@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light;
+
+  /* Surfaces — cleaner, higher contrast whites with a whisper of green */
+  --bg: #eef4ee;
+  --bg-elevated: #f6faf5;
+  --surface: #ffffff;
+  --surface-soft: #e4eee5;
+  --surface-strong: #d4e3d6;
+
+  /* Ink — near-black, crisp, WCAG-friendly reading contrast */
+  --ink: #0e1611;
+  --ink-2: #22302a;
+  --ink-3: #47564c;
+  --ink-4: #74837a;
+
+  /* Lines — clearly visible dividers */
+  --line: #cfdfd1;
+  --line-strong: #b3c9b7;
+
+  /* Pine brand green — vivid, saturated emerald */
+  --pine-50: #e2f4e9;
+  --pine-100: #c6ebd4;
+  --pine-200: #99d9b2;
+  --pine-300: #66bd8a;
+  --pine-400: #3f9c64;
+  --pine-500: #2b8152;
+  --pine-600: #226c43;
+  --pine-700: #1c5636;
+  --pine-800: #154029;
+  --pine-900: #0e2c1c;
+
+  /* Semantic colors — saturated for strong signal */
+  --amber: #a86e1c;
+  --amber-soft: #f7ecd6;
+  --red: #b03d39;
+  --red-soft: #f9e5e3;
+  --blue: #2f6a94;
+  --blue-soft: #e1eef6;
+  --purple: #6b4a92;
+  --purple-soft: #efe8f6;
+  --success: #2b8152;
+  --success-soft: #def1e4;
+
+  /* Shadows — deeper, more dimensional */
+  --shadow-1: 0 1px 2px rgb(15 35 24 / 8%), 0 8px 24px rgb(15 35 24 / 8%);
+  --shadow-2: 0 22px 56px rgb(15 35 24 / 18%);
+
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --sidebar: 244px;
+  --content-max: 1480px;
+
+  /* Typography — refined stacks tuned for mixed Chinese/Latin UI */
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "LXGW WenKai", "LXGW WenKai Screen", "Kaiti SC", "STKaiti", "KaiTi",
+    "楷体", "AR PL UKai CN", "Noto Serif SC", serif;
+
+  --ease: cubic-bezier(.2,.8,.2,1);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* Surfaces — deep, grounded green-tinted blacks */
+  --bg: #0b110d;
+  --bg-elevated: #101812;
+  --surface: #161f19;
+  --surface-soft: #1f2b23;
+  --surface-strong: #28362d;
+
+  /* Ink — bright, high-contrast text */
+  --ink: #f4f8f4;
+  --ink-2: #d2ded4;
+  --ink-3: #a2b5a7;
+  --ink-4: #71866f;
+
+  /* Lines — stronger separation on dark */
+  --line: #2c3c31;
+  --line-strong: #43584b;
+
+  /* Pine brand green — luminous for dark surfaces */
+  --pine-50: #16271d;
+  --pine-100: #1b3425;
+  --pine-200: #254930;
+  --pine-300: #387045;
+  --pine-400: #5b9a72;
+  --pine-500: #83c398;
+  --pine-600: #9fd6b2;
+  --pine-700: #b9e4c7;
+  --pine-800: #d1eeda;
+  --pine-900: #e6f6ec;
+
+  --amber: #d8a85e;
+  --amber-soft: #3a2f1c;
+  --red: #e0918a;
+  --red-soft: #402524;
+  --blue: #8fc0da;
+  --blue-soft: #1e3742;
+  --purple: #c4abdc;
+  --purple-soft: #322a3d;
+  --success: #7cc996;
+  --success-soft: #1b3826;
+}

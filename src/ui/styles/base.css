@@ -1,0 +1,28 @@
+* { box-sizing: border-box; }
+html { min-width: 320px; background: var(--bg); scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--bg); color: var(--ink); font-family: var(--font-sans); font-size: 14.5px; line-height: 1.6; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "kern" 1, "liga" 1, "calt" 1; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: inherit; text-decoration: none; }
+::selection { background: var(--pine-100); color: var(--pine-900); }
+:focus-visible { outline: 3px solid color-mix(in srgb, var(--pine-500) 32%, transparent); outline-offset: 2px; }
+h1,h2,h3,h4,p { margin-top: 0; }
+h1,h2,h3 { letter-spacing: -.02em; line-height: 1.18; text-wrap: balance; }
+.serif { font-family: var(--font-serif); }
+.muted { color: var(--ink-3); }
+.subtle { color: var(--ink-4); }
+.text-success { color: var(--success); }
+.text-warning { color: var(--amber); }
+.text-danger { color: var(--red); }
+.text-info { color: var(--blue); }
+.no-wrap { white-space: nowrap; }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(1px,1px,1px,1px); white-space: nowrap; }
+.divider { height: 1px; background: var(--line); margin: 20px 0; }
+.kbd { display:inline-flex; align-items:center; padding: 1px 6px; border:1px solid var(--line); border-bottom-color:var(--line-strong); border-radius:5px; background:var(--surface-soft); font-size:11px; color:var(--ink-3); }
+.num, .metric-value, .score b, .dimension b { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "lnum" 1; }
+/* Refined, brand-tinted scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--pine-300); background-clip: padding-box; }

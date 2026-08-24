@@ -1,0 +1,251 @@
+import { defineStore } from 'pinia'
+import { computed, ref } from 'vue'
+import type {
+  BookHealthProjection,
+  CanonProjection,
+  ChapterListItem,
+  ChapterProjection,
+  CommandRequest,
+  CommandStatus,
+  DecisionItem,
+  HistoryProjection,
+  MarketStrategyProjection,
+  PageResult,
+  ProductionCenterProjection,
+  ProjectOverviewProjection,
+  SearchHit,
+  SettingsProjection,
+  StoryDirectionProjection,
+  VersionProjection,
+  VolumeDetailProjection,
+  VolumeSummary
+} from '../../application/contracts'
+import { getFrontendPort } from '../../app/providers/runtimePort'
+import { useProjectLibraryStore } from './projectLibraryStore'
+
+const frontendPort = getFrontendPort()
+
+export interface CommandUiState {
+  status: CommandStatus
+  message: string
+  commandId?: string
+}
+
+const emptyPage = <T>(): PageResult<T> => ({ items: [], nextCursor: null, total: 0 })
+
+export const useProjectStore = defineStore('project-projection', () => {
+  const currentProjectId = ref<string | null>(null)
+  const overview = ref<ProjectOverviewProjection | null>(null)
+  const marketStrategy = ref<MarketStrategyProjection | null>(null)
+  const directions = ref<StoryDirectionProjection | null>(null)
+  const production = ref<ProductionCenterProjection | null>(null)
+  const volumes = ref<PageResult<VolumeSummary> | null>(null)
+  const volumeDetail = ref<VolumeDetailProjection | null>(null)
+  const decisions = ref<PageResult<DecisionItem> | null>(null)
+  const readerVolumes = ref<PageResult<VolumeSummary> | null>(null)
+  const chapterLists = ref<Record<string, PageResult<ChapterListItem>>>({})
+  const activeChapter = ref<ChapterProjection | null>(null)
+  const chapterVersions = ref<PageResult<VersionProjection>>(emptyPage())
+  const canon = ref<CanonProjection | null>(null)
+  const health = ref<BookHealthProjection | null>(null)
+  const history = ref<HistoryProjection | null>(null)
+  const settings = ref<SettingsProjection | null>(null)
+  const searchResults = ref<PageResult<SearchHit>>(emptyPage())
+  const loading = ref(false)
+  const workspaceLoading = ref<Record<string, boolean>>({})
+  const loadError = ref('')
+  const commandStates = ref<Record<string, CommandUiState>>({})
+  const advancedMode = ref(false)
+  let loadSequence = 0
+
+  const project = computed(() => overview.value?.project ?? null)
+  const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
+  const pendingDecisions = computed(() => decisions.value?.items.filter(item => item.status === 'pending') ?? [])
+  const recentOfficialChapters = computed(() => overview.value?.recentChapters ?? [])
+
+  function queryBase(scope: string, pageSize = 50) {
+    if (!currentProjectId.value) throw new Error('当前没有打开的作品。')
+    return { projectId: currentProjectId.value, scope, cursor: null, pageSize }
+  }
+
+  function resetWorkspaces() {
+    marketStrategy.value = null
+    directions.value = null
+    production.value = null
+    volumes.value = null
+    volumeDetail.value = null
+    decisions.value = null
+    readerVolumes.value = null
+    chapterLists.value = {}
+    activeChapter.value = null
+    chapterVersions.value = emptyPage()
+    canon.value = null
+    health.value = null
+    history.value = null
+    settings.value = null
+    searchResults.value = emptyPage()
+  }
+
+  async function bootstrap(projectId?: string) {
+    if (!projectId) return
+    if (currentProjectId.value === projectId && overview.value) return
+    await openProject(projectId)
+  }
+
+  async function openProject(projectId: string) {
+    if (!projectId) return
+    const requestSequence = ++loadSequence
+    const switching = currentProjectId.value !== projectId
+    if (switching) {
+      overview.value = null
+      resetWorkspaces()
+    }
+    currentProjectId.value = projectId
+    loading.value = true
+    loadError.value = ''
+    try {
+      const next = await frontendPort.queryProjectOverview({ projectId, scope:'overview', cursor:null, pageSize:8 })
+      if (requestSequence !== loadSequence || currentProjectId.value !== projectId) return
+      overview.value = next
+      void useProjectLibraryStore().refresh()
+    } catch (error) {
+      if (requestSequence !== loadSequence || currentProjectId.value !== projectId) return
+      overview.value = null
+      loadError.value = error instanceof Error ? error.message : '无法读取项目概览。'
+    } finally {
+      if (requestSequence === loadSequence) loading.value = false
+    }
+  }
+
+  async function refresh() {
+    if (currentProjectId.value) await openProject(currentProjectId.value)
+  }
+
+  function clearProject() {
+    loadSequence += 1
+    currentProjectId.value = null
+    overview.value = null
+    resetWorkspaces()
+    loadError.value = ''
+  }
+
+  async function withWorkspace<T>(key: string, loader: () => Promise<T>, assign: (value: T) => void) {
+    workspaceLoading.value[key] = true
+    try { const value = await loader(); assign(value); return value }
+    finally { workspaceLoading.value[key] = false }
+  }
+
+  async function loadMarket(force=false) {
+    if (marketStrategy.value && !force) return marketStrategy.value
+    return withWorkspace('market', () => frontendPort.queryMarketStrategy(queryBase('market', 20)), v => { marketStrategy.value=v })
+  }
+  async function loadDirections(force=false) {
+    if (directions.value && !force) return directions.value
+    return withWorkspace('directions', () => frontendPort.queryStoryDirections(queryBase('directions', 10)), v => { directions.value=v })
+  }
+  async function loadProduction(force=false) {
+    if (production.value && !force) return production.value
+    return withWorkspace('production', () => frontendPort.queryProductionCenter(queryBase('production', 20)), v => { production.value=v })
+  }
+  async function loadVolumes(force=false) {
+    if (volumes.value && !force) return volumes.value
+    return withWorkspace('volumes', () => frontendPort.queryVolumeList(queryBase('volumes', 20)), v => { volumes.value=v })
+  }
+  async function loadVolumeDetail(volumeId:string, force=false) {
+    if (volumeDetail.value?.volume.id === volumeId && !force) return volumeDetail.value
+    return withWorkspace('volume-detail', () => frontendPort.queryVolumeDetail({ ...queryBase(`volume:${volumeId}`, 30), volumeId }), v => { volumeDetail.value=v })
+  }
+  async function loadDecisions(status:'pending'|'resolved'|'all'='all', force=false) {
+    if (decisions.value && !force && status==='all') return decisions.value
+    return withWorkspace('decisions', () => frontendPort.queryDecisions({ ...queryBase('decisions', 50), status }), v => { decisions.value=v })
+  }
+  async function loadReaderVolumes(force=false) {
+    if (readerVolumes.value && !force) return readerVolumes.value
+    return withWorkspace('reader-volumes', () => frontendPort.queryReaderVolumes(queryBase('reader:volumes', 30)), v => { readerVolumes.value=v })
+  }
+  async function loadChapterList(volumeId:string, force=false) {
+    if (chapterLists.value[volumeId] && !force) return chapterLists.value[volumeId]
+    return withWorkspace(`chapters:${volumeId}`, () => frontendPort.queryChapterList({ ...queryBase(`reader:volume:${volumeId}`, 40), volumeId }), v => { chapterLists.value={...chapterLists.value,[volumeId]:v} })
+  }
+  async function loadChapter(chapterId:string) {
+    return withWorkspace('chapter', () => frontendPort.queryChapterFinal({ ...queryBase(`reader:chapter:${chapterId}`, 1), chapterId }), v => { activeChapter.value=v })
+  }
+  async function loadChapterVersions(chapterId:string) {
+    return withWorkspace('chapter-versions', () => frontendPort.queryChapterVersions({ ...queryBase(`history:chapter:${chapterId}`, 30), chapterId }), v => { chapterVersions.value=v })
+  }
+  async function loadCanon(force=false) {
+    if (canon.value && !force) return canon.value
+    return withWorkspace('graph', () => frontendPort.queryCanon(queryBase('graph:overview', 60)), v => { canon.value=v })
+  }
+  async function loadHealth(force=false) {
+    if (health.value && !force) return health.value
+    return withWorkspace('health', () => frontendPort.queryBookHealth(queryBase('health', 50)), v => { health.value=v })
+  }
+  async function loadHistory(kind:'all'|'VERSION'|'CHANGE_REQUEST'|'RETCON'='all', force=false) {
+    if (history.value && !force && kind==='all') return history.value
+    return withWorkspace('history', () => frontendPort.queryHistory({ ...queryBase('history', 40), kind }), v => { history.value=v })
+  }
+  async function loadSettings(force=false) {
+    if (settings.value && !force) return settings.value
+    return withWorkspace('settings', () => frontendPort.queryProjectSettings(queryBase('settings', 1)), v => { settings.value=v })
+  }
+  async function search(text:string) {
+    return withWorkspace('search', () => frontendPort.searchFulltext({ ...queryBase('search', 30), text }), v => { searchResults.value=v })
+  }
+
+  async function refreshLoadedWorkspaces() {
+    const jobs: Promise<unknown>[] = []
+    if (marketStrategy.value) jobs.push(loadMarket(true))
+    if (directions.value) jobs.push(loadDirections(true))
+    if (production.value) jobs.push(loadProduction(true))
+    if (volumes.value) jobs.push(loadVolumes(true))
+    if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
+    if (decisions.value) jobs.push(loadDecisions('all', true))
+    if (readerVolumes.value) jobs.push(loadReaderVolumes(true))
+    if (canon.value) jobs.push(loadCanon(true))
+    if (health.value) jobs.push(loadHealth(true))
+    if (history.value) jobs.push(loadHistory('all', true))
+    if (settings.value) jobs.push(loadSettings(true))
+    await Promise.all(jobs)
+  }
+
+  async function runCommand(key: string, request: CommandRequest) {
+    commandStates.value[key] = { status:'submitting', message:'正在提交…' }
+    const envelope: CommandRequest = {
+      ...request,
+      commandId: request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      projectId: request.projectId ?? currentProjectId.value ?? project.value?.id,
+      expectedRevision: request.expectedRevision ?? project.value?.revision ?? 0,
+      requestedAt: request.requestedAt ?? new Date().toISOString()
+    }
+    const receipt = await frontendPort.executeCommand(envelope, (status,message) => { commandStates.value[key]={...commandStates.value[key],status,message} })
+    commandStates.value[key] = { status:receipt.finalStatus, message:receipt.message, commandId:receipt.commandId }
+    if (receipt.finalStatus === 'committed') {
+      await refresh()
+      await refreshLoadedWorkspaces()
+    }
+    void useProjectLibraryStore().refresh()
+    return receipt
+  }
+
+  async function testProvider(key:string, nextSettings:SettingsProjection) {
+    commandStates.value[key]={status:'submitting',message:'正在提交诊断…'}
+    const receipt=await frontendPort.testProvider(nextSettings,(status,message)=>{commandStates.value[key]={...commandStates.value[key],status,message}})
+    commandStates.value[key]={status:receipt.finalStatus,message:receipt.message,commandId:receipt.commandId}
+    return receipt
+  }
+
+  function commandState(key:string):CommandUiState { return commandStates.value[key] ?? { status:'idle',message:'' } }
+  function clearCommandState(key:string){ commandStates.value[key]={status:'idle',message:''} }
+  function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
+
+  return {
+    currentProjectId, overview, marketStrategy, directions, production, volumes, volumeDetail, decisions,
+    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults,
+    loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
+    bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadProduction, loadVolumes,
+    loadVolumeDetail, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
+    loadCanon, loadHealth, loadHistory, loadSettings, search, runCommand, testProvider, commandState,
+    clearCommandState, isWorkspaceLoading
+  }
+})
