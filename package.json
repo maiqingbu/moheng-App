@@ -9,7 +9,8 @@
     "build:fast": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "verify": "node scripts/verify-architecture.mjs",
+    "verify": "node scripts/verify-architecture.mjs && node scripts/verify-module-boundaries.mjs",
+    "verify:boundaries": "node scripts/verify-module-boundaries.mjs",
     "build:demo": "VITE_BROWSER_DEMO=true vite build"
   },
   "dependencies": {
