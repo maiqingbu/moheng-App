@@ -20,6 +20,7 @@ test('should enforce every M0A HARD gate in CI without overwriting drift first',
 test('should inspect Rust command implementations and authoritative SQL boundaries', () => {
   const evidence = read('scripts/verify-m0a-evidence.mjs')
   const architecture = read('scripts/verify-architecture.mjs')
+  const projectManager = read('src-tauri/src/project_db/mod.rs')
   assert.match(evidence, /src-tauri\/src\/commands\.rs/)
   assert.match(evidence, /IPC_UNSUPPORTED/)
   assert.match(evidence, /idempotencyKey/)
@@ -28,4 +29,5 @@ test('should inspect Rust command implementations and authoritative SQL boundari
   assert.match(evidence, /REVISION_CONFLICT/)
   assert.match(architecture, /src-tauri/)
   assert.match(architecture, /authoritative write/)
+  assert.match(projectManager, /CommitService::commit_project_command/)
 })

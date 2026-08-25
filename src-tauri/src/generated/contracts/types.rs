@@ -221,6 +221,175 @@ pub struct PageRequest {
     pub page_size: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CanonDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<OpaqueId>,
+    pub fact_id: OpaqueId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_json: Option<CanonDeltaObjectJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_to_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_level: Option<AuthorityLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<CanonDeltaPayloadJson>,
+}
+
+pub type CanonDeltaObjectJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+pub type CanonDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObligationDelta {
+    pub obligation_id: OpaqueId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub obligation_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub must_resolve_before_chapter: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prerequisites: Option<Vec<OpaqueId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_ref: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<ObligationDeltaPayloadJson>,
+}
+
+pub type ObligationDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForeshadowDelta {
+    pub foreshadow_id: OpaqueId,
+    pub intent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plant_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_window_end_chapter: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbidden_reveal_before_chapter: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_payload_ref: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<ForeshadowDeltaPayloadJson>,
+}
+
+pub type ForeshadowDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KnowledgeDelta {
+    pub knowledge_id: OpaqueId,
+    pub knower_id: OpaqueId,
+    pub fact_id: OpaqueId,
+    pub epistemic_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<KnowledgeDeltaPayloadJson>,
+}
+
+pub type KnowledgeDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateDelta {
+    pub state_id: OpaqueId,
+    pub state_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_json: Option<StateDeltaValueJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<StateDeltaPayloadJson>,
+}
+
+pub type StateDeltaValueJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+pub type StateDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DependencyEdge {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_id: Option<OpaqueId>,
+    pub source_ref: OpaqueId,
+    pub target_ref: OpaqueId,
+    pub dependency_type: String,
+    pub scope: String,
+    pub impact_class: String,
+    pub source_hash: Sha256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<DependencyEdgePayloadJson>,
+}
+
+pub type DependencyEdgePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JobUpdate {
+    pub job_id: OpaqueId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_no: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_round: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<JobUpdatePayloadJson>,
+}
+
+pub type JobUpdatePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DecisionUpdate {
+    pub decision_id: OpaqueId,
+    pub decision_type: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<DecisionUpdatePayloadJson>,
+}
+
+pub type DecisionUpdatePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
 pub type SharedDefinitions = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -343,23 +512,23 @@ pub struct CommitBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_updates: Option<Vec<CommitBundleHeadUpdatesItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canon_delta: Option<serde_json::Value>,
+    pub canon_delta: Option<Vec<CanonDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub obligation_delta: Option<serde_json::Value>,
+    pub obligation_delta: Option<Vec<ObligationDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub foreshadow_delta: Option<serde_json::Value>,
+    pub foreshadow_delta: Option<Vec<ForeshadowDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub knowledge_delta: Option<serde_json::Value>,
+    pub knowledge_delta: Option<Vec<KnowledgeDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_delta: Option<serde_json::Value>,
+    pub state_delta: Option<Vec<StateDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency_edges: Option<Vec<serde_json::Value>>,
+    pub dependency_edges: Option<Vec<DependencyEdge>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_updates: Option<Vec<serde_json::Value>>,
+    pub job_updates: Option<Vec<JobUpdate>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_updates: Option<Vec<serde_json::Value>>,
+    pub decision_updates: Option<Vec<DecisionUpdate>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate_certificates: Option<Vec<serde_json::Value>>,
+    pub gate_certificates: Option<Vec<GateCertificate>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -371,6 +540,8 @@ pub struct CommitBundleHeadUpdatesItem {
     pub version: i64,
     pub payload_hash: Sha256,
 }
+
+pub type CommitDeltas = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

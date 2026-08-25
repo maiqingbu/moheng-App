@@ -1,0 +1,812 @@
+{
+  "authority_registry": [
+    {
+      "authoritative_table": "arcs",
+      "authority_key": "arc",
+      "projection_only": 0,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "arc_plan_index",
+      "authority_key": "arc_plan_index",
+      "projection_only": 1,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "artifacts",
+      "authority_key": "artifact",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "artifact_dependencies",
+      "authority_key": "artifact_lineage",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "artifact_payloads",
+      "authority_key": "artifact_payload",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "artifact_schemas",
+      "authority_key": "artifact_schemas_registry",
+      "projection_only": 0,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "books",
+      "authority_key": "book",
+      "projection_only": 0,
+      "write_owner": "M1"
+    },
+    {
+      "authoritative_table": "book_health_projection",
+      "authority_key": "book_health_projection",
+      "projection_only": 1,
+      "write_owner": "M3C"
+    },
+    {
+      "authoritative_table": "book_plan_index",
+      "authority_key": "book_plan_index",
+      "projection_only": 1,
+      "write_owner": "M1"
+    },
+    {
+      "authoritative_table": "budget_reservations",
+      "authority_key": "budget_reservation",
+      "projection_only": 0,
+      "write_owner": "BudgetService"
+    },
+    {
+      "authoritative_table": "canon_aliases",
+      "authority_key": "canon_alias",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_entities",
+      "authority_key": "canon_entity",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_events",
+      "authority_key": "canon_event",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_evidence",
+      "authority_key": "canon_evidence",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_facts",
+      "authority_key": "canon_fact",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_knowledge",
+      "authority_key": "canon_knowledge",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_relations",
+      "authority_key": "canon_relation",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canon_timepoints",
+      "authority_key": "canon_timepoint",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "canonical_heads",
+      "authority_key": "canonical_head",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "change_requests",
+      "authority_key": "change_request",
+      "projection_only": 0,
+      "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "chapters",
+      "authority_key": "chapter",
+      "projection_only": 0,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "chapter_index",
+      "authority_key": "chapter_index",
+      "projection_only": 1,
+      "write_owner": "SearchService"
+    },
+    {
+      "authoritative_table": "chapter_plan_index",
+      "authority_key": "chapter_plan_index",
+      "projection_only": 1,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "character_arc_states",
+      "authority_key": "character_arc_state",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "commands",
+      "authority_key": "command",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "commit_receipts",
+      "authority_key": "commit_receipt",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "copy_receipts",
+      "authority_key": "copy_receipt",
+      "projection_only": 0,
+      "write_owner": "ProjectManager"
+    },
+    {
+      "authoritative_table": "dependency_edges",
+      "authority_key": "dependency_edge",
+      "projection_only": 0,
+      "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "entity_index",
+      "authority_key": "entity_index",
+      "projection_only": 1,
+      "write_owner": "SearchService"
+    },
+    {
+      "authoritative_table": "foreshadows",
+      "authority_key": "foreshadow",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "foreshadow_windows",
+      "authority_key": "foreshadow_window",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "gc_receipts",
+      "authority_key": "gc_receipt",
+      "projection_only": 0,
+      "write_owner": "MaintenanceService"
+    },
+    {
+      "authoritative_table": "impact_sets",
+      "authority_key": "impact_set",
+      "projection_only": 0,
+      "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "jobs",
+      "authority_key": "job",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "job_checkpoints",
+      "authority_key": "job_checkpoint",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "job_leases",
+      "authority_key": "job_lease",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "job_steps",
+      "authority_key": "job_step",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "model_cost_ledger",
+      "authority_key": "model_cost_ledger",
+      "projection_only": 0,
+      "write_owner": "BudgetService"
+    },
+    {
+      "authoritative_table": "model_parse_results",
+      "authority_key": "model_parse_result",
+      "projection_only": 0,
+      "write_owner": "ModelTransport"
+    },
+    {
+      "authoritative_table": "model_responses",
+      "authority_key": "model_response",
+      "projection_only": 0,
+      "write_owner": "ModelTransport"
+    },
+    {
+      "authoritative_table": "model_runs",
+      "authority_key": "model_run",
+      "projection_only": 0,
+      "write_owner": "ModelTransport"
+    },
+    {
+      "authoritative_table": "model_usage",
+      "authority_key": "model_usage",
+      "projection_only": 0,
+      "write_owner": "BudgetService"
+    },
+    {
+      "authoritative_table": "mystery_states",
+      "authority_key": "mystery_state",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "narrative_taste_profile_index",
+      "authority_key": "narrative_taste_profile",
+      "projection_only": 1,
+      "write_owner": "M3C"
+    },
+    {
+      "authoritative_table": "narrative_obligations",
+      "authority_key": "obligation",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "obligation_dependencies",
+      "authority_key": "obligation_dependency",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "obligation_evidence",
+      "authority_key": "obligation_evidence",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "planning_state_ledger_index",
+      "authority_key": "planning_state_ledger",
+      "projection_only": 1,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "chapter_production_budgets",
+      "authority_key": "production_budget",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "production_events",
+      "authority_key": "production_event",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "production_timeline_projection",
+      "authority_key": "production_timeline_projection",
+      "projection_only": 1,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "project_meta",
+      "authority_key": "project",
+      "projection_only": 0,
+      "write_owner": "ProjectManager"
+    },
+    {
+      "authoritative_table": "project_command_receipts",
+      "authority_key": "project_command_receipt",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "project_runtime_state",
+      "authority_key": "project_runtime_state",
+      "projection_only": 1,
+      "write_owner": "ProjectManager"
+    },
+    {
+      "authoritative_table": "project_settings",
+      "authority_key": "project_settings",
+      "projection_only": 0,
+      "write_owner": "ProjectManager"
+    },
+    {
+      "authoritative_table": "prompt_registry",
+      "authority_key": "prompt_registry",
+      "projection_only": 0,
+      "write_owner": "ProductionSupervisor"
+    },
+    {
+      "authoritative_table": "quality_trend_projection",
+      "authority_key": "quality_vector",
+      "projection_only": 1,
+      "write_owner": "M3C"
+    },
+    {
+      "authoritative_table": "reader_desires",
+      "authority_key": "reader_desire",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "reader_desire_events",
+      "authority_key": "reader_desire_event",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "reader_desire_evidence",
+      "authority_key": "reader_desire_evidence",
+      "projection_only": 0,
+      "write_owner": "M3B"
+    },
+    {
+      "authoritative_table": "reader_desire_health_projection",
+      "authority_key": "reader_desire_health_projection",
+      "projection_only": 1,
+      "write_owner": "M3C"
+    },
+    {
+      "authoritative_table": "retcon_plans",
+      "authority_key": "retcon_plan",
+      "projection_only": 0,
+      "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "retention_policies",
+      "authority_key": "retention",
+      "projection_only": 0,
+      "write_owner": "MaintenanceService"
+    },
+    {
+      "authoritative_table": "stale_queue",
+      "authority_key": "stale_queue",
+      "projection_only": 0,
+      "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "volumes",
+      "authority_key": "volume",
+      "projection_only": 0,
+      "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "volume_health_projection",
+      "authority_key": "volume_health_projection",
+      "projection_only": 1,
+      "write_owner": "M3C"
+    },
+    {
+      "authoritative_table": "volume_plan_index",
+      "authority_key": "volume_plan_index",
+      "projection_only": 1,
+      "write_owner": "M3A"
+    }
+  ],
+  "missing_authoritative_tables": [],
+  "missing_registered_tables": [],
+  "table_family_registry": [
+    {
+      "authority_key": "arc_plan_index",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "arc_plan_index"
+    },
+    {
+      "authority_key": "arc",
+      "family": "structural",
+      "retention_class": "PERMANENT",
+      "table_name": "arcs"
+    },
+    {
+      "authority_key": "artifact_lineage",
+      "family": "dependency",
+      "retention_class": "PERMANENT",
+      "table_name": "artifact_dependencies"
+    },
+    {
+      "authority_key": "artifact_payload",
+      "family": "artifact",
+      "retention_class": "POLICY",
+      "table_name": "artifact_payloads"
+    },
+    {
+      "authority_key": "artifact_schemas_registry",
+      "family": "artifact",
+      "retention_class": "PERMANENT",
+      "table_name": "artifact_schemas"
+    },
+    {
+      "authority_key": "artifact",
+      "family": "artifact",
+      "retention_class": "POLICY",
+      "table_name": "artifacts"
+    },
+    {
+      "authority_key": "book_health_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "book_health_projection"
+    },
+    {
+      "authority_key": "book_plan_index",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "book_plan_index"
+    },
+    {
+      "authority_key": "book",
+      "family": "structural",
+      "retention_class": "PERMANENT",
+      "table_name": "books"
+    },
+    {
+      "authority_key": "budget_reservation",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "budget_reservations"
+    },
+    {
+      "authority_key": "canon_alias",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_aliases"
+    },
+    {
+      "authority_key": "canon_entity",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_entities"
+    },
+    {
+      "authority_key": "canon_event",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_events"
+    },
+    {
+      "authority_key": "canon_evidence",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_evidence"
+    },
+    {
+      "authority_key": "canon_fact",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_facts"
+    },
+    {
+      "authority_key": "canon_knowledge",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_knowledge"
+    },
+    {
+      "authority_key": "canon_relation",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_relations"
+    },
+    {
+      "authority_key": "canon_timepoint",
+      "family": "canon",
+      "retention_class": "PERMANENT",
+      "table_name": "canon_timepoints"
+    },
+    {
+      "authority_key": "canonical_head",
+      "family": "artifact",
+      "retention_class": "PERMANENT",
+      "table_name": "canonical_heads"
+    },
+    {
+      "authority_key": "change_request",
+      "family": "change",
+      "retention_class": "PERMANENT",
+      "table_name": "change_requests"
+    },
+    {
+      "authority_key": "chapter_index",
+      "family": "search_projection",
+      "retention_class": "POLICY",
+      "table_name": "chapter_index"
+    },
+    {
+      "authority_key": "chapter_plan_index",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "chapter_plan_index"
+    },
+    {
+      "authority_key": "production_budget",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "chapter_production_budgets"
+    },
+    {
+      "authority_key": "chapter",
+      "family": "structural",
+      "retention_class": "PERMANENT",
+      "table_name": "chapters"
+    },
+    {
+      "authority_key": "character_arc_state",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "character_arc_states"
+    },
+    {
+      "authority_key": "command",
+      "family": "commit",
+      "retention_class": "AUDIT",
+      "table_name": "commands"
+    },
+    {
+      "authority_key": "commit_receipt",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "commit_receipts"
+    },
+    {
+      "authority_key": "copy_receipt",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "copy_receipts"
+    },
+    {
+      "authority_key": "dependency_edge",
+      "family": "dependency",
+      "retention_class": "PERMANENT",
+      "table_name": "dependency_edges"
+    },
+    {
+      "authority_key": "entity_index",
+      "family": "search_projection",
+      "retention_class": "POLICY",
+      "table_name": "entity_index"
+    },
+    {
+      "authority_key": "foreshadow_window",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "foreshadow_windows"
+    },
+    {
+      "authority_key": "foreshadow",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "foreshadows"
+    },
+    {
+      "authority_key": "gc_receipt",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "gc_receipts"
+    },
+    {
+      "authority_key": "impact_set",
+      "family": "change",
+      "retention_class": "POLICY",
+      "table_name": "impact_sets"
+    },
+    {
+      "authority_key": "job_checkpoint",
+      "family": "runtime",
+      "retention_class": "AUDIT",
+      "table_name": "job_checkpoints"
+    },
+    {
+      "authority_key": "job_lease",
+      "family": "runtime",
+      "retention_class": "AUDIT",
+      "table_name": "job_leases"
+    },
+    {
+      "authority_key": "job_step",
+      "family": "runtime",
+      "retention_class": "AUDIT",
+      "table_name": "job_steps"
+    },
+    {
+      "authority_key": "job",
+      "family": "runtime",
+      "retention_class": "AUDIT",
+      "table_name": "jobs"
+    },
+    {
+      "authority_key": "model_cost_ledger",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "model_cost_ledger"
+    },
+    {
+      "authority_key": "model_parse_result",
+      "family": "runtime_policy",
+      "retention_class": "POLICY",
+      "table_name": "model_parse_results"
+    },
+    {
+      "authority_key": "model_response",
+      "family": "runtime_policy",
+      "retention_class": "POLICY",
+      "table_name": "model_responses"
+    },
+    {
+      "authority_key": "model_run",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "model_runs"
+    },
+    {
+      "authority_key": "model_usage",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "model_usage"
+    },
+    {
+      "authority_key": "mystery_state",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "mystery_states"
+    },
+    {
+      "authority_key": "obligation",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "narrative_obligations"
+    },
+    {
+      "authority_key": "narrative_taste_profile",
+      "family": "quality_evidence",
+      "retention_class": "POLICY",
+      "table_name": "narrative_taste_profile_index"
+    },
+    {
+      "authority_key": "obligation_dependency",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "obligation_dependencies"
+    },
+    {
+      "authority_key": "obligation_evidence",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "obligation_evidence"
+    },
+    {
+      "authority_key": "planning_state_ledger",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "planning_state_ledger_index"
+    },
+    {
+      "authority_key": "production_event",
+      "family": "runtime",
+      "retention_class": "AUDIT",
+      "table_name": "production_events"
+    },
+    {
+      "authority_key": "production_timeline_projection",
+      "family": "production_projection",
+      "retention_class": "POLICY",
+      "table_name": "production_timeline_projection"
+    },
+    {
+      "authority_key": "project_command_receipt",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "project_command_receipts"
+    },
+    {
+      "authority_key": "project",
+      "family": "project",
+      "retention_class": "PERMANENT",
+      "table_name": "project_meta"
+    },
+    {
+      "authority_key": "project_runtime_state",
+      "family": "project",
+      "retention_class": "PERMANENT",
+      "table_name": "project_runtime_state"
+    },
+    {
+      "authority_key": "project_settings",
+      "family": "project",
+      "retention_class": "PERMANENT",
+      "table_name": "project_settings"
+    },
+    {
+      "authority_key": "prompt_registry",
+      "family": "runtime_policy",
+      "retention_class": "AUDIT",
+      "table_name": "prompt_registry"
+    },
+    {
+      "authority_key": "quality_vector",
+      "family": "quality_evidence",
+      "retention_class": "POLICY",
+      "table_name": "quality_trend_projection"
+    },
+    {
+      "authority_key": "reader_desire_event",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "reader_desire_events"
+    },
+    {
+      "authority_key": "reader_desire_evidence",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "reader_desire_evidence"
+    },
+    {
+      "authority_key": "reader_desire_health_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "reader_desire_health_projection"
+    },
+    {
+      "authority_key": "reader_desire",
+      "family": "narrative_control",
+      "retention_class": "PERMANENT",
+      "table_name": "reader_desires"
+    },
+    {
+      "authority_key": "retcon_plan",
+      "family": "change",
+      "retention_class": "PERMANENT",
+      "table_name": "retcon_plans"
+    },
+    {
+      "authority_key": "retention",
+      "family": "maintenance",
+      "retention_class": "PERMANENT",
+      "table_name": "retention_policies"
+    },
+    {
+      "authority_key": "stale_queue",
+      "family": "change",
+      "retention_class": "POLICY",
+      "table_name": "stale_queue"
+    },
+    {
+      "authority_key": "volume_health_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "volume_health_projection"
+    },
+    {
+      "authority_key": "volume_plan_index",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "volume_plan_index"
+    },
+    {
+      "authority_key": "volume",
+      "family": "structural",
+      "retention_class": "PERMANENT",
+      "table_name": "volumes"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ pub enum DatabaseError {
 const CATALOG_MIGRATION: &str = include_str!("../../migrations/0001_catalog.sql");
 const PROJECT_MIGRATION: &str = include_str!("../../migrations/0002_project_authority.sql");
 const PROJECT_COMMAND_MIGRATION: &str = include_str!("../../migrations/0003_project_command.sql");
+const PROJECT_LONGTERM_MIGRATION: &str = include_str!("../../migrations/0004_project_longterm.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     if !read_only {
@@ -86,8 +87,9 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    // A project is up to date only when both the authority migration and the
-    // project-command migration (v3) have been applied.
+    // A project is up to date only when both the authority migration (v2), the
+    // project-command migration (v3) and the long-term authority migration (v4)
+    // have been applied.
     let applied_v3: Option<i64> = connection
         .query_row(
             "SELECT version FROM migration_history WHERE version = 3",
@@ -95,7 +97,14 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    Ok(applied.is_none() || applied_v3.is_none())
+    let applied_v4: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 4",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(applied.is_none() || applied_v3.is_none() || applied_v4.is_none())
 }
 
 pub fn migrate_project(
@@ -108,12 +117,17 @@ pub fn migrate_project(
     let result = (|| {
         connection.execute_batch(PROJECT_MIGRATION)?;
         connection.execute_batch(PROJECT_COMMAND_MIGRATION)?;
+        connection.execute_batch(PROJECT_LONGTERM_MIGRATION)?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (2, ?1)",
             [now],
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (3, ?1)",
+            [now],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (4, ?1)",
             [now],
         )?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;

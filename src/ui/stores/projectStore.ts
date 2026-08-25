@@ -130,9 +130,21 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function withWorkspace<T>(key: string, loader: () => Promise<T>, assign: (value: T) => void) {
+    // Capture the store generation (loadSequence) and the project id at request
+    // time. When the response lands, it is only written if neither has changed —
+    // otherwise a slow response from a project the user already left would clobber
+    // the workspace the user is now looking at (FR-PRJ-003 / B01-T06).
+    const generation = loadSequence
+    const projectId = currentProjectId.value
     workspaceLoading.value[key] = true
-    try { const value = await loader(); assign(value); return value }
-    finally { workspaceLoading.value[key] = false }
+    try {
+      const value = await loader()
+      if (generation !== loadSequence || projectId !== currentProjectId.value) return value
+      assign(value)
+      return value
+    } finally {
+      workspaceLoading.value[key] = false
+    }
   }
 
   async function loadMarket(force=false) {

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/commit/deltas.schema.json",
+  "title": "CommitDeltas",
+  "description": "Typed L3 delta payloads that the CommitService applies atomically. B01-T05 freezes only the long-term structural fields; calibrated literary semantics are carried in the per-delta payloadJson/objectJson/value fields rather than as bespoke top-level keys, so the cross-language DTOs stay stable while L2 semantics remain adjustable before Calibration.",
+  "$defs": {
+    "CanonDelta": {
+      "type": "object",
+      "properties": {
+        "entityId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "factId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "subjectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "predicate": { "type": "string", "minLength": 1 },
+        "objectJson": { "type": "object" },
+        "relationId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "validFromChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "validToChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "authorityLevel": { "$ref": "../shared/definitions.schema.json#/$defs/AuthorityLevel" },
+        "eventType": { "type": "string" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["factId"],
+      "additionalProperties": false
+    },
+    "ObligationDelta": {
+      "type": "object",
+      "properties": {
+        "obligationId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "scope": { "type": "string", "enum": ["BOOK", "VOLUME", "ARC", "CHAPTER"] },
+        "obligationType": { "type": "string", "minLength": 1 },
+        "authorityLevel": { "type": "string", "enum": ["A", "B", "C"] },
+        "lifecycle": { "type": "string", "enum": ["PROPOSED", "APPROVED", "PLANTED", "PROGRESSING", "RESOLVED", "ABANDONED", "SUPERSEDED"] },
+        "mustResolveBeforeChapter": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "description": { "type": "string" },
+        "prerequisites": { "type": "array", "items": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" } },
+        "decisionRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["obligationId", "obligationType"],
+      "additionalProperties": false
+    },
+    "ForeshadowDelta": {
+      "type": "object",
+      "properties": {
+        "foreshadowId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "intent": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["PLANTED", "REINFORCED", "RECOVERED", "ABANDONED", "STALE"] },
+        "plantChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "recoverWindowEndChapter": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "forbiddenRevealBeforeChapter": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "secretPayloadRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["foreshadowId", "intent"],
+      "additionalProperties": false
+    },
+    "KnowledgeDelta": {
+      "type": "object",
+      "properties": {
+        "knowledgeId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "knowerId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "factId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "epistemicState": { "type": "string", "enum": ["KNOWS", "BELIEVES_TRUE", "BELIEVES_FALSE", "SUSPECTS", "CONCEALS", "UNKNOWN"] },
+        "visibilityScope": { "type": "string" },
+        "fromChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "untilChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["knowledgeId", "knowerId", "factId", "epistemicState"],
+      "additionalProperties": false
+    },
+    "StateDelta": {
+      "type": "object",
+      "properties": {
+        "stateId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "stateType": { "type": "string", "minLength": 1 },
+        "valueJson": { "type": "object" },
+        "chapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["stateId", "stateType"],
+      "additionalProperties": false
+    },
+    "DependencyEdge": {
+      "type": "object",
+      "properties": {
+        "edgeId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "sourceRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "targetRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "dependencyType": { "type": "string", "enum": ["HARD_CONTRACT", "PLAN_INPUT", "CANON_FACT", "STATE_INPUT", "KNOWLEDGE_INPUT", "FORESHADOW_INPUT", "OBLIGATION_INPUT", "EVIDENCE", "PRESENTATION", "SOFT_CONTEXT"] },
+        "scope": { "type": "string", "minLength": 1 },
+        "impactClass": { "type": "string", "enum": ["HARD", "REVIEW_REQUIRED", "SOFT", "EVIDENCE"] },
+        "sourceHash": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
+        "selector": { "type": "string" },
+        "entityId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["sourceRef", "targetRef", "dependencyType", "scope", "impactClass", "sourceHash"],
+      "additionalProperties": false
+    },
+    "JobUpdate": {
+      "type": "object",
+      "properties": {
+        "jobId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "status": { "type": "string", "enum": ["QUEUED", "RUNNING", "PAUSING", "PAUSED", "WAITING_MODEL", "WAITING_DECISION", "WAITING_BUDGET", "BLOCKED", "COMPLETED", "FAILED", "CANCELLED"] },
+        "currentStage": { "type": "string" },
+        "attemptNo": { "type": "integer", "minimum": 0 },
+        "repairRound": { "type": "integer", "minimum": 0 },
+        "errorCode": { "type": "string" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["jobId"],
+      "additionalProperties": false
+    },
+    "DecisionUpdate": {
+      "type": "object",
+      "properties": {
+        "decisionId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "decisionType": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" },
+        "sourceRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["decisionId", "decisionType", "outcome"],
+      "additionalProperties": false
+    }
+  }
+}

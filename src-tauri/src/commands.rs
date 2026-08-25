@@ -151,34 +151,85 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
     let catalog = CatalogRepository::open(&state.paths, "1970-01-01T00:00:00Z")
         .map_err(|error| error.to_string())?;
     let rows = CatalogRepository::list_projects(&catalog).map_err(|error| error.to_string())?;
-    let projects: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "id": row.project_id,
-                "title": row.title,
-                "subtitle": "本地权威项目",
-                "platform": "未设置",
-                "genre": "未设置",
-                "mode": "DIRECTOR",
-                "phase": "SETUP",
-                "runState": "IDLE",
-                "blockReason": null,
-                "signingStatus": "NOT_STARTED",
-                "lifecycle": row.lifecycle,
-                "progress": 0,
-                "totalCost": 0,
-                "totalWords": 0,
-                "committedChapters": 0,
-                "candidateChapters": 0,
-                "pendingDecisions": 0,
-                "revision": 0,
-                "createdAt": row.created_at,
-                "updatedAt": row.updated_at,
-                "lastOpenedAt": row.last_opened_at.unwrap_or_default()
-            })
-        })
-        .collect();
+    let mut projects: Vec<Value> = Vec::with_capacity(rows.len());
+    let mut producing = 0_i64;
+    let mut waiting_decision = 0_i64;
+    let mut completed = 0_i64;
+    let mut total_cost = 0_i64;
+    for row in rows {
+        // B01-T07: read the project's authoritative revision + rebuildable
+        // runtime summary through the controlled read path, instead of emitting
+        // a hard-coded revision 0 / idle state. A project whose runtime_state row
+        // is missing keeps conservative defaults but still carries a truthful
+        // revision (the library is not a second authority, only a projection).
+        //
+        // A single unreadable project (e.g. a trashed project whose DB was
+        // externally removed) must not take down the whole library listing, so a
+        // read failure degrades to a conservative default rather than aborting.
+        let projection = state
+            .manager
+            .library_projection(&row.project_id)
+            .unwrap_or_default();
+        let revision = projection.revision;
+        // A fresh M0B project has no runtime-state row yet; LibraryRuntimeProjection
+        // Default carries truthful defaults so a library row never presents a
+        // fabricated revision/state or leaks a signed/committed count it does not own.
+        let runtime = projection.runtime.unwrap_or_default();
+        let (
+            phase,
+            run_state,
+            block_reason,
+            signing_status,
+            committed,
+            candidate,
+            words,
+            cost_cents,
+            progress,
+            generated_revision,
+        ) = (
+            runtime.current_phase,
+            runtime.run_state,
+            runtime.block_reason,
+            runtime.signing_status,
+            runtime.committed_chapters,
+            runtime.candidate_chapters,
+            runtime.total_words,
+            runtime.total_cost_cents,
+            runtime.progress,
+            runtime.generated_revision,
+        );
+        match run_state.as_str() {
+            "ACTIVE" => producing += 1,
+            "WAITING_DECISION" => waiting_decision += 1,
+            "COMPLETED" => completed += 1,
+            _ => {}
+        }
+        total_cost += cost_cents;
+        projects.push(json!({
+            "id": row.project_id,
+            "title": row.title,
+            "subtitle": "本地权威项目",
+            "platform": "未设置",
+            "genre": "未设置",
+            "mode": "DIRECTOR",
+            "phase": phase,
+            "runState": run_state,
+            "blockReason": block_reason,
+            "signingStatus": signing_status,
+            "lifecycle": row.lifecycle,
+            "progress": progress,
+            "totalCost": cost_cents,
+            "totalWords": words,
+            "committedChapters": committed,
+            "candidateChapters": candidate,
+            "pendingDecisions": 0,
+            "revision": revision,
+            "generatedRevision": generated_revision,
+            "createdAt": row.created_at,
+            "updatedAt": row.updated_at,
+            "lastOpenedAt": row.last_opened_at.unwrap_or_default()
+        }));
+    }
     let active = projects
         .iter()
         .filter(|project| project["lifecycle"] == "ACTIVE")
@@ -190,10 +241,10 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
             "all": active + archived,
             "active": active,
             "archived": archived,
-            "producing": 0,
-            "waitingDecision": 0,
-            "completed": 0,
-            "totalCost": 0
+            "producing": producing,
+            "waitingDecision": waiting_decision,
+            "completed": completed,
+            "totalCost": total_cost
         }
     }))
 }
@@ -236,12 +287,22 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             {
                 return Ok(replayed);
             }
-            drop(
-                state
-                    .manager
-                    .create(&id, title, requested_at)
-                    .map_err(|error| error.to_string())?,
-            );
+            match state.manager.overview(&id) {
+                Ok((existing_title, revision, _)) if existing_title == title && revision == 0 => {
+                    // Recover a crash after atomic create/catalog registration but
+                    // before the command receipt was persisted.
+                }
+                Ok(_) => return Err("IDEMPOTENCY_CONFLICT".to_string()),
+                Err(crate::project_db::ManagerError::ProjectNotFound) => {
+                    drop(
+                        state
+                            .manager
+                            .create(&id, title, requested_at)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                Err(error) => return Err(error.to_string()),
+            }
             let receipt = outcome_receipt(
                 state
                     .manager
@@ -286,16 +347,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     title,
                 )
                 .map_err(|error| error.to_string())?;
-            let receipt = match outcome {
-                ProjectCommandOutcome::Replayed(receipt) => receipt,
-                ProjectCommandOutcome::Committed { receipt, .. } => {
-                    let catalog = CatalogRepository::open(&state.paths, requested_at)
-                        .map_err(|error| error.to_string())?;
-                    CatalogRepository::rename(&catalog, id, title, requested_at)
-                        .map_err(|error| error.to_string())?;
-                    receipt
-                }
-            };
+            let receipt = outcome_receipt(outcome);
+            let catalog = CatalogRepository::open(&state.paths, requested_at)
+                .map_err(|error| error.to_string())?;
+            CatalogRepository::rename(&catalog, id, title, requested_at)
+                .map_err(|error| error.to_string())?;
             Ok(project_command_response(&receipt))
         }
         "project_archive" => {
@@ -317,16 +373,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     |_| Ok(()),
                 )
                 .map_err(|error| error.to_string())?;
-            let receipt = match outcome {
-                ProjectCommandOutcome::Replayed(receipt) => receipt,
-                ProjectCommandOutcome::Committed { receipt, .. } => {
-                    state
-                        .manager
-                        .set_lifecycle(id, "ARCHIVED", requested_at)
-                        .map_err(|error| error.to_string())?;
-                    receipt
-                }
-            };
+            let receipt = outcome_receipt(outcome);
+            state
+                .manager
+                .set_lifecycle(id, "ARCHIVED", requested_at)
+                .map_err(|error| error.to_string())?;
             Ok(project_command_response(&receipt))
         }
         "project_restore" => {
@@ -348,16 +399,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     |_| Ok(()),
                 )
                 .map_err(|error| error.to_string())?;
-            let receipt = match outcome {
-                ProjectCommandOutcome::Replayed(receipt) => receipt,
-                ProjectCommandOutcome::Committed { receipt, .. } => {
-                    state
-                        .manager
-                        .set_lifecycle(id, "ACTIVE", requested_at)
-                        .map_err(|error| error.to_string())?;
-                    receipt
-                }
-            };
+            let receipt = outcome_receipt(outcome);
+            state
+                .manager
+                .set_lifecycle(id, "ACTIVE", requested_at)
+                .map_err(|error| error.to_string())?;
             Ok(project_command_response(&receipt))
         }
         "project_duplicate" => {
@@ -380,10 +426,16 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     return Err("REVISION_CONFLICT".to_string());
                 }
             }
-            state
+            if !state
                 .manager
-                .duplicate(id, &target, requested_at)
-                .map_err(|error| error.to_string())?;
+                .has_valid_copy_receipt(id, &target)
+                .map_err(|error| error.to_string())?
+            {
+                state
+                    .manager
+                    .duplicate(id, &target, requested_at)
+                    .map_err(|error| error.to_string())?;
+            }
             let result = state.manager.commit_project_command(
                 project_command_spec(
                     id,
@@ -410,6 +462,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         "project_delete" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                state
+                    .manager
+                    .delete_to_trash(id, requested_at)
+                    .map_err(|error| error.to_string())?;
                 return Ok(replayed);
             }
             let outcome = state

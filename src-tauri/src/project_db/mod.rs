@@ -5,13 +5,14 @@ pub mod read_pool;
 pub use read_pool::ReadPool;
 
 use crate::catalog::CatalogRepository;
+use crate::commit::{CommitError, CommitService};
+pub use crate::commit::{ProjectCommandOutcome, ProjectCommandSpec};
 use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 pub use connection::DatabaseError;
 use connection::{migrate_project, open_connection, project_needs_migration, quick_check};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use paths::{AppPaths, PathError};
-use serde_json::json;
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::path::Path;
@@ -21,6 +22,47 @@ use std::sync::{Arc, Mutex};
 /// wall-clock value. Reading the catalog's authoritative `project_path` does not
 /// depend on the wall clock, so a constant is safe and keeps reads deterministic.
 const DEFAULT_NOW: &str = "1970-01-01T00:00:00Z";
+
+/// Rebuildable runtime-state projection read back from a project's own DB.
+/// Derived from project_runtime_state; never a second authority.
+pub struct LibraryRuntimeProjection {
+    pub current_phase: String,
+    pub run_state: String,
+    pub block_reason: Option<String>,
+    pub signing_status: String,
+    pub committed_chapters: i64,
+    pub candidate_chapters: i64,
+    pub total_words: i64,
+    pub total_cost_cents: i64,
+    pub progress: f64,
+    pub generated_revision: i64,
+}
+
+impl Default for LibraryRuntimeProjection {
+    fn default() -> Self {
+        Self {
+            current_phase: "SETUP".to_string(),
+            run_state: "IDLE".to_string(),
+            block_reason: None,
+            signing_status: "NOT_STARTED".to_string(),
+            committed_chapters: 0,
+            candidate_chapters: 0,
+            total_words: 0,
+            total_cost_cents: 0,
+            progress: 0.0,
+            generated_revision: 0,
+        }
+    }
+}
+
+/// Controlled, non-catalog-derived projection that backs the project library.
+/// `revision` is the project's authoritative revision; `runtime` is None when the
+/// project has not yet produced a runtime-state row (fresh M0B project).
+#[derive(Default)]
+pub struct LibraryProjection {
+    pub revision: i64,
+    pub runtime: Option<LibraryRuntimeProjection>,
+}
 
 pub struct ProjectHandle {
     connection: Connection,
@@ -52,27 +94,6 @@ pub struct ReadLease {
     project_id: String,
     connection: Option<Connection>,
     pool: Arc<Mutex<read_pool::ReadPool>>,
-}
-
-pub enum ProjectCommandOutcome<T> {
-    Replayed(ProjectCommandReceipt),
-    Committed {
-        value: T,
-        receipt: ProjectCommandReceipt,
-    },
-}
-
-#[derive(Clone, Copy)]
-pub struct ProjectCommandSpec<'a> {
-    pub project_id: &'a str,
-    pub result_project_id: &'a str,
-    pub command_id: &'a str,
-    pub idempotency_key: &'a str,
-    pub command_type: &'a str,
-    pub request_digest: &'a str,
-    pub expected_revision: Option<i64>,
-    pub now: &'a str,
-    pub advance_revision: bool,
 }
 
 impl std::ops::Deref for ReadLease {
@@ -391,7 +412,8 @@ impl ProjectManager {
             Err(error) => return Err(error),
         };
         let connection = open_connection(&directory.join("project.db"), true)?;
-        Self::read_project_command_receipt(&connection, project_id, idempotency_key)
+        CommitService::find_project_command_receipt(&connection, project_id, idempotency_key)
+            .map_err(manager_error_from_commit)
     }
 
     /// Runs a project command mutation and its receipt write in one project DB
@@ -404,96 +426,10 @@ impl ProjectManager {
     ) -> Result<ProjectCommandOutcome<T>, ManagerError> {
         let handle = self.open(spec.project_id, "", spec.now)?;
         let connection: &Connection = &handle;
-        connection.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            if let Some(previous) = Self::read_project_command_receipt(
-                connection,
-                spec.project_id,
-                spec.idempotency_key,
-            )? {
-                if previous.request_digest == spec.request_digest {
-                    return Ok(ProjectCommandOutcome::Replayed(previous));
-                }
-                return Err(ManagerError::IdempotencyConflict);
-            }
-
-            let before: i64 = connection
-                .query_row(
-                    "SELECT revision FROM project_meta WHERE project_id = ?1 AND maintenance_state = 'READY'",
-                    [spec.project_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or(ManagerError::ProjectNotFound)?;
-            if let Some(expected) = spec.expected_revision {
-                if expected != before {
-                    return Err(ManagerError::RevisionConflict);
-                }
-            }
-
-            let value = apply(connection)?;
-            let after = if spec.advance_revision {
-                before + 1
-            } else {
-                before
-            };
-            if spec.advance_revision {
-                let updated = connection.execute(
-                    "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",
-                    libsql_rusqlite::params![after, spec.now, spec.project_id, before],
-                )?;
-                if updated != 1 {
-                    return Err(ManagerError::RevisionConflict);
-                }
-            }
-
-            let mut receipt = ProjectCommandReceipt {
-                receipt_id: format!("project-receipt:{}", spec.command_id),
-                project_id: spec.project_id.to_string(),
-                result_project_id: spec.result_project_id.to_string(),
-                command_id: spec.command_id.to_string(),
-                idempotency_key: spec.idempotency_key.to_string(),
-                command_type: spec.command_type.to_string(),
-                before_revision: before,
-                after_revision: after,
-                request_digest: spec.request_digest.to_string(),
-                committed_at: spec.now.to_string(),
-                receipt_digest: String::new(),
-            };
-            let mut digest_input = serde_json::to_value(&receipt)?;
-            digest_input["receiptDigest"] = json!("");
-            receipt.receipt_digest = sha256_canonical(&digest_input)?;
-            let receipt_json = serde_json::to_string(&receipt)?;
-            connection.execute(
-                "INSERT INTO project_command_receipts(receipt_id, project_id, result_project_id, command_id, idempotency_key, command_type, before_revision, after_revision, request_digest, receipt_json, receipt_digest, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                libsql_rusqlite::params![
-                    receipt.receipt_id,
-                    receipt.project_id,
-                    receipt.result_project_id,
-                    receipt.command_id,
-                    receipt.idempotency_key,
-                    receipt.command_type,
-                    receipt.before_revision,
-                    receipt.after_revision,
-                    receipt.request_digest,
-                    receipt_json,
-                    receipt.receipt_digest,
-                    receipt.committed_at,
-                ],
-            )?;
-            Ok(ProjectCommandOutcome::Committed { value, receipt })
-        })();
-
-        match result {
-            Ok(outcome) => {
-                connection.execute_batch("COMMIT")?;
-                Ok(outcome)
-            }
-            Err(error) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                Err(error)
-            }
-        }
+        CommitService::commit_project_command(connection, spec, |connection| {
+            apply(connection).map_err(|error| CommitError::ProjectCommandApply(error.to_string()))
+        })
+        .map_err(manager_error_from_commit)
     }
 
     pub fn commit_project_rename(
@@ -523,31 +459,6 @@ impl ProjectManager {
         })
     }
 
-    fn read_project_command_receipt(
-        connection: &Connection,
-        project_id: &str,
-        idempotency_key: &str,
-    ) -> Result<Option<ProjectCommandReceipt>, ManagerError> {
-        let row: Option<(String, String)> = connection
-            .query_row(
-                "SELECT receipt_json, receipt_digest FROM project_command_receipts WHERE project_id = ?1 AND idempotency_key = ?2",
-                [project_id, idempotency_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        row.map(|(receipt_json, stored_digest)| {
-            let receipt: ProjectCommandReceipt = serde_json::from_str(&receipt_json)?;
-            let mut digest_input = serde_json::to_value(&receipt)?;
-            digest_input["receiptDigest"] = json!("");
-            let expected = sha256_canonical(&digest_input)?;
-            if receipt.receipt_digest != expected || stored_digest != expected {
-                return Err(ManagerError::ProjectCommandReceiptDigestMismatch);
-            }
-            Ok(receipt)
-        })
-        .transpose()
-    }
-
     pub fn overview(&self, project_id: &str) -> Result<(String, i64, String), ManagerError> {
         // Route the production Overview query through the bounded reusable read
         // pool instead of opening a fresh read-only connection each call, so a
@@ -573,6 +484,83 @@ impl ProjectManager {
                 )
                 .map_err(ManagerError::Sqlite)
         })
+    }
+
+    /// Reads the authoritative revision plus the rebuildable runtime-state summary
+    /// for a single project, through the bounded read-only pool. This is the
+    /// controlled, non-catalog-derived projection that backs the project library
+    /// (B01-T07), so a library row carries the project's *actual* revision instead
+    /// of a hard-coded 0. The runtime_state table is a derived projection; when it
+    /// has no row yet the caller receives conservative defaults rather than a
+    /// fabricated value.
+    pub fn library_projection(&self, project_id: &str) -> Result<LibraryProjection, ManagerError> {
+        self.with_read_connection(project_id, DEFAULT_NOW, |connection| {
+            let revision: i64 = connection
+                .query_row(
+                    "SELECT revision FROM project_meta WHERE project_id = ?1",
+                    [project_id],
+                    |row| row.get(0),
+                )
+                .map_err(ManagerError::Sqlite)?;
+            // runtime_state is optional (a fresh M0B project may not have one yet).
+            let runtime = connection
+                .query_row(
+                    "SELECT current_phase, run_state, block_reason, signing_status, committed_chapters, candidate_chapters, total_words, total_cost_cents, progress, generated_revision
+                     FROM project_runtime_state WHERE project_id = ?1",
+                    [project_id],
+                    |row| {
+                        Ok(LibraryRuntimeProjection {
+                            current_phase: row.get(0)?,
+                            run_state: row.get(1)?,
+                            block_reason: row.get(2)?,
+                            signing_status: row.get(3)?,
+                            committed_chapters: row.get(4)?,
+                            candidate_chapters: row.get(5)?,
+                            total_words: row.get(6)?,
+                            total_cost_cents: row.get(7)?,
+                            progress: row.get(8)?,
+                            generated_revision: row.get(9)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(ManagerError::Sqlite)?;
+            Ok(LibraryProjection { revision, runtime })
+        })
+    }
+
+    pub fn has_valid_copy_receipt(
+        &self,
+        source_id: &str,
+        target_id: &str,
+    ) -> Result<bool, ManagerError> {
+        let directory = match self.resolve_registered_project_path(target_id) {
+            Ok(directory) => directory,
+            Err(ManagerError::ProjectNotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let connection = open_connection(&directory.join("project.db"), true)?;
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT receipt_json, receipt_digest FROM copy_receipts WHERE source_project_id = ?1 AND target_project_id = ?2",
+                [source_id, target_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((receipt_json, stored_digest)) = row else {
+            return Ok(false);
+        };
+        let receipt: serde_json::Value = serde_json::from_str(&receipt_json)?;
+        let expected = copy_receipt_digest(
+            receipt["receiptId"].as_str().unwrap_or_default(),
+            receipt["sourceProjectId"].as_str().unwrap_or_default(),
+            receipt["targetProjectId"].as_str().unwrap_or_default(),
+            receipt["copiedAt"].as_str().unwrap_or_default(),
+        )?;
+        Ok(receipt["sourceProjectId"] == source_id
+            && receipt["targetProjectId"] == target_id
+            && receipt["receiptDigest"] == expected
+            && stored_digest == expected)
     }
 
     pub fn rename(&self, project_id: &str, title: &str, now: &str) -> Result<(), ManagerError> {
@@ -689,9 +677,17 @@ impl ProjectManager {
     /// - deleting A never mutates B.
     pub fn delete_to_trash(&self, project_id: &str, now: &str) -> Result<(), ManagerError> {
         let catalog = CatalogRepository::open(&self.paths, now)?;
-        match CatalogRepository::lifecycle(&catalog, project_id)?.as_deref() {
+        let lifecycle = CatalogRepository::lifecycle(&catalog, project_id)?;
+        match lifecycle.as_deref() {
             Some("ACTIVE") | Some("ARCHIVED") | Some("DELETING") => {}
             _ => return Err(ManagerError::ProjectNotFound),
+        }
+        if lifecycle.as_deref() == Some("DELETING") {
+            if let Ok(path) = self.resolve_registered_project_path(project_id) {
+                if path.starts_with(self.paths.trash_dir()) && path.join("project.db").is_file() {
+                    return Ok(());
+                }
+            }
         }
         if self
             .writers
@@ -813,10 +809,15 @@ impl ProjectManager {
     /// (P0-02). It:
     ///
     /// - clears the source's runtime/audit artifacts (commands, commit receipts,
-    ///   gc receipts) rather than copying immutable receipts that belong to the
+    ///   gc receipts, leases, jobs, model telemetry, audit ledgers) rather than
+    ///   copying immutable receipts that belong to the source identity;
+    /// - rewrites `project_id` on every authoritative long-term table
+    ///   (project_meta, artifacts, canonical_heads, books, volumes, arcs,
+    ///   chapters, canon, obligations, foreshadows, reader desires, typed
+    ///   dependency edges, change/retcon, model budget, projections) to `new_id`;
+    /// - resets derived/runtime state (project_runtime_state, leases, checkpoints,
+    ///   jobs, model runs) rather than copying a live run that belongs to the
     ///   source identity;
-    /// - rewrites `project_id` on every authoritative table (project_meta,
-    ///   artifacts, canonical_heads) to `new_id`;
     /// - re-points the CATALOG-independent `provenance_json.refs` only for
     ///   mutable/candidate rows; committed provenance remains immutable source
     ///   evidence;
@@ -835,7 +836,9 @@ impl ProjectManager {
         // project_meta, so we rewrite them before re-enabling FK checking.
         connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
         let result = (|| -> Result<(), ManagerError> {
-            // 1. Drop the source's runtime/audit artifacts from the copy.
+            // 1. Drop the source's runtime/audit artifacts, which are identity-
+            //    bound and never copied. (Leases/jobs/model telemetry are runtime
+            //    state that must not be carried into a copy.)
             connection.execute("DELETE FROM commands WHERE project_id = ?1", [source_id])?;
             connection.execute(
                 "DELETE FROM commit_receipts WHERE project_id = ?1",
@@ -847,16 +850,39 @@ impl ProjectManager {
                 [source_id],
             )?;
             connection.execute("DELETE FROM copy_receipts", [])?;
-            // 2. Rewrite project_id on each authoritative table.
+            // 2. Apply the Copy-Project policy for every registered table from the
+            //    single-authority copy_policy_registry: REMAP rewrites the copy's
+            //    project_id to the new id; CLEAR deletes the source's rows (runtime,
+            //    lease, telemetry, and derived projections that must be rebuilt).
+            //    Tables the registry does not cover (M0A audit tables) are either
+            //    handled explicitly above or carry no project_id, so they are skipped.
+            let mut stmt = connection.prepare(
+                "SELECT table_name, copy_policy FROM copy_policy_registry ORDER BY table_name",
+            )?;
+            let policy_rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (table, policy) in policy_rows {
+                match policy.as_str() {
+                    "COPY_REMAP" => {
+                        connection.execute(
+                            &format!("UPDATE {table} SET project_id = ?1 WHERE project_id = ?2"),
+                            [new_id, source_id],
+                        )?;
+                    }
+                    "COPY_CLEAR" => {
+                        connection.execute(
+                            &format!("DELETE FROM {table} WHERE project_id = ?1"),
+                            [source_id],
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
             connection.execute("UPDATE project_meta SET project_id = ?1, title = ?2, revision = 0, maintenance_state = 'READY', updated_at = ?3 WHERE project_id = ?4", libsql_rusqlite::params![new_id, format!("{source_id} 副本"), now, source_id])?;
-            connection.execute(
-                "UPDATE artifacts SET project_id = ?1 WHERE project_id = ?2",
-                [new_id, source_id],
-            )?;
-            connection.execute(
-                "UPDATE canonical_heads SET project_id = ?1 WHERE project_id = ?2",
-                [new_id, source_id],
-            )?;
             // 3. Re-point inner project references inside serialized provenance.
             rewrite_provenance_project(connection, source_id, new_id)?;
             // 4. Record the copy action.
@@ -920,6 +946,24 @@ fn rewrite_provenance_project(
     Ok(())
 }
 
+/// Computes the canonical digest over a copy receipt's stable fields. Both the
+/// producer (`write_copy_receipt`) and the verifier (`has_valid_copy_receipt`)
+/// must agree on this field set; centralizing it prevents the two sides drifting
+/// if the receipt gains a field.
+fn copy_receipt_digest(
+    receipt_id: &str,
+    source_id: &str,
+    target_id: &str,
+    now: &str,
+) -> Result<String, ManagerError> {
+    Ok(sha256_canonical(&serde_json::json!({
+        "receiptId": receipt_id,
+        "sourceProjectId": source_id,
+        "targetProjectId": target_id,
+        "copiedAt": now,
+    }))?)
+}
+
 /// Writes a CopyReceipt recording that `source_id` was duplicated into `new_id`.
 ///
 /// The receipt's digest is computed over the stable copy fields and validated by
@@ -931,13 +975,7 @@ fn write_copy_receipt(
     now: &str,
 ) -> Result<(), ManagerError> {
     let receipt_id = format!("copy:{source_id}:{now}");
-    let digest_input = serde_json::json!({
-        "receiptId": receipt_id,
-        "sourceProjectId": source_id,
-        "targetProjectId": new_id,
-        "copiedAt": now,
-    });
-    let receipt_digest = sha256_canonical(&digest_input)?;
+    let receipt_digest = copy_receipt_digest(&receipt_id, source_id, new_id, now)?;
     let receipt_json = serde_json::to_string(&serde_json::json!({
         "receiptId": receipt_id,
         "sourceProjectId": source_id,
@@ -947,6 +985,20 @@ fn write_copy_receipt(
     }))?;
     connection.execute("INSERT OR IGNORE INTO copy_receipts(receipt_id, source_project_id, target_project_id, copied_at, receipt_json, receipt_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", libsql_rusqlite::params![receipt_id, source_id, new_id, now, receipt_json, receipt_digest])?;
     Ok(())
+}
+
+fn manager_error_from_commit(error: CommitError) -> ManagerError {
+    match error {
+        CommitError::ProjectNotFound => ManagerError::ProjectNotFound,
+        CommitError::RevisionConflict => ManagerError::RevisionConflict,
+        CommitError::IdempotencyConflict => ManagerError::IdempotencyConflict,
+        CommitError::ProjectCommandReceiptDigestMismatch => {
+            ManagerError::ProjectCommandReceiptDigestMismatch
+        }
+        CommitError::Sqlite(error) => ManagerError::Sqlite(error),
+        CommitError::Json(error) => ManagerError::Json(error),
+        other => ManagerError::ProjectCommand(other.to_string()),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -973,6 +1025,8 @@ pub enum ManagerError {
     IdempotencyConflict,
     #[error("PROJECT_COMMAND_RECEIPT_DIGEST_MISMATCH")]
     ProjectCommandReceiptDigestMismatch,
+    #[error("project command: {0}")]
+    ProjectCommand(String),
     #[error("database: {0}")]
     Database(#[from] DatabaseError),
     #[error("read pool: {0}")]

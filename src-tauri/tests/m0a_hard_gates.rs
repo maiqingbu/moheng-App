@@ -124,7 +124,7 @@ fn commit_rejects_reserved_deltas_instead_of_silently_dropping_them() {
         .unwrap();
     let mut value =
         serde_json::to_value(bundle("project-a", artifact("project-a", "artifact-1", 1))).unwrap();
-    value["canonDelta"] = json!({"facts": []});
+    value["canonDelta"] = json!([{"factId": "fact-1", "entityId": "ent-1"}]);
     let bundle: CommitBundle = serde_json::from_value(value).unwrap();
 
     assert!(matches!(

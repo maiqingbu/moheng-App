@@ -66,22 +66,41 @@
         "additionalProperties": false
       }
     },
-    "canonDelta": {},
-    "obligationDelta": {},
-    "foreshadowDelta": {},
-    "knowledgeDelta": {},
-    "stateDelta": {},
+    "canonDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/CanonDelta" }
+    },
+    "obligationDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/ObligationDelta" }
+    },
+    "foreshadowDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/ForeshadowDelta" }
+    },
+    "knowledgeDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/KnowledgeDelta" }
+    },
+    "stateDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/StateDelta" }
+    },
     "dependencyEdges": {
-      "type": "array"
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/DependencyEdge" }
     },
     "jobUpdates": {
-      "type": "array"
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/JobUpdate" }
     },
     "decisionUpdates": {
-      "type": "array"
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/DecisionUpdate" }
     },
     "gateCertificates": {
-      "type": "array"
+      "type": "array",
+      "items": { "$ref": "gate-certificate.schema.json" }
     }
   },
   "required": [

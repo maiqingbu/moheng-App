@@ -97,16 +97,107 @@ export interface CommitBundle {
   "createdAt": Rfc3339Utc
   "artifacts": Array<ArtifactEnvelope>
   "headUpdates"?: Array<{ "artifactType": ArtifactType; "scope": ArtifactScope; "artifactId": OpaqueId; "version": number; "payloadHash": Sha256 }>
-  "canonDelta"?: unknown
-  "obligationDelta"?: unknown
-  "foreshadowDelta"?: unknown
-  "knowledgeDelta"?: unknown
-  "stateDelta"?: unknown
-  "dependencyEdges"?: Array<unknown>
-  "jobUpdates"?: Array<unknown>
-  "decisionUpdates"?: Array<unknown>
-  "gateCertificates"?: Array<unknown>
+  "canonDelta"?: Array<CanonDelta>
+  "obligationDelta"?: Array<ObligationDelta>
+  "foreshadowDelta"?: Array<ForeshadowDelta>
+  "knowledgeDelta"?: Array<KnowledgeDelta>
+  "stateDelta"?: Array<StateDelta>
+  "dependencyEdges"?: Array<DependencyEdge>
+  "jobUpdates"?: Array<JobUpdate>
+  "decisionUpdates"?: Array<DecisionUpdate>
+  "gateCertificates"?: Array<GateCertificate>
 }
+
+export interface CanonDelta {
+  "entityId"?: OpaqueId
+  "factId": OpaqueId
+  "subjectId"?: OpaqueId
+  "predicate"?: string
+  "objectJson"?: {  }
+  "relationId"?: OpaqueId
+  "validFromChapterId"?: OpaqueId
+  "validToChapterId"?: OpaqueId
+  "authorityLevel"?: AuthorityLevel
+  "eventType"?: string
+  "payloadJson"?: {  }
+}
+
+export interface ObligationDelta {
+  "obligationId": OpaqueId
+  "scope"?: "BOOK" | "VOLUME" | "ARC" | "CHAPTER"
+  "obligationType": string
+  "authorityLevel"?: "A" | "B" | "C"
+  "lifecycle"?: "PROPOSED" | "APPROVED" | "PLANTED" | "PROGRESSING" | "RESOLVED" | "ABANDONED" | "SUPERSEDED"
+  "mustResolveBeforeChapter"?: OpaqueId
+  "description"?: string
+  "prerequisites"?: Array<OpaqueId>
+  "decisionRef"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export interface ForeshadowDelta {
+  "foreshadowId": OpaqueId
+  "intent": string
+  "status"?: "PLANTED" | "REINFORCED" | "RECOVERED" | "ABANDONED" | "STALE"
+  "plantChapterId"?: OpaqueId
+  "recoverWindowEndChapter"?: OpaqueId
+  "forbiddenRevealBeforeChapter"?: OpaqueId
+  "secretPayloadRef"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export interface KnowledgeDelta {
+  "knowledgeId": OpaqueId
+  "knowerId": OpaqueId
+  "factId": OpaqueId
+  "epistemicState": "KNOWS" | "BELIEVES_TRUE" | "BELIEVES_FALSE" | "SUSPECTS" | "CONCEALS" | "UNKNOWN"
+  "visibilityScope"?: string
+  "fromChapterId"?: OpaqueId
+  "untilChapterId"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export interface StateDelta {
+  "stateId": OpaqueId
+  "stateType": string
+  "valueJson"?: {  }
+  "chapterId"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export interface DependencyEdge {
+  "edgeId"?: OpaqueId
+  "sourceRef": OpaqueId
+  "targetRef": OpaqueId
+  "dependencyType": "HARD_CONTRACT" | "PLAN_INPUT" | "CANON_FACT" | "STATE_INPUT" | "KNOWLEDGE_INPUT" | "FORESHADOW_INPUT" | "OBLIGATION_INPUT" | "EVIDENCE" | "PRESENTATION" | "SOFT_CONTEXT"
+  "scope": string
+  "impactClass": "HARD" | "REVIEW_REQUIRED" | "SOFT" | "EVIDENCE"
+  "sourceHash": Sha256
+  "selector"?: string
+  "entityId"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export interface JobUpdate {
+  "jobId": OpaqueId
+  "status"?: "QUEUED" | "RUNNING" | "PAUSING" | "PAUSED" | "WAITING_MODEL" | "WAITING_DECISION" | "WAITING_BUDGET" | "BLOCKED" | "COMPLETED" | "FAILED" | "CANCELLED"
+  "currentStage"?: string
+  "attemptNo"?: number
+  "repairRound"?: number
+  "errorCode"?: string
+  "payloadJson"?: {  }
+}
+
+export interface DecisionUpdate {
+  "decisionId": OpaqueId
+  "decisionType": string
+  "outcome": string
+  "reason"?: string
+  "sourceRef"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
+export type CommitDeltas = unknown
 
 export interface CommitReceipt {
   "receiptId": OpaqueId

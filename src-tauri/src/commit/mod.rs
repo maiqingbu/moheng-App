@@ -1,5 +1,5 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
-use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt};
+use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt, ProjectCommandReceipt};
 use crate::generated::validators::validate_commit_bundle;
 use crate::hash::sha256_canonical;
 use crate::repositories::artifacts::{enum_string, scope_key, ArtifactError, ArtifactRepository};
@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 pub enum CommitError {
     #[error("project not found")]
     ProjectNotFound,
-    #[error("revision conflict")]
+    #[error("REVISION_CONFLICT")]
     RevisionConflict,
-    #[error("idempotency conflict")]
+    #[error("IDEMPOTENCY_CONFLICT")]
     IdempotencyConflict,
     #[error("candidate status required")]
     CandidateStatusRequired,
@@ -24,6 +24,10 @@ pub enum CommitError {
     RolledBack,
     #[error("receipt digest mismatch")]
     ReceiptDigestMismatch,
+    #[error("PROJECT_COMMAND_RECEIPT_DIGEST_MISMATCH")]
+    ProjectCommandReceiptDigestMismatch,
+    #[error("project command apply failed: {0}")]
+    ProjectCommandApply(String),
     #[error("artifact: {0}")]
     Artifact(#[from] ArtifactError),
     #[error("sqlite: {0}")]
@@ -33,7 +37,151 @@ pub enum CommitError {
 }
 
 pub struct CommitService;
+
+pub enum ProjectCommandOutcome<T> {
+    Replayed(ProjectCommandReceipt),
+    Committed {
+        value: T,
+        receipt: ProjectCommandReceipt,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub struct ProjectCommandSpec<'a> {
+    pub project_id: &'a str,
+    pub result_project_id: &'a str,
+    pub command_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub command_type: &'a str,
+    pub request_digest: &'a str,
+    pub expected_revision: Option<i64>,
+    pub now: &'a str,
+    pub advance_revision: bool,
+}
+
 impl CommitService {
+    pub fn commit_project_command<T>(
+        connection: &Connection,
+        spec: ProjectCommandSpec<'_>,
+        apply: impl FnOnce(&Connection) -> Result<T, CommitError>,
+    ) -> Result<ProjectCommandOutcome<T>, CommitError> {
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if let Some(previous) = Self::find_project_command_receipt(
+                connection,
+                spec.project_id,
+                spec.idempotency_key,
+            )? {
+                if previous.request_digest == spec.request_digest {
+                    return Ok(ProjectCommandOutcome::Replayed(previous));
+                }
+                return Err(CommitError::IdempotencyConflict);
+            }
+
+            let before: i64 = connection
+                .query_row(
+                    "SELECT revision FROM project_meta WHERE project_id = ?1 AND maintenance_state = 'READY'",
+                    [spec.project_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(CommitError::ProjectNotFound)?;
+            if let Some(expected) = spec.expected_revision {
+                if expected != before {
+                    return Err(CommitError::RevisionConflict);
+                }
+            }
+
+            let value = apply(connection)?;
+            let after = if spec.advance_revision {
+                before + 1
+            } else {
+                before
+            };
+            if spec.advance_revision {
+                let updated = connection.execute(
+                    "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",
+                    libsql_rusqlite::params![after, spec.now, spec.project_id, before],
+                )?;
+                if updated != 1 {
+                    return Err(CommitError::RevisionConflict);
+                }
+            }
+
+            let mut receipt = ProjectCommandReceipt {
+                receipt_id: format!("project-receipt:{}", spec.command_id),
+                project_id: spec.project_id.to_string(),
+                result_project_id: spec.result_project_id.to_string(),
+                command_id: spec.command_id.to_string(),
+                idempotency_key: spec.idempotency_key.to_string(),
+                command_type: spec.command_type.to_string(),
+                before_revision: before,
+                after_revision: after,
+                request_digest: spec.request_digest.to_string(),
+                committed_at: spec.now.to_string(),
+                receipt_digest: String::new(),
+            };
+            let mut digest_input = serde_json::to_value(&receipt)?;
+            digest_input["receiptDigest"] = serde_json::json!("");
+            receipt.receipt_digest = sha256_canonical(&digest_input)?;
+            let receipt_json = serde_json::to_string(&receipt)?;
+            connection.execute(
+                "INSERT INTO project_command_receipts(receipt_id, project_id, result_project_id, command_id, idempotency_key, command_type, before_revision, after_revision, request_digest, receipt_json, receipt_digest, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                libsql_rusqlite::params![
+                    receipt.receipt_id,
+                    receipt.project_id,
+                    receipt.result_project_id,
+                    receipt.command_id,
+                    receipt.idempotency_key,
+                    receipt.command_type,
+                    receipt.before_revision,
+                    receipt.after_revision,
+                    receipt.request_digest,
+                    receipt_json,
+                    receipt.receipt_digest,
+                    receipt.committed_at,
+                ],
+            )?;
+            Ok(ProjectCommandOutcome::Committed { value, receipt })
+        })();
+
+        match result {
+            Ok(outcome) => {
+                connection.execute_batch("COMMIT")?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn find_project_command_receipt(
+        connection: &Connection,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<ProjectCommandReceipt>, CommitError> {
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT receipt_json, receipt_digest FROM project_command_receipts WHERE project_id = ?1 AND idempotency_key = ?2",
+                [project_id, idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(receipt_json, stored_digest)| {
+            let receipt: ProjectCommandReceipt = serde_json::from_str(&receipt_json)?;
+            let mut digest_input = serde_json::to_value(&receipt)?;
+            digest_input["receiptDigest"] = serde_json::json!("");
+            let expected = sha256_canonical(&digest_input)?;
+            if receipt.receipt_digest != expected || stored_digest != expected {
+                return Err(CommitError::ProjectCommandReceiptDigestMismatch);
+            }
+            Ok(receipt)
+        })
+        .transpose()
+    }
+
     pub fn commit(
         connection: &Connection,
         bundle: &CommitBundle,

@@ -38,6 +38,11 @@
       "version": "m0a.commit-bundle.v1"
     },
     {
+      "name": "commit-deltas",
+      "path": "schemas/commit/deltas.schema.json",
+      "version": "m0a.commit-deltas.v1"
+    },
+    {
       "name": "commit-receipt",
       "path": "schemas/commit/commit-receipt.schema.json",
       "version": "m0a.commit-receipt.v1"

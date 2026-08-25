@@ -202,9 +202,12 @@ fn v21_artifact_type_registration_compat() {
 }
 
 /// H-06: the upstream document reserves the ReaderDesire / Quality / CostBudget
-/// table-family authority boundary. M0A records these as RESERVED (projection /
-/// runtime-policy) so downstream V2.1 can land them without re-layering the
-/// registry, while never materializing the tables here.
+/// table-family authority boundary. M0A recorded these as RESERVED (projection /
+/// runtime-policy). B01-T03 materializes the frozen tables, so ReaderDesire
+/// becomes a real authoritative Ledger (projection_only=0) while the derived
+/// quality/health projections stay derived (projection_only=1) and the per-chapter
+/// budget stays a runtime-policy authority (projection_only=0). The family/owner
+/// boundaries remain exactly as the architecture freezes them.
 #[test]
 fn v21_reserved_table_family_registry_boundary() {
     let temp = tempdir().unwrap();
@@ -213,11 +216,12 @@ fn v21_reserved_table_family_registry_boundary() {
     // writable connection to inspect them directly.
     let connection = manager.create("proj-a", "A", NOW).unwrap();
 
-    // ReaderDesire is a Narrative Control State, never Canon (projection_only=1).
-    // QualityVector/Report is Evidence/Artifact, never Canon (projection_only=1).
-    // ChapterProductionBudget is a Runtime/Policy authority (projection_only=0).
+    // ReaderDesire is a real authoritative Ledger after B01 (projection_only=0,
+    // never Canon). QualityVector/Trend is a derived Evidence/Projection
+    // (projection_only=1). ChapterProductionBudget is a Runtime/Policy authority
+    // (projection_only=0).
     let expectations = [
-        ("reader_desire", "narrative_control", 1),
+        ("reader_desire", "narrative_control", 0),
         ("quality_vector", "quality_evidence", 1),
         ("production_budget", "runtime_policy", 0),
     ];
