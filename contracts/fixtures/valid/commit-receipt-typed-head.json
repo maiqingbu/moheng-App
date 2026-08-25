@@ -1,0 +1,41 @@
+{
+  "receiptId": "receipt:p1:commit:1",
+  "commitId": "commit:p1:commit:1",
+  "projectId": "p1",
+  "commandId": "command:p1:1",
+  "idempotencyKey": "cmd:p1:1",
+  "beforeRevision": 0,
+  "afterRevision": 1,
+  "bundleDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "committedArtifactRefs": [
+    {
+      "artifactId": "art:p1:chap:1",
+      "version": 1,
+      "payloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "headChanges": [
+    {
+      "artifactType": "FinalChapter",
+      "scope": { "level": "CHAPTER", "chapterId": "chap:p1:vol:1:1" },
+      "artifactId": "art:p1:chap:1",
+      "version": 1,
+      "payloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "appliedDeltaCounts": {
+    "artifacts": 1,
+    "heads": 1,
+    "canon": 0,
+    "obligation": 0,
+    "foreshadow": 0,
+    "knowledge": 0,
+    "state": 0,
+    "dependency": 0,
+    "job": 0,
+    "decision": 0
+  },
+  "gateCertificateRefs": [],
+  "committedAt": "2026-08-26T00:00:00Z",
+  "receiptDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

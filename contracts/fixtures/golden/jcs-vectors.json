@@ -73,13 +73,13 @@
   },
   {
     "name": "small-fixed",
-    "value": 0.000002,
+    "value": 2e-06,
     "normalizeNewlines": false,
     "canonicalSha256": "42d91fe275fb108b247e0ebcd0577b6a00208780d9604950c172d65887e29ee9"
   },
   {
     "name": "small-exponent",
-    "value": 1e-7,
+    "value": 1e-07,
     "normalizeNewlines": false,
     "canonicalSha256": "5b33e02f2c5103a05d32f6ba9cb058294452bfbf393967f68bb30c1bdcbbab22"
   },
@@ -94,8 +94,8 @@
     "value": [
       1e+30,
       4.5,
-      0.000002,
-      1e-7,
+      2e-06,
+      1e-07,
       0
     ],
     "normalizeNewlines": false,
@@ -175,6 +175,46 @@
     },
     "normalizeNewlines": true,
     "canonicalSha256": "5d5e3fc790719dd31701de381c716d93e5b498086a68a11e84211ca1081c71e8"
+  },
+  {
+    "name": "budget-typed",
+    "value": {
+      "budgetId": "budget:p1:chap:1",
+      "projectId": "p1",
+      "chapterId": "chap:p1:vol:1:1",
+      "importanceClass": "NORMAL",
+      "modelPolicyRef": "policy:draft:1",
+      "targetModelRuns": 3,
+      "softMaxModelRuns": 8,
+      "hardMaxModelRuns": 12,
+      "inputTokenBudget": 60000,
+      "outputTokenBudget": 22000,
+      "repairRunLimit": 2,
+      "wallClockBudgetMs": 900000,
+      "costBudgetCents": 450,
+      "strategySearchBudget": 5,
+      "frozenAt": "2026-08-26T00:00:00Z"
+    },
+    "normalizeNewlines": true,
+    "canonicalSha256": "2bce37e52d29b4c5752a0331b2115917657f587408d0d71075a05ba2e60a4513"
+  },
+  {
+    "name": "commit-deltas-typed",
+    "value": {
+      "canonDelta": [
+        {
+          "entityId": "ent:p1:1",
+          "factId": "fact:p1:1",
+          "subjectId": "ent:p1:1",
+          "predicate": "cast",
+          "objectJson": {},
+          "authorityLevel": "C",
+          "eventType": "intro",
+          "payloadJson": {}
+        }
+      ]
+    },
+    "normalizeNewlines": true,
+    "canonicalSha256": "3e7a60537b246f0eb6d2412c7c5d3529e738f1d81169940ce081ca4581307fd4"
   }
 ]
-

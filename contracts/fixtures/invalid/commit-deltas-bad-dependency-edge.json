@@ -1,0 +1,13 @@
+{
+  "dependencyEdges": [
+    {
+      "edgeId": "edge:p1:1",
+      "sourceRef": "fact:p1:1",
+      "targetRef": "chap:p1:1",
+      "dependencyType": "CANON_FACT",
+      "scope": "CHAPTER",
+      "impactClass": "SOFT",
+      "sourceHash": "not-a-sha256-hash-at-all"
+    }
+  ]
+}

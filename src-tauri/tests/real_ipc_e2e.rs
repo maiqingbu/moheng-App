@@ -324,7 +324,8 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
             }
         }),
     );
-    assert_eq!(dup["projectId"], "copy-1");
+    assert_eq!(dup["projectId"], source);
+    assert_eq!(dup["resultProjectId"], "copy-1");
     let library = invoke(&w, "query_project_library", json!({}));
     assert_eq!(library["projects"].as_array().unwrap().len(), 2);
 
@@ -454,7 +455,8 @@ fn real_ipc_duplicate_receipt_and_delete_reflect_in_project_db() {
             }
         }),
     );
-    assert_eq!(dup["projectId"], "persist-copy");
+    assert_eq!(dup["projectId"], project_id);
+    assert_eq!(dup["resultProjectId"], "persist-copy");
 }
 
 #[test]

@@ -390,6 +390,16 @@ pub struct DecisionUpdate {
 
 pub type DecisionUpdatePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeadChange {
+    pub artifact_type: ArtifactType,
+    pub scope: ArtifactScope,
+    pub artifact_id: OpaqueId,
+    pub version: i64,
+    pub payload_hash: Sha256,
+}
+
 pub type SharedDefinitions = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -541,7 +551,26 @@ pub struct CommitBundleHeadUpdatesItem {
     pub payload_hash: Sha256,
 }
 
-pub type CommitDeltas = serde_json::Value;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommitDeltas {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canon_delta: Option<Vec<CanonDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_delta: Option<Vec<ObligationDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreshadow_delta: Option<Vec<ForeshadowDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_delta: Option<Vec<KnowledgeDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_delta: Option<Vec<StateDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_edges: Option<Vec<DependencyEdge>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_updates: Option<Vec<JobUpdate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_updates: Option<Vec<DecisionUpdate>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -555,7 +584,7 @@ pub struct CommitReceipt {
     pub after_revision: i64,
     pub bundle_digest: Sha256,
     pub committed_artifact_refs: Vec<ArtifactRef>,
-    pub head_changes: Vec<serde_json::Value>,
+    pub head_changes: Vec<HeadChange>,
     pub applied_delta_counts: CommitReceiptAppliedDeltaCounts,
     pub gate_certificate_refs: Vec<OpaqueId>,
     pub committed_at: Rfc3339Utc,
@@ -609,4 +638,25 @@ pub struct ProjectCatalogRecord {
     pub last_opened_at: Option<Rfc3339Utc>,
     pub project_schema_version: String,
     pub compatibility_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Budget {
+    pub budget_id: OpaqueId,
+    pub project_id: OpaqueId,
+    pub chapter_id: OpaqueId,
+    pub importance_class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_policy_ref: Option<OpaqueId>,
+    pub target_model_runs: i64,
+    pub soft_max_model_runs: i64,
+    pub hard_max_model_runs: i64,
+    pub input_token_budget: i64,
+    pub output_token_budget: i64,
+    pub repair_run_limit: i64,
+    pub wall_clock_budget_ms: i64,
+    pub cost_budget_cents: i64,
+    pub strategy_search_budget: i64,
+    pub frozen_at: Rfc3339Utc,
 }

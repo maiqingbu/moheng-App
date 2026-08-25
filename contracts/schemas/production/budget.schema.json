@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/production/budget.schema.json",
+  "title": "Budget",
+  "description": "Frozen ChapterProductionBudget contract (§16.7). Every ChapterProductionJob freezes the limits below; exceeding the soft limits warns/de-prioritizes, exceeding a hard limit must enter REPLAN / HUMAN_DECISION_REQUIRED rather than burning unbounded spend. This schema is the single contract source that generates the TypeScript and Rust Budget DTOs — it must not be duplicated in the UI layer.",
+  "type": "object",
+  "properties": {
+    "budgetId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "chapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "importanceClass": { "type": "string", "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+    "modelPolicyRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "targetModelRuns": { "type": "integer", "minimum": 0 },
+    "softMaxModelRuns": { "type": "integer", "minimum": 0 },
+    "hardMaxModelRuns": { "type": "integer", "minimum": 0 },
+    "inputTokenBudget": { "type": "integer", "minimum": 0 },
+    "outputTokenBudget": { "type": "integer", "minimum": 0 },
+    "repairRunLimit": { "type": "integer", "minimum": 0 },
+    "wallClockBudgetMs": { "type": "integer", "minimum": 0 },
+    "costBudgetCents": { "type": "integer", "minimum": 0 },
+    "strategySearchBudget": { "type": "integer", "minimum": 0 },
+    "frozenAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" }
+  },
+  "required": [
+    "budgetId",
+    "projectId",
+    "chapterId",
+    "importanceClass",
+    "targetModelRuns",
+    "softMaxModelRuns",
+    "hardMaxModelRuns",
+    "inputTokenBudget",
+    "outputTokenBudget",
+    "repairRunLimit",
+    "wallClockBudgetMs",
+    "costBudgetCents",
+    "strategySearchBudget",
+    "frozenAt"
+  ],
+  "additionalProperties": false
+}

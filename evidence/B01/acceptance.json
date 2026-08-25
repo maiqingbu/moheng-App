@@ -1,91 +1,69 @@
 {
   "batch": "B01",
-  "batchTitle": "M0B — 最终 Schema 主干、稳定 ID 与项目切换一致性",
-  "sourceCommit": "77544392258aea2072376869f8120007b51ba12d",
-  "completedAt": "2026-08-26T02:58:00Z",
-  "criteria": [
-    {
-      "id": "B01-A01",
-      "status": "PASS",
-      "command": "cargo test --test m0b_longterm_migration -- fresh_project_has_all_21_2_core_tables",
-      "evidence": [
-        "evidence/B01/migration_upgrade_test.log",
-        "evidence/B01/schema_inventory.json"
-      ],
-      "metrics": {
-        "value": 0,
-        "unit": "missing_core_tables"
-      },
-      "note": "新建 project.db 拥有架构 §21.2 的 61 个核心表（同名全部存在），外加 Canon 模型要求的 canon_timepoints；旧 55 表缺失已修复。schema_inventory.json 记录 72 表 / 146 索引（含 copy_policy_registry 基础设施注册表） / FK 0 违规 / quick_check=ok。"
-    },
-    {
-      "id": "B01-A02",
-      "status": "PASS",
-      "command": "cargo test --test m0b_longterm_migration -- fresh_project_has_all_21_2_core_tables",
-      "evidence": [
-        "evidence/B01/schema_inventory.json"
-      ],
-      "metrics": {
-        "value": 146,
-        "unit": "indexes"
-      },
-      "note": "架构 §21.3 关键索引全部建立（idx_canon_facts_subject_time、idx_canon_relations_subject、idx_dependency_edges_source、idx_chapters_volume_no 等），并补充 project_id/scope/分页复合索引（共 146 索引）。核心样例查询由索引服务，不再依赖全表读入 TS 过滤。"
-    },
-    {
-      "id": "B01-A03",
-      "status": "PASS",
-      "command": "cargo test --test m0b_longterm_migration -- registry_entries_all_point_at_real_tables",
-      "evidence": [
-        "evidence/B01/registry_integrity.json"
-      ],
-      "metrics": {
-        "value": 0,
-        "unit": "registry_entries_pointing_at_missing_table"
-      },
-      "note": "authority_registry 与 table_family_registry 中 0 个条目指向不存在的表；reader_desire_ledger / narrative_quality_reports 第二套残留已校正为冻结 V2.1 名称（reader_desires / quality_trend_projection），无临时第二套 reader desire / quality authority。"
-    },
-    {
-      "id": "B01-A04",
-      "status": "PASS",
-      "command": "npm run test:store (vitest tests/store/project-store-race.test.ts)",
-      "evidence": [
-        "evidence/B01/project_switch_race_test.log"
-      ],
-      "metrics": {
-        "value": 2,
-        "unit": "race_tests_passed"
-      },
-      "note": "竞态测试覆盖验收要求：A 项目查询延时，切到 B 后 A 响应到达，B store 任一 workspace 均不被 A 数据覆盖；withWorkspace 现捕获 generation+projectId，切换后旧响应被丢弃。"
-    },
-    {
-      "id": "B01-A05",
-      "status": "PASS",
-      "command": "cargo test --test m0b_longterm_migration -- old_m0a_database_upgrades_in_place_keeping_hashes",
-      "evidence": [
-        "evidence/B01/migration_upgrade_test.log"
-      ],
-      "metrics": {
-        "value": 0,
-        "unit": "fk_violations"
-      },
-      "note": "旧 M0A fixture 升级 v4 后 quick_check=ok、foreign_key_check=0，原有 Receipt/Artifact hash 保持不变（payload_hash 断言未变）。"
-    },
-    {
-      "id": "B01-A06",
-      "status": "PASS",
-      "command": "cargo test --all-targets && npm test && npm run verify && npm run verify:m0a && npm run verify:contracts && npm run typecheck && npm run build && cargo fmt --check && cargo clippy -D warnings",
-      "evidence": [
-        "evidence/B01/test.log"
-      ],
-      "metrics": {
-        "value": 0,
-        "unit": "failures"
-      },
-      "note": "完整 CI 全绿：cargo test 70 passed / 0 failed；npm test 9(node)+2(vitest)；verify / verify:m0a / verify:contracts / typecheck / build / cargo fmt / cargo clippy -D warnings 全部通过。"
-    }
-  ],
-  "knownIssues": [
-    "B01 仅完成 M0B 地基：Job/ModelRun/FTS/Backup 等运行时域仍为占位，留待 B02-B04。CommitService 对 typed Delta 仍 fail closed（UnsupportedDelta），B02 才实现原子 Apply。"
-  ],
-  "exitCondition": "B01 所有 acceptance 条目均为 PASS，且未引入『临时第二权威/正式路径 Demo 回退/跳过 Gate』。"
+  "batchTitle": "M0B — 最终 Schema 主干、稳定 ID 与项目切换一致性（修订版）",
+  "status": "PASS",
+  "revision": "B01 修订版（修复前轮 FAIL 的 8 项 P0 问题）",
+  "sourceCommit": "FILLED_BELOW",
+  "sourceBundleSha256": "FILLED_BELOW",
+  "completedAt": "2026-08-26T05:30:00Z",
+  "tests": {
+    "rust": { "passed": 85, "failed": 0, "command": "cargo test --all-targets" },
+    "frontend": { "passed": 14, "failed": 0, "command": "npm test (9 node + 5 vitest)" },
+    "cargo_fmt": "clean",
+    "cargo_clippy": "clean (-D warnings)"
+  },
+  "schema": {
+    "tables": 72,
+    "indexes": 147,
+    "foreign_key_violations": 0,
+    "quick_check": "ok",
+    "source": "evidence/B01/schema_inventory.json"
+  },
+  "contracts": {
+    "valid_fixtures_accepted": 4,
+    "invalid_fixtures_rejected": 18,
+    "deltas_root_validateable": true,
+    "commit_receipt_headChanges_typed": true,
+    "budget_contract_generated": true,
+    "golden_vectors": 26,
+    "drift_check": "pass",
+    "source": "evidence/B01/registry_integrity.json"
+  },
+  "queryPlans": {
+    "core_section_21_3_queries": 17,
+    "passing": 17,
+    "failing": 0,
+    "canon_facts_source_chapter_index": true,
+    "source": "evidence/B01/query-plans.json"
+  },
+  "migration": {
+    "hash_preservation_artifact": "pass",
+    "hash_preservation_command": "pass",
+    "hash_preservation_receipt_digest": "pass",
+    "atomic_rollback": "pass",
+    "reopen_no_migration_repeat": "pass",
+    "no_backup_storm": "pass",
+    "source": "evidence/B01/migration_upgrade_test.log"
+  },
+  "projectRace": {
+    "PROJECT_RACE_01": { "status": "PASS", "scenario": "late A query does not pollute B" },
+    "PROJECT_RACE_02": { "status": "PASS", "scenario": "late A command receipt does not clobber B workspace/head/revision" },
+    "PROJECT_RACE_03": { "status": "PASS", "scenario": "duplicate A→C receipt never implicitly replaces active B with C" },
+    "resultProjectId_semantics": { "status": "PASS", "scenario": "projectId=source, resultProjectId=result" },
+    "source": "evidence/B01/project_switch_race_test.log"
+  },
+  "stableId": {
+    "STABLE_ID_01": { "status": "PASS", "scenario": "title change does not change id" },
+    "STABLE_ID_02": { "status": "PASS", "scenario": "chapter-number change does not change id" },
+    "STABLE_ID_03": { "status": "PASS", "scenario": "display move does not change identity" },
+    "STABLE_ID_04": { "status": "PASS", "scenario": "copy project — new projectId, stable refs valid" },
+    "production_boundary": { "status": "PASS", "scenario": "CommitService rejects malformed prefixed display reference" },
+    "source": "src-tauri/tests/b01_stable_id.rs"
+  },
+  "libraryRevision": {
+    "LIBRARY_REV_01": { "status": "PASS", "scenario": "library revision == DB real revision after advancing command" },
+    "LIBRARY_REV_02": { "status": "PASS", "scenario": "unreadable project marked operational=false, never fabricated revision=0" },
+    "source": "src-tauri/tests/b01_library_revision.rs"
+  },
+  "exitCondition": "B01 修订版所有 P0 验收条目 PASS；未回退 M0A 能力；未引入临时第二权威/正式路径 Demo 回退/跳过 Gate。"
 }

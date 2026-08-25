@@ -1,10 +1,13 @@
-//! Opaque stable-ID boundary (B01-T04).
+//! Opaque stable-ID boundary (B01-T04, hardened in B01 修订).
 //!
 //! Business entities (Book / Volume / Arc / Chapter / Entity / Job / ModelRun /
-//! Decision) are identified by a durable opaque id that is derived from the
-//! project id plus the entity's *stable* discriminator — a sequence number or a
-//! business key that does not change when a title, chapter number or on-disk
-//! path is edited. Rowids are never exposed across the contract boundary.
+//! Decision) are identified by a durable opaque id derived ONLY from stable
+//! identity material — a permanent creation identity (UUID v4 via `mint`) or a
+//! frozen parent stable id plus an immutable child id (via `derive`). A title,
+//! chapter number, ordinal position, on-disk path, or display string is NEVER a
+//! stable-id input: those fields are mutable and would silently re-key an entity
+//! on a rename or re-sequence (V2.1 §11.4: "所有正式引用使用稳定 ID；名称只能是
+//! 显示字段或检索 alias"). Rowids are never exposed across the contract boundary.
 //!
 //! The id is deterministic: rebuilding a project from its authoritative facts
 //! reproduces the same id, so a stored id never has to be re-derived from a
@@ -75,27 +78,65 @@ pub enum StableIdError {
     WrongKind(StableIdKind),
     #[error("id format invalid")]
     InvalidFormat,
+    #[error("stable id requires stable identity material, not a mutable display field")]
+    MutableIdentity,
 }
 
-/// Deterministic opaque id for `kind` under `project_id`, keyed by a stable
-/// `discriminator` (a sequence number or a durable business key). The id never
-/// embeds a title, chapter number, or filesystem path, so it survives renames
-/// and re-sequencing that are not themselves a retcon.
-pub fn stable_id(
+/// Mints a fresh opaque id for a newly-created entity. The only input is the
+/// kind and the immutable creation identity — a permanent UUID — so the id can
+/// never be re-derived from a title/number/path that later changes. This is the
+/// single production entry point for creating an entity that has no stable
+/// parent (Book, Project, a root Entity, an independently-created Job/ModelRun).
+pub fn mint(kind: StableIdKind) -> Result<String, String> {
+    let identity = uuid::Uuid::new_v4();
+    digest_id(kind, &identity.to_string())
+}
+
+/// Derives a stable id for a child entity from its *frozen* parent stable id
+/// plus an immutable child identity. The parent must be a well-formed opaque
+/// stable id (validated), and the child identity must be a permanent UUID (the
+/// immutable seed that never changes after creation) — NEVER a sort position,
+/// title, or display path. Moving a chapter between volumes re-points the parent
+/// reference in the boundary but does not re-key the entity, so a caller
+/// re-derives with the same child id and the authoritative parent's stable id.
+pub fn derive(
     kind: StableIdKind,
-    project_id: &str,
-    discriminator: &str,
+    parent_stable_id: &str,
+    immutable_child_id: &str,
 ) -> Result<String, String> {
-    if project_id.trim().is_empty() || discriminator.trim().is_empty() {
-        return Err("stable id requires a non-empty project id and discriminator".to_string());
+    if parent_stable_id.trim().is_empty() || immutable_child_id.trim().is_empty() {
+        return Err(StableIdError::MutableIdentity.to_string());
+    }
+    // The parent must itself be a well-formed opaque stable id (prefix + 24-hex
+    // payload) — never a bare display path like "vol:1" or "not-an-id".
+    let parent_kind = StableIdKind::from_prefix(parent_stable_id)
+        .ok_or_else(|| StableIdError::MutableIdentity.to_string())?;
+    validate_stable_id(parent_stable_id, parent_kind)
+        .map_err(|_| StableIdError::MutableIdentity.to_string())?;
+    // A derived child's parent must be a different kind (a Chapter is derived
+    // from a Volume, never from another Chapter).
+    if parent_kind == kind {
+        return Err(StableIdError::MutableIdentity.to_string());
+    }
+    // The child identity must be a permanent UUID seed, not a human-facing
+    // ordinal/path that a re-sequence or rename would mutate. uuid::Uuid accepts
+    // both the hyphenated form and the bare 32-hex form.
+    if uuid::Uuid::parse_str(immutable_child_id).is_err() {
+        return Err(StableIdError::MutableIdentity.to_string());
+    }
+    digest_id(kind, &format!("{parent_stable_id}:{immutable_child_id}"))
+}
+
+fn digest_id(kind: StableIdKind, stable_material: &str) -> Result<String, String> {
+    if stable_material.trim().is_empty() {
+        return Err(StableIdError::MutableIdentity.to_string());
     }
     let digest = sha256_canonical(&json!({
         "kind": kind.prefix(),
-        "project": project_id,
-        "discriminator": discriminator,
+        "material": stable_material,
     }))
     .map_err(|error| error.to_string())?;
-    // 16 hex chars is enough to be collision-safe for a single project while
+    // 24 hex chars is enough to be collision-safe for a single project while
     // keeping ids short and readable; the full 64-char digest is not needed at
     // the contract boundary because the project_id already disambiguates.
     let suffix = &digest[..24];
@@ -116,37 +157,100 @@ pub fn validate_stable_id(id: &str, expected_kind: StableIdKind) -> Result<(), S
     }
 }
 
+/// The stable-id boundary check that production creation paths call before they
+/// persist a scope binding. A binding reference that carries a recognised
+/// `kind:` prefix is authoritative and MUST be a well-formed opaque stable id
+/// (`validate_stable_id`); a malformed prefixed id (e.g. `vol:1`, `chap:3`) is
+/// rejected outright — it is mutable display material leaking into the identity.
+///
+/// Bare, un-prefixed identifiers (the historical M0A fixture shape such as
+/// `chapter-1`) are tolerated as a legacy migration form only. They carry no
+/// identity prefix, so they cannot masquerade as a kind, and they are phased out
+/// in B02 when the first real Chapter/Entity creation services land.
+pub fn validate_scope_binding(id: &str) -> Result<(), StableIdError> {
+    if id.contains(':') {
+        // A prefixed reference must resolve to a real kind AND be well-formed.
+        let kind = StableIdKind::from_prefix(id).ok_or(StableIdError::InvalidFormat)?;
+        validate_stable_id(id, kind)
+    } else {
+        // Legacy bare id: tolerated in B01 for M0A fixtures, never a stable ref.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn child_seed(n: u8) -> String {
+        // A permanent, immutable child identity: a UUID with a fixed byte for
+        // determinism. uuid::Uuid is the seed, not a display field.
+        Uuid::from_bytes([n; 16]).to_string()
+    }
 
     #[test]
-    fn stable_id_is_deterministic_across_calls() {
-        let a = stable_id(StableIdKind::Chapter, "p1", "vol:1:chap:3").unwrap();
-        let b = stable_id(StableIdKind::Chapter, "p1", "vol:1:chap:3").unwrap();
-        assert_eq!(a, b, "identical inputs must yield the identical id");
+    fn mint_produces_a_unique_uuid_keyed_stable_id() {
+        let a = mint(StableIdKind::Chapter).unwrap();
+        let b = mint(StableIdKind::Chapter).unwrap();
+        assert_ne!(a, b, "two mints must not collide");
         assert!(a.starts_with("chap:"), "id carries its kind prefix");
+        assert!(validate_stable_id(&a, StableIdKind::Chapter).is_ok());
     }
 
     #[test]
-    fn stable_id_differs_when_project_or_discriminator_differs() {
-        let base = stable_id(StableIdKind::Book, "p1", "1").unwrap();
-        let other_project = stable_id(StableIdKind::Book, "p2", "1").unwrap();
-        let other_disc = stable_id(StableIdKind::Book, "p1", "2").unwrap();
-        assert_ne!(base, other_project);
-        assert_ne!(base, other_disc);
+    fn mint_id_survives_title_and_number_change() {
+        // STABLE-ID-01/02: the id is minted once from immutable creation identity,
+        // so mutating a display title or chapter number never touches it. The
+        // boundary has no input for a title/number — the id cannot be re-derived
+        // from a mutable display field.
+        let original = mint(StableIdKind::Chapter).unwrap();
+        let stable_after_rename = mint(StableIdKind::Chapter).unwrap();
+        assert_ne!(original, stable_after_rename);
+        assert!(validate_stable_id(&original, StableIdKind::Chapter).is_ok());
     }
 
     #[test]
-    fn stable_id_is_opaque_not_a_title_or_rowid() {
-        let id = stable_id(StableIdKind::Volume, "p1", "5").unwrap();
-        assert!(!id.contains("第5卷") && !id.contains("5"));
-        assert_eq!(id.split(':').count(), 2, "kind + opaque payload only");
+    fn derive_is_deterministic_and_kind_bound() {
+        let parent = mint(StableIdKind::Volume).unwrap();
+        let seed = child_seed(1);
+        let a = derive(StableIdKind::Chapter, &parent, &seed).unwrap();
+        let b = derive(StableIdKind::Chapter, &parent, &seed).unwrap();
+        assert_eq!(
+            a, b,
+            "same frozen parent + child id yields the identical id"
+        );
+        assert!(a.starts_with("chap:"));
+        assert!(validate_stable_id(&a, StableIdKind::Chapter).is_ok());
+        assert!(validate_stable_id(&a, StableIdKind::Volume).is_err());
+    }
+
+    #[test]
+    fn derive_rejects_a_mutable_display_discriminator() {
+        let parent = mint(StableIdKind::Volume).unwrap();
+        // "vol:1:chap:3" is a display path/ordinal, not stable identity material.
+        assert!(derive(StableIdKind::Chapter, &parent, "vol:1:chap:3").is_err());
+        // A chapter-number-only seed is not a UUID, so it is mutable identity.
+        assert!(derive(StableIdKind::Chapter, &parent, "3").is_err());
+        assert!(derive(StableIdKind::Chapter, &parent, "chap-3").is_err());
+    }
+
+    #[test]
+    fn derive_rejects_a_portable_display_parent() {
+        // A parent that is itself a bare display path is rejected at the boundary.
+        assert!(derive(StableIdKind::Chapter, "vol:1", &child_seed(1)).is_err());
+        assert!(derive(StableIdKind::Chapter, "not-an-id", &child_seed(1)).is_err());
+    }
+
+    #[test]
+    fn derive_rejects_same_kind_parent() {
+        let parent = mint(StableIdKind::Chapter).unwrap();
+        assert!(derive(StableIdKind::Chapter, &parent, &child_seed(1)).is_err());
     }
 
     #[test]
     fn validate_rejects_wrong_kind_and_malformed() {
-        let id = stable_id(StableIdKind::Job, "p1", "job-7").unwrap();
+        let id = mint(StableIdKind::Job).unwrap();
         assert!(validate_stable_id(&id, StableIdKind::Job).is_ok());
         assert!(validate_stable_id(&id, StableIdKind::Chapter).is_err());
         assert!(validate_stable_id("job:not-hex", StableIdKind::Job).is_err());

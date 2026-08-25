@@ -82,7 +82,8 @@ function libraryItem(record: DemoProjectRecord): ProjectLibraryItem {
     revision: bundle.project.revision,
     createdAt: record.createdAt,
     updatedAt: bundle.project.updatedAt,
-    lastOpenedAt: record.lastOpenedAt
+    lastOpenedAt: record.lastOpenedAt,
+    operational: true
   }
 }
 

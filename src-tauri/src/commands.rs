@@ -85,7 +85,12 @@ fn expected_revision(request: &Value) -> Result<Option<i64>, String> {
 fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
     json!({
         "commandId": receipt.command_id,
-        "projectId": receipt.result_project_id,
+        // `projectId` is the *source* project the command acted on; `resultProjectId`
+        // is the project the command produced (equal for in-place commands, the new
+        // copy for duplicate). Consumers must distinguish them (B01-P0 §六): a
+        // duplicate A→C must never be mistaken for an A-only receipt.
+        "projectId": receipt.project_id,
+        "resultProjectId": receipt.result_project_id,
         "acceptedAt": receipt.committed_at,
         "finalStatus": "committed",
         "message": "权威事务已完成，界面将重新查询。",
@@ -157,19 +162,49 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
     let mut completed = 0_i64;
     let mut total_cost = 0_i64;
     for row in rows {
-        // B01-T07: read the project's authoritative revision + rebuildable
-        // runtime summary through the controlled read path, instead of emitting
-        // a hard-coded revision 0 / idle state. A project whose runtime_state row
-        // is missing keeps conservative defaults but still carries a truthful
-        // revision (the library is not a second authority, only a projection).
+        // B01-T07/T15: read the project's authoritative revision + rebuildable
+        // runtime summary through the controlled read path, instead of emitting a
+        // hard-coded revision 0 / idle state. A project whose runtime_state row is
+        // missing keeps conservative defaults but still carries a truthful revision
+        // (the library is not a second authority, only a projection).
         //
         // A single unreadable project (e.g. a trashed project whose DB was
-        // externally removed) must not take down the whole library listing, so a
-        // read failure degrades to a conservative default rather than aborting.
-        let projection = state
-            .manager
-            .library_projection(&row.project_id)
-            .unwrap_or_default();
+        // externally removed) must NOT become a fabricated, operational revision=0
+        // entry: library_projection returns the real error, and the entry is marked
+        // operational=false with a readError. Such a project is not counted as
+        // producing/waiting/completed and is not usable for a destructive command.
+        let projection = match state.manager.library_projection(&row.project_id) {
+            Ok(projection) => projection,
+            Err(error) => {
+                projects.push(json!({
+                    "id": row.project_id,
+                    "title": row.title,
+                    "subtitle": "本地权威项目",
+                    "platform": "未设置",
+                    "genre": "未设置",
+                    "mode": "DIRECTOR",
+                    "phase": "SETUP",
+                    "runState": "IDLE",
+                    "blockReason": null,
+                    "signingStatus": "NOT_STARTED",
+                    "lifecycle": row.lifecycle,
+                    "progress": 0,
+                    "totalCost": 0,
+                    "totalWords": 0,
+                    "committedChapters": 0,
+                    "candidateChapters": 0,
+                    "pendingDecisions": 0,
+                    "revision": 0,
+                    "generatedRevision": 0,
+                    "createdAt": row.created_at,
+                    "updatedAt": row.updated_at,
+                    "lastOpenedAt": row.last_opened_at.unwrap_or_default(),
+                    "operational": false,
+                    "readError": error.to_string()
+                }));
+                continue;
+            }
+        };
         let revision = projection.revision;
         // A fresh M0B project has no runtime-state row yet; LibraryRuntimeProjection
         // Default carries truthful defaults so a library row never presents a
@@ -227,7 +262,8 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
             "generatedRevision": generated_revision,
             "createdAt": row.created_at,
             "updatedAt": row.updated_at,
-            "lastOpenedAt": row.last_opened_at.unwrap_or_default()
+            "lastOpenedAt": row.last_opened_at.unwrap_or_default(),
+            "operational": true
         }));
     }
     let active = projects

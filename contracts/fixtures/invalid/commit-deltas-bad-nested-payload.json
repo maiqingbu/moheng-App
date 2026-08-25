@@ -1,0 +1,12 @@
+{
+  "knowledgeDelta": [
+    {
+      "knowledgeId": "kn:p1:1",
+      "knowerId": "ent:p1:1",
+      "factId": "fact:p1:1",
+      "epistemicState": "BELIEVES_FALSE",
+      "fromChapterId": 7,
+      "payloadJson": {}
+    }
+  ]
+}

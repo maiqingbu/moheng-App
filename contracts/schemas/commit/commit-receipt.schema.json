@@ -3,6 +3,21 @@
   "$id": "m0a://schemas/commit/commit-receipt.schema.json",
   "title": "CommitReceipt",
   "type": "object",
+  "$defs": {
+    "HeadChange": {
+      "type": "object",
+      "description": "A single canonical-head advancement recorded by the commit. Mirrors the headUpdates item so a receipt never carries an untyped head change.",
+      "properties": {
+        "artifactType": { "$ref": "../shared/definitions.schema.json#/$defs/ArtifactType" },
+        "scope": { "$ref": "../artifact/artifact-scope.schema.json" },
+        "artifactId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "payloadHash": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
+      },
+      "required": ["artifactType", "scope", "artifactId", "version", "payloadHash"],
+      "additionalProperties": false
+    }
+  },
   "properties": {
     "receiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
     "commitId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
@@ -13,7 +28,7 @@
     "afterRevision": { "type": "integer", "minimum": 1 },
     "bundleDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
     "committedArtifactRefs": { "type": "array", "items": { "$ref": "../artifact/artifact-ref.schema.json" } },
-    "headChanges": { "type": "array" },
+    "headChanges": { "type": "array", "items": { "$ref": "commit-receipt.schema.json#/$defs/HeadChange" } },
     "appliedDeltaCounts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "gateCertificateRefs": { "type": "array", "items": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" } },
     "committedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },

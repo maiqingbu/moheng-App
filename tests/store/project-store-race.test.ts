@@ -20,7 +20,7 @@ describe('projectStore workspace race on project switch (B01-T06)', () => {
     deferred: { resolve: (value: unknown) => void; reject: (e: unknown) => void }
   }
 
-  function makePort() {
+  function makePort(commands?: Array<{ resolve: (v: CommandReceipt) => void; request: CommandRequest }>) {
     const bounded: QueryRecord[] = []
 
     const deferred = <T>() => {
@@ -63,9 +63,19 @@ describe('projectStore workspace race on project switch (B01-T06)', () => {
       searchFulltext: vi.fn(() => Promise.resolve(null)),
       queryMarketOpportunities: vi.fn(() => Promise.resolve([])),
       queryGlobalSettings: vi.fn(() => Promise.resolve(null)),
-      executeCommand: vi.fn((_req: CommandRequest): Promise<CommandReceipt> => Promise.resolve({
-        commandId: 'cmd', finalStatus: 'committed', message: '', acceptedAt: '', afterRevision: 1,
-      })),
+      executeCommand: vi.fn((req: CommandRequest): Promise<CommandReceipt> => {
+        // When the test supplies a command queue, park the receipt there so the
+        // race (receipt arrives after a project switch) can be controlled.
+        if (commands) {
+          const d = deferred<CommandReceipt>()
+          commands.push({ resolve: d.resolve, request: req })
+          return d.promise
+        }
+        return Promise.resolve({
+          commandId: 'cmd', projectId: req.projectId, resultProjectId: req.projectId,
+          finalStatus: 'committed', message: '', acceptedAt: '', afterRevision: 1,
+        })
+      }),
       testProvider: vi.fn((): Promise<CommandReceipt> => Promise.resolve({
         commandId: 'cmd', finalStatus: 'committed', message: '', acceptedAt: '',
       })),
@@ -129,5 +139,83 @@ describe('projectStore workspace race on project switch (B01-T06)', () => {
     port.bounded[1].deferred.resolve({ projectId: 'B', targetPlatform: 'B平台', strategyTitle: 'B策略', readerPromise: '', platformPolicyVersion: '', snapshotCollectedAt: '', confidence: 0, lastPulseAt: '', nextReview: '', opportunities: [], signals: [], guardrails: [] })
     await bMarket
     expect(store.marketStrategy?.targetPlatform).toBe('B平台')
+  })
+
+  it('PROJECT-RACE-01: a late A-query response does not pollute B after a switch', async () => {
+    const port = makePort()
+    holder.port = port
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+
+    await store.openProject('A')
+    const aQuery = store.loadMarket()
+    expect(port.bounded[0].projectId).toBe('A')
+
+    // Switch to B — openProject resets the workspaces, so B starts clean.
+    await store.openProject('B')
+    expect(store.marketStrategy).toBeNull()
+
+    // Release A's late response AFTER B is active: it must stay null (not polluted).
+    port.bounded[0].deferred.resolve({ projectId: 'A', targetPlatform: 'A平台', strategyTitle: 'A策略', readerPromise: '', platformPolicyVersion: '', snapshotCollectedAt: '', confidence: 0, lastPulseAt: '', nextReview: '', opportunities: [], signals: [], guardrails: [] })
+    await aQuery
+
+    expect(store.currentProjectId).toBe('B')
+    expect(store.marketStrategy).toBeNull()
+  })
+
+  it('PROJECT-RACE-02: a late A-command receipt does not clobber B workspace/head/revision', async () => {
+    const commands: Array<{ resolve: (v: CommandReceipt) => void; request: CommandRequest }> = []
+    const port = makePort(commands)
+    holder.port = port
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+
+    await store.openProject('A')
+    // Issue a command on A that stays in flight.
+    const aCommand = store.runCommand('cmd:A', { type: 'project_rename', projectId: 'A' })
+    expect(commands).toHaveLength(1)
+    expect(commands[0].request.projectId).toBe('A')
+
+    // Switch to B — openProject resets B workspaces clean.
+    await store.openProject('B')
+    expect(store.marketStrategy).toBeNull()
+
+    // Now A's receipt arrives. It must not refresh (and thereby clobber) B's data.
+    commands[0].resolve({
+      commandId: 'cmd-A', projectId: 'A', resultProjectId: 'A',
+      finalStatus: 'committed', message: '', acceptedAt: '', afterRevision: 1,
+    })
+    await aCommand
+
+    expect(store.currentProjectId).toBe('B')
+    expect(store.marketStrategy).toBeNull()
+  })
+
+  it('PROJECT-RACE-03: duplicate A→C receipt never implicitly replaces active B with C', async () => {
+    const commands: Array<{ resolve: (v: CommandReceipt) => void; request: CommandRequest }> = []
+    const port = makePort(commands)
+    holder.port = port
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+
+    await store.openProject('A')
+    // A duplicate issued on source A stays in flight.
+    const dup = store.runCommand('cmd:dup', { type: 'project_duplicate', projectId: 'A' })
+    expect(commands).toHaveLength(1)
+    expect(commands[0].request.projectId).toBe('A')
+
+    // User switches to B before the duplicate's receipt lands.
+    await store.openProject('B')
+    expect(store.currentProjectId).toBe('B')
+
+    // The duplicate receipt arrives: source A, result C. It must not swap the
+    // active project to C (that would be an implicit switch from a stale receipt).
+    commands[0].resolve({
+      commandId: 'cmd-dup', projectId: 'A', resultProjectId: 'C',
+      finalStatus: 'committed', message: '', acceptedAt: '', afterRevision: 1,
+    })
+    await dup
+
+    expect(store.currentProjectId).toBe('B')
   })
 })

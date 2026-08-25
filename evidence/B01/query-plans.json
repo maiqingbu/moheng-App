@@ -1,0 +1,196 @@
+{
+  "batch": "B01",
+  "failing": 0,
+  "passing": 17,
+  "queries": [
+    {
+      "indexUsed": "idx_artifacts_project_paging",
+      "name": "artifacts_project_paging",
+      "note": "served by idx_artifacts_project_paging",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH artifacts USING INDEX idx_artifacts_project_paging (project_id=? AND artifact_type=? AND artifact_status=? AND version>?)"
+      ],
+      "sql": "SELECT * FROM artifacts WHERE project_id='probe' AND artifact_type='probe' AND artifact_status='probe' AND version>='probe'",
+      "table": "artifacts"
+    },
+    {
+      "indexUsed": "sqlite_autoindex_canonical_heads_1",
+      "name": "canonical_heads_scope",
+      "note": "served by sqlite_autoindex_canonical_heads_1",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canonical_heads USING INDEX sqlite_autoindex_canonical_heads_1 (project_id=? AND artifact_type=? AND scope_level=? AND scope_key=?)"
+      ],
+      "sql": "SELECT * FROM canonical_heads WHERE project_id='probe' AND artifact_type='probe' AND scope_level='probe' AND scope_key='probe'",
+      "table": "canonical_heads"
+    },
+    {
+      "indexUsed": "idx_canon_facts_subject_time",
+      "name": "canon_facts_subject_time",
+      "note": "served by idx_canon_facts_subject_time",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_facts USING INDEX idx_canon_facts_subject_time (subject_id=? AND predicate=? AND valid_from_chapter_id>?)"
+      ],
+      "sql": "SELECT * FROM canon_facts WHERE subject_id='probe' AND predicate='probe' AND valid_from_chapter_id>'probe' AND valid_to_chapter_id<'probe'",
+      "table": "canon_facts"
+    },
+    {
+      "indexUsed": "idx_canon_facts_source_chapter",
+      "name": "canon_facts_source_chapter",
+      "note": "served by idx_canon_facts_source_chapter",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_facts USING INDEX idx_canon_facts_source_chapter (source_chapter_id=?)"
+      ],
+      "sql": "SELECT * FROM canon_facts WHERE source_chapter_id='probe'",
+      "table": "canon_facts"
+    },
+    {
+      "indexUsed": "idx_canon_relations_object",
+      "name": "canon_relations_subject",
+      "note": "served by idx_canon_relations_object",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_relations USING INDEX idx_canon_relations_object (object_id=? AND predicate=? AND subject_id=?)"
+      ],
+      "sql": "SELECT * FROM canon_relations WHERE subject_id='probe' AND predicate='probe' AND object_id='probe'",
+      "table": "canon_relations"
+    },
+    {
+      "indexUsed": "idx_canon_relations_object",
+      "name": "canon_relations_object",
+      "note": "served by idx_canon_relations_object",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_relations USING INDEX idx_canon_relations_object (object_id=? AND predicate=? AND subject_id=?)"
+      ],
+      "sql": "SELECT * FROM canon_relations WHERE object_id='probe' AND predicate='probe' AND subject_id='probe'",
+      "table": "canon_relations"
+    },
+    {
+      "indexUsed": "idx_canon_knowledge_knower",
+      "name": "canon_knowledge_knower",
+      "note": "served by idx_canon_knowledge_knower",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_knowledge USING INDEX idx_canon_knowledge_knower (knower_id=? AND epistemic_state=? AND fact_id=?)"
+      ],
+      "sql": "SELECT * FROM canon_knowledge WHERE knower_id='probe' AND epistemic_state='probe' AND fact_id='probe'",
+      "table": "canon_knowledge"
+    },
+    {
+      "indexUsed": "idx_canon_events_chapter",
+      "name": "canon_events_chapter",
+      "note": "served by idx_canon_events_chapter",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH canon_events USING INDEX idx_canon_events_chapter (chapter_id=? AND event_type=?)"
+      ],
+      "sql": "SELECT * FROM canon_events WHERE chapter_id='probe' AND event_type='probe'",
+      "table": "canon_events"
+    },
+    {
+      "indexUsed": "idx_dependency_edges_source",
+      "name": "dependency_edges_source",
+      "note": "served by idx_dependency_edges_source",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH dependency_edges USING INDEX idx_dependency_edges_source (source_ref=? AND dependency_type=? AND scope=?)"
+      ],
+      "sql": "SELECT * FROM dependency_edges WHERE source_ref='probe' AND dependency_type='probe' AND scope='probe'",
+      "table": "dependency_edges"
+    },
+    {
+      "indexUsed": "idx_dependency_edges_target",
+      "name": "dependency_edges_target",
+      "note": "served by idx_dependency_edges_target",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH dependency_edges USING INDEX idx_dependency_edges_target (target_ref=? AND dependency_type=? AND scope=?)"
+      ],
+      "sql": "SELECT * FROM dependency_edges WHERE target_ref='probe' AND dependency_type='probe' AND scope='probe'",
+      "table": "dependency_edges"
+    },
+    {
+      "indexUsed": "idx_obligations_lifecycle",
+      "name": "narrative_obligations_lifecycle",
+      "note": "served by idx_obligations_lifecycle",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH narrative_obligations USING INDEX idx_obligations_lifecycle (lifecycle=? AND scope=? AND must_resolve_before_chapter=?)"
+      ],
+      "sql": "SELECT * FROM narrative_obligations WHERE lifecycle='probe' AND scope='probe' AND must_resolve_before_chapter='probe'",
+      "table": "narrative_obligations"
+    },
+    {
+      "indexUsed": "idx_foreshadows_status_window",
+      "name": "foreshadows_status_window",
+      "note": "served by idx_foreshadows_status_window",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH foreshadows USING INDEX idx_foreshadows_status_window (status=? AND recover_window_end_chapter=?)"
+      ],
+      "sql": "SELECT * FROM foreshadows WHERE status='probe' AND recover_window_end_chapter='probe'",
+      "table": "foreshadows"
+    },
+    {
+      "indexUsed": "idx_reader_desires_status",
+      "name": "reader_desires_status",
+      "note": "served by idx_reader_desires_status",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH reader_desires USING INDEX idx_reader_desires_status (status=? AND desire_type=? AND expected_payoff_chapter=?)"
+      ],
+      "sql": "SELECT * FROM reader_desires WHERE status='probe' AND desire_type='probe' AND expected_payoff_chapter='probe'",
+      "table": "reader_desires"
+    },
+    {
+      "indexUsed": "idx_reader_desire_events_desire",
+      "name": "reader_desire_events_desire",
+      "note": "served by idx_reader_desire_events_desire",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH reader_desire_events USING INDEX idx_reader_desire_events_desire (desire_id=? AND chapter_id=?)"
+      ],
+      "sql": "SELECT * FROM reader_desire_events WHERE desire_id='probe' AND chapter_id='probe'",
+      "table": "reader_desire_events"
+    },
+    {
+      "indexUsed": "idx_chapters_volume_no",
+      "name": "chapters_volume_no",
+      "note": "served by idx_chapters_volume_no",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH chapters USING INDEX idx_chapters_volume_no (volume_id=? AND chapter_no=?)"
+      ],
+      "sql": "SELECT * FROM chapters WHERE volume_id='probe' AND chapter_no='probe'",
+      "table": "chapters"
+    },
+    {
+      "indexUsed": "idx_model_runs_step_status",
+      "name": "model_runs_step_status",
+      "note": "served by idx_model_runs_step_status",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH model_runs USING INDEX idx_model_runs_step_status (step_id=? AND status=?)"
+      ],
+      "sql": "SELECT * FROM model_runs WHERE step_id='probe' AND status='probe'",
+      "table": "model_runs"
+    },
+    {
+      "indexUsed": "idx_production_events_created",
+      "name": "production_events_created",
+      "note": "served by idx_production_events_created",
+      "pass": true,
+      "queryPlan": [
+        "SEARCH production_events USING INDEX idx_production_events_created (project_id=? AND created_at>?)"
+      ],
+      "sql": "SELECT * FROM production_events WHERE project_id='probe' AND created_at>='probe'",
+      "table": "production_events"
+    }
+  ],
+  "spec": "V2.1 §21.3 core-query index coverage",
+  "totalQueries": 17
+}

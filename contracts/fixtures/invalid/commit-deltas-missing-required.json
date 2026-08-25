@@ -1,0 +1,9 @@
+{
+  "canonDelta": [
+    {
+      "entityId": "ent:p1:1",
+      "predicate": "cast",
+      "objectJson": {}
+    }
+  ]
+}

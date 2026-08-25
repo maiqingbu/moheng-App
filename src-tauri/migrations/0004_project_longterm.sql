@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS canon_facts (
   story_time_to TEXT,
   source_artifact_id TEXT,
   source_version INTEGER,
+  source_chapter_id TEXT,
   evidence_range_json TEXT,
   authority_level TEXT NOT NULL DEFAULT 'C' CHECK (authority_level IN ('A','B','C','D')),
   superseded_by TEXT,
@@ -274,7 +275,8 @@ CREATE TABLE IF NOT EXISTS canon_facts (
   PRIMARY KEY (fact_id),
   UNIQUE (project_id, fact_id),
   FOREIGN KEY (project_id) REFERENCES project_meta(project_id),
-  FOREIGN KEY (subject_id) REFERENCES canon_entities(entity_id)
+  FOREIGN KEY (subject_id) REFERENCES canon_entities(entity_id),
+  FOREIGN KEY (source_chapter_id) REFERENCES chapters(chapter_id)
 );
 
 CREATE TABLE IF NOT EXISTS canon_relations (
@@ -1241,10 +1243,14 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_project_paging
 CREATE INDEX IF NOT EXISTS idx_canonical_heads_scope
   ON canonical_heads(project_id, artifact_type, scope_level, scope_key);
 
--- Canon facts: subjects with time validity, and source-chapter provenance.
+-- Canon facts: subjects with time validity, and source-chapter provenance
+-- (§21.3 mandates canon_facts(source_chapter_id); the artifact provenance
+-- index is a supplementary access path, not a §21.3 requirement).
 CREATE INDEX IF NOT EXISTS idx_canon_facts_subject_time
   ON canon_facts(subject_id, predicate, valid_from_chapter_id, valid_to_chapter_id);
-CREATE INDEX IF NOT EXISTS idx_canon_facts_source
+CREATE INDEX IF NOT EXISTS idx_canon_facts_source_chapter
+  ON canon_facts(source_chapter_id);
+CREATE INDEX IF NOT EXISTS idx_canon_facts_source_artifact
   ON canon_facts(source_artifact_id, source_version);
 
 -- Canon relations: both direction lookups.

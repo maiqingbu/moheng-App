@@ -93,6 +93,13 @@ export interface ProjectLibraryItem {
   createdAt: string
   updatedAt: string
   lastOpenedAt: string
+  /**
+   * True only when the project DB was readable and the authoritative revision was
+   * read successfully. When false the entry carries a degraded readError instead
+   * of a fabricated revision=0, and is NOT usable for destructive commands.
+   */
+  operational: boolean
+  readError?: string
 }
 
 export interface ProjectLibraryProjection {
@@ -462,7 +469,15 @@ export interface ProjectBundle {
 
 export interface CommandReceipt {
   commandId: string
+  /**
+   * Source project the command acted on. `resultProjectId` is the project the
+   * command produced — equal for in-place commands, the new copy for a duplicate.
+   * A consumer must gate on the *binding* project identity/generation, and for a
+   * duplicate must treat resultProjectId as a freshly-created project rather than
+   * overwriting the active store (B01-P0 §六).
+   */
   projectId?: string
+  resultProjectId?: string
   acceptedAt: string
   finalStatus: Exclude<CommandStatus, 'idle' | 'submitting' | 'accepted' | 'processing'>
   message: string

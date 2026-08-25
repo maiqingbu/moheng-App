@@ -1,6 +1,6 @@
 {
   "foreign_key_violations": 0,
-  "index_count": 146,
+  "index_count": 147,
   "indexes": [
     "idx_arcs_volume",
     "idx_artifact_schemas_project",
@@ -8,7 +8,8 @@
     "idx_artifacts_scope",
     "idx_budget_reservations_project",
     "idx_canon_events_chapter",
-    "idx_canon_facts_source",
+    "idx_canon_facts_source_artifact",
+    "idx_canon_facts_source_chapter",
     "idx_canon_facts_subject_time",
     "idx_canon_knowledge_knower",
     "idx_canon_relations_object",

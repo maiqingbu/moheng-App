@@ -1,31 +1,57 @@
-M  contracts/manifests/schema-manifest.json
-M  contracts/schemas/commit/commit-bundle.schema.json
-A  contracts/schemas/commit/deltas.schema.json
-A  evidence/B01/acceptance.json
-A  evidence/B01/changed-files.txt
-A  evidence/B01/registry_integrity.json
-A  evidence/B01/schema_inventory.json
-M  package-lock.json
-M  package.json
-A  src-tauri/migrations/0004_project_longterm.sql
-M  src-tauri/src/commands.rs
-M  src-tauri/src/commit/mod.rs
-M  src-tauri/src/generated/contracts/types.rs
-M  src-tauri/src/generated/contracts/validators.rs
-M  src-tauri/src/lib.rs
-M  src-tauri/src/project_db/connection.rs
-M  src-tauri/src/project_db/mod.rs
-A  src-tauri/src/stable_id.rs
-A  src-tauri/tests/b01_evidence.rs
-M  src-tauri/tests/m0a_hard_gates.rs
-A  src-tauri/tests/m0b_longterm_migration.rs
-M  src-tauri/tests/project_hardening.rs
-M  src/generated/contracts/types.ts
-M  src/generated/contracts/validators.ts
-M  src/ui/stores/projectStore.ts
-M  tests/contracts/architecture-guards.test.mjs
-A  tests/store/project-store-race.test.ts
-A  vitest.config.ts
-  evidence/B01/test.log
-  evidence/B01/migration_upgrade_test.log
-  evidence/B01/project_switch_race_test.log
+B01 修订版 changed-files（相对 HEAD 7f9be5f）
+
+说明：source-only 交付包相对上次基线曾缺失 index.html（打包遗漏，非架构删除）。
+本轮恢复并确认 index.html 已跟踪存在；本次未删除任何文件。
+
+新增 Added:
+  A contracts/schemas/production/budget.schema.json          Budget 契约源（§16.7）
+  A contracts/fixtures/valid/budget-typed.json                Budget 合法 fixture
+  A contracts/fixtures/valid/commit-deltas-typed.json         CommitDeltas 合法 fixture
+  A contracts/fixtures/valid/commit-receipt-typed-head.json   CommitReceipt 带类型化 headChanges
+  A contracts/fixtures/invalid/budget-negative-cost.json      Budget 非法（负成本）
+  A contracts/fixtures/invalid/commit-deltas-missing-required.json   缺必填
+  A contracts/fixtures/invalid/commit-deltas-bad-enum.json   enum 非法
+  A contracts/fixtures/invalid/commit-deltas-type-error.json 类型错误
+  A contracts/fixtures/invalid/commit-deltas-bad-nested-payload.json 嵌套 payload 非法
+  A contracts/fixtures/invalid/commit-deltas-bad-dependency-edge.json  dependency edge 非法
+  A contracts/fixtures/invalid/commit-deltas-bad-job-update.json      job update 非法
+  A contracts/fixtures/invalid/commit-deltas-empty-collection.json    空集合非法
+  A evidence/B01/query-plans.json                            EXPLAIN QUERY PLAN 证据（§21.3）
+  A src-tauri/tests/b01_stable_id.rs                         STABLE-ID-01~04 + 生产边界
+  A src-tauri/tests/b01_query_plans.rs                       §21.3 索引语义核对
+  A src-tauri/tests/b01_library_revision.rs                  LIBRARY-REV-01/02
+  A src-tauri/tests/project_command_recovery.rs              （纳入版本控制的 M0A 已有测试）
+
+修改 Modified:
+  M contracts/schemas/commit/deltas.schema.json              加可校验根结构（CommitDeltas 不再是 unknown）
+  M contracts/schemas/commit/commit-receipt.schema.json      headChanges → Array<HeadChange>（不再是 unknown）
+  M contracts/manifests/schema-manifest.json                 注册 budget
+  M contracts/fixtures/golden/jcs-vectors.json               追加 budget/delta golden 向量
+  M src-tauri/Cargo.toml                                     加 uuid v4（稳定 ID 创建身份）
+  M src-tauri/Cargo.lock
+  M src-tauri/migrations/0004_project_longterm.sql           canon_facts 加 source_chapter_id + §21.3 索引
+  M src-tauri/src/stable_id.rs                               统一 mint/derive 生产边界（弃展示序号）
+  M src-tauri/src/commit/mod.rs                              HeadChange 类型化 + 生产 stable-id 边界校验
+  M src-tauri/src/commands.rs                                receipt projectId=source + resultProjectId；library 不再伪造 revision=0
+  M src-tauri/tests/m0b_longterm_migration.rs                hash 保持 + 原子回滚 + backup 幂等
+  M src-tauri/tests/real_ipc_e2e.rs                          resultProjectId 语义
+  M src-tauri/tests/project_command_recovery.rs               resultProjectId 语义
+  M src-tauri/src/generated/contracts/types.rs               （代码生成）
+  M src-tauri/src/generated/contracts/validators.rs          （代码生成）
+  M src/application/contracts.ts                             CommandReceipt 加 projectId/resultProjectId；ProjectLibraryItem 加 operational
+  M src/generated/contracts/types.ts                         （代码生成）
+  M src/generated/contracts/validators.ts                    （代码生成）
+  M src/infrastructure/browser-demo/demoPort.ts              operational 字段
+  M src/ui/stores/projectStore.ts                            runCommand 竞态防护
+  M src/ui/stores/projectLibraryStore.ts                     runCommand 竞态防护
+  M tests/store/project-store-race.test.ts                   PROJECT-RACE-01/02/03
+  M evidence/B01/schema_inventory.json                       （重生成）
+  M evidence/B01/registry_integrity.json                     （重生成）
+  M evidence/B01/acceptance.json                             （重生成，仅真实测试结果）
+  M evidence/B01/changed-files.txt                           （本轮）
+
+删除 Deleted:
+  （无；index.html 已恢复，非架构删除）
+
+恢复 Restored:
+  index.html 已确认跟踪存在（上次 .7z 打包遗漏）

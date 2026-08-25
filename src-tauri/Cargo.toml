@@ -21,6 +21,7 @@ serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10"
 tauri = { version = "2" }
 thiserror = "2"
+uuid = { version = "1.25.0", features = ["v4"] }
 
 [build-dependencies]
 tauri-build = { version = "2" }

@@ -66,6 +66,11 @@
       "name": "project-record",
       "path": "schemas/project/project-record.schema.json",
       "version": "m0a.project.v1"
+    },
+    {
+      "name": "budget",
+      "path": "schemas/production/budget.schema.json",
+      "version": "m0a.budget.v1"
     }
   ],
   "artifactStatus": [

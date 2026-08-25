@@ -1,0 +1,84 @@
+{
+  "canonDelta": [
+    {
+      "entityId": "ent:p1:root:1",
+      "factId": "fact:p1:born:1",
+      "subjectId": "ent:p1:root:1",
+      "predicate": "cast",
+      "objectJson": { "name": "王五" },
+      "authorityLevel": "C",
+      "eventType": "character_introduction",
+      "payloadJson": { "note": "frozen for B01" }
+    }
+  ],
+  "obligationDelta": [
+    {
+      "obligationId": "obl:p1:1",
+      "scope": "VOLUME",
+      "obligationType": "payoff",
+      "authorityLevel": "B",
+      "lifecycle": "APPROVED",
+      "description": "pay off the planted mystery",
+      "payloadJson": { "tier": "major" }
+    }
+  ],
+  "foreshadowDelta": [
+    {
+      "foreshadowId": "fs:p1:1",
+      "intent": "the same knife returns",
+      "status": "PLANTED",
+      "plantChapterId": "chap:p1:vol:1:1",
+      "payloadJson": { "stage": "plant" }
+    }
+  ],
+  "knowledgeDelta": [
+    {
+      "knowledgeId": "kn:p1:1",
+      "knowerId": "ent:p1:root:1",
+      "factId": "fact:p1:born:1",
+      "epistemicState": "KNOWS",
+      "fromChapterId": "chap:p1:vol:1:1",
+      "payloadJson": { "certainty": 1 }
+    }
+  ],
+  "stateDelta": [
+    {
+      "stateId": "st:p1:1",
+      "stateType": "mood",
+      "valueJson": { "valence": "grim" },
+      "chapterId": "chap:p1:vol:1:1",
+      "payloadJson": {}
+    }
+  ],
+  "dependencyEdges": [
+    {
+      "edgeId": "edge:p1:1",
+      "sourceRef": "fact:p1:born:1",
+      "targetRef": "chap:p1:vol:1:1",
+      "dependencyType": "CANON_FACT",
+      "scope": "CHAPTER",
+      "impactClass": "HARD",
+      "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payloadJson": {}
+    }
+  ],
+  "jobUpdates": [
+    {
+      "jobId": "job:p1:1",
+      "status": "COMPLETED",
+      "currentStage": "epilogue",
+      "attemptNo": 1,
+      "payloadJson": {}
+    }
+  ],
+  "decisionUpdates": [
+    {
+      "decisionId": "dec:p1:1",
+      "decisionType": "cast",
+      "outcome": "approve",
+      "reason": "retains canon",
+      "sourceRef": "job:p1:1",
+      "payloadJson": {}
+    }
+  ]
+}

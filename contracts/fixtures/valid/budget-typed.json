@@ -1,0 +1,17 @@
+{
+  "budgetId": "budget:p1:chap:1",
+  "projectId": "p1",
+  "chapterId": "chap:p1:vol:1:1",
+  "importanceClass": "NORMAL",
+  "modelPolicyRef": "policy:draft:1",
+  "targetModelRuns": 3,
+  "softMaxModelRuns": 8,
+  "hardMaxModelRuns": 12,
+  "inputTokenBudget": 60000,
+  "outputTokenBudget": 22000,
+  "repairRunLimit": 2,
+  "wallClockBudgetMs": 900000,
+  "costBudgetCents": 450,
+  "strategySearchBudget": 5,
+  "frozenAt": "2026-08-26T00:00:00Z"
+}

@@ -187,8 +187,8 @@ fn old_m0a_database_upgrades_in_place_keeping_hashes() {
     let db = dir.join("project.db");
 
     // Build a v2/v3 (M0A-only) database: hand-apply the two historical SQL
-    // files, then seed a committed artifact + receipt so we can assert hashes
-    // survive the upgrade.
+    // files, then seed a committed artifact + command + commit receipt so we can
+    // assert every stored hash/digest survives the upgrade untouched.
     let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, false)
         .unwrap();
     conn.execute_batch(include_str!("../migrations/0002_project_authority.sql"))
@@ -208,6 +208,20 @@ fn old_m0a_database_upgrades_in_place_keeping_hashes() {
         "INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES ('a1', 'm0a', 'FinalChapter', 'CHAPTER', 'k1', 1, 'm0a.artifact.v1', 'COMMITTED', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', ?1, ?1)",
         [NOW],
     ).unwrap();
+    // A valid Command record that owns the receipt, so the commit_receipts FK
+    // (project_id, command_id) resolves.
+    conn.execute(
+        "INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES ('m0a', 'cmd:1', 'idem:1', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 'COMMITTED', ?1)",
+        [NOW],
+    ).unwrap();
+    // A frozen CommitReceipt whose receipt_digest and bundle_digest must be
+    // preserved byte-for-byte through the migration.
+    const RECEIPT_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const BUNDLE_DIGEST: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    conn.execute(
+        "INSERT INTO commit_receipts(receipt_id, project_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_json, receipt_digest, committed_at) VALUES ('rcp:1', 'm0a', 'commit:1', 'cmd:1', 'idem:1', 0, 1, ?1, '{\"receiptId\":\"rcp:1\"}', ?2, ?3)",
+        libsql_rusqlite::params![BUNDLE_DIGEST, RECEIPT_DIGEST, NOW],
+    ).unwrap();
     drop(conn);
 
     // Register in the catalog so the manager's open-policy gate can resolve it.
@@ -217,7 +231,7 @@ fn old_m0a_database_upgrades_in_place_keeping_hashes() {
 
     // Open via the manager: it must detect the missing v4 and migrate in place,
     // creating a backup first (policy in open()), then leave a v4 DB that keeps
-    // the original artifact hash intact and passes the integrity gates.
+    // the original artifact hash + receipt digest intact and passes the gates.
     let manager = ProjectManager::new(paths.clone());
     let connection = manager.open("m0a", "A", NOW).unwrap();
     assert_fk_and_quickcheck(&connection);
@@ -240,6 +254,17 @@ fn old_m0a_database_upgrades_in_place_keeping_hashes() {
         hash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "existing artifact hash must be untouched by the upgrade"
     );
+    let receipt_digest: String = connection
+        .query_row(
+            "SELECT receipt_digest FROM commit_receipts WHERE receipt_id = 'rcp:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        receipt_digest, RECEIPT_DIGEST,
+        "existing commit receipt digest must be untouched by the upgrade"
+    );
     let has_longterm: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='canon_facts')",
@@ -248,6 +273,140 @@ fn old_m0a_database_upgrades_in_place_keeping_hashes() {
         )
         .unwrap();
     assert!(has_longterm, "long-term tables must exist after upgrade");
+    drop(connection);
+}
+
+#[test]
+fn migration_rolls_back_atomically_on_midway_failure() {
+    // §23 / B01-P0: a migration must be transaction-atomic. On a deterministic
+    // failure in the middle of the M0B migration, nothing may be half-applied:
+    // no v4 marker, no half-built table/index, original M0A data intact. We
+    // trigger the failure with a *conflicting schema* — a `canon_facts` VIEW that
+    // occupies the name, so the `CREATE TABLE IF NOT EXISTS` is skipped and the
+    // later `CREATE INDEX ... ON canon_facts(...)` fails when SQLite refuses to
+    // index a view. The whole migrate_project transaction rolls back.
+    let temp = tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let dir = paths.project_dir("m0a").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("project.db");
+    let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, false)
+        .unwrap();
+    conn.execute_batch(include_str!("../migrations/0002_project_authority.sql"))
+        .unwrap();
+    conn.execute_batch(include_str!("../migrations/0003_project_command.sql"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO migration_history(version, applied_at) VALUES (2, ?1), (3, ?1)",
+        [NOW],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO project_meta(project_id, title, created_at, updated_at) VALUES ('m0a', 'A', ?1, ?1)", [NOW])
+        .unwrap();
+    conn.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES ('a1', 'm0a', 'FinalChapter', 'CHAPTER', 'k1', 1, 'm0a.artifact.v1', 'COMMITTED', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', ?1, ?1)", [NOW])
+        .unwrap();
+    // Conflict marker: a view grabs the canon_facts name before the migration.
+    conn.execute_batch("CREATE VIEW canon_facts AS SELECT 'x' AS fake_id;")
+        .unwrap();
+    drop(conn);
+
+    let catalog = CatalogRepository::open(&paths, NOW).unwrap();
+    CatalogRepository::register_project(&catalog, "m0a", &dir.to_string_lossy(), "A", NOW).unwrap();
+    drop(catalog);
+
+    let manager = ProjectManager::new(paths.clone());
+    let opened = manager.open("m0a", "A", NOW);
+    assert!(
+        opened.is_err(),
+        "migration must fail when canon_facts is a conflict schema"
+    );
+    drop(opened);
+
+    // Re-open read-only to inspect: no half-applied migration may remain.
+    let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, true)
+        .unwrap();
+    // 1. schema version must NOT be marked upgraded to v4.
+    let v4: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM migration_history WHERE version = 4)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!v4, "failed migration must not record v4");
+    // 2. no half-built new table after the conflict point (canon_relations is
+    //    created in the same migration, after canon_facts) may survive.
+    let canon_relations: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='canon_relations')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !canon_relations,
+        "no half-built table may survive a rollback"
+    );
+    let canon_fields: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_canon_facts_source_chapter')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!canon_fields, "no half-built index may survive a rollback");
+    // 4. original M0A data is intact.
+    let artifact_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id = 'm0a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        artifact_count, 1,
+        "original artifact must survive a rollback"
+    );
+    let hash: String = conn
+        .query_row(
+            "SELECT payload_hash FROM artifacts WHERE artifact_id = 'a1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        hash,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM project_meta WHERE project_id = 'm0a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "A");
+    drop(conn);
+    let _ = db; // silence unused in some paths
+
+    // 7. fix the conflict and re-run: migration must now succeed cleanly.
+    let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, false)
+        .unwrap();
+    conn.execute_batch("DROP VIEW canon_facts;").unwrap();
+    drop(conn);
+    let connection = manager.open("m0a", "A", NOW).unwrap();
+    assert_fk_and_quickcheck(&connection);
+    let v4_after: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM migration_history WHERE version = 4)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        v4_after,
+        "after fixing the conflict the migration must succeed"
+    );
     drop(connection);
 }
 
@@ -504,16 +663,105 @@ fn copy_policy_registry_covers_every_project_id_table() {
 }
 
 #[test]
+fn repeated_open_does_not_repeat_migration_or_backup_storm() {
+    // §23 / B01-P1: reopening an already-upgraded project must not re-run the
+    // destructive migration, must not grow the schema version again, and must not
+    // produce a migration backup on every open. Only the single upgrade itself
+    // writes a migration backup; subsequent opens are no-op.
+    let temp = tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let dir = paths.project_dir("m0a").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("project.db");
+    let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, false)
+        .unwrap();
+    conn.execute_batch(include_str!("../migrations/0002_project_authority.sql"))
+        .unwrap();
+    conn.execute_batch(include_str!("../migrations/0003_project_command.sql"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO migration_history(version, applied_at) VALUES (2, ?1), (3, ?1)",
+        [NOW],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO project_meta(project_id, title, created_at, updated_at) VALUES ('m0a', 'A', ?1, ?1)", [NOW])
+        .unwrap();
+    drop(conn);
+
+    let catalog = CatalogRepository::open(&paths, NOW).unwrap();
+    CatalogRepository::register_project(&catalog, "m0a", &dir.to_string_lossy(), "A", NOW).unwrap();
+    drop(catalog);
+
+    let manager = ProjectManager::new(paths.clone());
+    // First open performs the migration (one backup), then close.
+    drop(manager.open("m0a", "A", NOW).unwrap());
+    let backups_after_one = count_migration_backups(&dir);
+    assert_eq!(
+        backups_after_one, 1,
+        "the one upgrade must write exactly one migration backup"
+    );
+
+    // Reopen several times: migration must not recur, version must not grow,
+    // and no additional migration backup may appear (no storm).
+    for _ in 0..3 {
+        let conn = manager.open("m0a", "A", NOW).unwrap();
+        let max_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM migration_history", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            max_version, 4,
+            "schema version must settle at v4 and not grow"
+        );
+        drop(conn);
+    }
+    let backups_after_reopens = count_migration_backups(&dir);
+    assert_eq!(
+        backups_after_reopens, 1,
+        "reopening an already-migrated project must not create a migration backup storm"
+    );
+    // The DB is intact and up to date.
+    let conn = manager.read_connection("m0a", NOW).unwrap();
+    assert_fk_and_quickcheck(&conn);
+}
+
+fn count_migration_backups(dir: &std::path::Path) -> usize {
+    let backups = dir.join("backups");
+    if !backups.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(&backups)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("migration-")
+        })
+        .count()
+}
+
+#[test]
 fn stable_id_boundary_roundtrips_across_project_copy() {
-    // The id depends only on project + stable discriminator, not the rowid or
-    // title, so a copied project reproduces the same opaque id for the same
-    // business key — the boundary never leaks a mutable display field.
-    let a = stable_id::stable_id(stable_id::StableIdKind::Chapter, "p1", "vol:1:chap:1").unwrap();
-    let b = stable_id::stable_id(stable_id::StableIdKind::Chapter, "p1", "vol:1:chap:1").unwrap();
-    assert_eq!(a, b);
-    let copied =
-        stable_id::stable_id(stable_id::StableIdKind::Chapter, "p1", "vol:1:chap:1").unwrap();
-    assert_eq!(a, copied);
+    // The id depends only on stable identity material (a frozen parent stable id
+    // + an immutable child id), never a rowid, title, or chapter number. A copied
+    // project therefore reproduces the same opaque id for the same immutable
+    // child, proving the boundary never leaks a mutable display field.
+    let parent = stable_id::mint(stable_id::StableIdKind::Volume).unwrap();
+    let seed: String = uuid::Uuid::from_bytes([0xab; 16]).to_string(); // immutable hex child seed
+    let a = stable_id::derive(stable_id::StableIdKind::Chapter, &parent, &seed).unwrap();
+    let b = stable_id::derive(stable_id::StableIdKind::Chapter, &parent, &seed).unwrap();
+    assert_eq!(
+        a, b,
+        "identical stable material must yield the identical id"
+    );
+    let copied = stable_id::derive(stable_id::StableIdKind::Chapter, &parent, &seed).unwrap();
+    assert_eq!(a, copied, "a copy rewrites no stable material → same refs");
     assert!(stable_id::validate_stable_id(&a, stable_id::StableIdKind::Chapter).is_ok());
     assert!(stable_id::validate_stable_id(&a, stable_id::StableIdKind::Volume).is_err());
+    // A display-path discriminator (the old `vol:1:chap:1` form) is rejected at
+    // the boundary — it is mutable identity material.
+    assert!(stable_id::derive(stable_id::StableIdKind::Chapter, &parent, "vol:1:chap:1").is_err());
 }

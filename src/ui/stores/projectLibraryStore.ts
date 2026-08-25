@@ -85,7 +85,15 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
       commandStates.value[key] = { ...commandStates.value[key], status, message }
     })
     commandStates.value[key] = { status: receipt.finalStatus, message: receipt.message, commandId: receipt.commandId }
-    await refresh()
+    // The project slot this receipt targets: for a duplicate the result is a
+    // brand-new project (resultProjectId) added to the library, never an implicit
+    // replacement of the active project unless the caller explicitly switches.
+    // Refreshing the library projection is safe regardless — it is idempotent and
+    // re-reads the catalog — so a late receipt only re-syncs the list, never the
+    // active project store.
+    if (receipt.finalStatus === 'committed') {
+      void refresh()
+    }
     return receipt
   }
 

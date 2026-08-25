@@ -197,7 +197,24 @@ export interface DecisionUpdate {
   "payloadJson"?: {  }
 }
 
-export type CommitDeltas = unknown
+export interface CommitDeltas {
+  "canonDelta"?: Array<CanonDelta>
+  "obligationDelta"?: Array<ObligationDelta>
+  "foreshadowDelta"?: Array<ForeshadowDelta>
+  "knowledgeDelta"?: Array<KnowledgeDelta>
+  "stateDelta"?: Array<StateDelta>
+  "dependencyEdges"?: Array<DependencyEdge>
+  "jobUpdates"?: Array<JobUpdate>
+  "decisionUpdates"?: Array<DecisionUpdate>
+}
+
+export interface HeadChange {
+  "artifactType": ArtifactType
+  "scope": ArtifactScope
+  "artifactId": OpaqueId
+  "version": number
+  "payloadHash": Sha256
+}
 
 export interface CommitReceipt {
   "receiptId": OpaqueId
@@ -209,7 +226,7 @@ export interface CommitReceipt {
   "afterRevision": number
   "bundleDigest": Sha256
   "committedArtifactRefs": Array<ArtifactRef>
-  "headChanges": Array<unknown>
+  "headChanges": Array<HeadChange>
   "appliedDeltaCounts": Record<string, number>
   "gateCertificateRefs": Array<OpaqueId>
   "committedAt": Rfc3339Utc
@@ -252,4 +269,22 @@ export interface ProjectCatalogRecord {
   "lastOpenedAt"?: Rfc3339Utc
   "projectSchemaVersion": string
   "compatibilityState": "COMPATIBLE" | "MIGRATION_REQUIRED" | "RECOVERY"
+}
+
+export interface Budget {
+  "budgetId": OpaqueId
+  "projectId": OpaqueId
+  "chapterId": OpaqueId
+  "importanceClass": "NORMAL" | "IMPORTANT" | "CRITICAL"
+  "modelPolicyRef"?: OpaqueId
+  "targetModelRuns": number
+  "softMaxModelRuns": number
+  "hardMaxModelRuns": number
+  "inputTokenBudget": number
+  "outputTokenBudget": number
+  "repairRunLimit": number
+  "wallClockBudgetMs": number
+  "costBudgetCents": number
+  "strategySearchBudget": number
+  "frozenAt": Rfc3339Utc
 }

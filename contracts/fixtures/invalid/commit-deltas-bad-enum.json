@@ -1,0 +1,13 @@
+{
+  "canonDelta": [
+    {
+      "entityId": "ent:p1:1",
+      "factId": "fact:p1:1",
+      "subjectId": "ent:p1:1",
+      "predicate": "cast",
+      "objectJson": {},
+      "authorityLevel": "Z",
+      "payloadJson": {}
+    }
+  ]
+}
