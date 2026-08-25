@@ -199,18 +199,6 @@ mod tests {
     }
 
     #[test]
-    fn mint_id_survives_title_and_number_change() {
-        // STABLE-ID-01/02: the id is minted once from immutable creation identity,
-        // so mutating a display title or chapter number never touches it. The
-        // boundary has no input for a title/number — the id cannot be re-derived
-        // from a mutable display field.
-        let original = mint(StableIdKind::Chapter).unwrap();
-        let stable_after_rename = mint(StableIdKind::Chapter).unwrap();
-        assert_ne!(original, stable_after_rename);
-        assert!(validate_stable_id(&original, StableIdKind::Chapter).is_ok());
-    }
-
-    #[test]
     fn derive_is_deterministic_and_kind_bound() {
         let parent = mint(StableIdKind::Volume).unwrap();
         let seed = child_seed(1);

@@ -36,35 +36,7 @@
     },
     "headUpdates": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "artifactType": {
-            "$ref": "../shared/definitions.schema.json#/$defs/ArtifactType"
-          },
-          "scope": {
-            "$ref": "../artifact/artifact-scope.schema.json"
-          },
-          "artifactId": {
-            "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
-          },
-          "version": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "payloadHash": {
-            "$ref": "../shared/definitions.schema.json#/$defs/Sha256"
-          }
-        },
-        "required": [
-          "artifactType",
-          "scope",
-          "artifactId",
-          "version",
-          "payloadHash"
-        ],
-        "additionalProperties": false
-      }
+      "items": { "$ref": "../shared/definitions.schema.json#/$defs/HeadChange" }
     },
     "canonDelta": {
       "type": "array",

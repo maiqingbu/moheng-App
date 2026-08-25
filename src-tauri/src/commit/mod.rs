@@ -1,8 +1,6 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
 use crate::generated::types::ArtifactScopeLevel;
-use crate::generated::types::{
-    ArtifactRef, CommitBundle, CommitReceipt, HeadChange, ProjectCommandReceipt,
-};
+use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt, ProjectCommandReceipt};
 use crate::generated::validators::validate_commit_bundle;
 use crate::hash::sha256_canonical;
 use crate::repositories::artifacts::{enum_string, scope_key, ArtifactError, ArtifactRepository};
@@ -320,22 +318,10 @@ impl CommitService {
                 payload_hash: artifact.payload_hash.clone(),
             })
             .collect();
-        let head_changes = bundle
-            .head_updates
-            .as_ref()
-            .map(|heads| {
-                heads
-                    .iter()
-                    .map(|head| HeadChange {
-                        artifact_type: head.artifact_type.clone(),
-                        scope: head.scope.clone(),
-                        artifact_id: head.artifact_id.clone(),
-                        version: head.version,
-                        payload_hash: head.payload_hash.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        // head_updates are already HeadChange (shared contract type); the receipt's
+        // headChanges is the same type, so a plain clone suffices (the bundle is
+        // still borrowed later for the digest).
+        let head_changes = bundle.head_updates.clone().unwrap_or_default();
         let mut applied_delta_counts = BTreeMap::new();
         applied_delta_counts.insert("artifacts".into(), bundle.artifacts.len() as i64);
         applied_delta_counts.insert(
@@ -398,37 +384,30 @@ impl CommitService {
 /// Runs the stable-id boundary check over every scope binding in an artifact.
 /// Prefixed references are authoritative and must be well-formed opaque ids;
 /// malformed prefixed references (`vol:1`-style) are rejected before persistence.
+/// Bare legacy references are tolerated by `validate_scope_binding` (which owns
+/// the strict-vs-legacy decision), so this simply delegates wholesale.
 fn validate_artifact_scope_bindings(
     artifact: &crate::generated::types::ArtifactEnvelope,
 ) -> Result<(), CommitError> {
     let scope = &artifact.scope;
     let check = |scope_level: &ArtifactScopeLevel, id: &str| -> Result<(), CommitError> {
-        // Only a prefixed reference enters the strict opaque-id check; the
-        // tolerated legacy bare form is left to the caller.
-        if id.contains(':') {
-            crate::stable_id::validate_scope_binding(id).map_err(|_| {
-                CommitError::ContractInvalid(format!(
-                    "scope {scope_level:?} id is not a well-formed opaque stable id: {id}"
-                ))
-            })?;
-        }
+        crate::stable_id::validate_scope_binding(id).map_err(|_| {
+            CommitError::ContractInvalid(format!(
+                "scope {scope_level:?} id is not a well-formed opaque stable id: {id}"
+            ))
+        })?;
         Ok(())
     };
-    if let Some(id) = &scope.book_id {
-        check(&ArtifactScopeLevel::Book, id)?;
+    for (scope_level, id) in [
+        (&ArtifactScopeLevel::Book, scope.book_id.as_deref()),
+        (&ArtifactScopeLevel::Volume, scope.volume_id.as_deref()),
+        (&ArtifactScopeLevel::Arc, scope.arc_id.as_deref()),
+        (&ArtifactScopeLevel::Chapter, scope.chapter_id.as_deref()),
+        (&ArtifactScopeLevel::Entity, scope.entity_id.as_deref()),
+    ] {
+        if let Some(id) = id {
+            check(scope_level, id)?;
+        }
     }
-    if let Some(id) = &scope.volume_id {
-        check(&ArtifactScopeLevel::Volume, id)?;
-    }
-    if let Some(id) = &scope.arc_id {
-        check(&ArtifactScopeLevel::Arc, id)?;
-    }
-    if let Some(id) = &scope.chapter_id {
-        check(&ArtifactScopeLevel::Chapter, id)?;
-    }
-    if let Some(id) = &scope.entity_id {
-        check(&ArtifactScopeLevel::Entity, id)?;
-    }
-    let _ = scope;
     Ok(())
 }

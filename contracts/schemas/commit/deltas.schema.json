@@ -4,7 +4,6 @@
   "title": "CommitDeltas",
   "description": "A CommitDeltas is a complete, independently-validatable delta set that the CommitService applies atomically. Each of the eight typed channels (canon/obligation/foreshadow/knowledge/state/dependency/job/decision) is a homogeneous array validated by its own frozen $defs entry. B01-T05 freezes only the long-term structural fields; calibrated literary semantics are carried in the per-delta payloadJson/objectJson/value fields rather than as bespoke top-level keys, so the cross-language DTOs stay stable while L2 semantics remain adjustable before Calibration.",
   "type": "object",
-  "description": "A complete delta set. At least one channel must be present; every delta in every channel is validated against its typed definition.",
   "properties": {
     "canonDelta": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/CanonDelta" } },
     "obligationDelta": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/ObligationDelta" } },
@@ -15,7 +14,6 @@
     "jobUpdates": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/JobUpdate" } },
     "decisionUpdates": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/DecisionUpdate" } }
   },
-  "minProperties": 1,
   "additionalProperties": false,
   "$defs": {
     "CanonDelta": {

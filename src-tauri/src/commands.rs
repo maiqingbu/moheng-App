@@ -66,6 +66,26 @@ fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &s
     })
 }
 
+/// The catalog-derived fields shared by every project-library row, returned as a
+/// JSON object. Runtime/projection fields (phase, revision, progress, …) are NOT
+/// included here — they differ between the healthy and degraded branches, so the
+/// caller overlays them. Keeping the catalog fields in one place prevents a
+/// healthy/degrated drift when the library adds a field (B01 修订 P0 §七).
+fn library_catalog_fields(row: &crate::catalog::ProjectCatalogRow) -> Value {
+    json!({
+        "id": row.project_id,
+        "title": row.title,
+        "subtitle": "本地权威项目",
+        "platform": "未设置",
+        "genre": "未设置",
+        "mode": "DIRECTOR",
+        "lifecycle": row.lifecycle,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
+        "lastOpenedAt": row.last_opened_at.clone().unwrap_or_default(),
+    })
+}
+
 fn request_digest(request: &Value) -> Result<String, String> {
     sha256_canonical(request).map_err(|error| format!("IPC_INVALID:request:{error}"))
 }
@@ -176,32 +196,27 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
         let projection = match state.manager.library_projection(&row.project_id) {
             Ok(projection) => projection,
             Err(error) => {
-                projects.push(json!({
-                    "id": row.project_id,
-                    "title": row.title,
-                    "subtitle": "本地权威项目",
-                    "platform": "未设置",
-                    "genre": "未设置",
-                    "mode": "DIRECTOR",
-                    "phase": "SETUP",
-                    "runState": "IDLE",
-                    "blockReason": null,
-                    "signingStatus": "NOT_STARTED",
-                    "lifecycle": row.lifecycle,
-                    "progress": 0,
-                    "totalCost": 0,
-                    "totalWords": 0,
-                    "committedChapters": 0,
-                    "candidateChapters": 0,
-                    "pendingDecisions": 0,
-                    "revision": 0,
-                    "generatedRevision": 0,
-                    "createdAt": row.created_at,
-                    "updatedAt": row.updated_at,
-                    "lastOpenedAt": row.last_opened_at.unwrap_or_default(),
-                    "operational": false,
-                    "readError": error.to_string()
-                }));
+                // A degraded entry is NOT an operational revision=0 project: it
+                // carries operational=false plus the real read error, and its
+                // revision/generatedRevision are null (unreadable) rather than a
+                // fabricated 0. Such a project is not counted as producing/…
+                // and is not usable for a destructive command.
+                let mut entry = library_catalog_fields(&row);
+                entry["phase"] = json!("SETUP");
+                entry["runState"] = json!("IDLE");
+                entry["blockReason"] = Value::Null;
+                entry["signingStatus"] = json!("NOT_STARTED");
+                entry["progress"] = json!(0);
+                entry["totalCost"] = json!(0);
+                entry["totalWords"] = json!(0);
+                entry["committedChapters"] = json!(0);
+                entry["candidateChapters"] = json!(0);
+                entry["pendingDecisions"] = json!(0);
+                entry["revision"] = Value::Null;
+                entry["generatedRevision"] = Value::Null;
+                entry["operational"] = json!(false);
+                entry["readError"] = json!(error.to_string());
+                projects.push(entry);
                 continue;
             }
         };
@@ -240,31 +255,21 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
             _ => {}
         }
         total_cost += cost_cents;
-        projects.push(json!({
-            "id": row.project_id,
-            "title": row.title,
-            "subtitle": "本地权威项目",
-            "platform": "未设置",
-            "genre": "未设置",
-            "mode": "DIRECTOR",
-            "phase": phase,
-            "runState": run_state,
-            "blockReason": block_reason,
-            "signingStatus": signing_status,
-            "lifecycle": row.lifecycle,
-            "progress": progress,
-            "totalCost": cost_cents,
-            "totalWords": words,
-            "committedChapters": committed,
-            "candidateChapters": candidate,
-            "pendingDecisions": 0,
-            "revision": revision,
-            "generatedRevision": generated_revision,
-            "createdAt": row.created_at,
-            "updatedAt": row.updated_at,
-            "lastOpenedAt": row.last_opened_at.unwrap_or_default(),
-            "operational": true
-        }));
+        let mut entry = library_catalog_fields(&row);
+        entry["phase"] = json!(phase);
+        entry["runState"] = json!(run_state);
+        entry["blockReason"] = block_reason.map(Value::String).unwrap_or(Value::Null);
+        entry["signingStatus"] = json!(signing_status);
+        entry["progress"] = json!(progress);
+        entry["totalCost"] = json!(cost_cents);
+        entry["totalWords"] = json!(words);
+        entry["committedChapters"] = json!(committed);
+        entry["candidateChapters"] = json!(candidate);
+        entry["pendingDecisions"] = json!(0);
+        entry["revision"] = json!(revision);
+        entry["generatedRevision"] = json!(generated_revision);
+        entry["operational"] = json!(true);
+        projects.push(entry);
     }
     let active = projects
         .iter()

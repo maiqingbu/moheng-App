@@ -1244,14 +1244,13 @@ CREATE INDEX IF NOT EXISTS idx_canonical_heads_scope
   ON canonical_heads(project_id, artifact_type, scope_level, scope_key);
 
 -- Canon facts: subjects with time validity, and source-chapter provenance
--- (§21.3 mandates canon_facts(source_chapter_id); the artifact provenance
--- index is a supplementary access path, not a §21.3 requirement).
+-- (§21.3 mandates canon_facts(source_chapter_id)). The artifact-source access
+-- path is not a §21.3 requirement and no core query serves it yet, so it is
+-- intentionally not indexed here (an unserved index is pure write amplification).
 CREATE INDEX IF NOT EXISTS idx_canon_facts_subject_time
   ON canon_facts(subject_id, predicate, valid_from_chapter_id, valid_to_chapter_id);
 CREATE INDEX IF NOT EXISTS idx_canon_facts_source_chapter
   ON canon_facts(source_chapter_id);
-CREATE INDEX IF NOT EXISTS idx_canon_facts_source_artifact
-  ON canon_facts(source_artifact_id, source_version);
 
 -- Canon relations: both direction lookups.
 CREATE INDEX IF NOT EXISTS idx_canon_relations_subject

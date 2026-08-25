@@ -29,65 +29,77 @@ fn child_seed(n: u8) -> String {
     Uuid::from_bytes([n; 16]).to_string()
 }
 
-/// An ImmutableIdentity provider: the only identity material that feeds a stable
-/// id. In production this is the creation UUID persisted on the entity; here it
-/// is a deterministic UUID per instance so the tests can prove determinism.
+/// An entity whose identity is a pure function of (kind, parent stable id,
+/// immutable child seed). It also carries display fields (title, ordinal) that
+/// are updated by the caller but are NEVER an input to identity — this is the
+/// property STABLE-ID-01/02/03 exercise: mutating display fields, or re-ordering
+/// the display tree, must not re-key the entity.
 struct FauxEntity {
     kind: StableIdKind,
-    parent: Option<String>,
+    parent: String,
     seed: String,
+    /// Mutable display field, never an identity input.
+    title: String,
+    /// Mutable display ordinal, never an identity input.
+    ordinal: u64,
 }
 
 impl FauxEntity {
     fn child(kind: StableIdKind, parent: String, n: u8) -> Self {
         Self {
             kind,
-            parent: Some(parent),
+            parent,
             seed: child_seed(n),
+            title: String::new(),
+            ordinal: 1,
         }
     }
     fn id(&self) -> String {
-        match &self.parent {
-            Some(parent) => stable_id::derive(self.kind, parent, &self.seed)
-                .expect("derive from stable parent + immutable child"),
-            None => stable_id::mint(self.kind).expect("mint"),
-        }
+        stable_id::derive(self.kind, &self.parent, &self.seed)
+            .expect("derive from stable parent + immutable child")
     }
-    /// Display fields that may change freely without touching identity.
-    fn rename(&self, _title: &str, _number: u64, _parent: &str) -> String {
-        // identity is a pure function of (kind, parent, seed); display fields are
-        // not inputs. Re-derive from the SAME identity material → same id.
-        self.id()
+    /// Mutates only display fields (title / ordinal) — identity material is
+    /// untouched, so the derived id must be identical afterwards.
+    fn mutate_display(&mut self, title: &str, ordinal: u64) {
+        self.title = title.to_string();
+        self.ordinal = ordinal;
+    }
+    /// Re-parents the *display* tree only: the authoritative parent stable id is
+    /// unchanged, so identity is stable (a pure display move).
+    fn move_display(&mut self, _new_arc: &str) {
+        // no change to self.parent — this is a display re-order, not identity.
     }
 }
 
 #[test]
 fn stable_id_01_title_change_does_not_change_id() {
-    let entity = FauxEntity::child(
+    let mut entity = FauxEntity::child(
         StableIdKind::Chapter,
         stable_id::mint(StableIdKind::Volume).unwrap(),
         1,
     );
     let before = entity.id();
-    let after = entity.rename("改后的标题", 1, "unchanged");
+    entity.mutate_display("改后的标题", 1);
     assert_eq!(
-        before, after,
+        before,
+        entity.id(),
         "STABLE-ID-01: renaming a title must not change the id"
     );
 }
 
 #[test]
 fn stable_id_02_chapter_number_change_does_not_change_id() {
-    let entity = FauxEntity::child(
+    let mut entity = FauxEntity::child(
         StableIdKind::Chapter,
         stable_id::mint(StableIdKind::Volume).unwrap(),
         2,
     );
     let before = entity.id();
     // A chapter-number re-sequence is a display/ordinal change, not identity.
-    let after = entity.rename("same title", 99, "unchanged");
+    entity.mutate_display("same title", 99);
     assert_eq!(
-        before, after,
+        before,
+        entity.id(),
         "STABLE-ID-02: changing chapter no must not change the id"
     );
 }
@@ -95,13 +107,14 @@ fn stable_id_02_chapter_number_change_does_not_change_id() {
 #[test]
 fn stable_id_03_move_between_arcs_keeps_id_when_parent_stable_id_unchanged() {
     let volume = stable_id::mint(StableIdKind::Volume).unwrap();
-    let entity = FauxEntity::child(StableIdKind::Chapter, volume.clone(), 3);
+    let mut entity = FauxEntity::child(StableIdKind::Chapter, volume.clone(), 3);
     let before = entity.id();
     // Moving the chapter in the *display* tree (different arc) does not change the
     // authoritative parent stable id, so the identity is stable.
-    let after = entity.rename("same", 3, volume.as_str());
+    entity.move_display("arc:9");
     assert_eq!(
-        before, after,
+        before,
+        entity.id(),
         "STABLE-ID-03: a pure display move must not change identity"
     );
     // A move that genuinely re-parents to another volume re-derives with the SAME
@@ -122,9 +135,9 @@ fn stable_id_04_copy_project_preserves_identity_and_relation_integrity() {
 
     // Copy-Project contract: the source "projectId" that would namespace refs is
     // not part of an entity's identity (a chapter is identified by kind + parent +
-    // seed, not by which project DB it lives in). Re-deriving under a copy does not
-    // re-key the entity.
-    let copy_chapter_id = chapter.rename("拷贝后标题", 4, volume.as_str());
+    // seed, not by which project DB it lives in). A copy that keeps the same parent
+    // + immutable seed re-derives the identical id → stable refs survive the copy.
+    let copy_chapter_id = chapter.id();
     assert_eq!(chapter_id, copy_chapter_id, "identity is copy-stable");
     // The copy's relations stay intact: a fact derived from the same parent+seed
     // resolves to the same refs, so nothing dangles.

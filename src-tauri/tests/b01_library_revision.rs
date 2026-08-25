@@ -9,7 +9,6 @@
 
 use ai_novel_production_system_core::commands::{query_project_library_impl, KernelState};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use serde_json::json;
 use tempfile::tempdir;
 
 const NOW: &str = "2026-08-26T00:00:00Z";
@@ -19,13 +18,6 @@ fn create_state(temp: &tempfile::TempDir) -> KernelState {
 }
 
 fn create_project(state: &KernelState, id: &str, title: &str) {
-    let request = json!({
-        "type": "project_create_from_idea",
-        "commandId": format!("cmd:create:{id}"),
-        "idempotencyKey": format!("idem:create:{id}"),
-        "requestedAt": NOW,
-        "payload": { "title": title },
-    });
     state
         .manager
         .create(id, title, NOW)
@@ -48,7 +40,6 @@ fn create_project(state: &KernelState, id: &str, title: &str) {
             |_| Ok(()),
         )
         .expect("record create receipt");
-    let _ = request;
 }
 
 #[test]

@@ -387,7 +387,6 @@ fn migration_rolls_back_atomically_on_midway_failure() {
         .unwrap();
     assert_eq!(title, "A");
     drop(conn);
-    let _ = db; // silence unused in some paths
 
     // 7. fix the conflict and re-run: migration must now succeed cleanly.
     let conn = ai_novel_production_system_core::project_db::connection::open_connection(&db, false)

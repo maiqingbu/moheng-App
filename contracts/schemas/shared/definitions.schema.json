@@ -16,6 +16,19 @@
     "ArtifactScopeLevel": { "type": "string", "enum": ["PROJECT", "BOOK", "VOLUME", "ARC", "CHAPTER", "SCENE", "ENTITY", "MARKET"] },
     "CommandContractVersion": { "type": "string", "pattern": "^m0a\\.v[0-9]+$" },
     "ProjectLifecycle": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "DELETING"] },
+    "HeadChange": {
+      "type": "object",
+      "description": "A single canonical-head advancement. Both a CommitBundle's headUpdates and a CommitReceipt's headChanges reference this same definition so the cross-language DTOs converge on one type.",
+      "properties": {
+        "artifactType": { "$ref": "#/$defs/ArtifactType" },
+        "scope": { "$ref": "../artifact/artifact-scope.schema.json" },
+        "artifactId": { "$ref": "#/$defs/OpaqueId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "payloadHash": { "$ref": "#/$defs/Sha256" }
+      },
+      "required": ["artifactType", "scope", "artifactId", "version", "payloadHash"],
+      "additionalProperties": false
+    },
     "PageRequest": {
       "type": "object",
       "properties": { "cursor": { "type": ["string", "null"] }, "pageSize": { "type": "integer", "minimum": 1, "maximum": 500 } },

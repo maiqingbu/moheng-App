@@ -20,6 +20,14 @@ export type CommandContractVersion = string
 
 export type ProjectLifecycle = "ACTIVE" | "ARCHIVED" | "DELETING"
 
+export interface HeadChange {
+  "artifactType": ArtifactType
+  "scope": ArtifactScope
+  "artifactId": OpaqueId
+  "version": number
+  "payloadHash": Sha256
+}
+
 export interface PageRequest {
   "cursor"?: string | null
   "pageSize"?: number
@@ -96,7 +104,7 @@ export interface CommitBundle {
   "contractVersion": CommandContractVersion
   "createdAt": Rfc3339Utc
   "artifacts": Array<ArtifactEnvelope>
-  "headUpdates"?: Array<{ "artifactType": ArtifactType; "scope": ArtifactScope; "artifactId": OpaqueId; "version": number; "payloadHash": Sha256 }>
+  "headUpdates"?: Array<HeadChange>
   "canonDelta"?: Array<CanonDelta>
   "obligationDelta"?: Array<ObligationDelta>
   "foreshadowDelta"?: Array<ForeshadowDelta>
@@ -206,14 +214,6 @@ export interface CommitDeltas {
   "dependencyEdges"?: Array<DependencyEdge>
   "jobUpdates"?: Array<JobUpdate>
   "decisionUpdates"?: Array<DecisionUpdate>
-}
-
-export interface HeadChange {
-  "artifactType": ArtifactType
-  "scope": ArtifactScope
-  "artifactId": OpaqueId
-  "version": number
-  "payloadHash": Sha256
 }
 
 export interface CommitReceipt {

@@ -1,6 +1,6 @@
 use ai_novel_production_system_core::commit::{CommitError, CommitService};
 use ai_novel_production_system_core::generated::types::{
-    ArtifactEnvelope, ArtifactStatus, CommitBundle, CommitBundleHeadUpdatesItem,
+    ArtifactEnvelope, ArtifactStatus, CommitBundle, HeadChange,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -219,7 +219,7 @@ fn failed_commit_rolls_back_all_rows_and_revision() {
         artifact("project-a", "artifact-1", ArtifactStatus::Candidate),
     );
     failed.head_updates = Some(vec![
-        serde_json::from_value::<CommitBundleHeadUpdatesItem>(
+        serde_json::from_value::<HeadChange>(
             json!({"artifactId":"missing", "version":1, "payloadHash":"0000000000000000000000000000000000000000000000000000000000000000", "artifactType":"ChapterCandidate", "scope":{"level":"CHAPTER", "chapterId":"chapter-1"}}),
         )
         .unwrap(),

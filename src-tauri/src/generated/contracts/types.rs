@@ -214,6 +214,16 @@ pub enum ProjectLifecycle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HeadChange {
+    pub artifact_type: ArtifactType,
+    pub scope: ArtifactScope,
+    pub artifact_id: OpaqueId,
+    pub version: i64,
+    pub payload_hash: Sha256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -390,16 +400,6 @@ pub struct DecisionUpdate {
 
 pub type DecisionUpdatePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HeadChange {
-    pub artifact_type: ArtifactType,
-    pub scope: ArtifactScope,
-    pub artifact_id: OpaqueId,
-    pub version: i64,
-    pub payload_hash: Sha256,
-}
-
 pub type SharedDefinitions = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -520,7 +520,7 @@ pub struct CommitBundle {
     pub created_at: Rfc3339Utc,
     pub artifacts: Vec<ArtifactEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_updates: Option<Vec<CommitBundleHeadUpdatesItem>>,
+    pub head_updates: Option<Vec<HeadChange>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canon_delta: Option<Vec<CanonDelta>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,16 +539,6 @@ pub struct CommitBundle {
     pub decision_updates: Option<Vec<DecisionUpdate>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_certificates: Option<Vec<GateCertificate>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CommitBundleHeadUpdatesItem {
-    pub artifact_type: ArtifactType,
-    pub scope: ArtifactScope,
-    pub artifact_id: OpaqueId,
-    pub version: i64,
-    pub payload_hash: Sha256,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
