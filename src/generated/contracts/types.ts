@@ -6,7 +6,7 @@ export type Rfc3339Utc = string
 
 export type Sha256 = string
 
-export type ArtifactType = "CreativeBrief" | "MarketSnapshot" | "MarketEvidenceBundle" | "GenreOpportunity" | "MarketStrategyContract" | "ProjectPitch" | "StoryBlueprint" | "NamingSystem" | "EntityNameDesign" | "StoryConstitution" | "ConstitutionSeal" | "BookPlan" | "MainContract" | "EndgameContract" | "BookStateSnapshot" | "BookExitState" | "BookHealthReport" | "BookCompletionReport" | "VolumeIntent" | "VolumePlan" | "VolumeContract" | "PlanningStateLedger" | "VolumeExitState" | "VolumeHealthReport" | "ArcPlan" | "ArcContract" | "ArcExitState" | "ChapterPlan" | "SceneContract" | "ContextManifest" | "ChapterCandidate" | "ReviewReport" | "RevisionPatch" | "GatePolicy" | "GateCertificate" | "FinalChapter" | "ChapterSummary" | "ChapterExitState" | "ProductionReceipt" | "NarrativeObligationSet" | "ForeshadowPlan" | "CharacterArcPlan" | "KnowledgePlan" | "MysteryPlan" | "ChangeRequest" | "ImpactPlan" | "RetconPlan" | "PlatformPolicy" | "OpeningContract" | "SimulatedSigningReceipt" | "PublishedChapterSnapshot" | "PublishedPerformanceSnapshot" | "PromptPackage" | "ModelRunReceipt" | "ExportPackage" | "BackupReceipt" | "IntegrityReport"
+export type ArtifactType = "CreativeBrief" | "MarketSnapshot" | "MarketEvidenceBundle" | "GenreOpportunity" | "MarketStrategyContract" | "ProjectPitch" | "StoryBlueprint" | "NamingSystem" | "EntityNameDesign" | "StoryConstitution" | "ConstitutionSeal" | "BookPlan" | "MainContract" | "EndgameContract" | "BookStateSnapshot" | "BookExitState" | "BookHealthReport" | "BookCompletionReport" | "NarrativeTasteProfile" | "NarrativeSemanticSeal" | "VolumeIntent" | "VolumePlan" | "VolumeContract" | "PlanningStateLedger" | "VolumeExitState" | "VolumeHealthReport" | "ArcPlan" | "ArcContract" | "ArcExitState" | "ChapterPlan" | "SceneContract" | "DramaticAuthoringPlan" | "SceneStrategySet" | "SceneStrategyDecision" | "ContextManifest" | "ChapterCandidate" | "ReviewReport" | "NarrativeQualityReport" | "RevisionPatch" | "GatePolicy" | "GateCertificate" | "FinalChapter" | "ChapterSummary" | "ChapterExitState" | "ProductionReceipt" | "NarrativeObligationSet" | "ForeshadowPlan" | "CharacterArcPlan" | "KnowledgePlan" | "MysteryPlan" | "ReaderDesireSnapshot" | "ChangeRequest" | "ImpactPlan" | "RetconPlan" | "PlatformPolicy" | "OpeningContract" | "SimulatedSigningReceipt" | "PublishedChapterSnapshot" | "PublishedPerformanceSnapshot" | "PromptPackage" | "ModelRunReceipt" | "ExportPackage" | "BackupReceipt" | "IntegrityReport"
 
 export type ArtifactStatus = "CANDIDATE" | "VALIDATED" | "COMMITTED" | "STALE" | "REJECTED" | "SUPERSEDED"
 
@@ -71,6 +71,20 @@ export interface CommandEnvelope {
   "idempotencyKey": OpaqueId
   "payload": {  }
   "contractVersion": CommandContractVersion
+}
+
+export interface ProjectCommandReceipt {
+  "receiptId": OpaqueId
+  "projectId": OpaqueId
+  "resultProjectId": OpaqueId
+  "commandId": OpaqueId
+  "idempotencyKey": OpaqueId
+  "commandType": string
+  "beforeRevision": number
+  "afterRevision": number
+  "requestDigest": Sha256
+  "committedAt": Rfc3339Utc
+  "receiptDigest": Sha256
 }
 
 export interface CommitBundle {

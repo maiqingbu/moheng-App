@@ -74,9 +74,11 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
 
   async function runCommand(key: string, request: CommandRequest) {
     commandStates.value[key] = { status: 'submitting', message: '正在提交…' }
+    const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
     const envelope: CommandRequest = {
       ...request,
-      commandId: request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      commandId,
+      idempotencyKey: request.idempotencyKey ?? commandId,
       requestedAt: request.requestedAt ?? new Date().toISOString()
     }
     const receipt = await frontendPort.executeCommand(envelope, (status, message) => {

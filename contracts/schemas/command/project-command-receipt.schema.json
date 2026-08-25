@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/command/project-command-receipt.schema.json",
+  "title": "ProjectCommandReceipt",
+  "type": "object",
+  "properties": {
+    "receiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "resultProjectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "idempotencyKey": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commandType": { "type": "string", "minLength": 1 },
+    "beforeRevision": { "type": "integer", "minimum": 0 },
+    "afterRevision": { "type": "integer", "minimum": 0 },
+    "requestDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
+    "committedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
+  },
+  "required": ["receiptId", "projectId", "resultProjectId", "commandId", "idempotencyKey", "commandType", "beforeRevision", "afterRevision", "requestDigest", "committedAt", "receiptDigest"],
+  "additionalProperties": false
+}

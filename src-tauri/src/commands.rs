@@ -1,6 +1,8 @@
 use crate::catalog::CatalogRepository;
+use crate::generated::types::ProjectCommandReceipt;
+use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
-use crate::project_db::ProjectManager;
+use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -62,6 +64,87 @@ fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &s
         "revision": revision,
         "updatedAt": updated_at
     })
+}
+
+fn request_digest(request: &Value) -> Result<String, String> {
+    sha256_canonical(request).map_err(|error| format!("IPC_INVALID:request:{error}"))
+}
+
+fn expected_revision(request: &Value) -> Result<Option<i64>, String> {
+    request
+        .get("expectedRevision")
+        .map(|value| {
+            value
+                .as_i64()
+                .filter(|revision| *revision >= 0)
+                .ok_or_else(|| "IPC_INVALID:expectedRevision".to_string())
+        })
+        .transpose()
+}
+
+fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
+    json!({
+        "commandId": receipt.command_id,
+        "projectId": receipt.result_project_id,
+        "acceptedAt": receipt.committed_at,
+        "finalStatus": "committed",
+        "message": "权威事务已完成，界面将重新查询。",
+        "receiptId": receipt.receipt_id,
+        "beforeRevision": receipt.before_revision,
+        "afterRevision": receipt.after_revision,
+        "requestDigest": receipt.request_digest,
+    })
+}
+
+fn outcome_receipt<T>(outcome: ProjectCommandOutcome<T>) -> ProjectCommandReceipt {
+    match outcome {
+        ProjectCommandOutcome::Replayed(receipt)
+        | ProjectCommandOutcome::Committed { receipt, .. } => receipt,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_command_spec<'a>(
+    project_id: &'a str,
+    result_project_id: &'a str,
+    command_id: &'a str,
+    idempotency_key: &'a str,
+    command_type: &'a str,
+    request_digest: &'a str,
+    expected_revision: Option<i64>,
+    now: &'a str,
+    advance_revision: bool,
+) -> ProjectCommandSpec<'a> {
+    ProjectCommandSpec {
+        project_id,
+        result_project_id,
+        command_id,
+        idempotency_key,
+        command_type,
+        request_digest,
+        expected_revision,
+        now,
+        advance_revision,
+    }
+}
+
+fn replayed_project_command(
+    state: &KernelState,
+    project_id: &str,
+    idempotency_key: &str,
+    digest: &str,
+) -> Result<Option<Value>, String> {
+    let receipt = state
+        .manager
+        .find_project_command_receipt(project_id, idempotency_key)
+        .map_err(|error| error.to_string())?;
+    match receipt {
+        None => Ok(None),
+        Some(receipt) if receipt.request_digest == digest => {
+            Ok(Some(project_command_response(&receipt)))
+        }
+        Some(_) => Err("IDEMPOTENCY_CONFLICT".to_string()),
+    }
 }
 
 pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> {
@@ -137,22 +220,48 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
     let command_id = required_string(&request, "commandId")?;
+    let idempotency_key = required_string(&request, "idempotencyKey")?;
     let requested_at = required_string(&request, "requestedAt")?;
     let project_id = request.get("projectId").and_then(Value::as_str);
-    let result_project_id = match command_type {
+    let expected_revision = expected_revision(&request)?;
+    let digest = request_digest(&request)?;
+    match command_type {
         "project_create_from_idea" | "project_create_from_market" => {
             let title = request
                 .pointer("/payload/title")
                 .and_then(Value::as_str)
                 .unwrap_or("未命名作品");
             let id = safe_project_id(command_id);
+            if let Some(replayed) = replayed_project_command(state, &id, idempotency_key, &digest)?
+            {
+                return Ok(replayed);
+            }
             drop(
                 state
                     .manager
                     .create(&id, title, requested_at)
                     .map_err(|error| error.to_string())?,
             );
-            Some(id)
+            let receipt = outcome_receipt(
+                state
+                    .manager
+                    .commit_project_command(
+                        project_command_spec(
+                            &id,
+                            &id,
+                            command_id,
+                            idempotency_key,
+                            command_type,
+                            &digest,
+                            expected_revision,
+                            requested_at,
+                            false,
+                        ),
+                        |_| Ok(()),
+                    )
+                    .map_err(|error| error.to_string())?,
+            );
+            Ok(project_command_response(&receipt))
         }
         "project_rename" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -160,27 +269,96 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 .pointer("/payload/title")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "IPC_INVALID:payload.title".to_string())?;
-            state
+            let outcome = state
                 .manager
-                .rename(id, title, requested_at)
+                .commit_project_rename(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    title,
+                )
                 .map_err(|error| error.to_string())?;
-            Some(id.to_string())
+            let receipt = match outcome {
+                ProjectCommandOutcome::Replayed(receipt) => receipt,
+                ProjectCommandOutcome::Committed { receipt, .. } => {
+                    let catalog = CatalogRepository::open(&state.paths, requested_at)
+                        .map_err(|error| error.to_string())?;
+                    CatalogRepository::rename(&catalog, id, title, requested_at)
+                        .map_err(|error| error.to_string())?;
+                    receipt
+                }
+            };
+            Ok(project_command_response(&receipt))
         }
         "project_archive" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
-            state
+            let outcome = state
                 .manager
-                .set_lifecycle(id, "ARCHIVED", requested_at)
+                .commit_project_command(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    |_| Ok(()),
+                )
                 .map_err(|error| error.to_string())?;
-            Some(id.to_string())
+            let receipt = match outcome {
+                ProjectCommandOutcome::Replayed(receipt) => receipt,
+                ProjectCommandOutcome::Committed { receipt, .. } => {
+                    state
+                        .manager
+                        .set_lifecycle(id, "ARCHIVED", requested_at)
+                        .map_err(|error| error.to_string())?;
+                    receipt
+                }
+            };
+            Ok(project_command_response(&receipt))
         }
         "project_restore" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
-            state
+            let outcome = state
                 .manager
-                .set_lifecycle(id, "ACTIVE", requested_at)
+                .commit_project_command(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    |_| Ok(()),
+                )
                 .map_err(|error| error.to_string())?;
-            Some(id.to_string())
+            let receipt = match outcome {
+                ProjectCommandOutcome::Replayed(receipt) => receipt,
+                ProjectCommandOutcome::Committed { receipt, .. } => {
+                    state
+                        .manager
+                        .set_lifecycle(id, "ACTIVE", requested_at)
+                        .map_err(|error| error.to_string())?;
+                    receipt
+                }
+            };
+            Ok(project_command_response(&receipt))
         }
         "project_duplicate" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -190,40 +368,102 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| value.to_string())
                 .ok_or_else(|| "IPC_INVALID:payload.targetProjectId".to_string())?;
+            if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                return Ok(replayed);
+            }
+            if let Some(expected) = expected_revision {
+                let current = state
+                    .manager
+                    .project_revision(id)
+                    .map_err(|error| error.to_string())?;
+                if current != expected {
+                    return Err("REVISION_CONFLICT".to_string());
+                }
+            }
             state
                 .manager
                 .duplicate(id, &target, requested_at)
                 .map_err(|error| error.to_string())?;
-            Some(target)
+            let result = state.manager.commit_project_command(
+                project_command_spec(
+                    id,
+                    &target,
+                    command_id,
+                    idempotency_key,
+                    command_type,
+                    &digest,
+                    expected_revision,
+                    requested_at,
+                    true,
+                ),
+                |_| Ok(()),
+            );
+            let receipt = match result {
+                Ok(outcome) => outcome_receipt(outcome),
+                Err(error) => {
+                    let _ = state.manager.delete_to_trash(&target, requested_at);
+                    return Err(error.to_string());
+                }
+            };
+            Ok(project_command_response(&receipt))
         }
         "project_delete" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                return Ok(replayed);
+            }
+            let outcome = state
+                .manager
+                .commit_project_command(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    |_| Ok(()),
+                )
+                .map_err(|error| error.to_string())?;
+            let receipt = match outcome {
+                ProjectCommandOutcome::Replayed(receipt) => {
+                    return Ok(project_command_response(&receipt));
+                }
+                ProjectCommandOutcome::Committed { receipt, .. } => receipt,
+            };
+            // A new delete has to move the now-receipted project after its
+            // authoritative project transaction releases the writer.
             state
                 .manager
                 .delete_to_trash(id, requested_at)
                 .map_err(|error| error.to_string())?;
-            Some(id.to_string())
+            Ok(project_command_response(&receipt))
         }
         "integrity_check_run" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
-            drop(
-                state
-                    .manager
-                    .open_read(id)
-                    .map_err(|error| error.to_string())?,
-            );
-            Some(id.to_string())
+            let outcome = state
+                .manager
+                .commit_project_integrity(project_command_spec(
+                    id,
+                    id,
+                    command_id,
+                    idempotency_key,
+                    command_type,
+                    &digest,
+                    expected_revision,
+                    requested_at,
+                    false,
+                ))
+                .map_err(|error| error.to_string())?;
+            let receipt = outcome_receipt(outcome);
+            Ok(project_command_response(&receipt))
         }
-        _ => return Err(format!("IPC_UNSUPPORTED:{command_type}")),
-    };
-    Ok(json!({
-        "commandId": command_id,
-        "projectId": result_project_id,
-        "acceptedAt": requested_at,
-        "finalStatus": "committed",
-        "message": "权威事务已完成，界面将重新查询。",
-        "receiptId": format!("catalog:{command_id}")
-    }))
+        _ => Err(format!("IPC_UNSUPPORTED:{command_type}")),
+    }
 }
 
 #[tauri::command]

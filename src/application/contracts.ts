@@ -467,6 +467,9 @@ export interface CommandReceipt {
   finalStatus: Exclude<CommandStatus, 'idle' | 'submitting' | 'accepted' | 'processing'>
   message: string
   receiptId?: string
+  beforeRevision?: number
+  afterRevision?: number
+  requestDigest?: string
 }
 
 export type CommandType =
@@ -513,6 +516,7 @@ export interface CommandRequest {
   commandId?: string
   projectId?: string
   expectedRevision?: number
+  idempotencyKey?: string
   requestedAt?: string
   payload?: Record<string, unknown>
 }

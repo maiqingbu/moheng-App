@@ -28,6 +28,11 @@
       "version": "m0a.command.v1"
     },
     {
+      "name": "project-command-receipt",
+      "path": "schemas/command/project-command-receipt.schema.json",
+      "version": "m0a.project-command-receipt.v1"
+    },
+    {
       "name": "commit-bundle",
       "path": "schemas/commit/commit-bundle.schema.json",
       "version": "m0a.commit-bundle.v1"

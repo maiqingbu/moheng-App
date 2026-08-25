@@ -15,8 +15,17 @@ const vectors = JSON.parse(
 test('should normalize CRLF and CR before hashing payload text', () => {
   assert.deepEqual(normalizeJsonNewlines({ text: 'a\r\nb\rc' }), { text: 'a\nb\nc' })
   assert.equal(
-    sha256Canonical({ text: 'a\r\nb\rc' }, { normalizeNewlines: true }),
-    sha256Canonical({ text: 'a\nb\nc' }, { normalizeNewlines: true }),
+    sha256Canonical({ text: 'a\r\nb\rc' }),
+    sha256Canonical({ text: 'a\nb\nc' }),
+  )
+})
+
+test('official sha256Canonical defaults to newline normalization (TS/Rust parity)', () => {
+  // The official artifact hash API must normalize CRLF/CR -> LF by default,
+  // so a caller who forgets the option never drifts from the Rust kernel.
+  assert.equal(
+    sha256Canonical({ text: 'a\r\nb\rc' }),
+    sha256Canonical({ text: 'a\nb\nc' }),
   )
 })
 

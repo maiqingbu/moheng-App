@@ -10,6 +10,7 @@
 //! deterministically on CI and locally.
 
 use ai_novel_production_system_core::commands::{self, KernelState};
+use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::{json, Value};
 use tauri::ipc;
@@ -66,10 +67,135 @@ fn invoke(
         .expect("response body should be JSON")
 }
 
+/// Runs an invoke while preserving the Tauri error so protocol tests can assert
+/// fail-closed revision/idempotency behavior.
+fn try_invoke(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    command: &str,
+    body: Value,
+) -> Result<Value, String> {
+    let request = InvokeRequest {
+        cmd: command.into(),
+        callback: ipc::CallbackFn(0),
+        error: ipc::CallbackFn(1),
+        url: "tauri://localhost".parse().unwrap(),
+        body: ipc::InvokeBody::Json(body),
+        headers: Default::default(),
+        invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    };
+    let response =
+        tauri::test::get_ipc_response(webview, request).map_err(|error| format!("{error:?}"))?;
+    response
+        .deserialize::<Value>()
+        .map_err(|error| format!("{error:?}"))
+}
+
 fn receipt_project_id(receipt: &Value) -> &str {
     receipt["projectId"]
         .as_str()
         .expect("receipt has projectId")
+}
+
+#[test]
+fn real_ipc_project_commands_are_idempotent_revision_checked_and_receipted() {
+    let temp = tempdir().unwrap();
+    let app = build_app_over(temp.path());
+    let w = webview(&app);
+
+    let create_request = json!({
+        "request": {
+            "type": "project_create_from_idea",
+            "commandId": "pc-create",
+            "idempotencyKey": "pc-create-key",
+            "requestedAt": "2026-08-25T00:00:00Z",
+            "expectedRevision": 0,
+            "payload": {"title": "命令协议"}
+        }
+    });
+    let created = invoke(&w, "execute_command", create_request.clone());
+    assert_eq!(created["finalStatus"], "committed");
+    assert_eq!(created["afterRevision"], 0);
+    assert!(created["requestDigest"].as_str().is_some());
+    let project_id = receipt_project_id(&created).to_string();
+
+    // A retry after an IPC timeout must return the exact persisted result.
+    let replay = invoke(&w, "execute_command", create_request);
+    assert_eq!(replay, created);
+
+    let rename_request = json!({
+        "request": {
+            "type": "project_rename",
+            "commandId": "pc-rename",
+            "idempotencyKey": "pc-rename-key",
+            "projectId": project_id,
+            "expectedRevision": 0,
+            "requestedAt": "2026-08-25T00:00:01Z",
+            "payload": {"title": "命令协议已重命名"}
+        }
+    });
+    let renamed = invoke(&w, "execute_command", rename_request.clone());
+    assert_eq!(renamed["afterRevision"], 1);
+    let rename_replay = invoke(&w, "execute_command", rename_request);
+    assert_eq!(rename_replay, renamed);
+
+    let stale = try_invoke(
+        &w,
+        "execute_command",
+        json!({
+            "request": {
+                "type": "project_rename",
+                "commandId": "pc-stale",
+                "idempotencyKey": "pc-stale-key",
+                "projectId": project_id,
+                "expectedRevision": 0,
+                "requestedAt": "2026-08-25T00:00:02Z",
+                "payload": {"title": "不应写入"}
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(stale.contains("REVISION_CONFLICT"), "{stale}");
+
+    let idempotency_conflict = try_invoke(
+        &w,
+        "execute_command",
+        json!({
+            "request": {
+                "type": "project_rename",
+                "commandId": "pc-conflict",
+                "idempotencyKey": "pc-rename-key",
+                "projectId": project_id,
+                "expectedRevision": 1,
+                "requestedAt": "2026-08-25T00:00:03Z",
+                "payload": {"title": "同 key 不同请求"}
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        idempotency_conflict.contains("IDEMPOTENCY_CONFLICT"),
+        "{idempotency_conflict}"
+    );
+
+    drop(w);
+    drop(app);
+    let connection = open_connection(
+        &temp
+            .path()
+            .join("projects")
+            .join(&project_id)
+            .join("project.db"),
+        true,
+    )
+    .unwrap();
+    let receipt_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM project_command_receipts WHERE project_id = ?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_count, 2);
 }
 
 #[test]
@@ -85,6 +211,7 @@ fn real_ipc_create_query_rename_archive_restore_and_delete() {
             "request": {
                 "type": "project_create_from_idea",
                 "commandId": "c1",
+                "idempotencyKey": "c1-key",
                 "requestedAt": "2026-08-25T00:00:00Z",
                 "payload": {"title": "第一部"}
             }
@@ -116,7 +243,9 @@ fn real_ipc_create_query_rename_archive_restore_and_delete() {
             "request": {
                 "type": "project_rename",
                 "commandId": "c2",
+                "idempotencyKey": "c2-key",
                 "projectId": project_id,
+                "expectedRevision": 0,
                 "requestedAt": "2026-08-25T00:00:01Z",
                 "payload": {"title": "第二部"}
             }
@@ -129,7 +258,9 @@ fn real_ipc_create_query_rename_archive_restore_and_delete() {
             "request": {
                 "type": "project_archive",
                 "commandId": "c3",
+                "idempotencyKey": "c3-key",
                 "projectId": project_id,
+                "expectedRevision": 1,
                 "requestedAt": "2026-08-25T00:00:02Z"
             }
         }),
@@ -146,7 +277,9 @@ fn real_ipc_create_query_rename_archive_restore_and_delete() {
             "request": {
                 "type": "project_restore",
                 "commandId": "c4",
+                "idempotencyKey": "c4-key",
                 "projectId": project_id,
+                "expectedRevision": 2,
                 "requestedAt": "2026-08-25T00:00:03Z"
             }
         }),
@@ -167,6 +300,7 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
             "request": {
                 "type": "project_create_from_idea",
                 "commandId": "d1",
+                "idempotencyKey": "d1-key",
                 "requestedAt": "2026-08-25T00:00:00Z",
                 "payload": {"title": "待复制"}
             }
@@ -182,7 +316,9 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
             "request": {
                 "type": "project_duplicate",
                 "commandId": "d2",
+                "idempotencyKey": "d2-key",
                 "projectId": source,
+                "expectedRevision": 0,
                 "requestedAt": "2026-08-25T00:00:01Z",
                 "payload": {"targetProjectId": "copy-1"}
             }
@@ -200,7 +336,9 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
             "request": {
                 "type": "project_delete",
                 "commandId": "d3",
+                "idempotencyKey": "d3-key",
                 "projectId": source,
+                "expectedRevision": 1,
                 "requestedAt": "2026-08-25T00:00:02Z"
             }
         }),
@@ -235,6 +373,7 @@ fn real_ipc_survives_restart_and_reloaded_query_matches_commit() {
             "request": {
                 "type": "project_create_from_idea",
                 "commandId": "r1",
+                "idempotencyKey": "r1-key",
                 "requestedAt": "2026-08-25T00:00:00Z",
                 "payload": {"title": "重启验证"}
             }
@@ -248,7 +387,9 @@ fn real_ipc_survives_restart_and_reloaded_query_matches_commit() {
             "request": {
                 "type": "project_rename",
                 "commandId": "r2",
+                "idempotencyKey": "r2-key",
                 "projectId": project_id,
+                "expectedRevision": 0,
                 "requestedAt": "2026-08-25T00:00:01Z",
                 "payload": {"title": "重命名后"}
             }
@@ -284,6 +425,7 @@ fn real_ipc_duplicate_receipt_and_delete_reflect_in_project_db() {
             "request": {
                 "type": "project_create_from_idea",
                 "commandId": "k1",
+                "idempotencyKey": "k1-key",
                 "requestedAt": "2026-08-25T00:00:00Z",
                 "payload": {"title": "持久化"}
             }
@@ -304,7 +446,9 @@ fn real_ipc_duplicate_receipt_and_delete_reflect_in_project_db() {
             "request": {
                 "type": "project_duplicate",
                 "commandId": "k2",
+                "idempotencyKey": "k2-key",
                 "projectId": project_id,
+                "expectedRevision": 0,
                 "requestedAt": "2026-08-25T00:00:01Z",
                 "payload": {"targetProjectId": "persist-copy"}
             }
@@ -324,6 +468,7 @@ fn real_ipc_integrity_query_runs_and_market_opportunities_is_available() {
             "request": {
                 "type": "project_create_from_idea",
                 "commandId": "i1",
+                "idempotencyKey": "i1-key",
                 "requestedAt": "2026-08-25T00:00:00Z",
                 "payload": {"title": "完整性"}
             }
@@ -337,7 +482,9 @@ fn real_ipc_integrity_query_runs_and_market_opportunities_is_available() {
             "request": {
                 "type": "integrity_check_run",
                 "commandId": "i2",
+                "idempotencyKey": "i2-key",
                 "projectId": project_id,
+                "expectedRevision": 0,
                 "requestedAt": "2026-08-25T00:00:01Z"
             }
         }),

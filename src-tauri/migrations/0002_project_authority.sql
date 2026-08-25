@@ -128,7 +128,10 @@ INSERT OR IGNORE INTO authority_registry(authority_key, authoritative_table, wri
   ('command', 'commands', 'CommitService', 0),
   ('commit_receipt', 'commit_receipts', 'CommitService', 0),
   ('retention', 'retention_policies', 'MaintenanceService', 0),
-  ('gc_receipt', 'gc_receipts', 'MaintenanceService', 0);
+  ('gc_receipt', 'gc_receipts', 'MaintenanceService', 0),
+  ('reader_desire', 'reader_desire_ledger', 'M3B', 1),
+  ('quality_vector', 'narrative_quality_reports', 'M3B', 1),
+  ('production_budget', 'chapter_production_budgets', 'M3B', 0);
 
 INSERT OR IGNORE INTO table_family_registry(table_name, family, authority_key, retention_class) VALUES
   ('project_meta', 'project', 'project', 'PERMANENT'),
@@ -139,7 +142,10 @@ INSERT OR IGNORE INTO table_family_registry(table_name, family, authority_key, r
   ('commands', 'commit', 'command', 'AUDIT'),
   ('commit_receipts', 'receipt', 'commit_receipt', 'PERMANENT'),
   ('retention_policies', 'maintenance', 'retention', 'PERMANENT'),
-  ('gc_receipts', 'receipt', 'gc_receipt', 'PERMANENT');
+  ('gc_receipts', 'receipt', 'gc_receipt', 'PERMANENT'),
+  ('reader_desire_ledger', 'narrative_control', 'reader_desire', 'POLICY'),
+  ('narrative_quality_reports', 'quality_evidence', 'quality_vector', 'POLICY'),
+  ('chapter_production_budgets', 'runtime_policy', 'production_budget', 'AUDIT');
 
 INSERT OR IGNORE INTO receipt_taxonomy(receipt_type, authority_state, owner) VALUES
   ('CommitReceipt', 'ACTIVE', 'CommitService'),

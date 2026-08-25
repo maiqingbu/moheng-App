@@ -46,6 +46,10 @@ pub enum ArtifactType {
     BookHealthReport,
     #[serde(rename = "BookCompletionReport")]
     BookCompletionReport,
+    #[serde(rename = "NarrativeTasteProfile")]
+    NarrativeTasteProfile,
+    #[serde(rename = "NarrativeSemanticSeal")]
+    NarrativeSemanticSeal,
     #[serde(rename = "VolumeIntent")]
     VolumeIntent,
     #[serde(rename = "VolumePlan")]
@@ -68,12 +72,20 @@ pub enum ArtifactType {
     ChapterPlan,
     #[serde(rename = "SceneContract")]
     SceneContract,
+    #[serde(rename = "DramaticAuthoringPlan")]
+    DramaticAuthoringPlan,
+    #[serde(rename = "SceneStrategySet")]
+    SceneStrategySet,
+    #[serde(rename = "SceneStrategyDecision")]
+    SceneStrategyDecision,
     #[serde(rename = "ContextManifest")]
     ContextManifest,
     #[serde(rename = "ChapterCandidate")]
     ChapterCandidate,
     #[serde(rename = "ReviewReport")]
     ReviewReport,
+    #[serde(rename = "NarrativeQualityReport")]
+    NarrativeQualityReport,
     #[serde(rename = "RevisionPatch")]
     RevisionPatch,
     #[serde(rename = "GatePolicy")]
@@ -98,6 +110,8 @@ pub enum ArtifactType {
     KnowledgePlan,
     #[serde(rename = "MysteryPlan")]
     MysteryPlan,
+    #[serde(rename = "ReaderDesireSnapshot")]
+    ReaderDesireSnapshot,
     #[serde(rename = "ChangeRequest")]
     ChangeRequest,
     #[serde(rename = "ImpactPlan")]
@@ -297,6 +311,22 @@ pub struct CommandEnvelope {
 }
 
 pub type CommandEnvelopePayload = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectCommandReceipt {
+    pub receipt_id: OpaqueId,
+    pub project_id: OpaqueId,
+    pub result_project_id: OpaqueId,
+    pub command_id: OpaqueId,
+    pub idempotency_key: OpaqueId,
+    pub command_type: String,
+    pub before_revision: i64,
+    pub after_revision: i64,
+    pub request_digest: Sha256,
+    pub committed_at: Rfc3339Utc,
+    pub receipt_digest: Sha256,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

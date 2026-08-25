@@ -49,6 +49,9 @@ for (const forbidden of [
   if (commands.includes(forbidden)) errors.push(`minimum IPC path is still unsupported: ${forbidden}`)
 }
 if (!commands.includes('IPC_UNSUPPORTED')) errors.push('unsupported non-M0A commands must fail closed')
+for (const marker of ['idempotencyKey', 'commit_project_command', 'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT']) {
+  if (!commands.includes(marker)) errors.push(`missing authoritative Project Command protocol: ${marker}`)
+}
 
 const main = read('src-tauri/src/main.rs')
 if (!main.includes('manage(KernelState::new')) errors.push('Tauri host does not initialize KernelState')
@@ -57,6 +60,12 @@ if (!main.includes('commands::handler()')) errors.push('Tauri host does not regi
 const migration = read('src-tauri/migrations/0002_project_authority.sql')
 for (const table of ['authority_registry', 'table_family_registry', 'receipt_taxonomy', 'retention_policies', 'gc_receipts']) {
   if (!migration.includes(`CREATE TABLE IF NOT EXISTS ${table}`)) errors.push(`missing M0A registry/table: ${table}`)
+}
+const projectCommandMigration = read('src-tauri/migrations/0003_project_command.sql')
+for (const table of ['project_command_receipts', 'copy_receipts']) {
+  if (!projectCommandMigration.includes(`CREATE TABLE IF NOT EXISTS ${table}`)) {
+    errors.push(`missing Project Command authority table: ${table}`)
+  }
 }
 
 if (errors.length) {

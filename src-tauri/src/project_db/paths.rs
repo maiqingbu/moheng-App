@@ -21,6 +21,9 @@ impl AppPaths {
     pub fn trash_dir(&self) -> PathBuf {
         self.root.join("trash")
     }
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join(".staging")
+    }
     pub fn project_dir(&self, project_id: &str) -> Result<PathBuf, PathError> {
         if project_id.is_empty()
             || project_id.contains('/')

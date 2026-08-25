@@ -15,6 +15,7 @@ fn tauri_service_path_creates_queries_renames_and_archives_project() {
         json!({
             "type": "project_create_from_idea",
             "commandId": "create-1",
+            "idempotencyKey": "create-key-1",
             "requestedAt": "2026-08-24T00:00:00Z",
             "payload": {"title": "第一部"}
         }),
@@ -40,7 +41,9 @@ fn tauri_service_path_creates_queries_renames_and_archives_project() {
         json!({
             "type": "project_rename",
             "commandId": "rename-1",
+            "idempotencyKey": "rename-key-1",
             "projectId": project_id,
+            "expectedRevision": 0,
             "requestedAt": "2026-08-24T00:00:01Z",
             "payload": {"title": "第二部"}
         }),
@@ -51,7 +54,9 @@ fn tauri_service_path_creates_queries_renames_and_archives_project() {
         json!({
             "type": "project_archive",
             "commandId": "archive-1",
+            "idempotencyKey": "archive-key-1",
             "projectId": project_id,
+            "expectedRevision": 1,
             "requestedAt": "2026-08-24T00:00:02Z"
         }),
     )

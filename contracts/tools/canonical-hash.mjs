@@ -52,7 +52,7 @@ function canonicalizeValue(value) {
   return JSON.stringify(value)
 }
 
-export function canonicalize(value, { normalizeNewlines = false } = {}) {
+export function canonicalize(value, { normalizeNewlines = true } = {}) {
   const normalized = normalizeNewlines ? normalizeJsonNewlines(value) : value
   assertJsonValue(normalized)
   return canonicalizeValue(normalized)
@@ -60,4 +60,9 @@ export function canonicalize(value, { normalizeNewlines = false } = {}) {
 
 export function sha256Canonical(value, options) {
   return crypto.createHash('sha256').update(Buffer.from(canonicalize(value, options), 'utf8')).digest('hex')
+}
+
+/** Internal raw JCS (no newline normalization) helper — not a formal artifact hash API. */
+export function canonicalizeRaw(value) {
+  return canonicalize(value, { normalizeNewlines: false })
 }
