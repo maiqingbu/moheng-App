@@ -3,8 +3,8 @@
   "batchTitle": "M0B — 最终 Schema 主干、稳定 ID 与项目切换一致性（修订版）",
   "status": "PASS",
   "revision": "B01 修订版（修复前轮 FAIL 的 8 项 P0 问题）",
-  "sourceCommit": "FILLED_BELOW",
-  "sourceBundleSha256": "FILLED_BELOW",
+  "sourceCommit": "7ef60c579b4e8c803236060140eccef085cc8519",
+  "sourceBundleSha256": "200da29576636640c4d18282aa71a59360c6004e1c022e7642b075379e1123c8",
   "completedAt": "2026-08-26T05:30:00Z",
   "tests": {
     "rust": { "passed": 85, "failed": 0, "command": "cargo test --all-targets" },
