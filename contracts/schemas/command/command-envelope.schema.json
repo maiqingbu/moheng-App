@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/command/command-envelope.schema.json",
+  "title": "CommandEnvelope",
+  "type": "object",
+  "properties": {
+    "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commandType": { "type": "string", "minLength": 1 },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "requestedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "idempotencyKey": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "payload": { "type": "object" },
+    "contractVersion": { "$ref": "../shared/definitions.schema.json#/$defs/CommandContractVersion" }
+  },
+  "required": ["commandId", "commandType", "requestedAt", "idempotencyKey", "payload", "contractVersion"],
+  "additionalProperties": false
+}

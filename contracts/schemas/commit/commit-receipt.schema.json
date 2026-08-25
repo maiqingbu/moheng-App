@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/commit/commit-receipt.schema.json",
+  "title": "CommitReceipt",
+  "type": "object",
+  "properties": {
+    "receiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commitId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "idempotencyKey": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "beforeRevision": { "type": "integer", "minimum": 0 },
+    "afterRevision": { "type": "integer", "minimum": 1 },
+    "bundleDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
+    "committedArtifactRefs": { "type": "array", "items": { "$ref": "../artifact/artifact-ref.schema.json" } },
+    "headChanges": { "type": "array" },
+    "appliedDeltaCounts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "gateCertificateRefs": { "type": "array", "items": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" } },
+    "committedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
+  },
+  "required": ["receiptId", "commitId", "projectId", "commandId", "idempotencyKey", "beforeRevision", "afterRevision", "bundleDigest", "committedArtifactRefs", "headChanges", "appliedDeltaCounts", "gateCertificateRefs", "committedAt", "receiptDigest"],
+  "additionalProperties": false
+}

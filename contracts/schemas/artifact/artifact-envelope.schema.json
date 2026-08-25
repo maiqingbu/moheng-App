@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/artifact/artifact-envelope.schema.json",
+  "title": "ArtifactEnvelope",
+  "type": "object",
+  "properties": {
+    "artifactId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "artifactType": { "$ref": "../shared/definitions.schema.json#/$defs/ArtifactType" },
+    "scope": { "$ref": "artifact-scope.schema.json" },
+    "version": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "type": "string", "pattern": "^m0a\\.artifact\\.v[0-9]+$" },
+    "artifactStatus": { "$ref": "../shared/definitions.schema.json#/$defs/ArtifactStatus" },
+    "semanticLifecycle": { "$ref": "../shared/definitions.schema.json#/$defs/SemanticLifecycle" },
+    "authorityLevel": { "$ref": "../shared/definitions.schema.json#/$defs/AuthorityLevel" },
+    "payload": {},
+    "payloadHash": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
+    "dependencyRefs": { "type": "array", "items": { "$ref": "artifact-ref.schema.json" } },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "createdBy": { "type": "string", "minLength": 1 },
+        "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "jobId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "stepId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "modelRunId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "promptRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "contextManifestRef": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "decisionRefs": { "type": "array", "items": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" } },
+        "gateCertificateRefs": { "type": "array", "items": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" } }
+      },
+      "required": ["createdBy", "commandId"],
+      "additionalProperties": false
+    },
+    "createdAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "committedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" }
+  },
+  "required": ["artifactId", "projectId", "artifactType", "scope", "version", "schemaVersion", "artifactStatus", "payload", "payloadHash", "dependencyRefs", "provenance", "createdAt"],
+  "additionalProperties": false
+}

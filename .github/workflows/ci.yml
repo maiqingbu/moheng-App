@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Install Tauri Linux system dependencies
+        # `tauri` (with default features) links webkit2gtk/gtk/libsoup on Linux even
+        # for a MockRuntime build, so cargo test/check needs these native libs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - run: npm ci
+      - run: npm run contracts:validate
+      - run: npm run contracts:golden
+      - run: npm run contracts:drift-check
+      - run: npm run contracts:generate
+      - run: git diff --exit-code -- src/generated/contracts src-tauri/src/generated/contracts
+      - run: npm test
+      - run: npm run verify:m0a
+      - run: npm run verify
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run build:demo
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --test tauri_ipc_smoke
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --test real_ipc_e2e
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --test project_lifecycle
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets

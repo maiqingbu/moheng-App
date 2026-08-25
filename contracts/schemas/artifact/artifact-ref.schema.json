@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/artifact/artifact-ref.schema.json",
+  "title": "ArtifactRef",
+  "type": "object",
+  "properties": { "artifactId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" }, "version": { "type": "integer", "minimum": 1 }, "payloadHash": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" } },
+  "required": ["artifactId", "version", "payloadHash"],
+  "additionalProperties": false
+}

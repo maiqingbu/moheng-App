@@ -1,0 +1,54 @@
+{
+  "commitId": "commit-1",
+  "projectId": "project-demo",
+  "commandId": "command-1",
+  "idempotencyKey": "key-1",
+  "contractVersion": "m0a.v1",
+  "createdAt": "2026-08-24T00:00:00Z",
+  "artifacts": [
+    {
+      "artifactId": "duplicate",
+      "projectId": "project-demo",
+      "artifactType": "ChapterCandidate",
+      "scope": {
+        "level": "CHAPTER",
+        "chapterId": "chapter-1"
+      },
+      "version": 1,
+      "schemaVersion": "m0a.artifact.v1",
+      "artifactStatus": "CANDIDATE",
+      "payload": {
+        "version": 1
+      },
+      "payloadHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencyRefs": [],
+      "provenance": {
+        "createdBy": "test",
+        "commandId": "command-1"
+      },
+      "createdAt": "2026-08-24T00:00:00Z"
+    },
+    {
+      "artifactId": "duplicate",
+      "projectId": "project-demo",
+      "artifactType": "ChapterCandidate",
+      "scope": {
+        "level": "CHAPTER",
+        "chapterId": "chapter-1"
+      },
+      "version": 2,
+      "schemaVersion": "m0a.artifact.v1",
+      "artifactStatus": "CANDIDATE",
+      "payload": {
+        "version": 2
+      },
+      "payloadHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "dependencyRefs": [],
+      "provenance": {
+        "createdBy": "test",
+        "commandId": "command-1"
+      },
+      "createdAt": "2026-08-24T00:00:00Z"
+    }
+  ]
+}

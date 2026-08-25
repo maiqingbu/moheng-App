@@ -34,6 +34,18 @@ const FORBIDDEN_RULES = [
   },
 ]
 
+const FORBIDDEN_SOURCE_RULES = [
+  {
+    name: 'UI/application must not call Tauri or SQLite APIs directly',
+    test: (relative, content) => {
+      const layer = relative.split(path.sep)[0]
+      const forbiddenImport = /^(?:import|export).*?(?:from\s*)?["'](?:[^"']*tauri|[^"']*sqlite|[^"']*rusqlite)/im.test(content)
+      const forbiddenApiCall = /\b(?:invoke|listen)\s*\(/.test(content)
+      return ['ui', 'application'].includes(layer) && (forbiddenImport || forbiddenApiCall)
+    },
+  },
+]
+
 // Walk all source files under src/.
 const files = []
 const walk = (dir) => {
@@ -84,6 +96,11 @@ for (const file of files) {
   const srcRel = toSrcRel(file)
   const fromLayer = layerOf(srcRel)
   const content = fs.readFileSync(file, 'utf8')
+  for (const rule of FORBIDDEN_SOURCE_RULES) {
+    if (rule.test(srcRel, content)) {
+      errors.push(`[source] ${rule.name}: ${srcRel}`)
+    }
+  }
   const specifiers = importedPathsFrom(content)
 
   for (const spec of specifiers) {

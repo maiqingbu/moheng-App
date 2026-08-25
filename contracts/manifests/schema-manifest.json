@@ -1,0 +1,91 @@
+{
+  "manifestVersion": "m0a.v1",
+  "dialect": "https://json-schema.org/draft/2020-12/schema",
+  "schemas": [
+    {
+      "name": "shared-definitions",
+      "path": "schemas/shared/definitions.schema.json",
+      "version": "m0a.shared.v1"
+    },
+    {
+      "name": "artifact-ref",
+      "path": "schemas/artifact/artifact-ref.schema.json",
+      "version": "m0a.artifact-ref.v1"
+    },
+    {
+      "name": "artifact-scope",
+      "path": "schemas/artifact/artifact-scope.schema.json",
+      "version": "m0a.artifact-scope.v1"
+    },
+    {
+      "name": "artifact-envelope",
+      "path": "schemas/artifact/artifact-envelope.schema.json",
+      "version": "m0a.artifact.v1"
+    },
+    {
+      "name": "command-envelope",
+      "path": "schemas/command/command-envelope.schema.json",
+      "version": "m0a.command.v1"
+    },
+    {
+      "name": "commit-bundle",
+      "path": "schemas/commit/commit-bundle.schema.json",
+      "version": "m0a.commit-bundle.v1"
+    },
+    {
+      "name": "commit-receipt",
+      "path": "schemas/commit/commit-receipt.schema.json",
+      "version": "m0a.commit-receipt.v1"
+    },
+    {
+      "name": "domain-receipt",
+      "path": "schemas/commit/domain-receipt.schema.json",
+      "version": "m0a.domain-receipt.v1"
+    },
+    {
+      "name": "gate-certificate",
+      "path": "schemas/commit/gate-certificate.schema.json",
+      "version": "m0a.gate-certificate.v1"
+    },
+    {
+      "name": "query-envelope",
+      "path": "schemas/query/query-envelope.schema.json",
+      "version": "m0a.query.v1"
+    },
+    {
+      "name": "project-record",
+      "path": "schemas/project/project-record.schema.json",
+      "version": "m0a.project.v1"
+    }
+  ],
+  "artifactStatus": [
+    "CANDIDATE",
+    "VALIDATED",
+    "COMMITTED",
+    "STALE",
+    "REJECTED",
+    "SUPERSEDED"
+  ],
+  "jobStateReserved": [
+    "QUEUED",
+    "RUNNING",
+    "PAUSING",
+    "PAUSED",
+    "WAITING_MODEL",
+    "WAITING_DECISION",
+    "WAITING_BUDGET",
+    "BLOCKED",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED"
+  ],
+  "receiptTaxonomy": {
+    "commit": "CommitReceipt",
+    "domain": "DomainReceipt",
+    "gate": "GateCertificate"
+  },
+  "dependencyBoundary": {
+    "artifact_dependencies": "immutable Artifact-to-Artifact lineage/provenance",
+    "dependency_edges": "typed impact graph reserved for M0B"
+  }
+}

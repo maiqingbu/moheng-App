@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/shared/definitions.schema.json",
+  "title": "SharedDefinitions",
+  "$defs": {
+    "OpaqueId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\s]+$" },
+    "Rfc3339Utc": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "Sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "ArtifactType": {
+      "type": "string",
+      "enum": ["CreativeBrief", "MarketSnapshot", "MarketEvidenceBundle", "GenreOpportunity", "MarketStrategyContract", "ProjectPitch", "StoryBlueprint", "NamingSystem", "EntityNameDesign", "StoryConstitution", "ConstitutionSeal", "BookPlan", "MainContract", "EndgameContract", "BookStateSnapshot", "BookExitState", "BookHealthReport", "BookCompletionReport", "VolumeIntent", "VolumePlan", "VolumeContract", "PlanningStateLedger", "VolumeExitState", "VolumeHealthReport", "ArcPlan", "ArcContract", "ArcExitState", "ChapterPlan", "SceneContract", "ContextManifest", "ChapterCandidate", "ReviewReport", "RevisionPatch", "GatePolicy", "GateCertificate", "FinalChapter", "ChapterSummary", "ChapterExitState", "ProductionReceipt", "NarrativeObligationSet", "ForeshadowPlan", "CharacterArcPlan", "KnowledgePlan", "MysteryPlan", "ChangeRequest", "ImpactPlan", "RetconPlan", "PlatformPolicy", "OpeningContract", "SimulatedSigningReceipt", "PublishedChapterSnapshot", "PublishedPerformanceSnapshot", "PromptPackage", "ModelRunReceipt", "ExportPackage", "BackupReceipt", "IntegrityReport"]
+    },
+    "ArtifactStatus": { "type": "string", "enum": ["CANDIDATE", "VALIDATED", "COMMITTED", "STALE", "REJECTED", "SUPERSEDED"] },
+    "SemanticLifecycle": { "type": "string", "enum": ["PROPOSAL", "APPROVED_PLAN", "MATERIALIZED", "CANON"] },
+    "AuthorityLevel": { "type": "string", "enum": ["A", "B", "C", "D"] },
+    "ArtifactScopeLevel": { "type": "string", "enum": ["PROJECT", "BOOK", "VOLUME", "ARC", "CHAPTER", "SCENE", "ENTITY", "MARKET"] },
+    "CommandContractVersion": { "type": "string", "pattern": "^m0a\\.v[0-9]+$" },
+    "ProjectLifecycle": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "DELETING"] },
+    "PageRequest": {
+      "type": "object",
+      "properties": { "cursor": { "type": ["string", "null"] }, "pageSize": { "type": "integer", "minimum": 1, "maximum": 500 } },
+      "additionalProperties": false
+    }
+  }
+}

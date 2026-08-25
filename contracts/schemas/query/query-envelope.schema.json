@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/query/query-envelope.schema.json",
+  "title": "QueryEnvelope",
+  "type": "object",
+  "properties": {
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "scope": { "type": "string", "minLength": 1 },
+    "pagination": { "$ref": "../shared/definitions.schema.json#/$defs/PageRequest" }
+  },
+  "required": ["projectId", "scope", "pagination"],
+  "additionalProperties": false
+}

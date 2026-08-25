@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/commit/commit-bundle.schema.json",
+  "title": "CommitBundle",
+  "type": "object",
+  "properties": {
+    "commitId": {
+      "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
+    },
+    "projectId": {
+      "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
+    },
+    "commandId": {
+      "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
+    },
+    "idempotencyKey": {
+      "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
+    },
+    "expectedProjectRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "contractVersion": {
+      "$ref": "../shared/definitions.schema.json#/$defs/CommandContractVersion"
+    },
+    "createdAt": {
+      "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "../artifact/artifact-envelope.schema.json"
+      },
+      "uniqueItems": true,
+      "x-uniqueBy": "artifactId"
+    },
+    "headUpdates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactType": {
+            "$ref": "../shared/definitions.schema.json#/$defs/ArtifactType"
+          },
+          "scope": {
+            "$ref": "../artifact/artifact-scope.schema.json"
+          },
+          "artifactId": {
+            "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "payloadHash": {
+            "$ref": "../shared/definitions.schema.json#/$defs/Sha256"
+          }
+        },
+        "required": [
+          "artifactType",
+          "scope",
+          "artifactId",
+          "version",
+          "payloadHash"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "canonDelta": {},
+    "obligationDelta": {},
+    "foreshadowDelta": {},
+    "knowledgeDelta": {},
+    "stateDelta": {},
+    "dependencyEdges": {
+      "type": "array"
+    },
+    "jobUpdates": {
+      "type": "array"
+    },
+    "decisionUpdates": {
+      "type": "array"
+    },
+    "gateCertificates": {
+      "type": "array"
+    }
+  },
+  "required": [
+    "commitId",
+    "projectId",
+    "commandId",
+    "idempotencyKey",
+    "contractVersion",
+    "createdAt",
+    "artifacts"
+  ],
+  "additionalProperties": false
+}

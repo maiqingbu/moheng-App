@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/commit/domain-receipt.schema.json",
+  "title": "DomainReceipt",
+  "type": "object",
+  "properties": {
+    "receiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "domain": { "type": "string", "minLength": 1 },
+    "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "commitReceiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "createdAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
+  },
+  "required": ["receiptId", "projectId", "domain", "commandId", "commitReceiptId", "createdAt", "receiptDigest"],
+  "additionalProperties": false
+}

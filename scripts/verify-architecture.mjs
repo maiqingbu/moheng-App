@@ -14,14 +14,45 @@ const walk = dir => {
 }
 walk(root)
 
-const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
-const text = files.map(file => fs.readFileSync(file, 'utf8')).join('\n')
+const sourceByPath = new Map(files.map(file => [file, fs.readFileSync(file, 'utf8')]))
+const read = relative => sourceByPath.get(path.join(root, relative))
+const text = [...sourceByPath.values()].join('\n')
+const projectRoot = path.dirname(root)
+const contractRoot = path.join(projectRoot, 'contracts')
+const generatedRoot = path.join(root, 'generated/contracts')
+const rustGeneratedRoot = path.join(projectRoot, 'src-tauri/src/generated/contracts')
+const manifestPath = path.join(contractRoot, 'manifests/schema-manifest.json')
 const errors = []
 
+// Rust authoritative write boundary: SQL may live only in migration/project DB,
+// catalog, repository, or CommitService ownership modules.
+const rustRoot = path.join(projectRoot, 'src-tauri/src')
+const rustFiles = []
+const walkRust = dir => {
+  for (const name of fs.readdirSync(dir)) {
+    const file = path.join(dir, name)
+    if (fs.statSync(file).isDirectory()) walkRust(file)
+    else if (name.endsWith('.rs')) rustFiles.push(file)
+  }
+}
+walkRust(rustRoot)
+const sqlOwnerPrefixes = ['catalog/', 'commit/', 'project_db/', 'repositories/']
+for (const file of rustFiles) {
+  const relative = path.relative(rustRoot, file).split(path.sep).join('/')
+  const source = fs.readFileSync(file, 'utf8')
+  const hasSql = /\b(?:INSERT\s+INTO|UPDATE\s+\w+|DELETE\s+FROM|SELECT\s+.+\s+FROM)\b/i.test(source)
+  if (hasSql && !sqlOwnerPrefixes.some(prefix => relative.startsWith(prefix))) {
+    errors.push(`Rust SQL 越过 authoritative write/query owner: ${relative}`)
+  }
+}
+
+if (!fs.existsSync(manifestPath)) errors.push('缺少 Schema manifest 唯一真源')
+for (const generatedPath of [generatedRoot, rustGeneratedRoot]) {
+  if (!fs.existsSync(generatedPath)) errors.push(`缺少生成合同目录 ${generatedPath}`)
+}
 for (const token of ['localStorage', 'sessionStorage', 'indexedDB']) {
   if (text.includes(token)) errors.push(`禁止使用 ${token} 冒充权威状态`)
 }
-
 const frozenRoutes = [
   '/projects', '/projects/new', '/projects/:id', '/projects/:id/market', '/projects/:id/directions',
   '/projects/:id/production', '/projects/:id/volumes', '/projects/:id/volumes/:volumeId',
@@ -52,7 +83,7 @@ for (const command of [
 }
 
 const uiFiles = files.filter(file => file.includes(`${path.sep}ui${path.sep}`))
-const ui = uiFiles.map(file => fs.readFileSync(file, 'utf8')).join('\n')
+const ui = uiFiles.map(file => sourceByPath.get(file)).join('\n')
 if (ui.includes('queryProjectBundle')) errors.push('UI 仍在查询整项目 Bundle')
 if (/store\.bundle|projectStore\.bundle/.test(ui)) errors.push('Pinia/UI 仍持有整项目 Bundle')
 

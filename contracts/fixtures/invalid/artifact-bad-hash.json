@@ -1,0 +1,20 @@
+{
+  "artifactId": "artifact-invalid",
+  "projectId": "project-demo",
+  "artifactType": "ChapterCandidate",
+  "scope": {
+    "level": "CHAPTER",
+    "chapterId": "chapter-1"
+  },
+  "version": 1,
+  "schemaVersion": "m0a.artifact.v1",
+  "artifactStatus": "CANDIDATE",
+  "payload": {},
+  "payloadHash": "bad",
+  "dependencyRefs": [],
+  "provenance": {
+    "createdBy": "test",
+    "commandId": "command-1"
+  },
+  "createdAt": "2026-08-24T00:00:00Z"
+}

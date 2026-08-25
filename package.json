@@ -8,12 +8,21 @@
     "build": "vue-tsc --noEmit && vite build",
     "build:fast": "vite build",
     "preview": "vite preview",
+    "test": "node --test tests/**/*.test.mjs",
     "typecheck": "vue-tsc --noEmit",
     "verify": "node scripts/verify-architecture.mjs && node scripts/verify-module-boundaries.mjs",
+    "verify:m0a": "node scripts/verify-m0a-evidence.mjs",
     "verify:boundaries": "node scripts/verify-module-boundaries.mjs",
-    "build:demo": "VITE_BROWSER_DEMO=true vite build"
+    "build:demo": "VITE_BROWSER_DEMO=true vite build",
+    "contracts:generate": "node contracts/tools/generate-contracts.mjs",
+    "contracts:validate": "node contracts/tools/validate-fixtures.mjs",
+    "contracts:golden": "node contracts/tools/verify-golden-hash.mjs",
+    "contracts:drift-check": "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && CONTRACTS_GENERATED_DIR=\"$tmp/ts\" CONTRACTS_RUST_GENERATED_DIR=\"$tmp/rust\" node contracts/tools/generate-contracts.mjs && diff -ru src/generated/contracts \"$tmp/ts\" && diff -ru src-tauri/src/generated/contracts \"$tmp/rust\"",
+    "verify:contracts": "npm run contracts:validate && npm run contracts:golden && npm run contracts:drift-check"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "pinia": "^3.0.0",
     "vue": "^3.5.0",
     "vue-router": "^4.5.0"

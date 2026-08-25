@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/project/project-record.schema.json",
+  "title": "ProjectCatalogRecord",
+  "type": "object",
+  "properties": {
+    "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "projectPath": { "type": "string", "minLength": 1 },
+    "title": { "type": "string" },
+    "lifecycle": { "$ref": "../shared/definitions.schema.json#/$defs/ProjectLifecycle" },
+    "createdAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "updatedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "lastOpenedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
+    "projectSchemaVersion": { "type": "string", "minLength": 1 },
+    "compatibilityState": { "type": "string", "enum": ["COMPATIBLE", "MIGRATION_REQUIRED", "RECOVERY"] }
+  },
+  "required": ["projectId", "projectPath", "title", "lifecycle", "createdAt", "updatedAt", "projectSchemaVersion", "compatibilityState"],
+  "additionalProperties": false
+}
