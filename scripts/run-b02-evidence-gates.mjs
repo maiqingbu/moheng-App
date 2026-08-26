@@ -75,6 +75,9 @@ const output = name => pendingLogs.get(name) ?? ''
 const metrics = parseMetrics({ targeted: output('b02_targeted_test.log'), allRust: output('cargo_all_targets.log'), node: output('npm_test.log'), contract: output('contracts_gate.log') })
 const finalStatus = results.every(result => result.blocking === false || (result.status === 'PASS' && result.exitCode === 0)) && gitBinding.status === 'PASS' ? 'PASS' : 'FAIL'
 for (const [logName, content] of pendingLogs) writeFileSync(resolve(evidence, logName), content)
+const nodeLines = output('npm_test.log').split('\n')
+writeFileSync(resolve(evidence, 'acceptance_generator_tests.log'), `${nodeLines.filter(line => line.includes('ACCEPTANCE-GEN-')).join('\n')}\n`)
+writeFileSync(resolve(evidence, 'git_binding_tests.log'), `${nodeLines.filter(line => line.includes('GIT-BINDING-')).join('\n')}\n`)
 writeFileSync(resolve(evidence, 'gate-results.json'), `${JSON.stringify({ generatedAt: new Date().toISOString(), sourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: before.dirty, workingTreeDirtyAfter: after.dirty, gitBinding, finalStatus, runnerExitCode: finalStatus === 'PASS' ? 0 : 1, metrics, gates: results }, null, 2)}\n`)
 console.log(`B02 gates recorded: ${results.filter(result => result.status === 'PASS').length}/${results.length} PASS; gitBinding=${gitBinding.status}`)
 if (finalStatus !== 'PASS') process.exitCode = 1
