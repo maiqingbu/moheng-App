@@ -901,6 +901,43 @@ fn b03_explicit_unknown_retry_keeps_original_budget_binding() {
 }
 
 #[test]
+fn b03_explicit_unknown_retry_rejects_missing_original_budget_binding() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:unknown-required", 3, 0, 100);
+    let first = budgeted_model_spec("mr:181818181818181818181818", "budget:unknown-required", 5);
+    let mut timeout_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout_transport, &first, NOW).is_err());
+    let mut second = model_spec();
+    second.model_run_id = "mr:191919191919191919191919".into();
+    second.idempotency_key = "model-key:missing-budget".into();
+    second.attempt_no = 1;
+    let mut retry_transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
+    assert!(matches!(
+        DurableModelRunner::resolve_unknown(
+            &connection,
+            &first.model_run_id,
+            "RETRY_REMOTE",
+            &mut retry_transport,
+            &second,
+            NOW,
+        ),
+        Err(RuntimeError::BudgetBindingMismatch)
+    ));
+    assert_eq!(retry_transport.send_calls(), 0);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "OPEN"
+    );
+}
+
+#[test]
 fn b03_explicit_unknown_retry_is_budget_blocked_before_transport_when_hold_exceeds_hard() {
     let (_temp, _manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
@@ -983,7 +1020,9 @@ fn b03_parse_and_completed_recovery_do_not_duplicate_settlement() {
     DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
     let before = connection.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa' AND cost_type='ACTUAL'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
     let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
-    DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).unwrap();
+    for _ in 0..3 {
+        DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).unwrap();
+    }
     let after = connection.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa' AND cost_type='ACTUAL'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
     assert_eq!(before, after);
     assert_eq!(retry_transport.send_calls(), 0);
