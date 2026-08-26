@@ -1,29 +1,37 @@
 
 > ai-novel-production-system-ui@1.0.0 test
-> node --test tests/**/*.test.mjs && vitest run tests/store
+> node --test tests/*.test.mjs tests/contracts/*.test.mjs && vitest run tests/store
 
-✔ should enforce every M0A HARD gate in CI without overwriting drift first (3.97443ms)
-✔ should inspect Rust command implementations and authoritative SQL boundaries (15.239785ms)
-✔ should normalize CRLF and CR before hashing payload text (18.744309ms)
-✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (0.317374ms)
-✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (0.418698ms)
-✔ should reject lone Unicode surrogates (0.60399ms)
-✔ should verify at least twenty frozen golden vectors (1.237756ms)
-✔ should generate every manifest schema into both languages without handwritten DTO omissions (34.977177ms)
-✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (1.351251ms)
-ℹ tests 9
+✔ ACCEPTANCE-GEN-01: all blocking gates PASS produces PASS (2.608773ms)
+✔ ACCEPTANCE-GEN-02: cargo clippy FAIL produces FAIL (0.246533ms)
+✔ ACCEPTANCE-GEN-03: build FAIL produces FAIL (0.293524ms)
+✔ ACCEPTANCE-GEN-04: missing blocking gate produces FAIL (0.205955ms)
+✔ ACCEPTANCE-GEN-05: mismatched test count produces FAIL (0.185223ms)
+✔ GIT-BINDING-01: unchanged clean commit produces PASS (0.141313ms)
+✔ GIT-BINDING-02: changed commit produces FAIL (0.334039ms)
+✔ GIT-BINDING-03: dirty after gates produces FAIL (0.139726ms)
+✔ should enforce every M0A HARD gate in CI without overwriting drift first (3.88027ms)
+✔ should inspect Rust command implementations and authoritative SQL boundaries (18.699155ms)
+✔ should normalize CRLF and CR before hashing payload text (2.606218ms)
+✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (0.228255ms)
+✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (0.235944ms)
+✔ should reject lone Unicode surrogates (0.510739ms)
+✔ should verify at least twenty frozen golden vectors (0.70542ms)
+✔ should generate every manifest schema into both languages without handwritten DTO omissions (25.796483ms)
+✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (0.686388ms)
+ℹ tests 17
 ℹ suites 0
-ℹ pass 9
+ℹ pass 17
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 534.946282
+ℹ duration_ms 322.649884
 
  RUN  v4.1.11 /Users/mac/Desktop/AI小说生产系统/ai-novel-production-system
 
 
  Test Files  3 passed (3)
       Tests  17 passed (17)
-   Start at  01:59:18
-   Duration  2.02s (transform 414ms, setup 0ms, import 1.10s, tests 1.27s, environment 0ms)
+   Start at  02:28:54
+   Duration  1.86s (transform 524ms, setup 0ms, import 955ms, tests 1.29s, environment 0ms)

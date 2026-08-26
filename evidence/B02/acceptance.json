@@ -2,8 +2,10 @@
   "batch": "B02",
   "milestone": "M0C",
   "status": "PASS",
-  "sourceCommit": "21fd7753727d1d6f1c129ed1df96b9abd8f97ed4",
-  "workingTreeDirty": false,
+  "sourceCommit": "82172418fbae09d8856e35f6aad19c7514444e6c",
+  "workingTreeDirtyBefore": false,
+  "workingTreeDirtyAfter": false,
+  "gitBinding": "PASS",
   "gates": [
     {
       "name": "contracts",
@@ -11,8 +13,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:35.589Z",
-      "finishedAt": "2026-08-26T17:59:38.076Z",
+      "startedAt": "2026-08-26T18:29:07.323Z",
+      "finishedAt": "2026-08-26T18:29:09.533Z",
       "log": "evidence/B02/contracts_gate.log"
     },
     {
@@ -21,8 +23,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:16.006Z",
-      "finishedAt": "2026-08-26T17:59:20.654Z",
+      "startedAt": "2026-08-26T18:28:53.241Z",
+      "finishedAt": "2026-08-26T18:28:56.291Z",
       "log": "evidence/B02/npm_test.log"
     },
     {
@@ -40,8 +42,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:20.654Z",
-      "finishedAt": "2026-08-26T17:59:25.928Z",
+      "startedAt": "2026-08-26T18:28:56.291Z",
+      "finishedAt": "2026-08-26T18:29:00.458Z",
       "log": "evidence/B02/typecheck.log"
     },
     {
@@ -50,8 +52,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:25.928Z",
-      "finishedAt": "2026-08-26T17:59:35.589Z",
+      "startedAt": "2026-08-26T18:29:00.458Z",
+      "finishedAt": "2026-08-26T18:29:07.323Z",
       "log": "evidence/B02/build.log"
     },
     {
@@ -60,9 +62,18 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:38.076Z",
-      "finishedAt": "2026-08-26T17:59:38.613Z",
+      "startedAt": "2026-08-26T18:29:09.533Z",
+      "finishedAt": "2026-08-26T18:29:10.039Z",
       "log": "evidence/B02/architecture_gate.log"
+    },
+    {
+      "name": "module_boundary",
+      "command": "npm run verify",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "log": "evidence/B02/architecture_gate.log",
+      "note": "module boundary is part of npm run verify"
     },
     {
       "name": "m0a",
@@ -70,8 +81,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:38.613Z",
-      "finishedAt": "2026-08-26T17:59:38.989Z",
+      "startedAt": "2026-08-26T18:29:10.039Z",
+      "finishedAt": "2026-08-26T18:29:10.360Z",
       "log": "evidence/B02/m0a_gate.log"
     },
     {
@@ -80,8 +91,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:38.989Z",
-      "finishedAt": "2026-08-26T17:59:39.411Z",
+      "startedAt": "2026-08-26T18:29:10.360Z",
+      "finishedAt": "2026-08-26T18:29:10.656Z",
       "log": "evidence/B02/cargo_fmt.log"
     },
     {
@@ -90,8 +101,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:59:39.411Z",
-      "finishedAt": "2026-08-26T18:00:01.113Z",
+      "startedAt": "2026-08-26T18:29:10.656Z",
+      "finishedAt": "2026-08-26T18:29:22.649Z",
       "log": "evidence/B02/cargo_check.log"
     },
     {
@@ -100,8 +111,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T18:00:01.113Z",
-      "finishedAt": "2026-08-26T18:00:21.756Z",
+      "startedAt": "2026-08-26T18:29:22.649Z",
+      "finishedAt": "2026-08-26T18:29:37.881Z",
       "log": "evidence/B02/cargo_clippy.log"
     },
     {
@@ -110,8 +121,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:57:31.621Z",
-      "finishedAt": "2026-08-26T17:59:16.006Z",
+      "startedAt": "2026-08-26T18:27:23.359Z",
+      "finishedAt": "2026-08-26T18:28:53.241Z",
       "log": "evidence/B02/cargo_all_targets.log"
     },
     {
@@ -120,8 +131,8 @@
       "exitCode": 0,
       "status": "PASS",
       "blocking": true,
-      "startedAt": "2026-08-26T17:56:48.648Z",
-      "finishedAt": "2026-08-26T17:57:31.620Z",
+      "startedAt": "2026-08-26T18:27:03.830Z",
+      "finishedAt": "2026-08-26T18:27:23.359Z",
       "log": "evidence/B02/b02_targeted_test.log"
     },
     {
@@ -141,30 +152,25 @@
       "blocking": true,
       "log": "evidence/B02/cargo_all_targets.log",
       "note": "B01 regression is included in Rust all-targets"
+    },
+    {
+      "name": "git_binding",
+      "status": "PASS",
+      "exitCode": 0,
+      "blocking": true,
+      "log": "evidence/B02/gate-results.json"
     }
   ],
+  "metricConsistency": "PASS",
   "predecessor": {
     "batch": "B01",
     "status": "FROZEN_PASS",
     "baselineCommit": "306d8882c6dbedcd2116a0044ad72773b578a9fe"
   },
-  "commands": [
-    "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
-    "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
-    "npm test",
-    "npm run typecheck",
-    "npm run build",
-    "npm run verify:contracts",
-    "npm run verify",
-    "npm run verify:m0a",
-    "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
-    "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
-    "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
-  ],
   "keyNumbers": {
     "b02TargetedRustTests": "20/20",
     "allRustTests": "110/110",
-    "nodeTests": "9/9",
+    "nodeTests": "17/17",
     "vitestTests": "17/17",
     "contractFixtures": "6 valid accepted, 24 invalid rejected",
     "goldenVectors": 26,
@@ -174,22 +180,33 @@
     "replayCount": 100,
     "volumeAtomicRollbackFixtures": 2
   },
+  "evidenceGenerator": {
+    "script": "scripts/generate-b02-acceptance.mjs",
+    "digest": "55a09ce8eeaebdbafaf155c2f65f9a78b181094191bfb7959f35bbe41a651c31"
+  },
+  "gateRunner": {
+    "script": "scripts/run-b02-evidence-gates.mjs",
+    "digest": "0541b64b261dc9b2c7e71b1e12c458746f4c04b3c5864290286593100e6675b3"
+  },
+  "gateRunnerExitCode": 0,
   "evidence": [
+    "acceptance.json",
     "gate-results.json",
-    "atomic_commit_matrix.json",
-    "fault_injection.log",
-    "receipt_replay.json",
-    "final_gate_negative_cases.json",
-    "repository_boundary.json",
-    "gate_policy_boundary.json",
-    "gate_certificate_binding.json",
-    "domain_receipt_roundtrip.json",
-    "volume_atomic_rollback.json",
-    "sqlite_integrity.json",
     "test.log",
-    "changed-files.txt",
-    "environment.json",
-    "commands.log",
-    "regression_summary.json"
+    "npm_test.log",
+    "cargo_fmt.log",
+    "cargo_check.log",
+    "cargo_clippy.log",
+    "cargo_all_targets.log",
+    "b02_targeted_test.log",
+    "typecheck.log",
+    "build.log",
+    "contracts_gate.log",
+    "architecture_gate.log",
+    "m0a_gate.log",
+    "sqlite_integrity.json",
+    "acceptance_generator_tests.log",
+    "git_binding_tests.log",
+    "changed-files.txt"
   ]
 }

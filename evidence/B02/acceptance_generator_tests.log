@@ -1,0 +1,5 @@
+✔ ACCEPTANCE-GEN-01: all blocking gates PASS produces PASS (2.608773ms)
+✔ ACCEPTANCE-GEN-02: cargo clippy FAIL produces FAIL (0.246533ms)
+✔ ACCEPTANCE-GEN-03: build FAIL produces FAIL (0.293524ms)
+✔ ACCEPTANCE-GEN-04: missing blocking gate produces FAIL (0.205955ms)
+✔ ACCEPTANCE-GEN-05: mismatched test count produces FAIL (0.185223ms)

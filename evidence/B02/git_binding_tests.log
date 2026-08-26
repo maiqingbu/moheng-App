@@ -1,0 +1,3 @@
+✔ GIT-BINDING-01: unchanged clean commit produces PASS (0.141313ms)
+✔ GIT-BINDING-02: changed commit produces FAIL (0.334039ms)
+✔ GIT-BINDING-03: dirty after gates produces FAIL (0.139726ms)
