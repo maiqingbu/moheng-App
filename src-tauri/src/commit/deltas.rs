@@ -395,6 +395,7 @@ pub(crate) fn certificate_source_digest(
 ) -> Result<String, super::CommitError> {
     Ok(sha256_canonical(&json!({
         "gatePolicyRef": certificate.gate_policy_ref,
+        "subjectRef": certificate.subject_ref,
         "evidenceRefs": certificate.evidence_refs
     }))?)
 }

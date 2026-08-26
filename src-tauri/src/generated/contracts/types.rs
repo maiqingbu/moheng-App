@@ -616,9 +616,13 @@ pub struct DomainReceipt {
     pub domain: String,
     pub command_id: OpaqueId,
     pub commit_receipt_id: OpaqueId,
+    pub artifact_refs: Vec<ArtifactRef>,
+    pub payload: DomainReceiptPayload,
     pub created_at: Rfc3339Utc,
     pub receipt_digest: Sha256,
 }
+
+pub type DomainReceiptPayload = std::collections::BTreeMap<String, serde_json::Value>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -626,6 +630,7 @@ pub struct GateCertificate {
     pub certificate_id: OpaqueId,
     pub project_id: OpaqueId,
     pub gate_policy_ref: ArtifactRef,
+    pub subject_ref: ArtifactRef,
     pub evidence_refs: Vec<ArtifactRef>,
     pub source_digest: Sha256,
     pub passed_at: Rfc3339Utc,

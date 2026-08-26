@@ -7,11 +7,12 @@
     "certificateId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
     "projectId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
     "gatePolicyRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "subjectRef": { "$ref": "../artifact/artifact-ref.schema.json" },
     "evidenceRefs": { "type": "array", "items": { "$ref": "../artifact/artifact-ref.schema.json" } },
     "sourceDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
     "passedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
     "certificateDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
   },
-  "required": ["certificateId", "projectId", "gatePolicyRef", "evidenceRefs", "sourceDigest", "passedAt", "certificateDigest"],
+  "required": ["certificateId", "projectId", "gatePolicyRef", "subjectRef", "evidenceRefs", "sourceDigest", "passedAt", "certificateDigest"],
   "additionalProperties": false
 }

@@ -1,0 +1,10 @@
+{
+  "receiptId": "domain-receipt:invalid:digest",
+  "projectId": "p1",
+  "domain": "chapter-production",
+  "commandId": "cmd:invalid:digest",
+  "commitReceiptId": "receipt:invalid:digest",
+  "artifactRefs": [],
+  "payload": {},
+  "createdAt": "2026-08-27T00:00:00Z"
+}

@@ -9,9 +9,11 @@
     "domain": { "type": "string", "minLength": 1 },
     "commandId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
     "commitReceiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "artifactRefs": { "type": "array", "items": { "$ref": "../artifact/artifact-ref.schema.json" } },
+    "payload": { "type": "object" },
     "createdAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
     "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
   },
-  "required": ["receiptId", "projectId", "domain", "commandId", "commitReceiptId", "createdAt", "receiptDigest"],
+  "required": ["receiptId", "projectId", "domain", "commandId", "commitReceiptId", "artifactRefs", "payload", "createdAt", "receiptDigest"],
   "additionalProperties": false
 }

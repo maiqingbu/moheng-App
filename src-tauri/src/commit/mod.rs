@@ -365,12 +365,23 @@ impl CommitService {
         if let Some(certificates) = &bundle.gate_certificates {
             for certificate in certificates {
                 let evidence_refs = serde_json::to_string(&certificate.evidence_refs)?;
-                let existing: Option<(String, i64, String, String, String, String, String)> =
+                let existing: Option<(
+                    String,
+                    i64,
+                    String,
+                    String,
+                    i64,
+                    String,
+                    String,
+                    String,
+                    String,
+                    String,
+                )> =
                     connection
                         .query_row(
-                            "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
+                            "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, subject_artifact_id, subject_version, subject_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
                             [&bundle.project_id, &certificate.certificate_id],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
                         )
                         .optional()?;
                 if let Some(existing) = existing {
@@ -378,6 +389,9 @@ impl CommitService {
                         certificate.gate_policy_ref.artifact_id.clone(),
                         certificate.gate_policy_ref.version,
                         certificate.gate_policy_ref.payload_hash.clone(),
+                        certificate.subject_ref.artifact_id.clone(),
+                        certificate.subject_ref.version,
+                        certificate.subject_ref.payload_hash.clone(),
                         evidence_refs,
                         certificate.source_digest.clone(),
                         certificate.passed_at.clone(),
@@ -390,8 +404,8 @@ impl CommitService {
                     }
                 } else {
                     connection.execute(
-                        "INSERT INTO gate_certificates(certificate_id, project_id, gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        libsql_rusqlite::params![certificate.certificate_id, certificate.project_id, certificate.gate_policy_ref.artifact_id, certificate.gate_policy_ref.version, certificate.gate_policy_ref.payload_hash, evidence_refs, certificate.source_digest, certificate.passed_at, certificate.certificate_digest],
+                        "INSERT INTO gate_certificates(certificate_id, project_id, gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, subject_artifact_id, subject_version, subject_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        libsql_rusqlite::params![certificate.certificate_id, certificate.project_id, certificate.gate_policy_ref.artifact_id, certificate.gate_policy_ref.version, certificate.gate_policy_ref.payload_hash, certificate.subject_ref.artifact_id, certificate.subject_ref.version, certificate.subject_ref.payload_hash, evidence_refs, certificate.source_digest, certificate.passed_at, certificate.certificate_digest],
                     )?;
                 }
             }
@@ -449,6 +463,8 @@ impl CommitService {
                 domain: draft.domain.clone(),
                 command_id: bundle.command_id.clone(),
                 commit_receipt_id: receipt.receipt_id.clone(),
+                artifact_refs: draft.artifact_refs.clone().unwrap_or_default(),
+                payload: draft.payload.clone().unwrap_or_default(),
                 created_at: committed_at.to_string(),
                 receipt_digest: String::new(),
             };
@@ -456,10 +472,25 @@ impl CommitService {
             unsigned["receiptDigest"] = serde_json::json!("");
             domain_receipt.receipt_digest = sha256_canonical(&unsigned)?;
             let receipt_json = serde_json::to_string(&domain_receipt)?;
-            connection.execute(
-                "INSERT INTO domain_receipts(receipt_id, project_id, domain, command_id, commit_receipt_id, created_at, receipt_json, receipt_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                libsql_rusqlite::params![domain_receipt.receipt_id, domain_receipt.project_id, domain_receipt.domain, domain_receipt.command_id, domain_receipt.commit_receipt_id, domain_receipt.created_at, receipt_json, domain_receipt.receipt_digest],
-            )?;
+            let existing: Option<String> = connection
+                .query_row(
+                    "SELECT receipt_json FROM domain_receipts WHERE project_id = ?1 AND receipt_id = ?2",
+                    [&bundle.project_id, &domain_receipt.receipt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing != receipt_json {
+                    return Err(CommitError::ContractInvalid(
+                        "DomainReceipt id already exists with a different payload".into(),
+                    ));
+                }
+            } else {
+                connection.execute(
+                    "INSERT INTO domain_receipts(receipt_id, project_id, domain, command_id, commit_receipt_id, created_at, receipt_json, receipt_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    libsql_rusqlite::params![domain_receipt.receipt_id, domain_receipt.project_id, domain_receipt.domain, domain_receipt.command_id, domain_receipt.commit_receipt_id, domain_receipt.created_at, receipt_json, domain_receipt.receipt_digest],
+                )?;
+            }
         }
         Ok(receipt)
     }

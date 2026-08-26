@@ -252,6 +252,8 @@ export interface DomainReceipt {
   "domain": string
   "commandId": OpaqueId
   "commitReceiptId": OpaqueId
+  "artifactRefs": Array<ArtifactRef>
+  "payload": {  }
   "createdAt": Rfc3339Utc
   "receiptDigest": Sha256
 }
@@ -260,6 +262,7 @@ export interface GateCertificate {
   "certificateId": OpaqueId
   "projectId": OpaqueId
   "gatePolicyRef": ArtifactRef
+  "subjectRef": ArtifactRef
   "evidenceRefs": Array<ArtifactRef>
   "sourceDigest": Sha256
   "passedAt": Rfc3339Utc

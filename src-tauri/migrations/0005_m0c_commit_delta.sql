@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS gate_certificates (
   gate_policy_artifact_id TEXT NOT NULL,
   gate_policy_version INTEGER NOT NULL,
   gate_policy_payload_hash TEXT NOT NULL CHECK (length(gate_policy_payload_hash) = 64),
+  subject_artifact_id TEXT NOT NULL,
+  subject_version INTEGER NOT NULL,
+  subject_payload_hash TEXT NOT NULL CHECK (length(subject_payload_hash) = 64),
   evidence_refs_json TEXT NOT NULL DEFAULT '[]',
   source_digest TEXT NOT NULL CHECK (length(source_digest) = 64),
   passed_at TEXT NOT NULL,
@@ -47,7 +50,8 @@ CREATE TABLE IF NOT EXISTS gate_certificates (
   PRIMARY KEY (certificate_id),
   UNIQUE (project_id, certificate_id),
   FOREIGN KEY (project_id) REFERENCES project_meta(project_id),
-  FOREIGN KEY (gate_policy_artifact_id, gate_policy_version) REFERENCES artifacts(artifact_id, version)
+  FOREIGN KEY (gate_policy_artifact_id, gate_policy_version) REFERENCES artifacts(artifact_id, version),
+  FOREIGN KEY (subject_artifact_id, subject_version) REFERENCES artifacts(artifact_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS domain_receipts (

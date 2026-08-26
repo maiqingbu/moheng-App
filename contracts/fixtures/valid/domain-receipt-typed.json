@@ -1,0 +1,17 @@
+{
+  "receiptId": "domain-receipt:p1:chapter:1",
+  "projectId": "p1",
+  "domain": "chapter-production",
+  "commandId": "cmd:p1:chapter:1",
+  "commitReceiptId": "receipt:p1:chapter:1",
+  "artifactRefs": [
+    {
+      "artifactId": "art:p1:chapter:1",
+      "version": 1,
+      "payloadHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "payload": {"scope": "CHAPTER"},
+  "createdAt": "2026-08-27T00:00:00Z",
+  "receiptDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

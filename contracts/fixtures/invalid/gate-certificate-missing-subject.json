@@ -1,0 +1,9 @@
+{
+  "certificateId": "gate:invalid:missing-subject",
+  "projectId": "p1",
+  "gatePolicyRef": {"artifactId":"gate-policy:p1:final","version":1,"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "evidenceRefs": [],
+  "sourceDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "passedAt": "2026-08-27T00:00:00Z",
+  "certificateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

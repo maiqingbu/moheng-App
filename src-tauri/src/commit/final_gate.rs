@@ -85,6 +85,40 @@ fn resolve_artifact(
         .ok_or_else(|| invalid("artifact reference not found or hash mismatch"))
 }
 
+fn resolve_committed_gate_policy(
+    connection: &Connection,
+    bundle: &CommitBundle,
+    artifact: &ArtifactRef,
+) -> Result<ResolvedArtifact, CommitError> {
+    let resolved: ResolvedArtifact = connection
+        .query_row(
+            "SELECT artifact_type, scope_level, scope_key, artifact_status FROM artifacts WHERE project_id = ?1 AND artifact_id = ?2 AND version = ?3 AND payload_hash = ?4",
+            libsql_rusqlite::params![bundle.project_id, artifact.artifact_id, artifact.version, artifact.payload_hash],
+            |row| {
+                Ok(ResolvedArtifact {
+                    artifact_type: row.get(0)?,
+                    scope_level: row.get(1)?,
+                    scope_key: row.get(2)?,
+                    status: row.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| invalid("GatePolicy must pre-exist the Final Commit"))?;
+    if resolved.artifact_type != "GatePolicy" || resolved.status != "COMMITTED" {
+        return Err(invalid("GatePolicy must be a committed authority artifact"));
+    }
+    let approved_head: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM canonical_heads WHERE project_id = ?1 AND artifact_type = 'GatePolicy' AND scope_level = ?2 AND scope_key = ?3 AND artifact_id = ?4 AND version = ?5 AND payload_hash = ?6)",
+        libsql_rusqlite::params![bundle.project_id, resolved.scope_level, resolved.scope_key, artifact.artifact_id, artifact.version, artifact.payload_hash],
+        |row| row.get(0),
+    )?;
+    if !approved_head {
+        return Err(invalid("GatePolicy must be the approved canonical head"));
+    }
+    Ok(resolved)
+}
+
 fn reference_artifact(
     connection: &Connection,
     bundle: &CommitBundle,
@@ -332,6 +366,24 @@ fn validate_heads(connection: &Connection, bundle: &CommitBundle) -> Result<(), 
             }
         }
     }
+    for head in bundle.head_updates.iter().flatten() {
+        if enum_string(&head.artifact_type)? == "FinalChapter" {
+            let bound = bundle
+                .gate_certificates
+                .iter()
+                .flatten()
+                .any(|certificate| {
+                    certificate.subject_ref.artifact_id == head.artifact_id
+                        && certificate.subject_ref.version == head.version
+                        && certificate.subject_ref.payload_hash == head.payload_hash
+                });
+            if !bound {
+                return Err(invalid(
+                    "FinalChapter head must match a GateCertificate subjectRef",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -347,11 +399,22 @@ fn existing_certificate_matches(
     bundle: &CommitBundle,
     certificate: &GateCertificate,
 ) -> Result<bool, CommitError> {
-    let existing: Option<(String, i64, String, String, String, String, String)> = connection
+    let existing: Option<(
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = connection
         .query_row(
-            "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
+            "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, subject_artifact_id, subject_version, subject_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
             [&bundle.project_id, &certificate.certificate_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
         )
         .optional()?;
     let Some(existing) = existing else {
@@ -363,6 +426,9 @@ fn existing_certificate_matches(
             certificate.gate_policy_ref.artifact_id.clone(),
             certificate.gate_policy_ref.version,
             certificate.gate_policy_ref.payload_hash.clone(),
+            certificate.subject_ref.artifact_id.clone(),
+            certificate.subject_ref.version,
+            certificate.subject_ref.payload_hash.clone(),
             evidence_refs,
             certificate.source_digest.clone(),
             certificate.passed_at.clone(),
@@ -395,17 +461,12 @@ fn validate_gate_certificates(
         if certificate.certificate_digest != super::deltas::certificate_digest(certificate)? {
             return Err(CommitError::GateCertificateDigestMismatch);
         }
-        let policy = resolve_artifact(connection, bundle, &certificate.gate_policy_ref)?;
+        let policy =
+            resolve_committed_gate_policy(connection, bundle, &certificate.gate_policy_ref)?;
         if policy.artifact_type != "GatePolicy" {
             return Err(invalid(
                 "gatePolicyRef must reference a GatePolicy artifact",
             ));
-        }
-        if !matches!(
-            policy.status.as_str(),
-            "CANDIDATE" | "VALIDATED" | "COMMITTED"
-        ) {
-            return Err(invalid("gate policy artifact is not active"));
         }
         if let Some((level, key)) = &target_scope {
             if policy.scope_level != "PROJECT"
@@ -427,6 +488,19 @@ fn validate_gate_certificates(
                         "gate evidence scope does not match the transaction scope",
                     ));
                 }
+            }
+        }
+        let subject = resolve_artifact(connection, bundle, &certificate.subject_ref)?;
+        if subject.artifact_type == "ChapterCandidate" {
+            return Err(invalid(
+                "GateCertificate subject cannot be ChapterCandidate",
+            ));
+        }
+        if let Some((level, key)) = &target_scope {
+            if &subject.scope_level != level || &subject.scope_key != key {
+                return Err(invalid(
+                    "GateCertificate subject scope does not match the transaction scope",
+                ));
             }
         }
         let _ = existing_certificate_matches(connection, bundle, certificate)?;
@@ -515,6 +589,28 @@ fn validate_receipt_draft(
     }
     for artifact in draft.artifact_refs.iter().flatten() {
         let _ = resolve_artifact(connection, bundle, artifact)?;
+    }
+    if let Some(receipt_id) = &draft.receipt_id {
+        if let Some(stored_json) = connection
+            .query_row(
+                "SELECT receipt_json FROM domain_receipts WHERE project_id = ?1 AND receipt_id = ?2",
+                [&bundle.project_id, receipt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let stored: Value = serde_json::from_str(&stored_json)?;
+            let expected_refs = serde_json::to_value(draft.artifact_refs.clone().unwrap_or_default())?;
+            let expected_payload = serde_json::to_value(draft.payload.clone().unwrap_or_default())?;
+            if stored["domain"] != draft.domain
+                || stored["artifactRefs"] != expected_refs
+                || stored["payload"] != expected_payload
+            {
+                return Err(invalid(
+                    "DomainReceipt id already exists with different artifactRefs or payload",
+                ));
+            }
+        }
     }
     Ok(())
 }

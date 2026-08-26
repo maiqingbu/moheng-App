@@ -1,0 +1,10 @@
+{
+  "certificateId": "gate:invalid:subject-hash",
+  "projectId": "p1",
+  "gatePolicyRef": {"artifactId":"gate-policy:p1:final","version":1,"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "subjectRef": {"artifactId":"art:p1:chapter:1","version":1,"payloadHash":"not-a-sha"},
+  "evidenceRefs": [],
+  "sourceDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "passedAt": "2026-08-27T00:00:00Z",
+  "certificateDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}
