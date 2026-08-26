@@ -90,6 +90,8 @@ export function generateAcceptance(evidenceDir = process.env.B03_EVIDENCE_DIR ??
     contract: read('contracts_gate.log')
   })
   const result = evaluateAcceptance({ gateResults, actualMetrics })
+  const evidenceFiles = new Set(readdirSync(evidenceDir))
+  evidenceFiles.add('acceptance.json')
   const acceptance = {
     batch: 'B03',
     milestone: 'M0D',
@@ -115,7 +117,7 @@ export function generateAcceptance(evidenceDir = process.env.B03_EVIDENCE_DIR ??
       digest: digest(resolve(root, 'scripts/run-b03-evidence-gates.mjs'))
     },
     gateRunnerExitCode: gateResults.runnerExitCode ?? (result.status === 'PASS' ? 0 : 1),
-    evidence: readdirSync(evidenceDir).sort()
+    evidence: [...evidenceFiles].sort()
   }
   writeFileSync(resolve(evidenceDir, 'acceptance.json'), `${JSON.stringify(acceptance, null, 2)}\n`)
   return acceptance
