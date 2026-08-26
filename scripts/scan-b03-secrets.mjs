@@ -1,8 +1,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { delimiter, resolve } from 'node:path'
 
 const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
-const targets = [resolve(root, 'evidence/B03')]
+const evidenceDir = resolve(process.env.B03_EVIDENCE_DIR ?? resolve(root, 'evidence/B03'))
+const targets = [evidenceDir]
+if (process.env.B03_SCAN_PATHS) {
+  targets.push(...process.env.B03_SCAN_PATHS.split(delimiter).filter(Boolean).map(resolve))
+}
 const forbidden = [/sk-secret-b03/g, /Authorization:\s*Bearer\s+\S+/gi]
 const hits = []
 
@@ -20,7 +24,7 @@ function visit(path) {
 }
 
 for (const target of targets) visit(target)
-console.log(`B03 secret scan: ${hits.length === 0 ? 'PASS' : 'FAIL'}`)
+console.log(`B03 secret scan: ${hits.length === 0 ? 'PASS' : 'FAIL'} paths=${targets.join(',')}`)
 if (hits.length > 0) {
   console.error([...new Set(hits)].join('\n'))
   process.exitCode = 1

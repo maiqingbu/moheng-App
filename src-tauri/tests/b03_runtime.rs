@@ -757,8 +757,9 @@ fn b03_unknown_requires_explicit_retry_decision_for_new_attempt() {
         DurableModelRunner::execute(&connection, &mut timeout_transport, &model_spec(), NOW)
             .is_err()
     );
-    let mut next_spec = budgeted_model_spec("mr:121212121212121212121212", "", 1);
-    next_spec.budget_id = None;
+    let mut next_spec = model_spec();
+    next_spec.model_run_id = "mr:121212121212121212121212".into();
+    next_spec.idempotency_key = "model-key:explicit-retry".into();
     next_spec.attempt_no = 1;
     let mut retry_transport = FakeModelTransport::success(json!({"draft":"explicit"}));
     DurableModelRunner::resolve_unknown(
@@ -819,7 +820,7 @@ fn b03_restart_recovery_projects_unknown_decision_state() {
 
 #[test]
 fn b03_secret_store_is_consumed_at_transport_boundary_and_redacted() {
-    let (_temp, _manager, connection) = project();
+    let (temp, _manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
     let store = MemorySecretStore::new();
     let mut transport = ai_novel_production_system_core::runtime::SecretBackedTransport::new(
@@ -858,6 +859,10 @@ fn b03_secret_store_is_consumed_at_transport_boundary_and_redacted() {
         ),
         "Authorization: Bearer [REDACTED]"
     );
+    let db_path = temp.path().join("projects/p1/project.db");
+    drop(connection);
+    let db_bytes = std::fs::read(&db_path).unwrap();
+    assert!(!String::from_utf8_lossy(&db_bytes).contains("sk-secret-b03"));
 }
 
 #[test]

@@ -9,8 +9,10 @@ export const REQUIRED_BLOCKING_GATES = [
   'contracts', 'node_tests', 'frontend_vitest', 'typecheck', 'build',
   'architecture', 'module_boundary', 'm0a', 'b01_regression', 'b02_regression',
   'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets',
-  'b03_targeted', 'sqlite_integrity', 'secret_scan', 'budget_runtime',
-  'modelrun_recovery', 'lease_runtime', 'git_binding'
+  'b03_targeted', 'sqlite_integrity', 'unknown_budget', 'settlement_consistency',
+  'stable_id_regression', 'secret_provider_wiring', 'secret_scan',
+  'budget_runtime', 'modelrun_recovery', 'lease_runtime', 'recovery_matrix',
+  'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {

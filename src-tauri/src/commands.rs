@@ -349,9 +349,6 @@ fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String
             StableIdKind::Job,
             command_id,
         )?);
-    if !job_id.starts_with("job:") {
-        return Err("stable job id required".into());
-    }
     let stages = payload
         .and_then(|value| value.get("stages"))
         .and_then(Value::as_array)

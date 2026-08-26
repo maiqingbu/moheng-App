@@ -41,7 +41,12 @@ const results = []
 const logs = new Map()
 for (const [name, command, logName] of commands) {
   const startedAt = new Date().toISOString()
-  const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8' })
+  const result = spawnSync(command, {
+    cwd: root,
+    shell: true,
+    encoding: 'utf8',
+    env: { ...process.env, B03_EVIDENCE_DIR: evidence }
+  })
   const exitCode = result.status ?? 1
   const content = `${result.stdout ?? ''}${result.stderr ?? ''}`
   logs.set(logName, content)
@@ -74,6 +79,11 @@ for (const [name, source, note] of [
   ['budget_runtime', 'b03_targeted', 'budget lifecycle is covered by B03 targeted Rust tests'],
   ['modelrun_recovery', 'b03_targeted', 'ModelRun recovery is covered by B03 targeted Rust tests'],
   ['lease_runtime', 'b03_targeted', 'lease lifecycle is covered by B03 targeted Rust tests']
+  ,['unknown_budget', 'b03_targeted', 'UNKNOWN explicit retry budget is covered by B03 targeted Rust tests']
+  ,['settlement_consistency', 'b03_targeted', 'actual settlement consistency is covered by B03 targeted Rust tests']
+  ,['stable_id_regression', 'b03_targeted', 'formal Stable ID regression is covered by B03 targeted Rust tests and B01']
+  ,['secret_provider_wiring', 'b03_targeted', 'provider credential assertion is covered by B03 targeted Rust tests']
+  ,['recovery_matrix', 'b03_targeted', 'raw/completed/restart recovery is covered by B03 targeted Rust tests']
 ]) {
   const sourceResult = results.find(result => result.name === source)
   results.push({

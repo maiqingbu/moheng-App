@@ -29,7 +29,15 @@ test('B03 acceptance fails when a required gate is missing', () => {
   assert.equal(evaluateAcceptance({ gateResults: result, actualMetrics: result.metrics }).status, 'FAIL')
 })
 
-for (const gateName of ['secret_scan', 'budget_runtime', 'modelrun_recovery', 'git_binding']) {
+for (const gateName of [
+  'secret_scan',
+  'unknown_budget',
+  'settlement_consistency',
+  'stable_id_regression',
+  'modelrun_recovery',
+  'recovery_matrix',
+  'git_binding'
+]) {
   test(`B03 acceptance fails when ${gateName} fails`, () => {
     const result = passingResults()
     if (gateName === 'git_binding') result.gitBinding.status = 'FAIL'

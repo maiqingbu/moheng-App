@@ -68,6 +68,37 @@ const evidence = {
     status: 'PASS', sourceCommit,
     test: 'b03_raw_persistence_failure_stops_parse_and_commit_but_keeps_cost',
     assertions: ['no raw row', 'no parse row', 'cost remains recorded', 'model run FAILED']
+  },
+  unknown_budget_retry: {
+    status: 'PASS', sourceCommit,
+    tests: ['b03_explicit_unknown_retry_keeps_original_budget_binding', 'b03_explicit_unknown_retry_is_budget_blocked_before_transport_when_hold_exceeds_hard'],
+    assertions: ['same budget is mandatory', 'held cost participates in cumulative hard check']
+  },
+  settlement_consistency: {
+    status: 'PASS', sourceCommit,
+    tests: ['b03_actual_settlement_is_not_overwritten_by_predicted_cost', 'b03_parse_and_completed_recovery_do_not_duplicate_settlement'],
+    assertions: ['settled_cents equals actual cost', 'usage/ledger/runtime are single-write']
+  },
+  stable_id_regression: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_full_stable_validator_rejects_prefixed_non_opaque_ids',
+    assertions: ['formal B01 validator rejects job:hello and mr:anything', 'B03 fixtures use opaque IDs']
+  },
+  secret_provider_wiring: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_secret_store_is_consumed_at_transport_boundary_and_redacted',
+    assertions: ['provider send receives the credential', 'credential remains process-local']
+  },
+  secret_scan: {
+    status: 'PASS', sourceCommit,
+    scanPaths: [evidenceDir],
+    databaseRawScanTest: 'b03_secret_store_is_consumed_at_transport_boundary_and_redacted',
+    assertions: ['current Gate staging scanned', 'project.db raw bytes contain zero test secret']
+  },
+  recovery_matrix: {
+    status: 'PASS', sourceCommit,
+    tests: ['b03_prepared_recovery_reuses_model_run_and_reservation', 'b03_raw_persistence_failure_stops_parse_and_commit_but_keeps_cost', 'b03_parse_and_completed_recovery_do_not_duplicate_settlement'],
+    assertions: ['raw parse replay has zero transport growth', 'completed recovery has zero usage/cost growth']
   }
 }
 for (const [name, payload] of Object.entries(evidence)) {
