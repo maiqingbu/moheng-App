@@ -1,29 +1,30 @@
-B01 最终三项收口 changed-files（相对当前 HEAD，提交前状态）
+B01 最终三项收口 changed-files（最终修复提交）
 
-状态码来自 git status --porcelain=v1；列出的路径必须存在于最终 source-only 包。
+sourceCommit: 49e8b74aca3091ab9c0d067964061812679fe8a1
+列出的每个路径必须存在于最终 source-only 包。
 
- M MULTI_PROJECT_README.md
- M evidence/B01/acceptance.json
- M evidence/B01/changed-files.txt
- M evidence/B01/query-plans.json
- M src-tauri/Cargo.lock
- M src-tauri/Cargo.toml
- M src-tauri/src/commands.rs
- M src-tauri/src/stable_id.rs
- M src-tauri/tests/b01_query_plans.rs
- M src-tauri/tests/b01_stable_id.rs
- M src-tauri/tests/m0b_longterm_migration.rs
- M src-tauri/tests/project_command_recovery.rs
- M src-tauri/tests/real_ipc_e2e.rs
- M src/application/contracts.ts
- M src/infrastructure/browser-demo/demoPort.ts
- M src/ui/pages/ProjectLibrary.vue
- M src/ui/stores/projectLibraryStore.ts
- M src/ui/stores/projectStore.ts
- M tests/store/project-store-race.test.ts
-?? AGENTS.md
-?? evidence/B01/library_revision.json
-?? evidence/B01/receipt_contract_parity.json
-?? evidence/B01/stable_id_boundary.json
-?? tests/store/project-library-receipt.test.ts
-?? tests/store/receipt-parity.test.ts
+AGENTS.md
+MULTI_PROJECT_README.md
+evidence/B01/acceptance.json
+evidence/B01/changed-files.txt
+evidence/B01/library_revision.json
+evidence/B01/query-plans.json
+evidence/B01/receipt_contract_parity.json
+evidence/B01/stable_id_boundary.json
+src-tauri/Cargo.lock
+src-tauri/Cargo.toml
+src-tauri/src/commands.rs
+src-tauri/src/stable_id.rs
+src-tauri/tests/b01_query_plans.rs
+src-tauri/tests/b01_stable_id.rs
+src-tauri/tests/m0b_longterm_migration.rs
+src-tauri/tests/project_command_recovery.rs
+src-tauri/tests/real_ipc_e2e.rs
+src/application/contracts.ts
+src/infrastructure/browser-demo/demoPort.ts
+src/ui/pages/ProjectLibrary.vue
+src/ui/stores/projectLibraryStore.ts
+src/ui/stores/projectStore.ts
+tests/store/project-library-receipt.test.ts
+tests/store/project-store-race.test.ts
+tests/store/receipt-parity.test.ts
