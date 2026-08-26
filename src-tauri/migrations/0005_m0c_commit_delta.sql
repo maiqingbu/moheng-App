@@ -50,26 +50,53 @@ CREATE TABLE IF NOT EXISTS gate_certificates (
   FOREIGN KEY (gate_policy_artifact_id, gate_policy_version) REFERENCES artifacts(artifact_id, version)
 );
 
+CREATE TABLE IF NOT EXISTS domain_receipts (
+  receipt_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  command_id TEXT NOT NULL,
+  commit_receipt_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  receipt_json TEXT NOT NULL,
+  receipt_digest TEXT NOT NULL CHECK (length(receipt_digest) = 64),
+  PRIMARY KEY (receipt_id),
+  UNIQUE (project_id, receipt_id),
+  UNIQUE (project_id, domain, command_id),
+  FOREIGN KEY (project_id) REFERENCES project_meta(project_id),
+  FOREIGN KEY (commit_receipt_id) REFERENCES commit_receipts(receipt_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_decisions_project_status
   ON decisions(project_id, decision_type, outcome, updated_at);
 CREATE INDEX IF NOT EXISTS idx_gate_certificates_project_time
   ON gate_certificates(project_id, passed_at);
+CREATE INDEX IF NOT EXISTS idx_domain_receipts_project_time
+  ON domain_receipts(project_id, created_at);
 
 INSERT OR IGNORE INTO authority_registry(authority_key, authoritative_table, write_owner, projection_only) VALUES
   ('decision', 'decisions', 'CommitService', 0),
   ('state_delta', 'state_deltas', 'CommitService', 0),
   ('gate_certificate', 'gate_certificates', 'CommitService', 0);
+INSERT OR IGNORE INTO authority_registry(authority_key, authoritative_table, write_owner, projection_only) VALUES
+  ('domain_receipt', 'domain_receipts', 'CommitService', 0);
 
 INSERT OR IGNORE INTO table_family_registry(table_name, family, authority_key, retention_class) VALUES
   ('decisions', 'decision', 'decision', 'PERMANENT'),
   ('state_deltas', 'state', 'state_delta', 'PERMANENT'),
   ('gate_certificates', 'receipt', 'gate_certificate', 'PERMANENT');
+INSERT OR IGNORE INTO table_family_registry(table_name, family, authority_key, retention_class) VALUES
+  ('domain_receipts', 'receipt', 'domain_receipt', 'PERMANENT');
 
 UPDATE receipt_taxonomy
 SET authority_state = 'ACTIVE', owner = 'CommitService'
 WHERE receipt_type = 'GateCertificate';
+UPDATE receipt_taxonomy
+SET authority_state = 'ACTIVE', owner = 'CommitService'
+WHERE receipt_type = 'DomainReceipt';
 
 INSERT OR IGNORE INTO copy_policy_registry(table_name, copy_policy) VALUES
   ('state_deltas', 'COPY_REMAP'),
   ('decisions', 'COPY_REMAP'),
   ('gate_certificates', 'COPY_REMAP');
+INSERT OR IGNORE INTO copy_policy_registry(table_name, copy_policy) VALUES
+  ('domain_receipts', 'COPY_CLEAR');

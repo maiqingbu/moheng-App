@@ -1,6 +1,8 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
 use crate::generated::types::ArtifactScopeLevel;
-use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt, ProjectCommandReceipt};
+use crate::generated::types::{
+    ArtifactRef, CommitBundle, CommitReceipt, DomainReceipt, HeadChange, ProjectCommandReceipt,
+};
 use crate::generated::validators::validate_commit_bundle;
 use crate::hash::sha256_canonical;
 use crate::repositories::artifacts::{enum_string, scope_key, ArtifactError, ArtifactRepository};
@@ -255,6 +257,16 @@ impl CommitService {
         committed_at: &str,
     ) -> Result<CommitReceipt, CommitError> {
         final_gate::validate(connection, bundle)?;
+        let artifacts_before: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
+        let heads_before: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM canonical_heads WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
         connection.execute("INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES (?1, ?2, ?3, ?4, 'PREPARED', ?5)", libsql_rusqlite::params![bundle.project_id, bundle.command_id, bundle.idempotency_key, bundle_digest, bundle.created_at])?;
         for artifact in &bundle.artifacts {
             if !matches!(
@@ -292,6 +304,11 @@ impl CommitService {
                 )?;
             }
         }
+        let heads_after: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM canonical_heads WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
         let fallback_artifact = bundle
             .artifacts
             .first()
@@ -306,6 +323,7 @@ impl CommitService {
             bundle.dependency_edges.as_ref(),
             bundle.job_updates.as_ref(),
             bundle.decision_updates.as_ref(),
+            bundle.reader_desire_delta.as_ref(),
             committed_at,
             fallback_artifact,
         )?;
@@ -329,17 +347,63 @@ impl CommitService {
         // head_updates are already HeadChange (shared contract type); the receipt's
         // headChanges is the same type, so a plain clone suffices (the bundle is
         // still borrowed later for the digest).
-        let head_changes = bundle.head_updates.clone().unwrap_or_default();
+        let head_changes = read_head_changes(connection, bundle)?;
+        let artifacts_after: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
         let mut applied_delta_counts = BTreeMap::new();
-        applied_delta_counts.insert("artifacts".into(), bundle.artifacts.len() as i64);
-        applied_delta_counts.insert(
-            "heads".into(),
-            bundle.head_updates.as_ref().map_or(0, Vec::len) as i64,
-        );
+        applied_delta_counts.insert("artifacts".into(), artifacts_after - artifacts_before);
+        applied_delta_counts.insert("heads".into(), heads_after - heads_before);
         applied_delta_counts.extend(delta_counts);
+        let gate_certificates_before: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM gate_certificates WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
+        if let Some(certificates) = &bundle.gate_certificates {
+            for certificate in certificates {
+                let evidence_refs = serde_json::to_string(&certificate.evidence_refs)?;
+                let existing: Option<(String, i64, String, String, String, String, String)> =
+                    connection
+                        .query_row(
+                            "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
+                            [&bundle.project_id, &certificate.certificate_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                        )
+                        .optional()?;
+                if let Some(existing) = existing {
+                    let expected = (
+                        certificate.gate_policy_ref.artifact_id.clone(),
+                        certificate.gate_policy_ref.version,
+                        certificate.gate_policy_ref.payload_hash.clone(),
+                        evidence_refs,
+                        certificate.source_digest.clone(),
+                        certificate.passed_at.clone(),
+                        certificate.certificate_digest.clone(),
+                    );
+                    if existing != expected {
+                        return Err(CommitError::ContractInvalid(
+                            "GateCertificate id already exists with a different digest".into(),
+                        ));
+                    }
+                } else {
+                    connection.execute(
+                        "INSERT INTO gate_certificates(certificate_id, project_id, gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        libsql_rusqlite::params![certificate.certificate_id, certificate.project_id, certificate.gate_policy_ref.artifact_id, certificate.gate_policy_ref.version, certificate.gate_policy_ref.payload_hash, evidence_refs, certificate.source_digest, certificate.passed_at, certificate.certificate_digest],
+                    )?;
+                }
+            }
+        }
+        let gate_certificates_after: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM gate_certificates WHERE project_id = ?1",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
         applied_delta_counts.insert(
             "gateCertificates".into(),
-            bundle.gate_certificates.as_ref().map_or(0, Vec::len) as i64,
+            gate_certificates_after - gate_certificates_before,
         );
         let gate_certificate_refs = bundle
             .gate_certificates
@@ -367,15 +431,6 @@ impl CommitService {
             committed_at: committed_at.to_string(),
             receipt_digest: String::new(),
         };
-        if let Some(certificates) = &bundle.gate_certificates {
-            for certificate in certificates {
-                let evidence_refs = serde_json::to_string(&certificate.evidence_refs)?;
-                connection.execute(
-                    "INSERT INTO gate_certificates(certificate_id, project_id, gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(certificate_id) DO UPDATE SET gate_policy_artifact_id=excluded.gate_policy_artifact_id, gate_policy_version=excluded.gate_policy_version, gate_policy_payload_hash=excluded.gate_policy_payload_hash, evidence_refs_json=excluded.evidence_refs_json, source_digest=excluded.source_digest, passed_at=excluded.passed_at, certificate_digest=excluded.certificate_digest",
-                    libsql_rusqlite::params![certificate.certificate_id, certificate.project_id, certificate.gate_policy_ref.artifact_id, certificate.gate_policy_ref.version, certificate.gate_policy_ref.payload_hash, evidence_refs, certificate.source_digest, certificate.passed_at, certificate.certificate_digest],
-                )?;
-            }
-        }
         receipt.receipt_digest = sha256_canonical(&serde_json::to_value(&receipt)?)?;
         let receipt_json = serde_json::to_string(&receipt)?;
         connection.execute("INSERT INTO commit_receipts(receipt_id, project_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_json, receipt_digest, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", libsql_rusqlite::params![receipt.receipt_id, receipt.project_id, receipt.commit_id, receipt.command_id, receipt.idempotency_key, receipt.before_revision, receipt.after_revision, receipt.bundle_digest, receipt_json, receipt.receipt_digest, receipt.committed_at])?;
@@ -383,6 +438,29 @@ impl CommitService {
             "UPDATE commands SET status = 'COMMITTED' WHERE project_id = ?1 AND command_id = ?2",
             [&bundle.project_id, &bundle.command_id],
         )?;
+        if let Some(draft) = &bundle.receipt_draft {
+            let receipt_id = draft
+                .receipt_id
+                .clone()
+                .unwrap_or_else(|| format!("domain-receipt:{}:{}", bundle.commit_id, draft.domain));
+            let mut domain_receipt = DomainReceipt {
+                receipt_id,
+                project_id: bundle.project_id.clone(),
+                domain: draft.domain.clone(),
+                command_id: bundle.command_id.clone(),
+                commit_receipt_id: receipt.receipt_id.clone(),
+                created_at: committed_at.to_string(),
+                receipt_digest: String::new(),
+            };
+            let mut unsigned = serde_json::to_value(&domain_receipt)?;
+            unsigned["receiptDigest"] = serde_json::json!("");
+            domain_receipt.receipt_digest = sha256_canonical(&unsigned)?;
+            let receipt_json = serde_json::to_string(&domain_receipt)?;
+            connection.execute(
+                "INSERT INTO domain_receipts(receipt_id, project_id, domain, command_id, commit_receipt_id, created_at, receipt_json, receipt_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                libsql_rusqlite::params![domain_receipt.receipt_id, domain_receipt.project_id, domain_receipt.domain, domain_receipt.command_id, domain_receipt.commit_receipt_id, domain_receipt.created_at, receipt_json, domain_receipt.receipt_digest],
+            )?;
+        }
         Ok(receipt)
     }
 
@@ -411,6 +489,37 @@ impl CommitService {
             })
             .transpose()
     }
+}
+
+fn read_head_changes(
+    connection: &Connection,
+    bundle: &CommitBundle,
+) -> Result<Vec<HeadChange>, CommitError> {
+    bundle
+        .head_updates
+        .as_ref()
+        .map(|heads| {
+            heads
+                .iter()
+                .map(|head| {
+                    let artifact_type = enum_string(&head.artifact_type)?;
+                    let scope_level = enum_string(&head.scope.level)?;
+                    let scope_key = scope_key(&head.scope)?;
+                    let (artifact_id, version, payload_hash): (String, i64, String) = connection
+                        .query_row(
+                            "SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id = ?1 AND artifact_type = ?2 AND scope_level = ?3 AND scope_key = ?4",
+                            libsql_rusqlite::params![bundle.project_id, artifact_type, scope_level, scope_key],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )?;
+                    let mut actual = head.clone();
+                    actual.artifact_id = artifact_id;
+                    actual.version = version;
+                    actual.payload_hash = payload_hash;
+                    Ok(actual)
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 /// Runs the stable-id boundary check over every scope binding in an artifact.

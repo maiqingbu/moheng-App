@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/commit/receipt-draft.schema.json",
+  "title": "ReceiptDraft",
+  "type": "object",
+  "properties": {
+    "domain": { "type": "string", "minLength": 1 },
+    "receiptId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+    "artifactRefs": { "type": "array", "items": { "$ref": "../artifact/artifact-ref.schema.json" } },
+    "payload": { "type": "object" }
+  },
+  "required": ["domain"],
+  "additionalProperties": false
+}

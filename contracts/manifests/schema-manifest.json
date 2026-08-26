@@ -58,6 +58,11 @@
       "version": "m0a.gate-certificate.v1"
     },
     {
+      "name": "receipt-draft",
+      "path": "schemas/commit/receipt-draft.schema.json",
+      "version": "m0a.receipt-draft.v1"
+    },
+    {
       "name": "query-envelope",
       "path": "schemas/query/query-envelope.schema.json",
       "version": "m0a.query.v1"

@@ -13,6 +13,7 @@
     "dependencyEdges": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/DependencyEdge" } },
     "jobUpdates": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/JobUpdate" } },
     "decisionUpdates": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/DecisionUpdate" } }
+    ,"readerDesireDelta": { "type": "array", "minItems": 1, "items": { "$ref": "deltas.schema.json#/$defs/ReaderDesireDelta" } }
   },
   "additionalProperties": false,
   "$defs": {
@@ -135,6 +136,20 @@
         "payloadJson": { "type": "object" }
       },
       "required": ["decisionId", "decisionType", "outcome"],
+      "additionalProperties": false
+    },
+    "ReaderDesireDelta": {
+      "type": "object",
+      "properties": {
+        "desireId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "desireType": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["OPEN", "ESCALATED", "PARTIAL_PAYOFF", "PAID", "ABANDONED", "STALE"] },
+        "expectedPayoffChapter": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "createdChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "lastTouchedChapterId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "payloadJson": { "type": "object" }
+      },
+      "required": ["desireId", "desireType"],
       "additionalProperties": false
     }
   }

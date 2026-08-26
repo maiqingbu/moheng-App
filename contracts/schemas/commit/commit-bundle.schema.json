@@ -70,9 +70,16 @@
       "type": "array",
       "items": { "$ref": "deltas.schema.json#/$defs/DecisionUpdate" }
     },
+    "readerDesireDelta": {
+      "type": "array",
+      "items": { "$ref": "deltas.schema.json#/$defs/ReaderDesireDelta" }
+    },
     "gateCertificates": {
       "type": "array",
       "items": { "$ref": "gate-certificate.schema.json" }
+    },
+    "receiptDraft": {
+      "$ref": "receipt-draft.schema.json"
     }
   },
   "required": [

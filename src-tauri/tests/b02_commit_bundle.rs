@@ -1,5 +1,7 @@
 use ai_novel_production_system_core::commit::{CommitError, CommitService};
-use ai_novel_production_system_core::generated::types::{ArtifactEnvelope, CommitBundle};
+use ai_novel_production_system_core::generated::types::{
+    ArtifactEnvelope, ArtifactType, CommitBundle,
+};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
@@ -8,13 +10,14 @@ use tempfile::tempdir;
 
 const NOW: &str = "2026-08-26T00:00:00Z";
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const VOLUME_ID: &str = "vol:111111111111111111111111";
 
 fn final_artifact(project_id: &str, command_id: &str) -> ArtifactEnvelope {
     let payload = json!({"title":"第一章","content":"最终正文"});
     serde_json::from_value(json!({
         "artifactId": "art:p1:chapter:1",
         "projectId": project_id,
-        "artifactType": "ChapterCandidate",
+        "artifactType": "FinalChapter",
         "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
         "version": 1,
         "schemaVersion": "m0a.artifact.v1",
@@ -28,6 +31,198 @@ fn final_artifact(project_id: &str, command_id: &str) -> ArtifactEnvelope {
     .unwrap()
 }
 
+fn gate_policy_artifact(project_id: &str, command_id: &str) -> ArtifactEnvelope {
+    let payload = json!({"policy":"m0c-final-gate","version":1});
+    serde_json::from_value(json!({
+        "artifactId": "gate-policy:p1:final",
+        "projectId": project_id,
+        "artifactType": "GatePolicy",
+        "scope": {"level":"PROJECT"},
+        "version": 1,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "payloadHash": sha256_canonical(&payload).unwrap(),
+        "dependencyRefs": [],
+        "provenance": {"createdBy":"b02-test","commandId":command_id},
+        "payload": payload,
+        "createdAt": NOW
+    }))
+    .unwrap()
+}
+
+fn production_receipt_artifact(project_id: &str, command_id: &str) -> ArtifactEnvelope {
+    let payload = json!({"chapterId":"chapter-1","receipt":"production"});
+    serde_json::from_value(json!({
+        "artifactId": "production-receipt:p1:chapter:1",
+        "projectId": project_id,
+        "artifactType": "ProductionReceipt",
+        "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
+        "version": 1,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "payloadHash": sha256_canonical(&payload).unwrap(),
+        "dependencyRefs": [],
+        "provenance": {"createdBy":"b02-test","commandId":command_id},
+        "payload": payload,
+        "createdAt": NOW
+    }))
+    .unwrap()
+}
+
+fn volume_artifact(
+    project_id: &str,
+    command_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    payload: Value,
+) -> ArtifactEnvelope {
+    serde_json::from_value(json!({
+        "artifactId": artifact_id,
+        "projectId": project_id,
+        "artifactType": artifact_type,
+        "scope": {"level":"VOLUME","volumeId":VOLUME_ID},
+        "version": 1,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "payloadHash": sha256_canonical(&payload).unwrap(),
+        "dependencyRefs": [],
+        "provenance": {"createdBy":"b02-test","commandId":command_id},
+        "payload": payload,
+        "createdAt": NOW
+    }))
+    .unwrap()
+}
+
+fn gate_certificate(policy: &ArtifactEnvelope, certificate_id: &str) -> Value {
+    let policy_ref = json!({
+        "artifactId": policy.artifact_id,
+        "version": policy.version,
+        "payloadHash": policy.payload_hash
+    });
+    let evidence_refs = json!([]);
+    let source_digest = sha256_canonical(&json!({
+        "gatePolicyRef": policy_ref,
+        "evidenceRefs": evidence_refs
+    }))
+    .unwrap();
+    let mut certificate = json!({
+        "certificateId": certificate_id,
+        "projectId": "p1",
+        "gatePolicyRef": policy_ref,
+        "evidenceRefs": [],
+        "sourceDigest": source_digest,
+        "passedAt": NOW,
+        "certificateDigest": ""
+    });
+    certificate["certificateDigest"] = json!(sha256_canonical(&certificate).unwrap());
+    certificate
+}
+
+fn volume_plan_bundle() -> CommitBundle {
+    let command_id = "b02-volume-plan-command";
+    let policy = gate_policy_artifact("p1", command_id);
+    let plan = volume_artifact(
+        "p1",
+        command_id,
+        "volume-plan:p1:1",
+        "VolumePlan",
+        json!({"volumeId":VOLUME_ID,"targetChapters":1,"state":"APPROVED_PLAN"}),
+    );
+    let contract = volume_artifact(
+        "p1",
+        command_id,
+        "volume-contract:p1:1",
+        "VolumeContract",
+        json!({"volumeId":VOLUME_ID,"contract":"frozen"}),
+    );
+    let ledger = volume_artifact(
+        "p1",
+        command_id,
+        "planning-ledger:p1:1",
+        "PlanningStateLedger",
+        json!({"volumeId":VOLUME_ID,"entryState":"OPEN","coverageState":"INCOMPLETE"}),
+    );
+    let production = volume_artifact(
+        "p1",
+        command_id,
+        "production-receipt:p1:volume:1",
+        "ProductionReceipt",
+        json!({"volumeId":VOLUME_ID,"stage":"VOLUME_PLAN"}),
+    );
+    let mut bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":"commit:b02:volume-plan",
+        "projectId":"p1",
+        "commandId":command_id,
+        "idempotencyKey":"b02-volume-plan-key",
+        "expectedProjectRevision":0,
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[policy,plan,contract,ledger,production],
+        "headUpdates":[
+          {"artifactType":"VolumePlan","scope":{"level":"VOLUME","volumeId":VOLUME_ID},"artifactId":"volume-plan:p1:1","version":1,"payloadHash":HASH},
+          {"artifactType":"VolumeContract","scope":{"level":"VOLUME","volumeId":VOLUME_ID},"artifactId":"volume-contract:p1:1","version":1,"payloadHash":HASH},
+          {"artifactType":"PlanningStateLedger","scope":{"level":"VOLUME","volumeId":VOLUME_ID},"artifactId":"planning-ledger:p1:1","version":1,"payloadHash":HASH}
+        ],
+        "stateDelta":[{"stateId":"volume-state:p1:1","stateType":"volume.planning","valueJson":{"entryState":"OPEN"},"payloadJson":{"coverageState":"INCOMPLETE"}}],
+        "dependencyEdges":[{"edgeId":"volume-edge:p1:1","sourceRef":"volume-plan:p1:1","targetRef":VOLUME_ID,"dependencyType":"HARD_CONTRACT","scope":"VOLUME","impactClass":"HARD","sourceHash":HASH}],
+        "gateCertificates":[gate_certificate(&policy,"gate:p1:volume-plan")]
+    })).unwrap();
+    let plan_hash = bundle.artifacts[1].payload_hash.clone();
+    for head in bundle.head_updates.as_mut().unwrap() {
+        head.payload_hash = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_id == head.artifact_id)
+            .unwrap()
+            .payload_hash
+            .clone();
+    }
+    bundle.dependency_edges.as_mut().unwrap()[0].source_hash = plan_hash;
+    bundle
+}
+
+fn volume_close_bundle(plan_hash: &str, policy: &ArtifactEnvelope) -> CommitBundle {
+    let command_id = "b02-volume-close-command";
+    let exit_state = volume_artifact(
+        "p1",
+        command_id,
+        "volume-exit:p1:1",
+        "VolumeExitState",
+        json!({"volumeId":VOLUME_ID,"state":"CLOSED","eligibleForNextVolume":true}),
+    );
+    let health = volume_artifact(
+        "p1",
+        command_id,
+        "volume-health:p1:1",
+        "VolumeHealthReport",
+        json!({"volumeId":VOLUME_ID,"status":"HEALTHY","eligibleForNextVolume":true}),
+    );
+    let production = volume_artifact(
+        "p1",
+        command_id,
+        "production-receipt:p1:volume-close:1",
+        "ProductionReceipt",
+        json!({"volumeId":VOLUME_ID,"stage":"VOLUME_CLOSE"}),
+    );
+    serde_json::from_value(json!({
+        "commitId":"commit:b02:volume-close",
+        "projectId":"p1",
+        "commandId":command_id,
+        "idempotencyKey":"b02-volume-close-key",
+        "expectedProjectRevision":1,
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[exit_state,health,production],
+        "headUpdates":[
+          {"artifactType":"VolumeExitState","scope":{"level":"VOLUME","volumeId":VOLUME_ID},"artifactId":"volume-exit:p1:1","version":1,"payloadHash":serde_json::to_value(volume_artifact("p1", command_id, "volume-exit:p1:1", "VolumeExitState", json!({"volumeId":VOLUME_ID,"state":"CLOSED","eligibleForNextVolume":true}))).unwrap()["payloadHash"]},
+          {"artifactType":"VolumeHealthReport","scope":{"level":"VOLUME","volumeId":VOLUME_ID},"artifactId":"volume-health:p1:1","version":1,"payloadHash":serde_json::to_value(volume_artifact("p1", command_id, "volume-health:p1:1", "VolumeHealthReport", json!({"volumeId":VOLUME_ID,"status":"HEALTHY","eligibleForNextVolume":true}))).unwrap()["payloadHash"]}
+        ],
+        "stateDelta":[{"stateId":"volume-close-state:p1:1","stateType":"volume.close","valueJson":{"ledgerState":"CLOSED"},"payloadJson":{"eligibleForNextVolume":true}}],
+        "dependencyEdges":[{"edgeId":"volume-close-edge:p1:1","sourceRef":"volume-plan:p1:1","targetRef":"volume-exit:p1:1","dependencyType":"HARD_CONTRACT","scope":"VOLUME","impactClass":"HARD","sourceHash":plan_hash}],
+        "gateCertificates":[gate_certificate(policy,"gate:p1:volume-close")]
+    })).unwrap()
+}
+
 fn full_bundle() -> CommitBundle {
     let command_id = "b02-full-delta-command";
     let mut bundle: CommitBundle = serde_json::from_value(json!({
@@ -38,20 +233,35 @@ fn full_bundle() -> CommitBundle {
         "expectedProjectRevision":0,
         "contractVersion":"m0a.v1",
         "createdAt":NOW,
-        "artifacts":[serde_json::to_value(final_artifact("p1", command_id)).unwrap()],
+        "artifacts":[
+            serde_json::to_value(gate_policy_artifact("p1", command_id)).unwrap(),
+            serde_json::to_value(final_artifact("p1", command_id)).unwrap(),
+            serde_json::to_value(production_receipt_artifact("p1", command_id)).unwrap()
+        ],
+        "headUpdates":[{"artifactType":"FinalChapter","scope":{"level":"CHAPTER","chapterId":"chapter-1"},"artifactId":"art:p1:chapter:1","version":1,"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
         "canonDelta":[{"entityId":"ent:p1:root:1","factId":"fact:p1:born:1","subjectId":"ent:p1:root:1","predicate":"cast","objectJson":{"name":"王五"},"authorityLevel":"C","eventType":"character_introduction","payloadJson":{"sourceArtifactId":"art:p1:chapter:1","sourceVersion":1,"chapterId":"chapter-1"}}],
         "obligationDelta":[{"obligationId":"obl:p1:1","scope":"VOLUME","obligationType":"payoff","authorityLevel":"B","lifecycle":"APPROVED","description":"pay off the planted mystery","payloadJson":{"sourceArtifactId":"art:p1:chapter:1","sourceVersion":1,"chapterId":"chapter-1"}}],
-        "foreshadowDelta":[{"foreshadowId":"fs:p1:1","intent":"the same knife returns","status":"PLANTED","plantChapterId":"chap:p1:1","payloadJson":{"sourceAuthority":"C"}}],
-        "knowledgeDelta":[{"knowledgeId":"kn:p1:1","knowerId":"ent:p1:root:1","factId":"fact:p1:born:1","epistemicState":"KNOWS","fromChapterId":"chap:p1:1","payloadJson":{"certainty":1}}],
+        "foreshadowDelta":[{"foreshadowId":"fs:p1:1","intent":"the same knife returns","status":"PLANTED","plantChapterId":"chapter-1","payloadJson":{"sourceAuthority":"C"}}],
+        "knowledgeDelta":[{"knowledgeId":"kn:p1:1","knowerId":"ent:p1:root:1","factId":"fact:p1:born:1","epistemicState":"KNOWS","fromChapterId":"chapter-1","payloadJson":{"certainty":1}}],
         "stateDelta":[{"stateId":"st:p1:1","stateType":"mood","valueJson":{"valence":"grim"},"chapterId":"chapter-1","payloadJson":{"currentPhase":"OPENING"}}],
-        "dependencyEdges":[{"edgeId":"edge:p1:1","sourceRef":"fact:p1:born:1","targetRef":"chap:p1:1","dependencyType":"CANON_FACT","scope":"CHAPTER","impactClass":"HARD","sourceHash":HASH,"payloadJson":{"createdBy":"b02-test"}}],
+        "dependencyEdges":[{"edgeId":"edge:p1:1","sourceRef":"art:p1:chapter:1","targetRef":"chapter-1","dependencyType":"EVIDENCE","scope":"CHAPTER","impactClass":"HARD","sourceHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payloadJson":{"createdBy":"b02-test"}}],
         "jobUpdates":[{"jobId":"job:p1:1","status":"COMPLETED","currentStage":"epilogue","attemptNo":1,"payloadJson":{"jobType":"CHAPTER"}}],
         "decisionUpdates":[{"decisionId":"dec:p1:1","decisionType":"cast","outcome":"approve","reason":"retains canon","sourceRef":"job:p1:1","payloadJson":{}}],
-        "gateCertificates":[{"certificateId":"gate:p1:1","projectId":"p1","gatePolicyRef":{"artifactId":"art:p1:chapter:1","version":1,"payloadHash":HASH},"evidenceRefs":[],"sourceDigest":HASH,"passedAt":NOW,"certificateDigest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+        "readerDesireDelta":[{"desireId":"desire:p1:1","desireType":"mystery","status":"OPEN","expectedPayoffChapter":"chapter-1","createdChapterId":"chapter-1","lastTouchedChapterId":"chapter-1","payloadJson":{"intensity":1}}],
+        "gateCertificates":[{"certificateId":"gate:p1:1","projectId":"p1","gatePolicyRef":{"artifactId":"gate-policy:p1:final","version":1,"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"evidenceRefs":[],"sourceDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","passedAt":NOW,"certificateDigest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}],
+        "receiptDraft":{"domain":"chapter-production","artifactRefs":[],"payload":{"scope":"CHAPTER"}}
     })).unwrap();
-    let artifact_hash = bundle.artifacts[0].payload_hash.clone();
+    let policy_hash = bundle.artifacts[0].payload_hash.clone();
+    let final_hash = bundle.artifacts[1].payload_hash.clone();
+    bundle.head_updates.as_mut().unwrap()[0].payload_hash = final_hash.clone();
+    bundle.dependency_edges.as_mut().unwrap()[0].source_hash = final_hash;
     let certificates = bundle.gate_certificates.as_mut().unwrap();
-    certificates[0].gate_policy_ref.payload_hash = artifact_hash;
+    certificates[0].gate_policy_ref.payload_hash = policy_hash.clone();
+    certificates[0].source_digest = sha256_canonical(&json!({
+        "gatePolicyRef": certificates[0].gate_policy_ref,
+        "evidenceRefs": certificates[0].evidence_refs
+    }))
+    .unwrap();
     let mut certificate_value = serde_json::to_value(&certificates[0]).unwrap();
     certificate_value["certificateDigest"] = Value::String(String::new());
     certificates[0].certificate_digest = sha256_canonical(&certificate_value).unwrap();
@@ -60,10 +270,25 @@ fn full_bundle() -> CommitBundle {
 
 fn seed_prerequisites(connection: &libsql_rusqlite::Connection) {
     connection.execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:p1:1','p1',1,'Book','ACTIVE',?1,?1)", [NOW]).unwrap();
-    connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('vol:p1:1','p1','book:p1:1',1,'Volume','PLANNING',1,1,1000,?1,?1)", [NOW]).unwrap();
-    connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter-1','p1','vol:p1:1',1,'Chapter','NORMAL','PLANNED',0,?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES (?1,'p1','book:p1:1',1,'Volume','PLANNING',1,1,1000,?2,?2)", [VOLUME_ID, NOW]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter-1','p1',?1,1,'Chapter','NORMAL','PLANNED',0,?2,?2)", [VOLUME_ID, NOW]).unwrap();
     connection.execute("INSERT INTO canon_entities(entity_id, project_id, canonical_name, entity_type, created_at, updated_at) VALUES ('ent:p1:root:1','p1','王五','CHARACTER',?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO jobs(job_id, project_id, job_type, chapter_id, status, created_at, updated_at) VALUES ('job:p1:1','p1','CHAPTER','chapter-1','RUNNING',?1,?1)", [NOW]).unwrap();
+}
+
+fn seed_over_limit_budget(connection: &libsql_rusqlite::Connection) {
+    connection
+        .execute(
+            "INSERT INTO chapter_production_budgets(budget_id, project_id, chapter_id, importance_class, hard_max_model_runs, frozen_at) VALUES ('budget:p1:1', 'p1', 'chapter-1', 'NORMAL', 1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO budget_reservations(reservation_id, project_id, budget_ref, reserved_cents, status, created_at) VALUES ('reservation:p1:1', 'p1', 'budget:p1:1', 1, 'OVER_LIMIT', ?1)",
+            [NOW],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -74,7 +299,7 @@ fn b02_full_delta_bundle_is_not_rejected_as_unsupported() {
     seed_prerequisites(&connection);
     let receipt = CommitService::commit(&connection, &full_bundle(), NOW).unwrap();
     assert_eq!(receipt.after_revision, 1);
-    assert_eq!(receipt.applied_delta_counts["canon"], 3);
+    assert_eq!(receipt.applied_delta_counts["canon"], 2);
     for channel in [
         "obligation",
         "foreshadow",
@@ -83,9 +308,11 @@ fn b02_full_delta_bundle_is_not_rejected_as_unsupported() {
         "dependency",
         "job",
         "decision",
+        "readerDesire",
     ] {
+        let expected = if channel == "job" { 0 } else { 1 };
         assert_eq!(
-            receipt.applied_delta_counts[channel], 1,
+            receipt.applied_delta_counts[channel], expected,
             "channel {channel}"
         );
     }
@@ -116,6 +343,12 @@ fn b02_full_delta_bundle_is_not_rejected_as_unsupported() {
         connection
             .query_row::<i64, _, _>("SELECT COUNT(*) FROM gate_certificates", [], |row| row
                 .get(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM domain_receipts", [], |row| row.get(0))
             .unwrap(),
         1
     );
@@ -200,6 +433,7 @@ fn b02_each_delta_channel_failure_rolls_back_the_entire_bundle() {
         "dependency",
         "job",
         "decision",
+        "readerDesire",
         "gate",
     ];
     for channel in channels {
@@ -235,6 +469,9 @@ fn b02_each_delta_channel_failure_rolls_back_the_entire_bundle() {
             "job" => bundle.job_updates.as_mut().unwrap()[0].status = Some("INVALID".into()),
             "decision" => {
                 bundle.decision_updates.as_mut().unwrap()[0].decision_type = String::new()
+            }
+            "readerDesire" => {
+                bundle.reader_desire_delta.as_mut().unwrap()[0].desire_type = String::new()
             }
             "gate" => {
                 bundle.gate_certificates.as_mut().unwrap()[0].certificate_digest =
@@ -285,6 +522,7 @@ fn b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes() {
         Err(CommitError::ContractInvalid(_))
     ));
 
+    seed_over_limit_budget(&connection);
     let mut over_budget = full_bundle();
     over_budget.state_delta.as_mut().unwrap()[0]
         .payload_json
@@ -358,15 +596,15 @@ fn b02_final_gate_revalidates_gate_policy_type_and_dependency_source_hash() {
     let connection = manager.create("p1", "A", NOW).unwrap();
     seed_prerequisites(&connection);
 
-    let bundle = full_bundle();
+    let mut bundle = full_bundle();
+    bundle.artifacts[0].artifact_type = ArtifactType::ChapterCandidate;
     assert!(matches!(
         CommitService::commit(&connection, &bundle, NOW),
         Err(CommitError::ContractInvalid(_))
     ));
 
     let mut dependency_bundle = full_bundle();
-    dependency_bundle.dependency_edges.as_mut().unwrap()[0].source_ref =
-        "fact:p1:existing".into();
+    dependency_bundle.dependency_edges.as_mut().unwrap()[0].source_ref = "fact:p1:existing".into();
     dependency_bundle.dependency_edges.as_mut().unwrap()[0].source_hash = HASH.into();
     connection
         .execute(
@@ -394,18 +632,7 @@ fn b02_final_gate_checks_knowledge_refs_and_authoritative_budget_state() {
         Err(CommitError::ContractInvalid(_))
     ));
 
-    connection
-        .execute(
-            "INSERT INTO chapter_production_budgets(budget_id, project_id, chapter_id, importance_class, hard_max_model_runs, frozen_at) VALUES ('budget:p1:1', 'p1', 'chapter-1', 'NORMAL', 1, ?1)",
-            [NOW],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO budget_reservations(reservation_id, project_id, budget_ref, reserved_cents, status, created_at) VALUES ('reservation:p1:1', 'p1', 'budget:p1:1', 1, 'OVER_LIMIT', ?1)",
-            [NOW],
-        )
-        .unwrap();
+    seed_over_limit_budget(&connection);
     let mut over_budget = full_bundle();
     over_budget.state_delta.as_mut().unwrap()[0]
         .payload_json
@@ -425,16 +652,18 @@ fn b02_candidate_cannot_become_a_canonical_head() {
     let connection = manager.create("p1", "A", NOW).unwrap();
     seed_prerequisites(&connection);
     let mut bundle = full_bundle();
+    bundle.artifacts[1].artifact_type = ArtifactType::ChapterCandidate;
     bundle.head_updates = Some(vec![serde_json::from_value(json!({
         "artifactType": "ChapterCandidate",
         "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
         "artifactId": "art:p1:chapter:1",
         "version": 1,
-        "payloadHash": bundle.artifacts[0].payload_hash
-    })).unwrap()]);
+        "payloadHash": bundle.artifacts[1].payload_hash
+    }))
+    .unwrap()]);
     assert!(matches!(
         CommitService::commit(&connection, &bundle, NOW),
-        Err(CommitError::CandidateStatusRequired | CommitError::Artifact(_))
+        Err(CommitError::Artifact(_))
     ));
 }
 
@@ -456,12 +685,13 @@ fn b02_receipt_counts_are_net_rows_and_head_changes_are_read_back() {
 
     let mut bundle = full_bundle();
     bundle.head_updates = Some(vec![serde_json::from_value(json!({
-        "artifactType": "ChapterCandidate",
+        "artifactType": "FinalChapter",
         "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
         "artifactId": "art:p1:chapter:1",
         "version": 1,
-        "payloadHash": bundle.artifacts[0].payload_hash
-    })).unwrap()]);
+        "payloadHash": bundle.artifacts[1].payload_hash
+    }))
+    .unwrap()]);
     let receipt = CommitService::commit(&connection, &bundle, NOW).unwrap();
     let after_entities: i64 = connection
         .query_row("SELECT COUNT(*) FROM canon_entities", [], |row| row.get(0))
@@ -474,8 +704,138 @@ fn b02_receipt_counts_are_net_rows_and_head_changes_are_read_back() {
         .unwrap();
     assert_eq!(
         receipt.applied_delta_counts["canon"],
-        (after_entities - before_entities) + (after_facts - before_facts) + (after_events - before_events)
+        (after_entities - before_entities)
+            + (after_facts - before_facts)
+            + (after_events - before_events)
     );
     assert_eq!(receipt.head_changes[0].artifact_id, "art:p1:chapter:1");
-    assert_eq!(receipt.head_changes[0].payload_hash, bundle.artifacts[0].payload_hash);
+    assert_eq!(
+        receipt.head_changes[0].payload_hash,
+        bundle.artifacts[1].payload_hash
+    );
+}
+
+#[test]
+fn b02_volume_plan_submission_is_atomic_and_receipted() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    let receipt = CommitService::commit(&connection, &volume_plan_bundle(), NOW).unwrap();
+    assert_eq!(receipt.after_revision, 1);
+    assert_eq!(receipt.applied_delta_counts["artifacts"], 5);
+    assert_eq!(receipt.applied_delta_counts["heads"], 3);
+    assert_eq!(receipt.applied_delta_counts["state"], 1);
+    assert_eq!(receipt.applied_delta_counts["dependency"], 1);
+    assert_eq!(receipt.applied_delta_counts["gateCertificates"], 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE project_id = 'p1' AND scope_key LIKE '%111111111111111111111111%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM state_deltas", [], |row| row.get(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn b02_volume_close_records_exit_health_eligibility_and_receipt() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    let plan = volume_plan_bundle();
+    let plan_hash = plan
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_id == "volume-plan:p1:1")
+        .unwrap()
+        .payload_hash
+        .clone();
+    let policy = plan.artifacts[0].clone();
+    CommitService::commit(&connection, &plan, NOW).unwrap();
+    let receipt =
+        CommitService::commit(&connection, &volume_close_bundle(&plan_hash, &policy), NOW).unwrap();
+    assert_eq!(receipt.before_revision, 1);
+    assert_eq!(receipt.after_revision, 2);
+    assert_eq!(receipt.applied_delta_counts["artifacts"], 3);
+    assert_eq!(receipt.applied_delta_counts["heads"], 2);
+    assert_eq!(receipt.applied_delta_counts["state"], 1);
+    assert_eq!(receipt.applied_delta_counts["dependency"], 1);
+    assert!(receipt
+        .head_changes
+        .iter()
+        .any(|head| head.artifact_type == ArtifactType::VolumeExitState));
+    assert!(receipt
+        .head_changes
+        .iter()
+        .any(|head| head.artifact_type == ArtifactType::VolumeHealthReport));
+    let eligibility: String = connection
+        .query_row(
+            "SELECT payload_json FROM state_deltas WHERE state_id = 'volume-close-state:p1:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&eligibility).unwrap()["eligibleForNextVolume"],
+        true
+    );
+}
+
+#[test]
+fn b02_gate_certificate_same_id_with_different_digest_is_not_rewritten() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    CommitService::commit(&connection, &full_bundle(), NOW).unwrap();
+    let original_digest: String = connection
+        .query_row(
+            "SELECT certificate_digest FROM gate_certificates WHERE certificate_id = 'gate:p1:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let mut conflict = full_bundle();
+    conflict.command_id = "b02-certificate-conflict-command".into();
+    conflict.idempotency_key = "b02-certificate-conflict-key".into();
+    conflict.expected_project_revision = Some(1);
+    for artifact in &mut conflict.artifacts {
+        artifact.provenance.command_id = conflict.command_id.clone();
+    }
+    conflict.gate_certificates.as_mut().unwrap()[0].passed_at = "2026-08-26T00:00:01Z".into();
+    let certificate = &mut conflict.gate_certificates.as_mut().unwrap()[0];
+    let mut value = serde_json::to_value(&*certificate).unwrap();
+    value["certificateDigest"] = Value::String(String::new());
+    certificate.certificate_digest = sha256_canonical(&value).unwrap();
+    assert!(matches!(
+        CommitService::commit(&connection, &conflict, NOW),
+        Err(CommitError::ContractInvalid(_))
+    ));
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT revision FROM project_meta", [], |row| row.get(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT certificate_digest FROM gate_certificates WHERE certificate_id = 'gate:p1:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        original_digest
+    );
 }

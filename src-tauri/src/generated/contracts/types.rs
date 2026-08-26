@@ -400,6 +400,25 @@ pub struct DecisionUpdate {
 
 pub type DecisionUpdatePayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReaderDesireDelta {
+    pub desire_id: OpaqueId,
+    pub desire_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_payoff_chapter: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_touched_chapter_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_json: Option<ReaderDesireDeltaPayloadJson>,
+}
+
+pub type ReaderDesireDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
 pub type SharedDefinitions = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -538,7 +557,11 @@ pub struct CommitBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_updates: Option<Vec<DecisionUpdate>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_desire_delta: Option<Vec<ReaderDesireDelta>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_certificates: Option<Vec<GateCertificate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_draft: Option<ReceiptDraft>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -560,6 +583,8 @@ pub struct CommitDeltas {
     pub job_updates: Option<Vec<JobUpdate>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_updates: Option<Vec<DecisionUpdate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_desire_delta: Option<Vec<ReaderDesireDelta>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -606,6 +631,20 @@ pub struct GateCertificate {
     pub passed_at: Rfc3339Utc,
     pub certificate_digest: Sha256,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptDraft {
+    pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<OpaqueId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_refs: Option<Vec<ArtifactRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<ReceiptDraftPayload>,
+}
+
+pub type ReceiptDraftPayload = std::collections::BTreeMap<String, serde_json::Value>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

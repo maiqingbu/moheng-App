@@ -201,7 +201,9 @@ fn production_commit_rejects_a_malformed_prefixed_display_reference() {
         dependency_edges: None,
         job_updates: None,
         decision_updates: None,
+        reader_desire_delta: None,
         gate_certificates: None,
+        receipt_draft: None,
     };
     let err = CommitService::commit(&conn, &bundle, NOW).unwrap_err();
     assert!(
@@ -249,7 +251,9 @@ fn production_commit_accepts_a_wellformed_opaque_scope_id() {
         dependency_edges: None,
         job_updates: None,
         decision_updates: None,
+        reader_desire_delta: None,
         gate_certificates: None,
+        receipt_draft: None,
     };
     let receipt = CommitService::commit(&conn, &bundle, NOW).unwrap();
     assert_eq!(receipt.after_revision, 1);

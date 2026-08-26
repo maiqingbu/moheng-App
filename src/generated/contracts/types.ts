@@ -113,7 +113,9 @@ export interface CommitBundle {
   "dependencyEdges"?: Array<DependencyEdge>
   "jobUpdates"?: Array<JobUpdate>
   "decisionUpdates"?: Array<DecisionUpdate>
+  "readerDesireDelta"?: Array<ReaderDesireDelta>
   "gateCertificates"?: Array<GateCertificate>
+  "receiptDraft"?: ReceiptDraft
 }
 
 export interface CanonDelta {
@@ -205,6 +207,16 @@ export interface DecisionUpdate {
   "payloadJson"?: {  }
 }
 
+export interface ReaderDesireDelta {
+  "desireId": OpaqueId
+  "desireType": string
+  "status"?: "OPEN" | "ESCALATED" | "PARTIAL_PAYOFF" | "PAID" | "ABANDONED" | "STALE"
+  "expectedPayoffChapter"?: OpaqueId
+  "createdChapterId"?: OpaqueId
+  "lastTouchedChapterId"?: OpaqueId
+  "payloadJson"?: {  }
+}
+
 export interface CommitDeltas {
   "canonDelta"?: Array<CanonDelta>
   "obligationDelta"?: Array<ObligationDelta>
@@ -214,6 +226,7 @@ export interface CommitDeltas {
   "dependencyEdges"?: Array<DependencyEdge>
   "jobUpdates"?: Array<JobUpdate>
   "decisionUpdates"?: Array<DecisionUpdate>
+  "readerDesireDelta"?: Array<ReaderDesireDelta>
 }
 
 export interface CommitReceipt {
@@ -251,6 +264,13 @@ export interface GateCertificate {
   "sourceDigest": Sha256
   "passedAt": Rfc3339Utc
   "certificateDigest": Sha256
+}
+
+export interface ReceiptDraft {
+  "domain": string
+  "receiptId"?: OpaqueId
+  "artifactRefs"?: Array<ArtifactRef>
+  "payload"?: {  }
 }
 
 export interface QueryEnvelope {

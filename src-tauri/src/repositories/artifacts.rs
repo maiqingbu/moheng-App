@@ -142,6 +142,9 @@ impl ArtifactRepository {
         if status != "COMMITTED" {
             return Err(ArtifactError::CandidateHead);
         }
+        if actual_type == "ChapterCandidate" {
+            return Err(ArtifactError::CandidateHead);
+        }
         let current: Option<(String, i64)> = connection
             .query_row(
                 "SELECT artifact_id, version FROM canonical_heads WHERE project_id = ?1 AND artifact_type = ?2 AND scope_level = ?3 AND scope_key = ?4",

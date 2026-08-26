@@ -51,7 +51,9 @@ fn bundle(project: &str, key: &str, mut artifact: ArtifactEnvelope) -> CommitBun
         dependency_edges: None,
         job_updates: None,
         decision_updates: None,
+        reader_desire_delta: None,
         gate_certificates: None,
+        receipt_draft: None,
     }
 }
 
