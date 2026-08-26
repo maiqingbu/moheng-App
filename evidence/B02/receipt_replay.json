@@ -8,7 +8,8 @@
   "businessSideEffects": {
     "commands": 1,
     "commitReceipts": 1,
-    "canonFacts": 1
+    "canonFacts": 1,
+    "domainReceipts": 1
   },
   "receiptLookupDigestVerification": "PASS",
   "evidence": "evidence/B02/fault_injection.log"

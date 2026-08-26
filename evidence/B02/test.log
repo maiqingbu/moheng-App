@@ -1,5 +1,5 @@
-B02 targeted test: PASS (7 passed, 0 failed)
-Rust all-targets test: PASS (97 passed, 0 failed)
+B02 targeted test: PASS (14 passed, 0 failed)
+Rust all-targets test: PASS (103 passed, 0 failed)
 Node test: PASS (9 passed, 0 failed)
 Vitest store test: PASS (17 passed, 0 failed)
 

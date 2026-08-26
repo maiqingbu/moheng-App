@@ -9,6 +9,10 @@
     "quickCheckAndForeignKeyCheck": "PASS"
   },
   "atomicCommit": "PASS",
+  "readerDesireDelta": "PASS",
+  "domainReceiptDraft": "PASS",
+  "volumePlanFixture": "PASS",
+  "volumeCloseFixture": "PASS",
   "idempotentReplay": "PASS",
   "casRevisionConflict": "PASS",
   "finalGate": "PASS",

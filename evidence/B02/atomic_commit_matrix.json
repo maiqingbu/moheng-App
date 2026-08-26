@@ -6,16 +6,17 @@
     "test": "b02_full_delta_bundle_is_not_rejected_as_unsupported",
     "status": "PASS",
     "channels": {
-      "artifacts": 1,
-      "heads": 0,
-      "canon": 3,
+      "artifacts": 3,
+      "heads": 1,
+      "canon": 2,
       "obligation": 1,
       "foreshadow": 1,
       "knowledge": 1,
       "state": 1,
       "dependency": 1,
-      "job": 1,
+      "job": 0,
       "decision": 1,
+      "readerDesire": 1,
       "gateCertificates": 1
     },
     "afterRevision": 1
@@ -31,6 +32,7 @@
       "dependency",
       "job",
       "decision",
+      "readerDesire",
       "gate"
     ],
     "expectedRevision": 0,

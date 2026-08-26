@@ -1,23 +1,31 @@
    Compiling ai-novel-production-system-core v0.1.0 (/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/src-tauri)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.95s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.57s
      Running tests/b02_commit_bundle.rs (src-tauri/target/debug/deps/b02_commit_bundle-518b15520e2734f8)
 
-running 7 tests
+running 14 tests
 test b02_delta_repository_is_transaction_scoped_and_final_gate_is_commit_owned ... ok
-test b02_invalid_delta_still_fails_closed_without_revision_or_rows ... ok
-fault_channel=canon rollback=PASS
-test b02_full_delta_bundle_is_not_rejected_as_unsupported ... ok
+test b02_candidate_cannot_become_a_canonical_head ... ok
 test b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes ... ok
-test b02_revision_conflict_performs_no_delta_writes ... ok
+test b02_final_gate_revalidates_gate_policy_type_and_dependency_source_hash ... ok
+fault_channel=canon rollback=PASS
+test b02_final_gate_checks_knowledge_refs_and_authoritative_budget_state ... ok
+test b02_invalid_delta_still_fails_closed_without_revision_or_rows ... ok
+test b02_full_delta_bundle_is_not_rejected_as_unsupported ... ok
 fault_channel=obligation rollback=PASS
+test b02_gate_certificate_same_id_with_different_digest_is_not_rewritten ... ok
+test b02_receipt_counts_are_net_rows_and_head_changes_are_read_back ... ok
+test b02_revision_conflict_performs_no_delta_writes ... ok
 fault_channel=foreshadow rollback=PASS
+test b02_volume_plan_submission_is_atomic_and_receipted ... ok
 fault_channel=knowledge rollback=PASS
+test b02_volume_close_records_exit_health_eligibility_and_receipt ... ok
 fault_channel=state rollback=PASS
 fault_channel=dependency rollback=PASS
 fault_channel=job rollback=PASS
 fault_channel=decision rollback=PASS
+fault_channel=readerDesire rollback=PASS
 fault_channel=gate rollback=PASS
 test b02_each_delta_channel_failure_rolls_back_the_entire_bundle ... ok
 test b02_same_bundle_replays_100_times_with_one_business_side_effect ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.54s
