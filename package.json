@@ -19,7 +19,8 @@
     "contracts:validate": "node contracts/tools/validate-fixtures.mjs",
     "contracts:golden": "node contracts/tools/verify-golden-hash.mjs",
     "contracts:drift-check": "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && CONTRACTS_GENERATED_DIR=\"$tmp/ts\" CONTRACTS_RUST_GENERATED_DIR=\"$tmp/rust\" node contracts/tools/generate-contracts.mjs && diff -ru src/generated/contracts \"$tmp/ts\" && diff -ru src-tauri/src/generated/contracts \"$tmp/rust\"",
-    "verify:contracts": "npm run contracts:validate && npm run contracts:golden && npm run contracts:drift-check"
+    "verify:contracts": "npm run contracts:validate && npm run contracts:golden && npm run contracts:drift-check",
+    "verify:b03": "node scripts/run-b03-evidence-gates.mjs && node scripts/generate-b03-acceptance.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",
