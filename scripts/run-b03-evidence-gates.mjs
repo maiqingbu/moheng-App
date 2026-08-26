@@ -67,6 +67,25 @@ const gitBinding = evaluateGitBinding({
   dirtyBefore: before.dirty,
   dirtyAfter: after.dirty
 })
+for (const [name, source, note] of [
+  ['b01_regression', 'cargo_all_targets', 'B01 regression is included in Rust all-targets'],
+  ['b02_regression', 'cargo_all_targets', 'B02 regression is included in Rust all-targets'],
+  ['sqlite_integrity', 'cargo_all_targets', 'SQLite quick_check and foreign_key_check are asserted by migration regression'],
+  ['budget_runtime', 'b03_targeted', 'budget lifecycle is covered by B03 targeted Rust tests'],
+  ['modelrun_recovery', 'b03_targeted', 'ModelRun recovery is covered by B03 targeted Rust tests'],
+  ['lease_runtime', 'b03_targeted', 'lease lifecycle is covered by B03 targeted Rust tests']
+]) {
+  const sourceResult = results.find(result => result.name === source)
+  results.push({
+    name,
+    command: sourceResult?.command ?? 'not run because prerequisite gate failed',
+    exitCode: sourceResult?.exitCode ?? 1,
+    status: sourceResult?.status ?? 'FAIL',
+    blocking: true,
+    log: sourceResult?.log ?? '',
+    note
+  })
+}
 results.push({
   name: 'git_binding',
   command: 'git rev-parse HEAD && git status --porcelain=v1',
