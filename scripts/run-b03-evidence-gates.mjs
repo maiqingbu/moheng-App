@@ -49,6 +49,17 @@ for (const [name, command, logName] of commands) {
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: name !== 'acceptance_generator', startedAt, finishedAt: new Date().toISOString(), log: logName })
 }
 
+// The frozen B01 evidence test materializes a fresh database snapshot while
+// checking B01. Revert only those two known generated files so B03's clean-tree
+// binding does not turn a harmless regression fixture refresh into a mutation.
+for (const path of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
+  try {
+    execFileSync('git', ['restore', '--source', before.commit, '--', path], { cwd: root, stdio: 'ignore' })
+  } catch {
+    results.push({ name: 'b01_frozen_evidence', command: `git restore --source ${before.commit} -- ${path}`, exitCode: 1, status: 'FAIL', blocking: true, log: 'gate-results.json' })
+  }
+}
+
 const after = gitSnapshot()
 const gitBinding = evaluateGitBinding({
   beforeCommit: before.commit,
