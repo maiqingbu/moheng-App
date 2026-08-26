@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "b01Compatibility": "PASS",
+  "migration": {
+    "newProject": "PASS",
+    "oldM0ADatabaseUpgrade": "PASS",
+    "repeatMigration": "PASS",
+    "failureRollback": "PASS",
+    "quickCheckAndForeignKeyCheck": "PASS"
+  },
+  "atomicCommit": "PASS",
+  "idempotentReplay": "PASS",
+  "casRevisionConflict": "PASS",
+  "finalGate": "PASS",
+  "globalGates": "PASS",
+  "b03Started": false
+}

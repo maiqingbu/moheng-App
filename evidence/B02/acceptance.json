@@ -1,0 +1,49 @@
+{
+  "batch": "B02",
+  "milestone": "M0C",
+  "status": "PASS",
+  "sourceCommit": "058603d68ca18f8af296ce1b0e860c44808b3319",
+  "workingTreeDirty": false,
+  "predecessor": {
+    "batch": "B01",
+    "status": "FROZEN_PASS",
+    "baselineCommit": "306d8882c6dbedcd2116a0044ad72773b578a9fe"
+  },
+  "commands": [
+    "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
+    "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+    "npm test",
+    "npm run typecheck",
+    "npm run build",
+    "npm run verify:contracts",
+    "npm run verify",
+    "npm run verify:m0a",
+    "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
+    "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
+  ],
+  "keyNumbers": {
+    "b02TargetedRustTests": "7/7",
+    "allRustTests": "97/97",
+    "nodeTests": "9/9",
+    "vitestTests": "17/17",
+    "contractFixtures": "4 valid accepted, 18 invalid rejected",
+    "goldenVectors": 26,
+    "architectureFiles": 44,
+    "moduleBoundaryFiles": 38,
+    "faultInjectedChannels": 9,
+    "replayCount": 100
+  },
+  "evidence": [
+    "atomic_commit_matrix.json",
+    "fault_injection.log",
+    "receipt_replay.json",
+    "final_gate_negative_cases.json",
+    "repository_boundary.json",
+    "test.log",
+    "changed-files.txt",
+    "environment.json",
+    "commands.log",
+    "regression_summary.json"
+  ]
+}

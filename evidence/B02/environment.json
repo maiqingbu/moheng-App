@@ -1,0 +1,10 @@
+{
+  "os": "macOS",
+  "architecture": "arm64",
+  "projectRoot": "/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system",
+  "date": "2026-08-26",
+  "rustManifest": "src-tauri/Cargo.toml",
+  "frontendPackageManager": "npm",
+  "workingTreeDirtyAtSourceCommit": false,
+  "secretsCaptured": false
+}
