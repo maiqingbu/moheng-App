@@ -99,6 +99,31 @@ const evidence = {
     status: 'PASS', sourceCommit,
     tests: ['b03_prepared_recovery_reuses_model_run_and_reservation', 'b03_raw_persistence_failure_stops_parse_and_commit_but_keeps_cost', 'b03_parse_and_completed_recovery_do_not_duplicate_settlement'],
     assertions: ['raw parse replay has zero transport growth', 'completed recovery has zero usage/cost growth']
+  },
+  unknown_resolution: {
+    status: 'PASS', sourceCommit,
+    tests: ['b03_explicit_unknown_retry_keeps_original_budget_binding', 'b03_explicit_unknown_retry_rejects_missing_original_budget_binding'],
+    assertions: ['old UNKNOWN reservation resolves to SETTLED after explicit retry', 'post-resolution normal run is allowed only within original budget']
+  },
+  lease_kernel_invariant: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_resume_kernel_invariant_acquires_lease_without_command_wrapper',
+    assertions: ['resume itself creates active lease', 'RUNNING transition cannot exist without active lease']
+  },
+  lease_time_boundary: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_lease_expiry_advances_date_across_midnight_month_and_year',
+    assertions: ['midnight', 'month end', 'year end']
+  },
+  recovery_raw_reopen: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_raw_recovery_closes_and_reopens_project_db_without_transport_or_cost_growth',
+    assertions: ['same project.db reopened', 'transport delta zero', 'cost delta zero']
+  },
+  recovery_completed_reopen: {
+    status: 'PASS', sourceCommit,
+    test: 'b03_completed_recovery_closes_and_reopens_project_db_without_duplicate_settlement',
+    assertions: ['same project.db reopened', 'no duplicate usage', 'no duplicate ledger or settlement']
   }
 }
 for (const [name, payload] of Object.entries(evidence)) {

@@ -36,6 +36,11 @@ for (const gateName of [
   'stable_id_regression',
   'modelrun_recovery',
   'recovery_matrix',
+  'unknown_resolution',
+  'lease_kernel_invariant',
+  'lease_time_boundary',
+  'recovery_raw_reopen',
+  'recovery_completed_reopen',
   'git_binding'
 ]) {
   test(`B03 acceptance fails when ${gateName} fails`, () => {

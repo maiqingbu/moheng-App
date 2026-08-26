@@ -11,8 +11,9 @@ export const REQUIRED_BLOCKING_GATES = [
   'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets',
   'b03_targeted', 'sqlite_integrity', 'unknown_budget', 'settlement_consistency',
   'stable_id_regression', 'secret_provider_wiring', 'secret_scan',
-  'budget_runtime', 'modelrun_recovery', 'lease_runtime', 'recovery_matrix',
-  'git_binding'
+  'unknown_resolution', 'budget_runtime', 'modelrun_recovery', 'lease_runtime',
+  'lease_kernel_invariant', 'lease_time_boundary', 'recovery_matrix',
+  'recovery_raw_reopen', 'recovery_completed_reopen', 'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {
