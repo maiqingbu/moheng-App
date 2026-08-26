@@ -7,6 +7,9 @@ use crate::repositories::artifacts::{enum_string, scope_key, ArtifactError, Arti
 use libsql_rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
+mod deltas;
+mod final_gate;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommitError {
     #[error("project not found")]
@@ -17,8 +20,10 @@ pub enum CommitError {
     IdempotencyConflict,
     #[error("candidate status required")]
     CandidateStatusRequired,
-    #[error("unsupported reserved delta")]
-    UnsupportedDelta,
+    #[error("budget hard limit")]
+    BudgetHardLimit,
+    #[error("gate certificate digest mismatch")]
+    GateCertificateDigestMismatch,
     #[error("contract invalid: {0}")]
     ContractInvalid(String),
     #[error("commit rolled back")]
@@ -195,9 +200,6 @@ impl CommitService {
                 "unsupported contractVersion".into(),
             ));
         }
-        if Self::has_reserved_delta(bundle) {
-            return Err(CommitError::UnsupportedDelta);
-        }
         if bundle
             .artifacts
             .iter()
@@ -245,18 +247,6 @@ impl CommitService {
         }
     }
 
-    fn has_reserved_delta(bundle: &CommitBundle) -> bool {
-        bundle.canon_delta.is_some()
-            || bundle.obligation_delta.is_some()
-            || bundle.foreshadow_delta.is_some()
-            || bundle.knowledge_delta.is_some()
-            || bundle.state_delta.is_some()
-            || bundle.dependency_edges.is_some()
-            || bundle.job_updates.is_some()
-            || bundle.decision_updates.is_some()
-            || bundle.gate_certificates.is_some()
-    }
-
     fn apply(
         connection: &Connection,
         bundle: &CommitBundle,
@@ -264,6 +254,7 @@ impl CommitService {
         before: i64,
         committed_at: &str,
     ) -> Result<CommitReceipt, CommitError> {
+        final_gate::validate(connection, bundle)?;
         connection.execute("INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES (?1, ?2, ?3, ?4, 'PREPARED', ?5)", libsql_rusqlite::params![bundle.project_id, bundle.command_id, bundle.idempotency_key, bundle_digest, bundle.created_at])?;
         for artifact in &bundle.artifacts {
             if !matches!(
@@ -301,6 +292,23 @@ impl CommitService {
                 )?;
             }
         }
+        let fallback_artifact = bundle
+            .artifacts
+            .first()
+            .map(|artifact| (artifact.artifact_id.as_str(), artifact.version));
+        let delta_counts = deltas::apply_all(
+            connection,
+            bundle.canon_delta.as_ref(),
+            bundle.obligation_delta.as_ref(),
+            bundle.foreshadow_delta.as_ref(),
+            bundle.knowledge_delta.as_ref(),
+            bundle.state_delta.as_ref(),
+            bundle.dependency_edges.as_ref(),
+            bundle.job_updates.as_ref(),
+            bundle.decision_updates.as_ref(),
+            committed_at,
+            fallback_artifact,
+        )?;
         let after = before + 1;
         let updated = connection.execute(
             "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",
@@ -328,6 +336,21 @@ impl CommitService {
             "heads".into(),
             bundle.head_updates.as_ref().map_or(0, Vec::len) as i64,
         );
+        applied_delta_counts.extend(delta_counts);
+        applied_delta_counts.insert(
+            "gateCertificates".into(),
+            bundle.gate_certificates.as_ref().map_or(0, Vec::len) as i64,
+        );
+        let gate_certificate_refs = bundle
+            .gate_certificates
+            .as_ref()
+            .map(|certificates| {
+                certificates
+                    .iter()
+                    .map(|certificate| certificate.certificate_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut receipt = CommitReceipt {
             receipt_id: format!("receipt:{}", bundle.commit_id),
             commit_id: bundle.commit_id.clone(),
@@ -340,10 +363,19 @@ impl CommitService {
             committed_artifact_refs: refs,
             head_changes,
             applied_delta_counts,
-            gate_certificate_refs: Vec::new(),
+            gate_certificate_refs,
             committed_at: committed_at.to_string(),
             receipt_digest: String::new(),
         };
+        if let Some(certificates) = &bundle.gate_certificates {
+            for certificate in certificates {
+                let evidence_refs = serde_json::to_string(&certificate.evidence_refs)?;
+                connection.execute(
+                    "INSERT INTO gate_certificates(certificate_id, project_id, gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(certificate_id) DO UPDATE SET gate_policy_artifact_id=excluded.gate_policy_artifact_id, gate_policy_version=excluded.gate_policy_version, gate_policy_payload_hash=excluded.gate_policy_payload_hash, evidence_refs_json=excluded.evidence_refs_json, source_digest=excluded.source_digest, passed_at=excluded.passed_at, certificate_digest=excluded.certificate_digest",
+                    libsql_rusqlite::params![certificate.certificate_id, certificate.project_id, certificate.gate_policy_ref.artifact_id, certificate.gate_policy_ref.version, certificate.gate_policy_ref.payload_hash, evidence_refs, certificate.source_digest, certificate.passed_at, certificate.certificate_digest],
+                )?;
+            }
+        }
         receipt.receipt_digest = sha256_canonical(&serde_json::to_value(&receipt)?)?;
         let receipt_json = serde_json::to_string(&receipt)?;
         connection.execute("INSERT INTO commit_receipts(receipt_id, project_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_json, receipt_digest, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", libsql_rusqlite::params![receipt.receipt_id, receipt.project_id, receipt.commit_id, receipt.command_id, receipt.idempotency_key, receipt.before_revision, receipt.after_revision, receipt.bundle_digest, receipt_json, receipt.receipt_digest, receipt.committed_at])?;

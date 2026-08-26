@@ -1,0 +1,15 @@
+{
+  "batch": "B02",
+  "status": "PASS",
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
+  "test": "b02_same_bundle_replays_100_times_with_one_business_side_effect",
+  "replayCount": 100,
+  "sameReceipt": true,
+  "businessSideEffects": {
+    "commands": 1,
+    "commitReceipts": 1,
+    "canonFacts": 1
+  },
+  "receiptLookupDigestVerification": "PASS",
+  "evidence": "evidence/B02/fault_injection.log"
+}

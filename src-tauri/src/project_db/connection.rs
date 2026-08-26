@@ -16,6 +16,7 @@ const CATALOG_MIGRATION: &str = include_str!("../../migrations/0001_catalog.sql"
 const PROJECT_MIGRATION: &str = include_str!("../../migrations/0002_project_authority.sql");
 const PROJECT_COMMAND_MIGRATION: &str = include_str!("../../migrations/0003_project_command.sql");
 const PROJECT_LONGTERM_MIGRATION: &str = include_str!("../../migrations/0004_project_longterm.sql");
+const M0C_COMMIT_DELTA_MIGRATION: &str = include_str!("../../migrations/0005_m0c_commit_delta.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     if !read_only {
@@ -104,7 +105,14 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    Ok(applied.is_none() || applied_v3.is_none() || applied_v4.is_none())
+    let applied_v5: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 5",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(applied.is_none() || applied_v3.is_none() || applied_v4.is_none() || applied_v5.is_none())
 }
 
 pub fn migrate_project(
@@ -118,6 +126,7 @@ pub fn migrate_project(
         connection.execute_batch(PROJECT_MIGRATION)?;
         connection.execute_batch(PROJECT_COMMAND_MIGRATION)?;
         connection.execute_batch(PROJECT_LONGTERM_MIGRATION)?;
+        connection.execute_batch(M0C_COMMIT_DELTA_MIGRATION)?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (2, ?1)",
             [now],
@@ -128,6 +137,10 @@ pub fn migrate_project(
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (4, ?1)",
+            [now],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (5, ?1)",
             [now],
         )?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;

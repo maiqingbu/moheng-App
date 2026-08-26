@@ -1,0 +1,6 @@
+
+> ai-novel-production-system-ui@1.0.0 verify
+> node scripts/verify-architecture.mjs && node scripts/verify-module-boundaries.mjs
+
+Architecture verification passed: 44 source files scanned; scoped queries, frozen IA, command boundaries and demo isolation checks passed.
+Module boundary verification passed: 38 files scanned.

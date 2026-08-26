@@ -1,0 +1,42 @@
+{
+  "batch": "B02",
+  "status": "PASS",
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
+  "successFixture": {
+    "test": "b02_full_delta_bundle_is_not_rejected_as_unsupported",
+    "status": "PASS",
+    "channels": {
+      "artifacts": 1,
+      "heads": 0,
+      "canon": 3,
+      "obligation": 1,
+      "foreshadow": 1,
+      "knowledge": 1,
+      "state": 1,
+      "dependency": 1,
+      "job": 1,
+      "decision": 1,
+      "gateCertificates": 1
+    },
+    "afterRevision": 1
+  },
+  "faultInjection": {
+    "test": "b02_each_delta_channel_failure_rolls_back_the_entire_bundle",
+    "channels": [
+      "canon",
+      "obligation",
+      "foreshadow",
+      "knowledge",
+      "state",
+      "dependency",
+      "job",
+      "decision",
+      "gate"
+    ],
+    "expectedRevision": 0,
+    "artifacts": 0,
+    "commitReceipts": 0,
+    "status": "PASS"
+  },
+  "evidence": "evidence/B02/fault_injection.log"
+}

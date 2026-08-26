@@ -1,0 +1,12 @@
+{
+  "batch": "B02",
+  "status": "PASS",
+  "test": "b02_delta_repository_is_transaction_scoped_and_final_gate_is_commit_owned",
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
+  "assertions": {
+    "deltaApplyIsCratePrivate": "pub(crate) fn apply_all",
+    "deltaRepositoryStartsNoTransaction": "no BEGIN IMMEDIATE in deltas.rs",
+    "commitOwnsFinalGate": "commit/mod.rs calls final_gate::validate"
+  },
+  "evidence": "src-tauri/tests/b02_commit_bundle.rs"
+}

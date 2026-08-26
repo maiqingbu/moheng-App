@@ -1,0 +1,19 @@
+
+> ai-novel-production-system-ui@1.0.0 verify:contracts
+> npm run contracts:validate && npm run contracts:golden && npm run contracts:drift-check
+
+
+> ai-novel-production-system-ui@1.0.0 contracts:validate
+> node contracts/tools/validate-fixtures.mjs
+
+Contract fixtures validated through Draft 2020-12 schemas: 4 valid accepted, 18 invalid rejected.
+
+> ai-novel-production-system-ui@1.0.0 contracts:golden
+> node contracts/tools/verify-golden-hash.mjs
+
+Golden hash verified: 26 RFC 8785/newline vectors
+
+> ai-novel-production-system-ui@1.0.0 contracts:drift-check
+> tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT && CONTRACTS_GENERATED_DIR="$tmp/ts" CONTRACTS_RUST_GENERATED_DIR="$tmp/rust" node contracts/tools/generate-contracts.mjs && diff -ru src/generated/contracts "$tmp/ts" && diff -ru src-tauri/src/generated/contracts "$tmp/rust"
+
+generated contracts

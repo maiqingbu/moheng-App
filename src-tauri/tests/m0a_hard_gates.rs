@@ -116,7 +116,7 @@ fn artifact_versions_are_monotonic_and_paged_metadata_excludes_payload() {
 }
 
 #[test]
-fn commit_rejects_reserved_deltas_instead_of_silently_dropping_them() {
+fn commit_applies_typed_deltas_and_rejects_invalid_payloads() {
     let temp = tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager
@@ -129,7 +129,7 @@ fn commit_rejects_reserved_deltas_instead_of_silently_dropping_them() {
 
     assert!(matches!(
         CommitService::commit(&connection, &bundle, "2026-08-24T00:00:01Z"),
-        Err(CommitError::UnsupportedDelta)
+        Err(CommitError::ContractInvalid(_))
     ));
     let count: i64 = connection
         .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))

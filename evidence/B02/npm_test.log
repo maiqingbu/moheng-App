@@ -1,0 +1,29 @@
+
+> ai-novel-production-system-ui@1.0.0 test
+> node --test tests/**/*.test.mjs && vitest run tests/store
+
+✔ should enforce every M0A HARD gate in CI without overwriting drift first (1.666687ms)
+✔ should inspect Rust command implementations and authoritative SQL boundaries (5.528926ms)
+✔ should normalize CRLF and CR before hashing payload text (4.768769ms)
+✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (0.281497ms)
+✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (0.265078ms)
+✔ should reject lone Unicode surrogates (0.58648ms)
+✔ should verify at least twenty frozen golden vectors (0.707988ms)
+✔ should generate every manifest schema into both languages without handwritten DTO omissions (49.711944ms)
+✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (4.901059ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 252.32539
+
+ RUN  v4.1.11 /Users/mac/Desktop/AI小说生产系统/ai-novel-production-system
+
+
+ Test Files  3 passed (3)
+      Tests  17 passed (17)
+   Start at  23:24:32
+   Duration  1.80s (transform 321ms, setup 0ms, import 732ms, tests 1.29s, environment 0ms)

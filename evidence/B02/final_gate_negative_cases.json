@@ -1,0 +1,37 @@
+{
+  "batch": "B02",
+  "status": "PASS",
+  "cases": [
+    {
+      "name": "wrong project gate certificate",
+      "test": "b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes",
+      "result": "PASS",
+      "expected": "ContractInvalid"
+    },
+    {
+      "name": "budget hard limit",
+      "test": "b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes",
+      "result": "PASS",
+      "expected": "BudgetHardLimit"
+    },
+    {
+      "name": "dependency source hash",
+      "test": "b02_invalid_delta_still_fails_closed_without_revision_or_rows",
+      "result": "PASS",
+      "expected": "no writes"
+    },
+    {
+      "name": "CAS revision",
+      "test": "b02_revision_conflict_performs_no_delta_writes",
+      "result": "PASS",
+      "expected": "RevisionConflict and no writes"
+    },
+    {
+      "name": "candidate/head guard",
+      "test": "promote_head_rejects_hash_and_scope_mismatches",
+      "result": "PASS",
+      "expected": "ArtifactError"
+    }
+  ],
+  "evidence": "evidence/B02/fault_injection.log"
+}
