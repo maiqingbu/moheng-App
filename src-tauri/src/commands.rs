@@ -3,7 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
-use crate::runtime::{lease_expiry, pending_decision_count, DurableJobService, JobSpec};
+use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::State;
@@ -430,15 +430,6 @@ fn execute_runtime_command(
                         requested_at,
                     )
                     .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
-                    DurableJobService::acquire_lease(
-                        connection,
-                        project_id,
-                        &job.job_id,
-                        "production-ipc",
-                        &lease_expiry(requested_at),
-                        requested_at,
-                    )
-                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
                     DurableJobService::set_runtime_state(
                         connection,
                         project_id,
@@ -475,16 +466,6 @@ fn execute_runtime_command(
                             connection,
                             project_id,
                             &job_id,
-                            requested_at,
-                        )
-                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
-                    } else {
-                        DurableJobService::acquire_lease(
-                            connection,
-                            project_id,
-                            &job_id,
-                            "production-ipc",
-                            &lease_expiry(requested_at),
                             requested_at,
                         )
                         .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;

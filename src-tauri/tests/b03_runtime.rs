@@ -4,9 +4,9 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::runtime::{
-    DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec, MemorySecretStore,
-    ModelRunSpec, ModelTransport, RuntimeError, SecretStore, TransportFailure, TransportResponse,
-    TransportUsage,
+    lease_expiry, DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec,
+    MemorySecretStore, ModelRunSpec, ModelTransport, RuntimeError, SecretStore, TransportFailure,
+    TransportResponse, TransportUsage,
 };
 use libsql_rusqlite::Connection;
 use serde_json::json;
@@ -898,6 +898,14 @@ fn b03_explicit_unknown_retry_keeps_original_budget_binding() {
     .unwrap();
     assert_eq!(retry_transport.send_calls(), 1);
     assert_eq!(connection.query_row::<String, _, _>("SELECT budget_ref FROM budget_reservations WHERE model_run_id='mr:141414141414141414141414'", [], |row| row.get(0)).unwrap(), "budget:unknown-retry");
+    let mut third = second.clone();
+    third.model_run_id = "mr:202020202020202020202020".into();
+    third.idempotency_key = "model-key:unknown-third".into();
+    third.attempt_no = 2;
+    let mut third_transport = FakeModelTransport::success(json!({"draft":"after-resolve"}));
+    DurableModelRunner::execute(&connection, &mut third_transport, &third, NOW).unwrap();
+    assert_eq!(third_transport.send_calls(), 1);
+    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:131313131313131313131313'", [], |row| row.get(0)).unwrap(), "SETTLED");
 }
 
 #[test]
@@ -1109,15 +1117,6 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
         "2026-08-27T00:02:00Z",
     )
     .unwrap();
-    DurableJobService::acquire_lease(
-        &connection,
-        "p1",
-        "job:222222222222222222222222",
-        "new-worker",
-        "2026-08-27T00:03:00Z",
-        "2026-08-27T00:02:00Z",
-    )
-    .unwrap();
     assert_eq!(
         connection
             .query_row::<String, _, _>(
@@ -1126,8 +1125,60 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
                 |row| row.get(0)
             )
             .unwrap(),
-        "new-worker"
+        "runtime-worker"
     );
+}
+
+#[test]
+fn b03_resume_kernel_invariant_acquires_lease_without_command_wrapper() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_leases WHERE job_id='job:111111111111111111111111' AND released_at IS NULL", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn b03_lease_expiry_advances_date_across_midnight_month_and_year() {
+    assert_eq!(lease_expiry("2026-08-27T23:59:30Z"), "2026-08-28T00:00:30Z");
+    assert_eq!(lease_expiry("2026-01-31T23:59:30Z"), "2026-02-01T00:00:30Z");
+    assert_eq!(lease_expiry("2026-12-31T23:59:30Z"), "2027-01-01T00:00:30Z");
+}
+
+#[test]
+fn b03_raw_recovery_closes_and_reopens_project_db_without_transport_or_cost_growth() {
+    let (temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::raw_success("not-json");
+    assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
+    let before = connection.query_row::<(i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    drop(connection);
+    let reopened_manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let reopened = reopened_manager.open("p1", "A", NOW).unwrap();
+    let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(
+        DurableModelRunner::retry(&reopened, &mut retry_transport, &model_spec(), NOW).is_err()
+    );
+    let after = reopened.query_row::<(i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(retry_transport.send_calls(), 0);
+    assert_eq!(before, after);
+}
+
+#[test]
+fn b03_completed_recovery_closes_and_reopens_project_db_without_duplicate_settlement() {
+    let (temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::success(json!({"draft":"completed-reopen"}));
+    DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
+    let before = connection.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa' AND cost_type='ACTUAL'), (SELECT settled_cents FROM budget_reservations WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    drop(connection);
+    let reopened_manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let reopened = reopened_manager.open("p1", "A", NOW).unwrap();
+    DurableJobService::recover_after_restart(&reopened, "p1", "2026-08-27T00:03:00Z").unwrap();
+    let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    DurableModelRunner::execute(&reopened, &mut retry_transport, &model_spec(), NOW).unwrap();
+    let after = reopened.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa' AND cost_type='ACTUAL'), (SELECT settled_cents FROM budget_reservations WHERE model_run_id='mr:aaaaaaaaaaaaaaaaaaaaaaaa')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    assert_eq!(retry_transport.send_calls(), 0);
+    assert_eq!(before, after);
 }
 
 #[test]
