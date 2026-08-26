@@ -1083,20 +1083,14 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
 
 #[test]
 fn b03_secret_store_keeps_secret_out_of_project_database() {
-    let (_temp, _manager, connection) = project();
+    let (temp, _manager, connection) = project();
     let store = MemorySecretStore::new();
     store.put("fake", "sk-secret-b03").unwrap();
     assert_eq!(store.get("fake").unwrap(), "sk-secret-b03");
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%sk-secret-b03%'",
-                [],
-                |row| row.get(0)
-            )
-            .unwrap(),
-        0
-    );
+    let db_path = temp.path().join("projects/p1/project.db");
+    drop(connection);
+    let db_bytes = std::fs::read(db_path).unwrap();
+    assert!(!String::from_utf8_lossy(&db_bytes).contains("sk-secret-b03"));
 }
 
 #[test]
