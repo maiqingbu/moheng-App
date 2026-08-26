@@ -1,90 +1,182 @@
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
 const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 const evidence = resolve(root, 'evidence/B02')
 const read = name => readFileSync(resolve(evidence, name), 'utf8')
-const gateResults = JSON.parse(read('gate-results.json'))
-const countRust = text => [...text.matchAll(/test result: ok[.;] (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0)
-const targetedRust = countRust(read('b02_targeted_test.log'))
-const allRust = countRust(read('cargo_all_targets.log'))
-const nodeLog = read('npm_test.log')
-const nodeTests = Number(nodeLog.match(/ℹ tests (\d+)/)?.[1] ?? 0)
-const vitestTests = Number(nodeLog.match(/Tests\s+(\d+)\s+passed/)?.[1] ?? 0)
-const contractLog = read('contracts_gate.log')
-const contractCounts = contractLog.match(/(\d+) valid accepted, (\d+) invalid rejected/)
-let sourceCommit = process.env.B02_SOURCE_COMMIT
-let sourceDirty = false
-try {
-  const gitOptions = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-  sourceCommit ??= execFileSync('git', ['rev-parse', 'HEAD'], gitOptions).trim()
-  sourceDirty = execFileSync('git', ['status', '--porcelain=v1', '--', '.', ':!evidence/B02'], gitOptions).trim().length > 0
-} catch {
-  sourceCommit ??= JSON.parse(read('acceptance.json')).sourceCommit ?? 'untracked-archive'
-}
-const requiredGates = ['contracts', 'node_tests', 'frontend_vitest', 'typecheck', 'build', 'architecture', 'm0a', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets', 'b02_targeted_rust', 'sqlite_integrity', 'b01_regression']
-const gateByName = new Map(gateResults.gates.map(gate => [gate.name, gate]))
-const gates = requiredGates.map(name => gateByName.get(name) ?? { name, status: 'FAIL', exitCode: 1, blocking: true, log: '' })
-const finalStatus = gates.filter(gate => gate.blocking !== false).every(gate => gate.status === 'PASS') ? 'PASS' : 'FAIL'
 
-const acceptance = {
-  batch: 'B02',
-  milestone: 'M0C',
-  status: finalStatus,
-  sourceCommit,
-  workingTreeDirty: sourceDirty,
-  gates,
-  predecessor: {
-    batch: 'B01',
-    status: 'FROZEN_PASS',
-    baselineCommit: '306d8882c6dbedcd2116a0044ad72773b578a9fe'
-  },
-  commands: [
-    'cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture',
-    'cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture',
-    'npm test',
-    'npm run typecheck',
-    'npm run build',
-    'npm run verify:contracts',
-    'npm run verify',
-    'npm run verify:m0a',
-    'cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check',
-    'cargo check --manifest-path src-tauri/Cargo.toml --all-targets',
-    'cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings'
-  ],
-  keyNumbers: {
-    b02TargetedRustTests: `${targetedRust}/${targetedRust}`,
-    allRustTests: `${allRust}/${allRust}`,
-    nodeTests: `${nodeTests}/${nodeTests}`,
-    vitestTests: `${vitestTests}/${vitestTests}`,
-    contractFixtures: contractCounts ? `${contractCounts[1]} valid accepted, ${contractCounts[2]} invalid rejected` : 'unparsed',
-    goldenVectors: 26,
-    architectureFiles: 44,
-    moduleBoundaryFiles: 38,
-    faultInjectedChannels: 10,
-    replayCount: 100,
-    volumeAtomicRollbackFixtures: 2
-  },
-  evidence: [
-    'gate-results.json',
-    'atomic_commit_matrix.json',
-    'fault_injection.log',
-    'receipt_replay.json',
-    'final_gate_negative_cases.json',
-    'repository_boundary.json',
-    'gate_policy_boundary.json',
-    'gate_certificate_binding.json',
-    'domain_receipt_roundtrip.json',
-    'volume_atomic_rollback.json',
-    'sqlite_integrity.json',
-    'test.log',
-    'changed-files.txt',
-    'environment.json',
-    'commands.log',
-    'regression_summary.json'
-  ]
+export const REQUIRED_BLOCKING_GATES = [
+  'contracts',
+  'node_tests',
+  'frontend_vitest',
+  'typecheck',
+  'build',
+  'architecture',
+  'module_boundary',
+  'm0a',
+  'cargo_fmt',
+  'cargo_check',
+  'cargo_clippy',
+  'cargo_all_targets',
+  'b02_targeted_rust',
+  'sqlite_integrity',
+  'b01_regression',
+  'git_binding'
+]
+
+export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {
+  const pass = Boolean(beforeCommit)
+    && beforeCommit === afterCommit
+    && dirtyBefore === false
+    && dirtyAfter === false
+  return {
+    status: pass ? 'PASS' : 'FAIL',
+    reason: pass ? 'commit and clean-tree state remained unchanged' : 'commit changed or working tree was dirty'
+  }
 }
 
-writeFileSync(resolve(evidence, 'acceptance.json'), `${JSON.stringify(acceptance, null, 2)}\n`)
-console.log(`B02 acceptance generated from logs: Rust ${targetedRust}/${targetedRust} targeted, ${allRust}/${allRust} all-targets; Node ${nodeTests}/${nodeTests}; Vitest ${vitestTests}/${vitestTests}`)
+export function countRust(text) {
+  return [...text.matchAll(/test result: ok[.;] (\d+) passed/g)]
+    .reduce((sum, match) => sum + Number(match[1]), 0)
+}
+
+export function parseMetrics(logs) {
+  const nodeTests = Number(logs.node.match(/ℹ tests (\d+)/)?.[1] ?? 0)
+  const vitestTests = Number(logs.node.match(/Tests\s+(\d+)\s+passed/)?.[1] ?? 0)
+  const contractCounts = logs.contract.match(/(\d+) valid accepted, (\d+) invalid rejected/)
+  return {
+    b02TargetedRustTests: countRust(logs.targeted),
+    allRustTests: countRust(logs.allRust),
+    nodeTests,
+    vitestTests,
+    contractValid: contractCounts ? Number(contractCounts[1]) : null,
+    contractInvalid: contractCounts ? Number(contractCounts[2]) : null
+  }
+}
+
+function sameMetrics(actual, declared) {
+  if (!declared) return false
+  return Object.keys(actual).every(key => actual[key] === declared[key])
+}
+
+export function evaluateAcceptance({ gateResults, actualMetrics }) {
+  const gateByName = new Map((gateResults.gates ?? []).map(gate => [gate.name, gate]))
+  const gates = REQUIRED_BLOCKING_GATES.map(name => {
+    if (name === 'git_binding') {
+      return {
+        name,
+        status: gateResults.gitBinding?.status ?? 'FAIL',
+        exitCode: gateResults.gitBinding?.status === 'PASS' ? 0 : 1,
+        blocking: true,
+        log: 'evidence/B02/gate-results.json'
+      }
+    }
+    return gateByName.get(name) ?? {
+      name,
+      status: 'FAIL',
+      exitCode: 1,
+      blocking: true,
+      log: ''
+    }
+  })
+  const binding = evaluateGitBinding({
+    beforeCommit: gateResults.sourceCommit,
+    afterCommit: gateResults.sourceCommitAfter,
+    dirtyBefore: gateResults.workingTreeDirtyBefore,
+    dirtyAfter: gateResults.workingTreeDirtyAfter
+  })
+  const metricConsistency = sameMetrics(actualMetrics, gateResults.metrics)
+  const allBlockingPass = gates
+    .filter(gate => gate.blocking !== false)
+    .every(gate => gate.status === 'PASS' && gate.exitCode === 0)
+  return {
+    status: allBlockingPass && binding.status === 'PASS' && metricConsistency ? 'PASS' : 'FAIL',
+    gates,
+    gitBinding: binding,
+    metricConsistency: metricConsistency ? 'PASS' : 'FAIL'
+  }
+}
+
+function digest(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+export function generateAcceptance() {
+  const gateResults = JSON.parse(read('gate-results.json'))
+  const actualMetrics = parseMetrics({
+    targeted: read('b02_targeted_test.log'),
+    allRust: read('cargo_all_targets.log'),
+    node: read('npm_test.log'),
+    contract: read('contracts_gate.log')
+  })
+  const result = evaluateAcceptance({ gateResults, actualMetrics })
+  const acceptance = {
+    batch: 'B02',
+    milestone: 'M0C',
+    status: result.status,
+    sourceCommit: gateResults.sourceCommit,
+    workingTreeDirtyBefore: gateResults.workingTreeDirtyBefore,
+    workingTreeDirtyAfter: gateResults.workingTreeDirtyAfter,
+    gitBinding: result.gitBinding.status,
+    gates: result.gates,
+    metricConsistency: result.metricConsistency,
+    predecessor: {
+      batch: 'B01',
+      status: 'FROZEN_PASS',
+      baselineCommit: '306d8882c6dbedcd2116a0044ad72773b578a9fe'
+    },
+    keyNumbers: {
+      b02TargetedRustTests: `${actualMetrics.b02TargetedRustTests}/${actualMetrics.b02TargetedRustTests}`,
+      allRustTests: `${actualMetrics.allRustTests}/${actualMetrics.allRustTests}`,
+      nodeTests: `${actualMetrics.nodeTests}/${actualMetrics.nodeTests}`,
+      vitestTests: `${actualMetrics.vitestTests}/${actualMetrics.vitestTests}`,
+      contractFixtures: `${actualMetrics.contractValid} valid accepted, ${actualMetrics.contractInvalid} invalid rejected`,
+      goldenVectors: 26,
+      architectureFiles: 44,
+      moduleBoundaryFiles: 38,
+      faultInjectedChannels: 10,
+      replayCount: 100,
+      volumeAtomicRollbackFixtures: 2
+    },
+    evidenceGenerator: {
+      script: 'scripts/generate-b02-acceptance.mjs',
+      digest: digest(fileURLToPath(import.meta.url))
+    },
+    gateRunner: {
+      script: 'scripts/run-b02-evidence-gates.mjs',
+      digest: digest(resolve(root, 'scripts/run-b02-evidence-gates.mjs'))
+    },
+    gateRunnerExitCode: gateResults.runnerExitCode ?? (result.status === 'PASS' ? 0 : 1),
+    evidence: [
+      'acceptance.json',
+      'gate-results.json',
+      'test.log',
+      'npm_test.log',
+      'cargo_fmt.log',
+      'cargo_check.log',
+      'cargo_clippy.log',
+      'cargo_all_targets.log',
+      'b02_targeted_test.log',
+      'typecheck.log',
+      'build.log',
+      'contracts_gate.log',
+      'architecture_gate.log',
+      'm0a_gate.log',
+      'sqlite_integrity.json',
+      'acceptance_generator_tests.log',
+      'git_binding_tests.log',
+      'changed-files.txt'
+    ]
+  }
+  writeFileSync(resolve(evidence, 'acceptance.json'), `${JSON.stringify(acceptance, null, 2)}\n`)
+  return acceptance
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const acceptance = generateAcceptance()
+  console.log(`B02 acceptance generated from bound gates: ${acceptance.status}`)
+  if (acceptance.status !== 'PASS') process.exitCode = 1
+}
