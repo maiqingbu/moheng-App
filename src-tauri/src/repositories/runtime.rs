@@ -1,3 +1,4 @@
+use crate::stable_id::{validate_stable_id, StableIdKind};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,6 +21,8 @@ pub enum RuntimeError {
     BudgetHardLimit,
     #[error("stable id rejected")]
     StableIdRejected,
+    #[error("model retry must keep the original budget binding")]
+    BudgetBindingMismatch,
     #[error("raw response persistence failed")]
     RawResponsePersistenceFailed,
     #[error("secret unavailable")]
@@ -113,9 +116,8 @@ impl DurableJobService {
                 "job_type".into(),
             ));
         }
-        if !spec.job_id.starts_with("job:") {
-            return Err(RuntimeError::StableIdRejected);
-        }
+        validate_stable_id(&spec.job_id, StableIdKind::Job)
+            .map_err(|_| RuntimeError::StableIdRejected)?;
         let project_id: String =
             connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
                 row.get(0)
@@ -455,7 +457,15 @@ pub trait ModelTransport {
         Ok(())
     }
 
-    fn send(&mut self, spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure>;
+    fn credential(&self) -> &str {
+        ""
+    }
+
+    fn send(
+        &mut self,
+        spec: &ModelRunSpec,
+        credential: &str,
+    ) -> Result<TransportResponse, TransportFailure>;
 }
 
 pub struct FakeModelTransport {
@@ -518,7 +528,11 @@ impl FakeModelTransport {
 }
 
 impl ModelTransport for FakeModelTransport {
-    fn send(&mut self, _spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure> {
+    fn send(
+        &mut self,
+        _spec: &ModelRunSpec,
+        _credential: &str,
+    ) -> Result<TransportResponse, TransportFailure> {
         self.calls += 1;
         self.response.clone()
     }
@@ -534,7 +548,7 @@ impl DurableModelRunner {
     ) -> Result<(), RuntimeError> {
         validate_model_run_id(spec)?;
         if existing_model_status(connection, spec)?.is_none() {
-            enforce_budget(connection, spec)?;
+            enforce_budget(connection, spec, false)?;
             persist_before_send(connection, spec, now)?;
         }
         Ok(())
@@ -545,6 +559,16 @@ impl DurableModelRunner {
         transport: &mut T,
         spec: &ModelRunSpec,
         now: &str,
+    ) -> Result<ModelRunOutcome, RuntimeError> {
+        Self::execute_with_budget_mode(connection, transport, spec, now, false)
+    }
+
+    fn execute_with_budget_mode<T: ModelTransport>(
+        connection: &Connection,
+        transport: &mut T,
+        spec: &ModelRunSpec,
+        now: &str,
+        allow_unknown_hold: bool,
     ) -> Result<ModelRunOutcome, RuntimeError> {
         validate_model_run_id(spec)?;
         if let Some(status) = existing_model_status(connection, spec)? {
@@ -569,7 +593,7 @@ impl DurableModelRunner {
                 ));
             }
         } else {
-            enforce_budget(connection, spec)?;
+            enforce_budget(connection, spec, allow_unknown_hold)?;
             persist_before_send(connection, spec, now)?;
         }
         mark_sending(connection, spec, now)?;
@@ -577,7 +601,8 @@ impl DurableModelRunner {
             mark_confirmed_failure(connection, spec, now)?;
             return Err(error);
         }
-        let response = match transport.send(spec) {
+        let credential = transport.credential().to_owned();
+        let response = match transport.send(spec, &credential) {
             Ok(response) => response,
             Err(TransportFailure::Timeout) => {
                 mark_unknown_remote_outcome(connection, spec, now)?;
@@ -659,6 +684,14 @@ impl DurableModelRunner {
                 if next_spec.model_run_id == model_run_id {
                     return Err(RuntimeError::StableIdRejected);
                 }
+                let old_budget: String = connection.query_row(
+                    "SELECT budget_ref FROM budget_reservations WHERE model_run_id=?1 ORDER BY created_at DESC LIMIT 1",
+                    [model_run_id],
+                    |row| row.get(0),
+                )?;
+                if next_spec.budget_id.as_deref().unwrap_or("UNSCOPED") != old_budget {
+                    return Err(RuntimeError::BudgetBindingMismatch);
+                }
                 connection.execute(
                     "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE decision_id=?2 AND outcome IN ('OPEN','PENDING')",
                     libsql_rusqlite::params![now, decision_id],
@@ -669,7 +702,7 @@ impl DurableModelRunner {
                         libsql_rusqlite::params![now, job_id],
                     )?;
                 }
-                Self::execute(connection, transport, next_spec, now)
+                Self::execute_with_budget_mode(connection, transport, next_spec, now, true)
             }
             "MARK_FAILED" | "CANCEL_JOB" => {
                 let job_status = if action == "CANCEL_JOB" {
@@ -701,10 +734,8 @@ impl DurableModelRunner {
 }
 
 fn validate_model_run_id(spec: &ModelRunSpec) -> Result<(), RuntimeError> {
-    if !spec.model_run_id.starts_with("mr:") {
-        return Err(RuntimeError::StableIdRejected);
-    }
-    Ok(())
+    validate_stable_id(&spec.model_run_id, StableIdKind::ModelRun)
+        .map_err(|_| RuntimeError::StableIdRejected)
 }
 
 fn existing_model_status(
@@ -720,7 +751,11 @@ fn existing_model_status(
         .optional()?)
 }
 
-fn enforce_budget(connection: &Connection, spec: &ModelRunSpec) -> Result<(), RuntimeError> {
+fn enforce_budget(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    allow_unknown_hold: bool,
+) -> Result<(), RuntimeError> {
     let Some(budget_id) = &spec.budget_id else {
         return Ok(());
     };
@@ -739,7 +774,7 @@ fn enforce_budget(connection: &Connection, spec: &ModelRunSpec) -> Result<(), Ru
         [budget_id],
         |row| row.get(0),
     )?;
-    if over_limit > 0 {
+    if over_limit > 0 && !allow_unknown_hold {
         record_budget_decision(
             connection,
             budget_id,
@@ -755,7 +790,7 @@ fn enforce_budget(connection: &Connection, spec: &ModelRunSpec) -> Result<(), Ru
         |row| row.get(0),
     )?;
     let active_reserved_cost: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_ref=?1 AND status='RESERVED'",
+        "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_ref=?1 AND status IN ('RESERVED','OVER_LIMIT')",
         [budget_id],
         |row| row.get(0),
     )?;
@@ -769,7 +804,11 @@ fn enforce_budget(connection: &Connection, spec: &ModelRunSpec) -> Result<(), Ru
         record_budget_decision(
             connection,
             budget_id,
-            "BUDGET_REPLAN",
+            if allow_unknown_hold {
+                "BUDGET_BLOCKED"
+            } else {
+                "BUDGET_REPLAN"
+            },
             "REPLAN_REQUIRED",
             "hard model-run limit reached",
         )?;
@@ -781,7 +820,11 @@ fn enforce_budget(connection: &Connection, spec: &ModelRunSpec) -> Result<(), Ru
         record_budget_decision(
             connection,
             budget_id,
-            "BUDGET_REPLAN",
+            if allow_unknown_hold {
+                "BUDGET_BLOCKED"
+            } else {
+                "BUDGET_REPLAN"
+            },
             "REPLAN_REQUIRED",
             "hard cost limit reached",
         )?;
@@ -1074,10 +1117,6 @@ fn finish_parse(
             "UPDATE model_runs SET status='COMPLETED', updated_at=?1 WHERE model_run_id=?2",
             libsql_rusqlite::params![now, spec.model_run_id],
         )?;
-        connection.execute(
-            "UPDATE budget_reservations SET status='SETTLED', settled_cents=reserved_cents, settled_at=?1 WHERE reservation_id=?2",
-            libsql_rusqlite::params![now, format!("reservation:{}", spec.model_run_id)],
-        )?;
         if let Some(step_id) = &spec.step_id {
             connection.execute(
                 "UPDATE job_steps SET status='COMPLETED', finished_at=?1, model_run_id=?2 WHERE job_step_id=?3",
@@ -1108,6 +1147,7 @@ pub struct SecretBackedTransport<T, S> {
     inner: T,
     store: S,
     provider: String,
+    credential: Option<String>,
 }
 
 impl<T, S> SecretBackedTransport<T, S> {
@@ -1116,6 +1156,7 @@ impl<T, S> SecretBackedTransport<T, S> {
             inner,
             store,
             provider: provider.into(),
+            credential: None,
         }
     }
 }
@@ -1126,7 +1167,7 @@ impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport
         connection: &Connection,
         spec: &ModelRunSpec,
     ) -> Result<(), RuntimeError> {
-        self.store.get(&self.provider)?;
+        self.credential = Some(self.store.get(&self.provider)?);
         self.inner.before_send(connection, spec)
     }
 
@@ -1138,8 +1179,16 @@ impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport
         self.inner.before_raw_persist(connection, spec)
     }
 
-    fn send(&mut self, spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure> {
-        self.inner.send(spec)
+    fn credential(&self) -> &str {
+        self.credential.as_deref().unwrap_or("")
+    }
+
+    fn send(
+        &mut self,
+        spec: &ModelRunSpec,
+        credential: &str,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.inner.send(spec, credential)
     }
 }
 
