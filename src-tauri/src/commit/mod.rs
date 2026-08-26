@@ -12,6 +12,19 @@ use std::collections::BTreeMap;
 mod deltas;
 mod final_gate;
 
+type StoredGateCertificateRow = (
+    String,
+    i64,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommitError {
     #[error("project not found")]
@@ -365,18 +378,7 @@ impl CommitService {
         if let Some(certificates) = &bundle.gate_certificates {
             for certificate in certificates {
                 let evidence_refs = serde_json::to_string(&certificate.evidence_refs)?;
-                let existing: Option<(
-                    String,
-                    i64,
-                    String,
-                    String,
-                    i64,
-                    String,
-                    String,
-                    String,
-                    String,
-                    String,
-                )> =
+                let existing: Option<StoredGateCertificateRow> =
                     connection
                         .query_row(
                             "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, subject_artifact_id, subject_version, subject_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",

@@ -36,6 +36,19 @@ type FactDigestRow = (
     Option<String>,
 );
 
+type StoredCertificateRow = (
+    String,
+    i64,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
 fn bundle_artifact(
     bundle: &CommitBundle,
     id: &str,
@@ -399,18 +412,7 @@ fn existing_certificate_matches(
     bundle: &CommitBundle,
     certificate: &GateCertificate,
 ) -> Result<bool, CommitError> {
-    let existing: Option<(
-        String,
-        i64,
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-    )> = connection
+    let existing: Option<StoredCertificateRow> = connection
         .query_row(
             "SELECT gate_policy_artifact_id, gate_policy_version, gate_policy_payload_hash, subject_artifact_id, subject_version, subject_payload_hash, evidence_refs_json, source_digest, passed_at, certificate_digest FROM gate_certificates WHERE project_id = ?1 AND certificate_id = ?2",
             [&bundle.project_id, &certificate.certificate_id],
