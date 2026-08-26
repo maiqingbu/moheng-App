@@ -71,7 +71,7 @@ export interface ProjectSnapshot {
   updatedAt: string
 }
 
-export interface ProjectLibraryItem {
+interface ProjectLibraryItemBase {
   id: string
   title: string
   subtitle: string
@@ -89,18 +89,27 @@ export interface ProjectLibraryItem {
   committedChapters: number
   candidateChapters: number
   pendingDecisions: number
-  revision: number
   createdAt: string
   updatedAt: string
   lastOpenedAt: string
-  /**
-   * True only when the project DB was readable and the authoritative revision was
-   * read successfully. When false the entry carries a degraded readError instead
-   * of a fabricated revision=0, and is NOT usable for destructive commands.
-   */
-  operational: boolean
-  readError?: string
 }
+
+export interface OperationalProjectLibraryItem extends ProjectLibraryItemBase {
+  operational: true
+  revision: number
+  generatedRevision: number
+  readError?: null
+}
+
+export interface DegradedProjectLibraryItem extends ProjectLibraryItemBase {
+  /** The project DB could not be read; no revision may be fabricated. */
+  operational: false
+  revision: null
+  generatedRevision: null
+  readError: string
+}
+
+export type ProjectLibraryItem = OperationalProjectLibraryItem | DegradedProjectLibraryItem
 
 export interface ProjectLibraryProjection {
   projects: ProjectLibraryItem[]

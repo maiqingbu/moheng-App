@@ -16,6 +16,7 @@
 
 use crate::hash::sha256_canonical;
 use serde_json::json;
+use uuid::Uuid;
 
 /// The recognized stable-id kinds. Keeping the set closed lets the validator
 /// reject an id whose prefix names a kind the kernel does not own.
@@ -80,6 +81,34 @@ pub enum StableIdError {
     InvalidFormat,
     #[error("stable id requires stable identity material, not a mutable display field")]
     MutableIdentity,
+}
+
+/// The kernel creation boundary. Production services obtain durable identities
+/// here instead of assembling ids from titles, ordinals, paths, or command UI
+/// slots. A command-derived identity is deterministic so an interrupted
+/// create/duplicate can be retried without creating a second project.
+pub struct StableIdentityFactory;
+
+impl StableIdentityFactory {
+    pub fn mint(kind: StableIdKind) -> Result<String, String> {
+        mint(kind)
+    }
+
+    pub fn derive(
+        kind: StableIdKind,
+        parent_stable_id: &str,
+        immutable_child_id: &str,
+    ) -> Result<String, String> {
+        derive(kind, parent_stable_id, immutable_child_id)
+    }
+
+    pub fn from_command(kind: StableIdKind, command_id: &str) -> Result<String, String> {
+        if command_id.trim().is_empty() {
+            return Err(StableIdError::MutableIdentity.to_string());
+        }
+        let immutable_seed = Uuid::new_v5(&Uuid::NAMESPACE_OID, command_id.as_bytes());
+        digest_id(kind, &immutable_seed.to_string())
+    }
 }
 
 /// Mints a fresh opaque id for a newly-created entity. The only input is the

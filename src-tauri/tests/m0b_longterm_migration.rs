@@ -305,6 +305,32 @@ fn migration_rolls_back_atomically_on_midway_failure() {
         .unwrap();
     conn.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES ('a1', 'm0a', 'FinalChapter', 'CHAPTER', 'k1', 1, 'm0a.artifact.v1', 'COMMITTED', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', ?1, ?1)", [NOW])
         .unwrap();
+    // Seed the command and its frozen receipt so rollback proves both the
+    // artifact hash and receipt digest survive a failed and successful retry.
+    conn.execute(
+        "INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES ('m0a', 'cmd:rollback', 'idem:rollback', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 'COMMITTED', ?1)",
+        [NOW],
+    ).unwrap();
+    const ROLLBACK_RECEIPT_DIGEST: &str =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    conn.execute(
+        "INSERT INTO commit_receipts(receipt_id, project_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_json, receipt_digest, committed_at) VALUES ('rcp:rollback', 'm0a', 'commit:rollback', 'cmd:rollback', 'idem:rollback', 0, 1, 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', '{\"receiptId\":\"rcp:rollback\"}', ?1, ?2)",
+        libsql_rusqlite::params![ROLLBACK_RECEIPT_DIGEST, NOW],
+    ).unwrap();
+    let before_artifact_hash: String = conn
+        .query_row(
+            "SELECT payload_hash FROM artifacts WHERE artifact_id = 'a1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_receipt_digest: String = conn
+        .query_row(
+            "SELECT receipt_digest FROM commit_receipts WHERE receipt_id = 'rcp:rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     // Conflict marker: a view grabs the canon_facts name before the migration.
     conn.execute_batch("CREATE VIEW canon_facts AS SELECT 'x' AS fake_id;")
         .unwrap();
@@ -386,6 +412,17 @@ fn migration_rolls_back_atomically_on_midway_failure() {
         )
         .unwrap();
     assert_eq!(title, "A");
+    let receipt_digest: String = conn
+        .query_row(
+            "SELECT receipt_digest FROM commit_receipts WHERE receipt_id = 'rcp:rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        receipt_digest, before_receipt_digest,
+        "receipt digest must survive rollback"
+    );
     drop(conn);
 
     // 7. fix the conflict and re-run: migration must now succeed cleanly.
@@ -405,6 +442,28 @@ fn migration_rolls_back_atomically_on_midway_failure() {
     assert!(
         v4_after,
         "after fixing the conflict the migration must succeed"
+    );
+    let after_artifact_hash: String = connection
+        .query_row(
+            "SELECT payload_hash FROM artifacts WHERE artifact_id = 'a1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let after_receipt_digest: String = connection
+        .query_row(
+            "SELECT receipt_digest FROM commit_receipts WHERE receipt_id = 'rcp:rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after_artifact_hash, before_artifact_hash,
+        "artifact hash must survive retry"
+    );
+    assert_eq!(
+        after_receipt_digest, before_receipt_digest,
+        "receipt digest must survive retry"
     );
     drop(connection);
 }

@@ -3,6 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
+use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -29,18 +30,8 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, String>
         .ok_or_else(|| format!("IPC_INVALID:{field}"))
 }
 
-fn safe_project_id(command_id: &str) -> String {
-    let suffix: String = command_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("project-{suffix}")
+fn stable_project_id(command_id: &str) -> Result<String, String> {
+    StableIdentityFactory::from_command(StableIdKind::Project, command_id)
 }
 
 fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &str) -> Value {
@@ -323,7 +314,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 .pointer("/payload/title")
                 .and_then(Value::as_str)
                 .unwrap_or("未命名作品");
-            let id = safe_project_id(command_id);
+            let id = stable_project_id(command_id)?;
             if let Some(replayed) = replayed_project_command(state, &id, idempotency_key, &digest)?
             {
                 return Ok(replayed);
@@ -449,12 +440,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         }
         "project_duplicate" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
-            let target = request
-                .pointer("/payload/targetProjectId")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| value.to_string())
-                .ok_or_else(|| "IPC_INVALID:payload.targetProjectId".to_string())?;
+            if request.pointer("/payload/targetProjectId").is_some() {
+                return Err("PROTOCOL / STABLE_ID_OVERRIDE_FORBIDDEN".to_string());
+            }
+            let target = StableIdentityFactory::from_command(StableIdKind::Project, command_id)?;
             if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
                 return Ok(replayed);
             }

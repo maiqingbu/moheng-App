@@ -80,6 +80,7 @@ function libraryItem(record: DemoProjectRecord): ProjectLibraryItem {
     candidateChapters: bundle.project.candidateChapters,
     pendingDecisions: bundle.decisions.filter(item => item.status === 'pending').length,
     revision: bundle.project.revision,
+    generatedRevision: bundle.project.revision,
     createdAt: record.createdAt,
     updatedAt: bundle.project.updatedAt,
     lastOpenedAt: record.lastOpenedAt,
@@ -544,7 +545,11 @@ export class BrowserDemoPort implements FrontendPort {
       }
     }
 
-    const receipt: CommandReceipt = { commandId, projectId:resultProjectId, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId }
+    // Match the Rust contract: projectId is the command source; resultProjectId
+    // is the produced/target project. Create has no source, so this demo follows
+    // the current Rust shape and uses the created project for both fields.
+    const sourceProjectId = request.projectId ?? resultProjectId
+    const receipt: CommandReceipt = { commandId, projectId:sourceProjectId, resultProjectId, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId }
     this.receipts.set(commandId, clone(receipt))
     emit(finalStatus,message)
     return receipt

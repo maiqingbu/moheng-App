@@ -1,69 +1,145 @@
 {
   "batch": "B01",
-  "batchTitle": "M0B — 最终 Schema 主干、稳定 ID 与项目切换一致性（修订版）",
+  "batchTitle": "M0B - 最终收口修复",
   "status": "PASS",
-  "revision": "B01 修订版（修复前轮 FAIL 的 8 项 P0 问题）",
-  "sourceCommit": "91e5acbfdd957f26c7bc34ba84955b3094f68833",
-  "sourceBundleSha256": "6b42f0ce30350189d3665960ba62064959dedccb69ae9a86ae3393afa8400e70",
-  "completedAt": "2026-08-26T05:30:00Z",
+  "revision": "B01 最终收口修复（六类问题）",
+  "sourceCommit": "PENDING_FINAL_COMMIT",
+  "workingTreeDirty": true,
+  "sourceBundleSha256": null,
+  "sourceBundleSha256Note": "记录在外层 B01_DELIVERY_REPORT.md，避免压缩包自引用哈希。",
   "tests": {
-    "rust": { "passed": 85, "failed": 0, "command": "cargo test --all-targets" },
-    "frontend": { "passed": 14, "failed": 0, "command": "npm test (9 node + 5 vitest)" },
-    "cargo_fmt": "clean",
-    "cargo_clippy": "clean (-D warnings)"
+    "rust": {
+      "passed": 90,
+      "failed": 0,
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+      "evidence": "evidence/B01/cargo_test.log"
+    },
+    "frontend": {
+      "passed": 26,
+      "failed": 0,
+      "breakdown": {
+        "node": 9,
+        "vitest": 17
+      },
+      "command": "npm test",
+      "evidence": "evidence/B01/test.log"
+    },
+    "typecheck": {
+      "status": "PASS",
+      "command": "npm run typecheck"
+    },
+    "build": {
+      "status": "PASS",
+      "command": "npm run build"
+    },
+    "contract": {
+      "status": "PASS",
+      "command": "npm run verify:contracts"
+    },
+    "architecture": {
+      "status": "PASS",
+      "command": "npm run verify"
+    },
+    "moduleBoundary": {
+      "status": "PASS",
+      "command": "npm run verify"
+    },
+    "m0a": {
+      "status": "PASS",
+      "command": "npm run verify:m0a"
+    },
+    "cargoFmt": {
+      "status": "PASS",
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check"
+    },
+    "cargoCheck": {
+      "status": "PASS",
+      "command": "cargo check --manifest-path src-tauri/Cargo.toml"
+    },
+    "cargoClippy": {
+      "status": "PASS",
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+    }
   },
   "schema": {
-    "tables": 72,
-    "indexes": 147,
-    "foreign_key_violations": 0,
-    "quick_check": "ok",
+    "coreTablesRequired": 61,
+    "coreTablesPresent": 61,
+    "totalTables": 72,
+    "indexes": 146,
+    "quickCheck": "ok",
+    "foreignKeyViolations": 0,
     "source": "evidence/B01/schema_inventory.json"
   },
   "contracts": {
-    "valid_fixtures_accepted": 4,
-    "invalid_fixtures_rejected": 18,
-    "deltas_root_validateable": true,
-    "commit_receipt_headChanges_typed": true,
-    "budget_contract_generated": true,
-    "golden_vectors": 26,
-    "drift_check": "pass",
+    "validFixturesAccepted": 4,
+    "invalidFixturesRejected": 18,
+    "goldenVectors": 26,
+    "driftCheck": "PASS",
     "source": "evidence/B01/registry_integrity.json"
   },
-  "queryPlans": {
-    "core_section_21_3_queries": 17,
-    "passing": 17,
-    "failing": 0,
-    "canon_facts_source_chapter_index": true,
-    "source": "evidence/B01/query-plans.json"
-  },
-  "migration": {
-    "hash_preservation_artifact": "pass",
-    "hash_preservation_command": "pass",
-    "hash_preservation_receipt_digest": "pass",
-    "atomic_rollback": "pass",
-    "reopen_no_migration_repeat": "pass",
-    "no_backup_storm": "pass",
-    "source": "evidence/B01/migration_upgrade_test.log"
+  "duplicateResult": {
+    "status": "PASS",
+    "source": "src/ui/pages/ProjectLibrary.vue",
+    "tests": [
+      "DUPLICATE-RESULT-02",
+      "real_ipc_duplicate_receipt_and_delete_reflect_in_project_db"
+    ],
+    "rule": "navigate only to receipt.resultProjectId; no projectId fallback"
   },
   "projectRace": {
-    "PROJECT_RACE_01": { "status": "PASS", "scenario": "late A query does not pollute B" },
-    "PROJECT_RACE_02": { "status": "PASS", "scenario": "late A command receipt does not clobber B workspace/head/revision" },
-    "PROJECT_RACE_03": { "status": "PASS", "scenario": "duplicate A→C receipt never implicitly replaces active B with C" },
-    "resultProjectId_semantics": { "status": "PASS", "scenario": "projectId=source, resultProjectId=result" },
+    "status": "PASS",
+    "tests": [
+      "PROJECT-RACE-01",
+      "PROJECT-RACE-02",
+      "PROJECT-RACE-03",
+      "PROJECT-RACE-COMMAND-STATUS",
+      "PROJECT-RACE-COMMAND-WRONG-RECEIPT"
+    ],
     "source": "evidence/B01/project_switch_race_test.log"
   },
+  "receiptParity": {
+    "status": "PASS",
+    "source": "evidence/B01/receipt_contract_parity.json"
+  },
   "stableId": {
-    "STABLE_ID_01": { "status": "PASS", "scenario": "title change does not change id" },
-    "STABLE_ID_02": { "status": "PASS", "scenario": "chapter-number change does not change id" },
-    "STABLE_ID_03": { "status": "PASS", "scenario": "display move does not change identity" },
-    "STABLE_ID_04": { "status": "PASS", "scenario": "copy project — new projectId, stable refs valid" },
-    "production_boundary": { "status": "PASS", "scenario": "CommitService rejects malformed prefixed display reference" },
-    "source": "src-tauri/tests/b01_stable_id.rs"
+    "status": "PASS",
+    "productionBoundary": "commands::execute_command_impl uses StableIdentityFactory for create/duplicate",
+    "source": "evidence/B01/stable_id_boundary.json"
   },
   "libraryRevision": {
-    "LIBRARY_REV_01": { "status": "PASS", "scenario": "library revision == DB real revision after advancing command" },
-    "LIBRARY_REV_02": { "status": "PASS", "scenario": "unreadable project marked operational=false, never fabricated revision=0" },
-    "source": "src-tauri/tests/b01_library_revision.rs"
+    "status": "PASS",
+    "source": "evidence/B01/library_revision.json"
   },
-  "exitCondition": "B01 修订版所有 P0 验收条目 PASS；未回退 M0A 能力；未引入临时第二权威/正式路径 Demo 回退/跳过 Gate。"
+  "migration": {
+    "status": "PASS",
+    "artifactHashPreserved": "PASS",
+    "receiptDigestPreserved": "PASS",
+    "atomicRollback": "PASS",
+    "retryAfterFix": "PASS",
+    "source": "evidence/B01/migration_upgrade_test.log"
+  },
+  "queryPlans": {
+    "total": 17,
+    "exact": 15,
+    "archEquivalent": 2,
+    "fail": 0,
+    "source": "evidence/B01/query-plans.json"
+  },
+  "registry": {
+    "missingAuthoritativeTables": 0,
+    "missingRegisteredTables": 0
+  },
+  "evidenceFiles": [
+    "acceptance.json",
+    "test.log",
+    "changed-files.txt",
+    "schema_inventory.json",
+    "registry_integrity.json",
+    "migration_upgrade_test.log",
+    "project_switch_race_test.log",
+    "query-plans.json",
+    "stable_id_boundary.json",
+    "library_revision.json",
+    "receipt_contract_parity.json"
+  ]
 }

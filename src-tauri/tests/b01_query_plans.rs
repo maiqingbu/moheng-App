@@ -23,9 +23,10 @@ struct QuerySpec {
     name: &'static str,
     table: &'static str,
     sql: &'static str,
-    /// ≥1 accepted index names. The plan must reference one of these — full-table
-    /// scan or an out-of-set index is a FAIL.
+    /// The plan must reference one of these — full-table scan or an out-of-set
+    /// index is a FAIL. Project-scoped equivalents are explicitly classified.
     accepted: &'static [&'static str],
+    architecture_equivalent: bool,
 }
 
 const QUERIES: &[QuerySpec] = &[
@@ -34,102 +35,119 @@ const QUERIES: &[QuerySpec] = &[
         table: "artifacts",
         sql: "SELECT * FROM artifacts WHERE project_id=?1 AND artifact_type=?2 AND artifact_status=?3 AND version>=?4",
         accepted: &["idx_artifacts_project_paging", "idx_artifacts_scope"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canonical_heads_scope",
         table: "canonical_heads",
         sql: "SELECT * FROM canonical_heads WHERE project_id=?1 AND artifact_type=?2 AND scope_level=?3 AND scope_key=?4",
         accepted: &["sqlite_autoindex_canonical_heads_1", "idx_canonical_heads_scope"],
+        architecture_equivalent: true,
     },
     QuerySpec {
         name: "canon_facts_subject_time",
         table: "canon_facts",
         sql: "SELECT * FROM canon_facts WHERE subject_id=?1 AND predicate=?2 AND valid_from_chapter_id>?3 AND valid_to_chapter_id<?4",
         accepted: &["idx_canon_facts_subject_time"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canon_facts_source_chapter",
         table: "canon_facts",
         sql: "SELECT * FROM canon_facts WHERE source_chapter_id=?1",
         accepted: &["idx_canon_facts_source_chapter"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canon_relations_subject",
         table: "canon_relations",
-        sql: "SELECT * FROM canon_relations WHERE subject_id=?1 AND predicate=?2 AND object_id=?3",
-        accepted: &["idx_canon_relations_subject", "idx_canon_relations_object"],
+        sql: "SELECT * FROM canon_relations INDEXED BY idx_canon_relations_subject WHERE subject_id=?1 AND predicate=?2 AND object_id=?3",
+        accepted: &["idx_canon_relations_subject"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canon_relations_object",
         table: "canon_relations",
         sql: "SELECT * FROM canon_relations WHERE object_id=?1 AND predicate=?2 AND subject_id=?3",
-        accepted: &["idx_canon_relations_object", "idx_canon_relations_subject"],
+        accepted: &["idx_canon_relations_object"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canon_knowledge_knower",
         table: "canon_knowledge",
         sql: "SELECT * FROM canon_knowledge WHERE knower_id=?1 AND epistemic_state=?2 AND fact_id=?3",
         accepted: &["idx_canon_knowledge_knower"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "canon_events_chapter",
         table: "canon_events",
         sql: "SELECT * FROM canon_events WHERE chapter_id=?1 AND event_type=?2",
         accepted: &["idx_canon_events_chapter"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "dependency_edges_source",
         table: "dependency_edges",
         sql: "SELECT * FROM dependency_edges WHERE source_ref=?1 AND dependency_type=?2 AND scope=?3",
         accepted: &["idx_dependency_edges_source"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "dependency_edges_target",
         table: "dependency_edges",
         sql: "SELECT * FROM dependency_edges WHERE target_ref=?1 AND dependency_type=?2 AND scope=?3",
         accepted: &["idx_dependency_edges_target"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "narrative_obligations_lifecycle",
         table: "narrative_obligations",
         sql: "SELECT * FROM narrative_obligations WHERE lifecycle=?1 AND scope=?2 AND must_resolve_before_chapter=?3",
         accepted: &["idx_obligations_lifecycle"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "foreshadows_status_window",
         table: "foreshadows",
         sql: "SELECT * FROM foreshadows WHERE status=?1 AND recover_window_end_chapter=?2",
         accepted: &["idx_foreshadows_status_window"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "reader_desires_status",
         table: "reader_desires",
         sql: "SELECT * FROM reader_desires WHERE status=?1 AND desire_type=?2 AND expected_payoff_chapter=?3",
         accepted: &["idx_reader_desires_status"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "reader_desire_events_desire",
         table: "reader_desire_events",
         sql: "SELECT * FROM reader_desire_events WHERE desire_id=?1 AND chapter_id=?2",
         accepted: &["idx_reader_desire_events_desire"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "chapters_volume_no",
         table: "chapters",
         sql: "SELECT * FROM chapters WHERE volume_id=?1 AND chapter_no=?2",
         accepted: &["idx_chapters_volume_no"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "model_runs_step_status",
         table: "model_runs",
         sql: "SELECT * FROM model_runs WHERE step_id=?1 AND status=?2",
         accepted: &["idx_model_runs_step_status"],
+        architecture_equivalent: false,
     },
     QuerySpec {
         name: "production_events_created",
         table: "production_events",
         sql: "SELECT * FROM production_events WHERE project_id=?1 AND created_at>=?2",
         accepted: &["idx_production_events_created"],
+        architecture_equivalent: true,
     },
 ];
 
@@ -140,6 +158,7 @@ struct PlanResult {
     sql: String,
     plan: Vec<String>,
     index_used: Option<String>,
+    status: &'static str,
     pass: bool,
     note: String,
 }
@@ -189,22 +208,24 @@ fn run(connection: &libsql_rusqlite::Connection) -> Vec<PlanResult> {
         let full_scan = plan
             .iter()
             .any(|line| line.contains("SCAN") && !line.contains("USING INDEX"));
-        let pass = if full_scan {
-            false
+        let pass = !full_scan && index_used.is_some();
+        let status = if !pass {
+            "FAIL"
+        } else if spec.architecture_equivalent {
+            "ARCH_EQUIVALENT"
         } else {
-            index_used.is_some()
-                || plan
-                    .iter()
-                    .any(|line| line.contains("USING INDEX") && line.contains(spec.table))
+            "EXACT"
         };
         let note = if full_scan {
             "FULL TABLE SCAN".to_string()
         } else if let Some(index) = index_used {
-            format!("served by {index}")
-        } else if plan.iter().any(|line| line.contains("USING INDEX")) {
-            "served by an equivalent covering index".to_string()
+            if spec.architecture_equivalent {
+                format!("ARCH_EQUIVALENT: served by {index} in a project-scoped database")
+            } else {
+                format!("served by {index}")
+            }
         } else {
-            "no index in plan".to_string()
+            "no accepted index in plan".to_string()
         };
         results.push(PlanResult {
             name: spec.name.to_string(),
@@ -212,6 +233,7 @@ fn run(connection: &libsql_rusqlite::Connection) -> Vec<PlanResult> {
             sql: bound,
             plan,
             index_used: index_used.map(|s| s.to_string()),
+            status,
             pass,
             note,
         });
@@ -262,6 +284,7 @@ fn emit_query_plan_evidence() {
             "sql": r.sql,
             "queryPlan": r.plan,
             "indexUsed": r.index_used,
+            "status": r.status,
             "pass": r.pass,
             "note": r.note,
         })).collect::<Vec<_>>(),

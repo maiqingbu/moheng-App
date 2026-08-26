@@ -1,6 +1,7 @@
 use ai_novel_production_system_core::catalog::CatalogRepository;
 use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tempfile::tempdir;
 
@@ -21,19 +22,16 @@ fn create_request(command_id: &str, key: &str, title: &str) -> Value {
 fn create_retry_recovers_project_created_before_receipt() {
     let temp = tempdir().unwrap();
     let state = KernelState::new(AppPaths::new(temp.path()));
-    drop(
-        state
-            .manager
-            .create("project-create-recovery", "恢复创建", NOW)
-            .unwrap(),
-    );
+    let project_id =
+        StableIdentityFactory::from_command(StableIdKind::Project, "create-recovery").unwrap();
+    drop(state.manager.create(&project_id, "恢复创建", NOW).unwrap());
 
     let receipt = execute_command_impl(
         &state,
         create_request("create-recovery", "create-recovery-key", "恢复创建"),
     )
     .unwrap();
-    assert_eq!(receipt["projectId"], "project-create-recovery");
+    assert_eq!(receipt["projectId"], project_id);
     assert!(receipt["receiptId"].as_str().is_some());
 }
 
@@ -78,9 +76,11 @@ fn duplicate_retry_adopts_copy_created_before_source_receipt() {
     let created =
         execute_command_impl(&state, create_request("dupe-src", "create-key", "A")).unwrap();
     let source_id = created["projectId"].as_str().unwrap();
+    let copied_id =
+        StableIdentityFactory::from_command(StableIdKind::Project, "duplicate-command").unwrap();
     state
         .manager
-        .duplicate(source_id, "copy-recovery", "2026-08-26T00:00:01Z")
+        .duplicate(source_id, &copied_id, "2026-08-26T00:00:01Z")
         .unwrap();
 
     let receipt = execute_command_impl(
@@ -91,15 +91,14 @@ fn duplicate_retry_adopts_copy_created_before_source_receipt() {
             "idempotencyKey": "duplicate-key",
             "projectId": source_id,
             "expectedRevision": 0,
-            "requestedAt": "2026-08-26T00:00:01Z",
-            "payload": {"targetProjectId": "copy-recovery"}
+            "requestedAt": "2026-08-26T00:00:01Z"
         }),
     )
     .unwrap();
     // B01-P0 §六: the receipt must distinguish source from result. `projectId` is
     // the source (dupe-src) the command acted on; `resultProjectId` is the copy.
     assert_eq!(receipt["projectId"], source_id);
-    assert_eq!(receipt["resultProjectId"], "copy-recovery");
+    assert_eq!(receipt["resultProjectId"], copied_id);
 }
 
 #[test]

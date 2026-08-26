@@ -73,7 +73,6 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
   }
 
   async function runCommand(key: string, request: CommandRequest) {
-    commandStates.value[key] = { status: 'submitting', message: '正在提交…' }
     const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
     const envelope: CommandRequest = {
       ...request,
@@ -81,19 +80,25 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
       idempotencyKey: request.idempotencyKey ?? commandId,
       requestedAt: request.requestedAt ?? new Date().toISOString()
     }
+    const projectScoped = envelope.projectId != null && !['project_create_from_idea', 'project_create_from_market', 'global_settings_save'].includes(envelope.type)
+    commandStates.value[key] = { status: 'submitting', message: '正在提交…', commandId }
     const receipt = await frontendPort.executeCommand(envelope, (status, message) => {
-      commandStates.value[key] = { ...commandStates.value[key], status, message }
+      if (commandStates.value[key]?.commandId !== commandId) return
+      commandStates.value[key] = { ...commandStates.value[key], commandId, status, message }
     })
+    if (receipt.commandId !== commandId || (projectScoped && receipt.projectId !== envelope.projectId)) {
+      const error = new Error('PROTOCOL / PROJECT_BINDING_ERROR')
+      if (commandStates.value[key]?.commandId === commandId) {
+        commandStates.value[key] = { status: 'failed', message: error.message, commandId }
+      }
+      throw error
+    }
+    if (commandStates.value[key]?.commandId !== commandId) return receipt
     commandStates.value[key] = { status: receipt.finalStatus, message: receipt.message, commandId: receipt.commandId }
     // The project slot this receipt targets: for a duplicate the result is a
     // brand-new project (resultProjectId) added to the library, never an implicit
     // replacement of the active project unless the caller explicitly switches.
-    // Refreshing the library projection is safe regardless — it is idempotent and
-    // re-reads the catalog — so a late receipt only re-syncs the list, never the
-    // active project store.
-    if (receipt.finalStatus === 'committed') {
-      void refresh()
-    }
+    if (receipt.finalStatus === 'committed') void refresh()
     return receipt
   }
 

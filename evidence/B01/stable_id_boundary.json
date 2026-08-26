@@ -1,0 +1,85 @@
+{
+  "batch": "B01",
+  "status": "PASS",
+  "tests": [
+    {
+      "id": "STABLE-PROD-01",
+      "test": "production_commit_rejects_a_malformed_prefixed_display_reference",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-PROD-02",
+      "test": "production_project_creation_uses_the_stable_identity_factory",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-PROD-03",
+      "test": "stable_id_01_title_change_does_not_change_id",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-PROD-04",
+      "test": "stable_id_02_chapter_number_change_does_not_change_id",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-PROD-05",
+      "test": "stable_id_03_move_between_arcs_keeps_id_when_parent_stable_id_unchanged",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-PROD-06",
+      "test": "stable_id_04_copy_project_preserves_identity_and_relation_integrity",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-DUP-01",
+      "test": "stable_dup_01_duplicate_result_is_a_factory_generated_opaque_project_id",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-DUP-02",
+      "test": "stable_dup_02_caller_target_project_override_is_rejected",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-DUP-03",
+      "test": "stable_dup_03_replay_returns_the_same_result_without_a_second_copy",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-DUP-04",
+      "test": "stable_dup_04_different_command_ids_produce_different_result_projects",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    },
+    {
+      "id": "STABLE-DUP-05",
+      "test": "stable_dup_05_copy_catalog_db_and_internal_refs_bind_to_the_new_project",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_stable_id -- --nocapture",
+      "result": "PASS",
+      "evidence": "src-tauri/tests/b01_stable_id.rs"
+    }
+  ],
+  "productionPath": "commands::execute_command_impl -> StableIdentityFactory::from_command -> project create/duplicate",
+  "sourceCommit": "14323bd585949330b2112d7a9e4f3f53e5087171"
+}

@@ -12,6 +12,7 @@
 use ai_novel_production_system_core::commands::{self, KernelState};
 use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::ipc;
 use tauri::test::{mock_builder, mock_context, noop_assets};
@@ -308,7 +309,9 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
     );
     let source = receipt_project_id(&created);
 
-    // Duplicate via real dispatch.
+    // Duplicate via real dispatch. The result identity is derived from d2 by
+    // the kernel; the caller does not provide a durable target id.
+    let expected_copy = StableIdentityFactory::from_command(StableIdKind::Project, "d2").unwrap();
     let dup = invoke(
         &w,
         "execute_command",
@@ -319,13 +322,12 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
                 "idempotencyKey": "d2-key",
                 "projectId": source,
                 "expectedRevision": 0,
-                "requestedAt": "2026-08-25T00:00:01Z",
-                "payload": {"targetProjectId": "copy-1"}
+                "requestedAt": "2026-08-25T00:00:01Z"
             }
         }),
     );
     assert_eq!(dup["projectId"], source);
-    assert_eq!(dup["resultProjectId"], "copy-1");
+    assert_eq!(dup["resultProjectId"], expected_copy);
     let library = invoke(&w, "query_project_library", json!({}));
     assert_eq!(library["projects"].as_array().unwrap().len(), 2);
 
@@ -357,7 +359,7 @@ fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["id"] == "copy-1")
+        .find(|p| p["id"] == expected_copy)
         .unwrap();
     assert_eq!(dup_row["lifecycle"], "ACTIVE");
 }
@@ -439,7 +441,8 @@ fn real_ipc_duplicate_receipt_and_delete_reflect_in_project_db() {
     assert_eq!(created["message"], "权威事务已完成，界面将重新查询。");
     assert_ne!(project_id, "");
 
-    // A duplicate command targets a brand-new id and returns it in the receipt.
+    // A duplicate command targets a brand-new factory-derived id and returns it.
+    let expected_copy = StableIdentityFactory::from_command(StableIdKind::Project, "k2").unwrap();
     let dup = invoke(
         &w,
         "execute_command",
@@ -450,13 +453,12 @@ fn real_ipc_duplicate_receipt_and_delete_reflect_in_project_db() {
                 "idempotencyKey": "k2-key",
                 "projectId": project_id,
                 "expectedRevision": 0,
-                "requestedAt": "2026-08-25T00:00:01Z",
-                "payload": {"targetProjectId": "persist-copy"}
+                "requestedAt": "2026-08-25T00:00:01Z"
             }
         }),
     );
     assert_eq!(dup["projectId"], project_id);
-    assert_eq!(dup["resultProjectId"], "persist-copy");
+    assert_eq!(dup["resultProjectId"], expected_copy);
 }
 
 #[test]

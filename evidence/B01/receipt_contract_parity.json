@@ -1,0 +1,27 @@
+{
+  "batch": "B01",
+  "status": "PASS",
+  "tests": [
+    {
+      "id": "RECEIPT-PARITY-CREATE",
+      "test": "RECEIPT-PARITY-CREATE: create uses the created project for the current Rust shape",
+      "result": "PASS"
+    },
+    {
+      "id": "RECEIPT-PARITY-DUPLICATE",
+      "test": "RECEIPT-PARITY-DUPLICATE: duplicate keeps source projectId and returns resultProjectId",
+      "result": "PASS"
+    },
+    {
+      "id": "RECEIPT-PARITY-PROJECT-COMMAND",
+      "test": "RECEIPT-PARITY-PROJECT-COMMAND: Demo and Tauri adapters expose the same source/result semantics",
+      "result": "PASS"
+    }
+  ],
+  "semantics": {
+    "projectId": "command source project",
+    "resultProjectId": "produced or target project; duplicate result is a new project"
+  },
+  "source": "tests/store/receipt-parity.test.ts",
+  "sourceCommit": "14323bd585949330b2112d7a9e4f3f53e5087171"
+}

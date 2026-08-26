@@ -13,13 +13,16 @@
 //! plus proof that the production write path (CommitService::apply) invokes the
 //! boundary and rejects a malformed prefixed display reference.
 
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_project_library_impl, KernelState,
+};
 use ai_novel_production_system_core::commit::{CommitError, CommitService};
 use ai_novel_production_system_core::generated::types::{ArtifactEnvelope, CommitBundle};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
-use ai_novel_production_system_core::stable_id::{self, StableIdKind};
-use serde_json::json;
+use ai_novel_production_system_core::stable_id::{self, StableIdKind, StableIdentityFactory};
+use serde_json::{json, Value};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -250,4 +253,197 @@ fn production_commit_accepts_a_wellformed_opaque_scope_id() {
     };
     let receipt = CommitService::commit(&conn, &bundle, NOW).unwrap();
     assert_eq!(receipt.after_revision, 1);
+}
+
+#[test]
+fn production_project_creation_uses_the_stable_identity_factory() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let create = execute_command_impl(
+        &state,
+        json!({
+            "type": "project_create_from_idea",
+            "commandId": "stable-prod-create",
+            "idempotencyKey": "stable-prod-create-key",
+            "requestedAt": NOW,
+            "expectedRevision": 0,
+            "payload": {"title": "工厂创建"}
+        }),
+    )
+    .unwrap();
+    let source = create["resultProjectId"].as_str().unwrap();
+    assert!(
+        source.starts_with("prj:"),
+        "production create must use the factory"
+    );
+
+    let duplicate = execute_command_impl(
+        &state,
+        json!({
+            "type": "project_duplicate",
+            "commandId": "stable-prod-duplicate",
+            "idempotencyKey": "stable-prod-duplicate-key",
+            "projectId": source,
+            "expectedRevision": 0,
+            "requestedAt": NOW
+        }),
+    )
+    .unwrap();
+    assert_eq!(duplicate["projectId"], source);
+    let copied = duplicate["resultProjectId"].as_str().unwrap();
+    assert!(
+        copied.starts_with("prj:"),
+        "production duplicate must use the factory"
+    );
+    assert_ne!(source, copied);
+    assert_eq!(
+        copied,
+        StableIdentityFactory::from_command(StableIdKind::Project, "stable-prod-duplicate")
+            .unwrap()
+    );
+}
+
+fn create_source(state: &KernelState, command_id: &str) -> String {
+    execute_command_impl(
+        state,
+        json!({
+            "type": "project_create_from_idea",
+            "commandId": command_id,
+            "idempotencyKey": format!("{command_id}-key"),
+            "requestedAt": NOW,
+            "expectedRevision": 0,
+            "payload": {"title": "Duplicate source"}
+        }),
+    )
+    .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn duplicate_request(
+    source: &str,
+    command_id: &str,
+    expected_revision: i64,
+    payload: Value,
+) -> Value {
+    json!({
+        "type": "project_duplicate",
+        "commandId": command_id,
+        "idempotencyKey": format!("{command_id}-key"),
+        "projectId": source,
+        "expectedRevision": expected_revision,
+        "requestedAt": NOW,
+        "payload": payload
+    })
+}
+
+#[test]
+fn stable_dup_01_duplicate_result_is_a_factory_generated_opaque_project_id() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let source = create_source(&state, "stable-dup-source-01");
+    let receipt = execute_command_impl(
+        &state,
+        duplicate_request(&source, "stable-dup-01", 0, json!({})),
+    )
+    .unwrap();
+    let expected =
+        StableIdentityFactory::from_command(StableIdKind::Project, "stable-dup-01").unwrap();
+    assert_eq!(receipt["projectId"], source);
+    assert_eq!(receipt["resultProjectId"], expected);
+    assert!(stable_id::validate_stable_id(&expected, StableIdKind::Project).is_ok());
+}
+
+#[test]
+fn stable_dup_02_caller_target_project_override_is_rejected() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let source = create_source(&state, "stable-dup-source-02");
+    let error = execute_command_impl(
+        &state,
+        duplicate_request(
+            &source,
+            "stable-dup-02",
+            0,
+            json!({"targetProjectId": "copy-1"}),
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(error, "PROTOCOL / STABLE_ID_OVERRIDE_FORBIDDEN");
+    assert!(!temp.path().join("projects/copy-1").exists());
+}
+
+#[test]
+fn stable_dup_03_replay_returns_the_same_result_without_a_second_copy() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let source = create_source(&state, "stable-dup-source-03");
+    let request = duplicate_request(&source, "stable-dup-03", 0, json!({}));
+    let first = execute_command_impl(&state, request.clone()).unwrap();
+    let replay = execute_command_impl(&state, request).unwrap();
+    assert_eq!(first, replay);
+    assert_eq!(
+        query_project_library_impl(&state).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn stable_dup_04_different_command_ids_produce_different_result_projects() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let source = create_source(&state, "stable-dup-source-04");
+    let first = execute_command_impl(
+        &state,
+        duplicate_request(&source, "stable-dup-04-a", 0, json!({})),
+    )
+    .unwrap();
+    let second = execute_command_impl(
+        &state,
+        duplicate_request(&source, "stable-dup-04-b", 1, json!({})),
+    )
+    .unwrap();
+    assert_ne!(first["resultProjectId"], second["resultProjectId"]);
+}
+
+#[test]
+fn stable_dup_05_copy_catalog_db_and_internal_refs_bind_to_the_new_project() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let source = create_source(&state, "stable-dup-source-05");
+    let source_connection = state
+        .manager
+        .open(&source, "Duplicate source", NOW)
+        .unwrap();
+    source_connection.execute(
+        "INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book-ref-05', ?1, 1, 'Book', 'ACTIVE', ?2, ?2)",
+        libsql_rusqlite::params![source, NOW],
+    ).unwrap();
+    drop(source_connection);
+    let receipt = execute_command_impl(
+        &state,
+        duplicate_request(&source, "stable-dup-05", 0, json!({})),
+    )
+    .unwrap();
+    let copied = receipt["resultProjectId"].as_str().unwrap();
+    let copied_connection = state.manager.open(copied, "Duplicate copy", NOW).unwrap();
+    let copied_project_id: String = copied_connection
+        .query_row(
+            "SELECT project_id FROM books WHERE book_id = 'book-ref-05'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copied_project_id, copied);
+    assert_ne!(copied, source);
+    let library = query_project_library_impl(&state).unwrap();
+    assert!(library["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|project| project["id"] == copied));
 }

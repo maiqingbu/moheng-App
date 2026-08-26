@@ -1,0 +1,37 @@
+{
+  "batch": "B01",
+  "status": "PASS",
+  "tests": [
+    {
+      "id": "LIBRARY-REV-01",
+      "test": "library_revision_matches_db_after_an_advancing_command",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_library_revision -- --nocapture",
+      "result": "PASS"
+    },
+    {
+      "id": "LIBRARY-REV-02",
+      "test": "library_marks_unreadable_project_nonoperational_with_error",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b01_library_revision -- --nocapture",
+      "result": "PASS"
+    },
+    {
+      "id": "LIBRARY-REV-03",
+      "test": "degraded Library items disable every revision-backed destructive action",
+      "command": "npm run test:store",
+      "result": "PASS",
+      "evidence": "tests/store/receipt-parity.test.ts"
+    }
+  ],
+  "contract": {
+    "operationalTrue": {
+      "revision": "number",
+      "generatedRevision": "number"
+    },
+    "operationalFalse": {
+      "revision": null,
+      "generatedRevision": null,
+      "readError": "required string"
+    }
+  },
+  "sourceCommit": "14323bd585949330b2112d7a9e4f3f53e5087171"
+}

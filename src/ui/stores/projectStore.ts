@@ -31,6 +31,12 @@ export interface CommandUiState {
   commandId?: string
 }
 
+export interface CommandBinding {
+  commandId: string
+  sourceProjectId: string | null
+  generation: number
+}
+
 const emptyPage = <T>(): PageResult<T> => ({ items: [], nextCursor: null, total: 0 })
 
 export const useProjectStore = defineStore('project-projection', () => {
@@ -99,6 +105,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (switching) {
       overview.value = null
       resetWorkspaces()
+      commandStates.value = {}
     }
     currentProjectId.value = projectId
     loading.value = true
@@ -222,30 +229,50 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function runCommand(key: string, request: CommandRequest) {
-    // Bind the command to the project identity active when it was issued. When
-    // the receipt lands after the user has switched projects, that stale receipt
-    // must not refresh or clobber the project now on screen (B01-P0 §六).
-    const bindingProjectId = currentProjectId.value
-    const bindingRevision = project.value?.revision
-    commandStates.value[key] = { status: 'submitting', message: '正在提交…' }
     const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+    const binding: CommandBinding = {
+      commandId,
+      sourceProjectId: request.projectId ?? currentProjectId.value,
+      generation: loadSequence,
+    }
+    const bindingRevision = project.value?.revision
+    const projectScoped = binding.sourceProjectId !== null && !['project_create_from_idea', 'project_create_from_market', 'global_settings_save'].includes(request.type)
+    const expectedRevision = request.expectedRevision ?? bindingRevision
+    const isCurrentBinding = () => binding.generation === loadSequence && binding.sourceProjectId === currentProjectId.value
+    const setStateIfCurrent = (state: CommandUiState) => {
+      if (!isCurrentBinding()) return
+      const previous = commandStates.value[key]
+      if (previous?.commandId && previous.commandId !== binding.commandId) return
+      commandStates.value[key] = state
+    }
+
+    commandStates.value[key] = { status: 'submitting', message: '正在提交…', commandId }
+    if (projectScoped && expectedRevision == null) {
+      const error = new Error('PROTOCOL / PROJECT_REVISION_UNAVAILABLE')
+      commandStates.value[key] = { status: 'failed', message: error.message, commandId }
+      throw error
+    }
     const envelope: CommandRequest = {
       ...request,
       commandId,
       idempotencyKey: request.idempotencyKey ?? commandId,
-      projectId: request.projectId ?? bindingProjectId ?? project.value?.id,
-      expectedRevision: request.expectedRevision ?? bindingRevision ?? 0,
+      projectId: request.projectId ?? binding.sourceProjectId ?? project.value?.id,
+      expectedRevision,
       requestedAt: request.requestedAt ?? new Date().toISOString()
     }
-    const receipt = await frontendPort.executeCommand(envelope, (status,message) => { commandStates.value[key]={...commandStates.value[key],status,message} })
-    // Record the receipt regardless — commandStates is keyed per command, not per
-    // project, so a duplicate's receipt belongs to its own slot.
+    const receipt = await frontendPort.executeCommand(envelope, (status, message) => {
+      setStateIfCurrent({ ...commandStates.value[key], commandId, status, message })
+    })
+
+    if (receipt.commandId !== binding.commandId || (projectScoped && receipt.projectId !== binding.sourceProjectId)) {
+      const error = new Error('PROTOCOL / PROJECT_BINDING_ERROR')
+      setStateIfCurrent({ status: 'failed', message: error.message, commandId })
+      throw error
+    }
+    if (!isCurrentBinding()) return receipt
+
     commandStates.value[key] = { status: receipt.finalStatus, message: receipt.message, commandId: receipt.commandId }
-    // Refresh the on-screen workspace ONLY when the user is still on the project
-    // the command acted on. A stale A receipt arriving after a switch to B must
-    // not trigger a B refresh.
-    const stillViewingSource = bindingProjectId !== null && bindingProjectId === currentProjectId.value
-    if (stillViewingSource && receipt.finalStatus === 'committed') {
+    if (receipt.finalStatus === 'committed') {
       await refresh()
       await refreshLoadedWorkspaces()
     }
