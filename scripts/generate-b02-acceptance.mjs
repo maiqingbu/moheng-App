@@ -60,6 +60,7 @@ const acceptance = {
     volumeAtomicRollbackFixtures: 2
   },
   evidence: [
+    'gate-results.json',
     'atomic_commit_matrix.json',
     'fault_injection.log',
     'receipt_replay.json',
