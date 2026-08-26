@@ -2,15 +2,15 @@
 > ai-novel-production-system-ui@1.0.0 test
 > node --test tests/**/*.test.mjs && vitest run tests/store
 
-✔ should enforce every M0A HARD gate in CI without overwriting drift first (19.123332ms)
-✔ should inspect Rust command implementations and authoritative SQL boundaries (10.516732ms)
-✔ should normalize CRLF and CR before hashing payload text (46.247031ms)
-✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (0.353867ms)
-✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (10.152175ms)
-✔ should reject lone Unicode surrogates (0.608383ms)
-✔ should verify at least twenty frozen golden vectors (0.894796ms)
-✔ should generate every manifest schema into both languages without handwritten DTO omissions (24.091235ms)
-✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (0.520538ms)
+✔ should enforce every M0A HARD gate in CI without overwriting drift first (3.97443ms)
+✔ should inspect Rust command implementations and authoritative SQL boundaries (15.239785ms)
+✔ should normalize CRLF and CR before hashing payload text (18.744309ms)
+✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (0.317374ms)
+✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (0.418698ms)
+✔ should reject lone Unicode surrogates (0.60399ms)
+✔ should verify at least twenty frozen golden vectors (1.237756ms)
+✔ should generate every manifest schema into both languages without handwritten DTO omissions (34.977177ms)
+✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (1.351251ms)
 ℹ tests 9
 ℹ suites 0
 ℹ pass 9
@@ -18,12 +18,12 @@
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 377.293511
+ℹ duration_ms 534.946282
 
  RUN  v4.1.11 /Users/mac/Desktop/AI小说生产系统/ai-novel-production-system
 
 
  Test Files  3 passed (3)
       Tests  17 passed (17)
-   Start at  01:38:51
-   Duration  2.54s (transform 742ms, setup 0ms, import 1.38s, tests 1.37s, environment 1ms)
+   Start at  01:59:18
+   Duration  2.02s (transform 414ms, setup 0ms, import 1.10s, tests 1.27s, environment 0ms)

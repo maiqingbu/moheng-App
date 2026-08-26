@@ -25,3 +25,4 @@ src-tauri/tests/b01_stable_id.rs
 src-tauri/tests/b02_commit_bundle.rs
 src-tauri/tests/commit_integration.rs
 scripts/generate-b02-acceptance.mjs
+scripts/run-b02-evidence-gates.mjs

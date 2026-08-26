@@ -2,8 +2,147 @@
   "batch": "B02",
   "milestone": "M0C",
   "status": "PASS",
-  "sourceCommit": "8ff8bb615eb29faa85b0b4e080584316bfcf0175",
+  "sourceCommit": "2ca555c6b46a39743b81a103afbba837cd6cfbfa",
   "workingTreeDirty": false,
+  "gates": [
+    {
+      "name": "contracts",
+      "command": "npm run verify:contracts",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:35.589Z",
+      "finishedAt": "2026-08-26T17:59:38.076Z",
+      "log": "evidence/B02/contracts_gate.log"
+    },
+    {
+      "name": "node_tests",
+      "command": "npm test",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:16.006Z",
+      "finishedAt": "2026-08-26T17:59:20.654Z",
+      "log": "evidence/B02/npm_test.log"
+    },
+    {
+      "name": "frontend_vitest",
+      "command": "npm test",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "log": "evidence/B02/npm_test.log",
+      "note": "frontend Vitest is part of npm test"
+    },
+    {
+      "name": "typecheck",
+      "command": "npm run typecheck",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:20.654Z",
+      "finishedAt": "2026-08-26T17:59:25.928Z",
+      "log": "evidence/B02/typecheck.log"
+    },
+    {
+      "name": "build",
+      "command": "npm run build",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:25.928Z",
+      "finishedAt": "2026-08-26T17:59:35.589Z",
+      "log": "evidence/B02/build.log"
+    },
+    {
+      "name": "architecture",
+      "command": "npm run verify",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:38.076Z",
+      "finishedAt": "2026-08-26T17:59:38.613Z",
+      "log": "evidence/B02/architecture_gate.log"
+    },
+    {
+      "name": "m0a",
+      "command": "npm run verify:m0a",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:38.613Z",
+      "finishedAt": "2026-08-26T17:59:38.989Z",
+      "log": "evidence/B02/m0a_gate.log"
+    },
+    {
+      "name": "cargo_fmt",
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:38.989Z",
+      "finishedAt": "2026-08-26T17:59:39.411Z",
+      "log": "evidence/B02/cargo_fmt.log"
+    },
+    {
+      "name": "cargo_check",
+      "command": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:59:39.411Z",
+      "finishedAt": "2026-08-26T18:00:01.113Z",
+      "log": "evidence/B02/cargo_check.log"
+    },
+    {
+      "name": "cargo_clippy",
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T18:00:01.113Z",
+      "finishedAt": "2026-08-26T18:00:21.756Z",
+      "log": "evidence/B02/cargo_clippy.log"
+    },
+    {
+      "name": "cargo_all_targets",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:57:31.621Z",
+      "finishedAt": "2026-08-26T17:59:16.006Z",
+      "log": "evidence/B02/cargo_all_targets.log"
+    },
+    {
+      "name": "b02_targeted_rust",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --test b02_commit_bundle -- --nocapture",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "startedAt": "2026-08-26T17:56:48.648Z",
+      "finishedAt": "2026-08-26T17:57:31.620Z",
+      "log": "evidence/B02/b02_targeted_test.log"
+    },
+    {
+      "name": "sqlite_integrity",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "log": "evidence/B02/cargo_all_targets.log",
+      "note": "SQLite quick_check/foreign_key_check are asserted by migration regression"
+    },
+    {
+      "name": "b01_regression",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+      "exitCode": 0,
+      "status": "PASS",
+      "blocking": true,
+      "log": "evidence/B02/cargo_all_targets.log",
+      "note": "B01 regression is included in Rust all-targets"
+    }
+  ],
   "predecessor": {
     "batch": "B01",
     "status": "FROZEN_PASS",
@@ -36,6 +175,7 @@
     "volumeAtomicRollbackFixtures": 2
   },
   "evidence": [
+    "gate-results.json",
     "atomic_commit_matrix.json",
     "fault_injection.log",
     "receipt_replay.json",

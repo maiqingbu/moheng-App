@@ -9,3 +9,5 @@ npm run verify:m0a
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+node scripts/run-b02-evidence-gates.mjs
+node scripts/generate-b02-acceptance.mjs
