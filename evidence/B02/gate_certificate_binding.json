@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "subjectFields": ["artifactId", "version", "payloadHash"],
+  "sourceDigestCovers": ["gatePolicyRef", "subjectRef", "evidenceRefs"],
+  "tests": [
+    "b02_certificate_subject_rejects_reuse_stale_hash_and_wrong_subject_type",
+    "b02_gate_certificate_same_id_with_different_digest_is_not_rewritten"
+  ],
+  "crossFinalReuse": "REJECTED",
+  "stalePayloadHash": "REJECTED",
+  "wrongSubjectType": "REJECTED",
+  "sameIdDifferentDigest": "REJECTED"
+}

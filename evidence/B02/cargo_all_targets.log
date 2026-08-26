@@ -1,23 +1,23 @@
    Compiling ai-novel-production-system-core v0.1.0 (/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/src-tauri)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.47s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.90s
      Running unittests src/lib.rs (src-tauri/target/debug/deps/ai_novel_production_system_core-807e780b1dc5b40a)
 
 running 13 tests
-test project_db::paths::tests::rejects_path_traversal ... ok
 test hash::tests::canonical_hash_uses_rfc8785_number_and_utf16_rules ... ok
 test hash::tests::canonical_hash_matches_utf8_golden_value ... ok
 test hash::tests::canonical_hash_sorts_nested_object_keys_and_normalizes_newlines ... ok
-test stable_id::tests::derive_is_deterministic_and_kind_bound ... ok
+test project_db::paths::tests::rejects_path_traversal ... ok
+test project_db::read_pool::tests::pool_obeys_global_cap ... ok
+test project_db::read_pool::tests::pool_obeys_per_project_isolation_bound ... ok
+test project_db::read_pool::tests::pool_reuses_released_connection_instead_of_opening_new ... ok
 test stable_id::tests::derive_rejects_a_mutable_display_discriminator ... ok
+test stable_id::tests::derive_is_deterministic_and_kind_bound ... ok
 test stable_id::tests::derive_rejects_a_portable_display_parent ... ok
 test stable_id::tests::derive_rejects_same_kind_parent ... ok
 test stable_id::tests::mint_produces_a_unique_uuid_keyed_stable_id ... ok
 test stable_id::tests::validate_rejects_wrong_kind_and_malformed ... ok
-test project_db::read_pool::tests::pool_reuses_released_connection_instead_of_opening_new ... ok
-test project_db::read_pool::tests::pool_obeys_global_cap ... ok
-test project_db::read_pool::tests::pool_obeys_per_project_isolation_bound ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
      Running unittests src/main.rs (src-tauri/target/debug/deps/ai_novel_production_system-51972b61028fed1a)
 
@@ -31,7 +31,7 @@ running 1 test
 schema_inventory.json + registry_integrity.json written to "/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/evidence/B01"
 test generate_evidence ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
 
      Running tests/b01_library_revision.rs (src-tauri/target/debug/deps/b01_library_revision-2577b93e80a47763)
 
@@ -39,11 +39,12 @@ running 2 tests
 test library_marks_unreadable_project_nonoperational_with_error ... ok
 test library_revision_matches_db_after_an_advancing_command ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
 
      Running tests/b01_query_plans.rs (src-tauri/target/debug/deps/b01_query_plans-b580932d4b9760d8)
 
 running 2 tests
+query-plans.json written to "/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/evidence/B01/query-plans.json"
 PASS | artifacts_project_paging | idx_artifacts_project_paging | served by idx_artifacts_project_paging
 PASS | canonical_heads_scope | sqlite_autoindex_canonical_heads_1 | ARCH_EQUIVALENT: served by sqlite_autoindex_canonical_heads_1 in a project-scoped database
 PASS | canon_facts_subject_time | idx_canon_facts_subject_time | served by idx_canon_facts_subject_time
@@ -62,7 +63,6 @@ PASS | chapters_volume_no | idx_chapters_volume_no | served by idx_chapters_volu
 PASS | model_runs_step_status | idx_model_runs_step_status | served by idx_model_runs_step_status
 PASS | production_events_created | idx_production_events_created | ARCH_EQUIVALENT: served by idx_production_events_created in a project-scoped database
 test section_21_3_core_queries_are_index_served ... ok
-query-plans.json written to "/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/evidence/B01/query-plans.json"
 test emit_query_plan_evidence ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
@@ -72,48 +72,54 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 12 tests
 test production_commit_rejects_a_malformed_prefixed_display_reference ... ok
 test production_commit_accepts_a_wellformed_opaque_scope_id ... ok
-test stable_dup_02_caller_target_project_override_is_rejected ... ok
 test stable_dup_01_duplicate_result_is_a_factory_generated_opaque_project_id ... ok
+test stable_dup_02_caller_target_project_override_is_rejected ... ok
 test production_project_creation_uses_the_stable_identity_factory ... ok
 test stable_id_01_title_change_does_not_change_id ... ok
 test stable_id_02_chapter_number_change_does_not_change_id ... ok
 test stable_id_03_move_between_arcs_keeps_id_when_parent_stable_id_unchanged ... ok
 test stable_id_04_copy_project_preserves_identity_and_relation_integrity ... ok
 test stable_dup_03_replay_returns_the_same_result_without_a_second_copy ... ok
-test stable_dup_04_different_command_ids_produce_different_result_projects ... ok
 test stable_dup_05_copy_catalog_db_and_internal_refs_bind_to_the_new_project ... ok
+test stable_dup_04_different_command_ids_produce_different_result_projects ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
 
      Running tests/b02_commit_bundle.rs (src-tauri/target/debug/deps/b02_commit_bundle-518b15520e2734f8)
 
-running 14 tests
+running 20 tests
 test b02_delta_repository_is_transaction_scoped_and_final_gate_is_commit_owned ... ok
 test b02_candidate_cannot_become_a_canonical_head ... ok
+fault_channel=canon rollback=PASS
 test b02_final_gate_checks_knowledge_refs_and_authoritative_budget_state ... ok
 test b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes ... ok
-fault_channel=canon rollback=PASS
 test b02_final_gate_revalidates_gate_policy_type_and_dependency_source_hash ... ok
-test b02_full_delta_bundle_is_not_rejected_as_unsupported ... ok
-test b02_gate_certificate_same_id_with_different_digest_is_not_rewritten ... ok
 fault_channel=obligation rollback=PASS
-test b02_invalid_delta_still_fails_closed_without_revision_or_rows ... ok
-test b02_revision_conflict_performs_no_delta_writes ... ok
-test b02_receipt_counts_are_net_rows_and_head_changes_are_read_back ... ok
+test b02_full_delta_bundle_is_not_rejected_as_unsupported ... ok
 fault_channel=foreshadow rollback=PASS
+test b02_gate_certificate_same_id_with_different_digest_is_not_rewritten ... ok
+test b02_gate_policy_must_be_committed_before_the_final_commit ... ok
+test b02_invalid_delta_still_fails_closed_without_revision_or_rows ... ok
 fault_channel=knowledge rollback=PASS
-test b02_volume_plan_submission_is_atomic_and_receipted ... ok
-test b02_volume_close_records_exit_health_eligibility_and_receipt ... ok
+test b02_certificate_subject_rejects_reuse_stale_hash_and_wrong_subject_type ... ok
+test b02_receipt_counts_are_net_rows_and_head_changes_are_read_back ... ok
 fault_channel=state rollback=PASS
+test b02_revision_conflict_performs_no_delta_writes ... ok
+test b02_receipt_draft_rejects_wrong_hash_and_payload_mutation ... ok
+test b02_same_bundle_or_uncommitted_gate_policy_is_rejected_before_writes ... ok
 fault_channel=dependency rollback=PASS
+test b02_volume_close_failure_after_artifacts_preserves_previous_volume_state ... ok
 fault_channel=job rollback=PASS
+test b02_volume_close_records_exit_health_eligibility_and_receipt ... ok
+test b02_volume_plan_failure_after_artifacts_rolls_back_every_write ... ok
 fault_channel=decision rollback=PASS
+test b02_volume_plan_submission_is_atomic_and_receipted ... ok
 fault_channel=readerDesire rollback=PASS
 fault_channel=gate rollback=PASS
 test b02_each_delta_channel_failure_rolls_back_the_entire_bundle ... ok
 test b02_same_bundle_replays_100_times_with_one_business_side_effect ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.70s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.14s
 
      Running tests/commit_integration.rs (src-tauri/target/debug/deps/commit_integration-4ec6ef20b5a48025)
 
@@ -126,7 +132,7 @@ test projects_are_isolated_and_migrations_are_repeatable ... ok
 test commit_is_idempotent_and_rejects_different_digest ... ok
 test receipt_digest_is_verified_when_replayed ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
      Running tests/m0a_hard_gates.rs (src-tauri/target/debug/deps/m0a_hard_gates-44f38021e99b68e9)
 
@@ -140,21 +146,21 @@ test project_manager_enforces_single_writer_and_wal ... ok
 test migration_reopen_creates_backup_before_reapplying_schema ... ok
 test committed_receipt_survives_close_and_reopen ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
 
      Running tests/m0b_longterm_migration.rs (src-tauri/target/debug/deps/m0b_longterm_migration-0f25103c10e67c75)
 
 running 8 tests
 test copy_policy_registry_covers_every_project_id_table ... ok
 test fresh_project_has_all_21_2_core_tables ... ok
-test migration_rolls_back_atomically_on_midway_failure ... ok
-test duplicate_remaps_all_long_term_project_id_and_resets_runtime ... ok
-test stable_id_boundary_roundtrips_across_project_copy ... ok
 test old_m0a_database_upgrades_in_place_keeping_hashes ... ok
 test registry_entries_all_point_at_real_tables ... ok
+test stable_id_boundary_roundtrips_across_project_copy ... ok
+test migration_rolls_back_atomically_on_midway_failure ... ok
+test duplicate_remaps_all_long_term_project_id_and_resets_runtime ... ok
 test repeated_open_does_not_repeat_migration_or_backup_storm ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
 
      Running tests/project_command_recovery.rs (src-tauri/target/debug/deps/project_command_recovery-b6ed145341ec0f60)
 
@@ -164,14 +170,14 @@ test delete_replay_completes_interrupted_filesystem_projection ... ok
 test archive_replay_repairs_catalog_projection ... ok
 test duplicate_retry_adopts_copy_created_before_source_receipt ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
 
      Running tests/project_copy.rs (src-tauri/target/debug/deps/project_copy-d3e4c24562056154)
 
 running 1 test
 test duplicate_remaps_real_authority_and_stays_isolated ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 
      Running tests/project_hardening.rs (src-tauri/target/debug/deps/project_hardening-b30835848fcea472)
 
@@ -179,36 +185,36 @@ running 12 tests
 test create_fails_cleanly_when_final_dir_blocked ... ok
 test create_after_migrate_crash_leaves_no_final_dir ... ok
 test create_finalizes_self_contained_db ... ok
-test open_resolves_path_from_catalog_authority ... ok
 test open_rejects_path_outside_allowed_root ... ok
+test open_resolves_path_from_catalog_authority ... ok
 test reconcile_cleans_stale_staging_dir ... ok
 test reconcile_adopts_catalog_missing_create_orphan ... ok
 test v21_artifact_type_registration_compat ... ok
 test restart_reconcile_recovers_create_orphan ... ok
-test v21_reserved_table_family_registry_boundary ... ok
 test open_policy_rejects_deleting_but_allows_archived_and_active ... ok
+test v21_reserved_table_family_registry_boundary ... ok
 test overview_obeys_read_pool_cap_on_contended_project ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
 
      Running tests/project_lifecycle.rs (src-tauri/target/debug/deps/project_lifecycle-4af92ec9672b372e)
 
 running 13 tests
 test create_never_exposes_partial_final_dir ... ok
-test delete_to_trash_is_recoverable_and_isolated ... ok
 test delete_to_trash_refuses_active_writer_and_delete_does_not_remove_rows ... ok
+test delete_to_trash_is_recoverable_and_isolated ... ok
 test duplicate_generates_new_id_copies_authority_and_does_not_copy_runtime ... ok
-test duplicate_is_wal_safe_snapshot_including_uncheckpointed_commits ... ok
 test duplicate_refuses_active_writer_and_self_duplicate ... ok
+test duplicate_is_wal_safe_snapshot_including_uncheckpointed_commits ... ok
 test manager_read_connection_is_bounded_and_released_back_to_pool ... ok
+test read_lease_recovers_cap_when_error_path_drops_connection ... ok
 test read_lease_returns_connection_on_drop_without_explicit_release ... ok
 test read_pool_reuses_connection_and_bounds_global_and_per_project ... ok
-test read_lease_recovers_cap_when_error_path_drops_connection ... ok
 test production_overview_path_reuses_bounded_read_pool ... ok
 test reconcile_repairs_catalog_path_after_interrupted_delete ... ok
 test writer_lock_releases_on_close ... ok
 
-test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
 
      Running tests/real_ipc_e2e.rs (src-tauri/target/debug/deps/real_ipc_e2e-38f5cc672318bb76)
 
@@ -220,11 +226,11 @@ test real_ipc_duplicate_and_delete_to_trash_round_trip ... ok
 test real_ipc_survives_restart_and_reloaded_query_matches_commit ... ok
 test real_ipc_project_commands_are_idempotent_revision_checked_and_receipted ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
 
      Running tests/tauri_ipc_smoke.rs (src-tauri/target/debug/deps/tauri_ipc_smoke-8480c5b05fa0ac8a)
 
 running 1 test
 test tauri_service_path_creates_queries_renames_and_archives_project ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s

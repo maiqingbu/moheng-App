@@ -2,7 +2,7 @@
   "batch": "B02",
   "milestone": "M0C",
   "status": "PASS",
-  "sourceCommit": "e359d3b12866ffeadd4abdd55363386bfca8aa4e",
+  "sourceCommit": "8ff8bb615eb29faa85b0b4e080584316bfcf0175",
   "workingTreeDirty": false,
   "predecessor": {
     "batch": "B01",
@@ -23,16 +23,17 @@
     "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
   ],
   "keyNumbers": {
-    "b02TargetedRustTests": "14/14",
-    "allRustTests": "103/103",
+    "b02TargetedRustTests": "20/20",
+    "allRustTests": "110/110",
     "nodeTests": "9/9",
     "vitestTests": "17/17",
-    "contractFixtures": "4 valid accepted, 18 invalid rejected",
+    "contractFixtures": "6 valid accepted, 24 invalid rejected",
     "goldenVectors": 26,
     "architectureFiles": 44,
     "moduleBoundaryFiles": 38,
     "faultInjectedChannels": 10,
-    "replayCount": 100
+    "replayCount": 100,
+    "volumeAtomicRollbackFixtures": 2
   },
   "evidence": [
     "atomic_commit_matrix.json",
@@ -40,6 +41,11 @@
     "receipt_replay.json",
     "final_gate_negative_cases.json",
     "repository_boundary.json",
+    "gate_policy_boundary.json",
+    "gate_certificate_binding.json",
+    "domain_receipt_roundtrip.json",
+    "volume_atomic_rollback.json",
+    "sqlite_integrity.json",
     "test.log",
     "changed-files.txt",
     "environment.json",

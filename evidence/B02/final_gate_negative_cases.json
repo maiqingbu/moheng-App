@@ -3,6 +3,18 @@
   "status": "PASS",
   "cases": [
     {
+      "name": "same-bundle GatePolicy self-certification",
+      "test": "b02_same_bundle_or_uncommitted_gate_policy_is_rejected_before_writes",
+      "result": "PASS",
+      "expected": "ContractInvalid and no writes"
+    },
+    {
+      "name": "uncommitted GatePolicy",
+      "test": "b02_same_bundle_or_uncommitted_gate_policy_is_rejected_before_writes",
+      "result": "PASS",
+      "expected": "ContractInvalid and no writes"
+    },
+    {
       "name": "wrong project gate certificate",
       "test": "b02_final_gate_rejects_wrong_project_and_budget_hard_limit_before_writes",
       "result": "PASS",
@@ -61,6 +73,18 @@
       "test": "b02_gate_certificate_same_id_with_different_digest_is_not_rewritten",
       "result": "PASS",
       "expected": "ContractInvalid and original digest preserved"
+    },
+    {
+      "name": "Receipt artifactRef wrong hash",
+      "test": "b02_receipt_draft_rejects_wrong_hash_and_payload_mutation",
+      "result": "PASS",
+      "expected": "ContractInvalid and rollback"
+    },
+    {
+      "name": "Receipt mutation under same receiptId",
+      "test": "b02_receipt_draft_rejects_wrong_hash_and_payload_mutation",
+      "result": "PASS",
+      "expected": "ContractInvalid and original receipt preserved"
     }
   ],
   "evidence": "evidence/B02/fault_injection.log"

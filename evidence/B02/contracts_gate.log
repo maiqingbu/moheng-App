@@ -6,7 +6,7 @@
 > ai-novel-production-system-ui@1.0.0 contracts:validate
 > node contracts/tools/validate-fixtures.mjs
 
-Contract fixtures validated through Draft 2020-12 schemas: 4 valid accepted, 18 invalid rejected.
+Contract fixtures validated through Draft 2020-12 schemas: 6 valid accepted, 24 invalid rejected.
 
 > ai-novel-production-system-ui@1.0.0 contracts:golden
 > node contracts/tools/verify-golden-hash.mjs

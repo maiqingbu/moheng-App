@@ -3,6 +3,14 @@ contracts/manifests/schema-manifest.json
 contracts/schemas/commit/commit-bundle.schema.json
 contracts/schemas/commit/deltas.schema.json
 contracts/schemas/commit/receipt-draft.schema.json
+contracts/fixtures/valid/gate-certificate-typed.json
+contracts/fixtures/valid/domain-receipt-typed.json
+contracts/fixtures/invalid/gate-certificate-missing-subject.json
+contracts/fixtures/invalid/gate-certificate-invalid-subject-hash.json
+contracts/fixtures/invalid/gate-certificate-invalid-subject-version.json
+contracts/fixtures/invalid/domain-receipt-wrong-artifact-ref.json
+contracts/fixtures/invalid/domain-receipt-payload-not-object.json
+contracts/fixtures/invalid/domain-receipt-missing-digest.json
 src/generated/contracts/types.ts
 src/generated/contracts/validators.ts
 src-tauri/migrations/0005_m0c_commit_delta.sql
@@ -16,3 +24,4 @@ src-tauri/src/repositories/artifacts.rs
 src-tauri/tests/b01_stable_id.rs
 src-tauri/tests/b02_commit_bundle.rs
 src-tauri/tests/commit_integration.rs
+scripts/generate-b02-acceptance.mjs

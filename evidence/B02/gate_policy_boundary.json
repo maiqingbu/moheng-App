@@ -1,0 +1,15 @@
+{
+  "status": "PASS",
+  "rules": {
+    "requiresPreExistingCommittedAuthority": true,
+    "requiresCanonicalGatePolicyHead": true,
+    "sameBundleSelfCertification": "REJECTED",
+    "uncommittedCandidatePolicy": "REJECTED",
+    "wrongProjectOrHash": "REJECTED"
+  },
+  "tests": [
+    "b02_gate_policy_must_be_committed_before_the_final_commit",
+    "b02_same_bundle_or_uncommitted_gate_policy_is_rejected_before_writes",
+    "b02_final_gate_revalidates_gate_policy_type_and_dependency_source_hash"
+  ]
+}

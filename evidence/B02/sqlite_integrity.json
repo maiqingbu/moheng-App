@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "migration": "0002 -> 0005",
+  "schemaVersion": 5,
+  "tableCount": 76,
+  "indexCount": 159,
+  "quickCheck": "ok",
+  "foreignKeyCheck": 0,
+  "sourceTest": "m0b_longterm_migration::old_m0a_database_upgrades_in_place_keeping_hashes",
+  "repeatedMigration": "PASS",
+  "failedMigrationRollback": "PASS"
+}

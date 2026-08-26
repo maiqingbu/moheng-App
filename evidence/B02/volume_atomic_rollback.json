@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "fixtures": {
+    "volumePlan": {
+      "test": "b02_volume_plan_failure_after_artifacts_rolls_back_every_write",
+      "failurePhase": "stateDelta apply after artifacts and heads",
+      "revisionUnchanged": true,
+      "headsUnchanged": true,
+      "artifactsRolledBack": true,
+      "dependencyRolledBack": true,
+      "stateRolledBack": true,
+      "domainReceiptRolledBack": true,
+      "commitReceiptRolledBack": true
+    },
+    "volumeClose": {
+      "test": "b02_volume_close_failure_after_artifacts_preserves_previous_volume_state",
+      "failurePhase": "stateDelta apply after exit/health artifacts and heads",
+      "volumeRemainsPlanning": true,
+      "exitHealthRolledBack": true,
+      "headsUnchanged": true,
+      "dependencyUnchanged": true,
+      "stateUnchanged": true,
+      "domainReceiptUnchanged": true,
+      "commitReceiptUnchanged": true,
+      "revisionUnchanged": true
+    }
+  }
+}

@@ -6,7 +6,7 @@
     "test": "b02_full_delta_bundle_is_not_rejected_as_unsupported",
     "status": "PASS",
     "channels": {
-      "artifacts": 3,
+      "artifacts": 2,
       "heads": 1,
       "canon": 2,
       "obligation": 1,
@@ -36,7 +36,9 @@
       "gate"
     ],
     "expectedRevision": 0,
-    "artifacts": 0,
+    "baselineArtifacts": 1,
+    "artifactsAfter": 1,
+    "newArtifacts": 0,
     "commitReceipts": 0,
     "status": "PASS"
   },
