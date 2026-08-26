@@ -63,6 +63,7 @@ const acceptance = {
     'gate_certificate_binding.json',
     'domain_receipt_roundtrip.json',
     'volume_atomic_rollback.json',
+    'sqlite_integrity.json',
     'test.log',
     'changed-files.txt',
     'environment.json',
