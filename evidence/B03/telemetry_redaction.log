@@ -1,0 +1,3 @@
+B03 secret/telemetry boundary: PASS
+No API key, authorization header, or raw provider secret is written by the runtime tests.
+Production control path writes only durable job/runtime state and ProjectCommandReceipt metadata.

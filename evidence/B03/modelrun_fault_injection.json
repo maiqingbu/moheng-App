@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "preSendPersistence": {"modelRuns": 1, "budgetReservations": 1},
+  "rawResponseBeforeParse": true,
+  "parseFailureRawResponseRetained": true,
+  "parseReplayTransportCalls": 0,
+  "test": "b03_parse_failure_keeps_raw_response_and_replays_without_transport"
+}

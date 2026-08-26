@@ -1,0 +1,9 @@
+{
+  "status": "PASS",
+  "test": "b03_authoritative_hard_budget_blocks_transport_and_records_decision",
+  "hardLimitSource": "chapter_production_budgets + budget_reservations",
+  "overLimitStatus": "OVER_LIMIT",
+  "transportCallsAfterHardLimit": 0,
+  "decisionType": "BUDGET_REPLAN",
+  "decisionRows": 1
+}

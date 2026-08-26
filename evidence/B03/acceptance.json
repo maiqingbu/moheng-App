@@ -1,0 +1,49 @@
+{
+  "batch": "B03",
+  "milestone": "M0D",
+  "status": "PASS",
+  "sourceCommit": "f5d78c83b1c5a1752cefd70b20a48e1fef9dc3ba",
+  "workingTreeDirty": false,
+  "predecessor": {"batch":"B02","status":"FROZEN_PASS","baselineCommit":"82172418fbae09d8856e35f6aad19c7514444e6c"},
+  "commands": [
+    "cargo test --manifest-path src-tauri/Cargo.toml --test b03_runtime -- --nocapture",
+    "cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture",
+    "npm test",
+    "npm run typecheck",
+    "npm run build",
+    "npm run verify:contracts",
+    "npm run verify",
+    "npm run verify:m0a",
+    "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
+    "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
+  ],
+  "keyNumbers": {
+    "b03TargetedRustTests": "7/7",
+    "allRustTests": "117/117",
+    "nodeTests": "17/17",
+    "vitestTests": "17/17",
+    "contractFixtures": "6 valid accepted, 24 invalid rejected",
+    "goldenVectors": 26,
+    "architectureFiles": 44,
+    "moduleBoundaryFiles": 38,
+    "jobRecoveryScenarios": 1,
+    "modelRunScenarios": 3,
+    "secretBoundaryScenarios": 1,
+    "realProductionControlCommands": 4
+  },
+  "evidence": [
+    "acceptance.json",
+    "test.log",
+    "changed-files.txt",
+    "environment.json",
+    "commands.log",
+    "regression_summary.json",
+    "job_recovery_matrix.json",
+    "modelrun_fault_injection.json",
+    "budget_settlement.json",
+    "unknown_remote_outcome.json",
+    "secret_redaction.json",
+    "telemetry_redaction.log"
+  ]
+}

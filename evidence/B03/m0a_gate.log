@@ -1,0 +1,5 @@
+
+> ai-novel-production-system-ui@1.0.0 verify:m0a
+> node scripts/verify-m0a-evidence.mjs
+
+M0A evidence gate passed: real Tauri service wiring, explicit demo isolation, authority/receipt/retention registries, and fail-closed unsupported commands verified.

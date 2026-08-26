@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "b01Regression": "PASS",
+  "b02Regression": "PASS",
+  "migrationRegression": "PASS",
+  "durableJob": "PASS",
+  "modelRunBeforeTransport": "PASS",
+  "rawResponseBeforeParse": "PASS",
+  "unknownRemoteOutcomeNoRetry": "PASS",
+  "budgetHardStop": "PASS",
+  "secretBoundary": "PASS",
+  "realIpcControls": "PASS",
+  "b04Started": false
+}

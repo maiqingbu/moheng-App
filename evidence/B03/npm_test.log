@@ -1,0 +1,37 @@
+
+> ai-novel-production-system-ui@1.0.0 test
+> node --test tests/*.test.mjs tests/contracts/*.test.mjs && vitest run tests/store
+
+✔ ACCEPTANCE-GEN-01: all blocking gates PASS produces PASS (4.586438ms)
+✔ ACCEPTANCE-GEN-02: cargo clippy FAIL produces FAIL (0.289489ms)
+✔ ACCEPTANCE-GEN-03: build FAIL produces FAIL (0.215789ms)
+✔ ACCEPTANCE-GEN-04: missing blocking gate produces FAIL (0.652132ms)
+✔ ACCEPTANCE-GEN-05: mismatched test count produces FAIL (0.234565ms)
+✔ GIT-BINDING-01: unchanged clean commit produces PASS (0.169425ms)
+✔ GIT-BINDING-02: changed commit produces FAIL (0.40025ms)
+✔ GIT-BINDING-03: dirty after gates produces FAIL (0.166439ms)
+✔ should enforce every M0A HARD gate in CI without overwriting drift first (2.028947ms)
+✔ should inspect Rust command implementations and authoritative SQL boundaries (7.679849ms)
+✔ should normalize CRLF and CR before hashing payload text (3.562572ms)
+✔ official sha256Canonical defaults to newline normalization (TS/Rust parity) (1.384017ms)
+✔ should serialize RFC 8785 numeric and UTF-16 ordering edge cases (0.52799ms)
+✔ should reject lone Unicode surrogates (0.642711ms)
+✔ should verify at least twenty frozen golden vectors (1.103253ms)
+✔ should generate every manifest schema into both languages without handwritten DTO omissions (106.394568ms)
+✔ should validate fixtures through Draft 2020-12 schemas rather than filename heuristics (2.087403ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 800.292373
+
+ RUN  v4.1.11 /Users/mac/Desktop/AI小说生产系统/ai-novel-production-system
+
+
+ Test Files  3 passed (3)
+      Tests  17 passed (17)
+   Start at  03:16:47
+   Duration  2.86s (transform 1.18s, setup 0ms, import 2.47s, tests 1.60s, environment 1ms)

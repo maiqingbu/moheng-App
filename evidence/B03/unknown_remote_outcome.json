@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "test": "b03_timeout_is_unknown_remote_outcome_and_does_not_retry_transport",
+  "timeoutStatus": "UNKNOWN_REMOTE_OUTCOME",
+  "initialTransportCalls": 1,
+  "ordinaryRetryTransportCalls": 0,
+  "requiresExplicitDecision": true
+}

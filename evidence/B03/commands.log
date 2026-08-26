@@ -1,0 +1,11 @@
+cargo test --manifest-path src-tauri/Cargo.toml --test b03_runtime -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture
+npm test
+npm run typecheck
+npm run build
+npm run verify:contracts
+npm run verify
+npm run verify:m0a
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings

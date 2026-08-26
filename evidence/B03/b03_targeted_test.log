@@ -1,0 +1,14 @@
+   Compiling ai-novel-production-system-core v0.1.0 (/Users/mac/Desktop/AI小说生产系统/ai-novel-production-system/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.32s
+     Running tests/b03_runtime.rs (src-tauri/target/debug/deps/b03_runtime-c6e757519acf03c8)
+
+running 7 tests
+test b03_job_lifecycle_persists_steps_lease_checkpoint_and_restart_recovery ... ok
+test b03_parse_failure_keeps_raw_response_and_replays_without_transport ... ok
+test b03_model_run_and_budget_reservation_exist_before_transport_send ... ok
+test b03_authoritative_hard_budget_blocks_transport_and_records_decision ... ok
+test b03_secret_store_keeps_secret_out_of_project_database ... ok
+test b03_timeout_is_unknown_remote_outcome_and_does_not_retry_transport ... ok
+test b03_real_command_path_controls_durable_job_and_runtime_projection ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s

@@ -1,0 +1,10 @@
+{
+  "status": "PASS",
+  "test": "b03_job_lifecycle_persists_steps_lease_checkpoint_and_restart_recovery",
+  "jobStatuses": ["QUEUED", "RUNNING", "PAUSED", "CANCELLED"],
+  "stepsPersisted": 3,
+  "leasePersisted": 1,
+  "checkpointOffset": 12,
+  "restartRecovery": "RUNNING -> PAUSED",
+  "duplicateRecoverySideEffect": false
+}
