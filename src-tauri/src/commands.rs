@@ -2,7 +2,8 @@ use crate::catalog::CatalogRepository;
 use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
-use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
+use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
+use crate::runtime::{DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::State;
@@ -287,8 +288,25 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
         .manager
         .overview(project_id)
         .map_err(|error| error.to_string())?;
+    let runtime = state
+        .manager
+        .library_projection(project_id)
+        .map_err(|error| error.to_string())?
+        .runtime
+        .unwrap_or_default();
+    let mut project = project_snapshot(project_id, &title, revision, &updated_at);
+    project["phase"] = json!(runtime.current_phase);
+    project["runState"] = json!(runtime.run_state);
+    project["blockReason"] = runtime
+        .block_reason
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    project["committedChapters"] = json!(runtime.committed_chapters);
+    project["candidateChapters"] = json!(runtime.candidate_chapters);
+    project["totalCost"] = json!(runtime.total_cost_cents as f64 / 100.0);
+    project["progress"] = json!(runtime.progress);
     Ok(json!({
-        "project": project_snapshot(project_id, &title, revision, &updated_at),
+        "project": project,
         "pendingDecisionCount": 0,
         "recentChapters": [],
         "recentArtifacts": [],
@@ -300,6 +318,154 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
     }))
 }
 
+fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String> {
+    let payload = request.get("payload");
+    let job_id = payload
+        .and_then(|value| value.get("jobId"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            StableIdentityFactory::from_command(StableIdKind::Job, command_id)
+                .unwrap_or_else(|_| format!("job:{command_id}"))
+        });
+    let stages = payload
+        .and_then(|value| value.get("stages"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["outline".into(), "draft".into(), "review".into()]);
+    Ok(JobSpec {
+        job_id,
+        job_type: payload
+            .and_then(|value| value.get("jobType"))
+            .and_then(Value::as_str)
+            .unwrap_or("CHAPTER")
+            .to_string(),
+        book_id: payload
+            .and_then(|value| value.get("bookId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        volume_id: payload
+            .and_then(|value| value.get("volumeId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        chapter_id: payload
+            .and_then(|value| value.get("chapterId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        stages,
+    })
+}
+
+// Runtime command handling intentionally carries the complete command envelope
+// into the ProjectManager-owned transaction so control receipts bind to it.
+#[allow(clippy::too_many_arguments)]
+fn execute_runtime_command(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    let spec = project_command_spec(
+        project_id,
+        project_id,
+        command_id,
+        idempotency_key,
+        command_type,
+        digest,
+        expected_revision,
+        requested_at,
+        true,
+    );
+    let outcome = state
+        .manager
+        .commit_project_command(spec, |connection| {
+            match command_type {
+                "production_start" => {
+                    let job = runtime_job_spec(request, command_id)
+                        .map_err(ManagerError::ProjectCommand)?;
+                    DurableJobService::start_job(connection, &job, requested_at)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    DurableJobService::transition(
+                        connection,
+                        project_id,
+                        &job.job_id,
+                        "RUNNING",
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    DurableJobService::acquire_lease(
+                        connection,
+                        project_id,
+                        &job.job_id,
+                        "production-ipc",
+                        "9999-12-31T00:00:00Z",
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    DurableJobService::set_runtime_state(
+                        connection,
+                        project_id,
+                        "ACTIVE",
+                        None,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                }
+                "production_pause" | "production_resume" | "production_cancel" => {
+                    let job_id = request
+                        .pointer("/payload/jobId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or(
+                            DurableJobService::latest_job_id(connection, project_id)
+                                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?,
+                        );
+                    let (next, run_state, reason) = match command_type {
+                        "production_pause" => ("PAUSED", "PAUSED", Some("USER_PAUSE")),
+                        "production_resume" => ("RUNNING", "ACTIVE", None),
+                        _ => ("CANCELLED", "FAILED", None),
+                    };
+                    DurableJobService::transition(
+                        connection,
+                        project_id,
+                        &job_id,
+                        next,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    DurableJobService::set_runtime_state(
+                        connection,
+                        project_id,
+                        run_state,
+                        reason,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                }
+                _ => {
+                    return Err(ManagerError::ProjectCommand(
+                        "unsupported runtime command".into(),
+                    ))
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(project_command_response(&outcome_receipt(outcome)))
+}
+
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
     let command_id = required_string(&request, "commandId")?;
@@ -309,6 +475,20 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
     let expected_revision = expected_revision(&request)?;
     let digest = request_digest(&request)?;
     match command_type {
+        "production_start" | "production_pause" | "production_resume" | "production_cancel" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_runtime_command(
+                state,
+                &request,
+                command_type,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
+            )
+        }
         "project_create_from_idea" | "project_create_from_market" => {
             let title = request
                 .pointer("/payload/title")

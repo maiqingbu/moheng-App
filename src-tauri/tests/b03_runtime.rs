@@ -1,8 +1,9 @@
+use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::runtime::{
-    DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec, ModelRunSpec,
-    SecretStore, MemorySecretStore, TransportFailure,
+    DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec, MemorySecretStore,
+    ModelRunSpec, SecretStore, TransportFailure,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -49,15 +50,68 @@ fn model_spec() -> ModelRunSpec {
 fn b03_job_lifecycle_persists_steps_lease_checkpoint_and_restart_recovery() {
     let (_temp, _manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
-    DurableJobService::acquire_lease(&connection, "p1", "job:b03:chapter:1", "worker-1", "2026-08-27T01:00:00Z", NOW).unwrap();
-    DurableJobService::save_checkpoint(&connection, "p1", "job:b03:chapter:1", "outline", 12, &json!({"chapter":"chapter-1"}), NOW).unwrap();
+    DurableJobService::acquire_lease(
+        &connection,
+        "p1",
+        "job:b03:chapter:1",
+        "worker-1",
+        "2026-08-27T01:00:00Z",
+        NOW,
+    )
+    .unwrap();
+    DurableJobService::save_checkpoint(
+        &connection,
+        "p1",
+        "job:b03:chapter:1",
+        "outline",
+        12,
+        &json!({"chapter":"chapter-1"}),
+        NOW,
+    )
+    .unwrap();
     DurableJobService::transition(&connection, "p1", "job:b03:chapter:1", "RUNNING", NOW).unwrap();
     let recovered = DurableJobService::recover_after_restart(&connection, "p1", NOW).unwrap();
     assert_eq!(recovered.recovered_jobs, 1);
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM jobs WHERE job_id = 'job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), "PAUSED");
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_steps WHERE job_id = 'job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), 3);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_leases WHERE job_id = 'job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT offset FROM job_checkpoints WHERE job_id = 'job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), 12);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id = 'job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "PAUSED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM job_steps WHERE job_id = 'job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM job_leases WHERE job_id = 'job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT offset FROM job_checkpoints WHERE job_id = 'job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        12
+    );
 }
 
 #[test]
@@ -68,10 +122,46 @@ fn b03_model_run_and_budget_reservation_exist_before_transport_send() {
     let mut transport = FakeModelTransport::success(json!({"draft":"hello"}));
     DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
     assert_eq!(transport.send_calls(), 1);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_runs WHERE model_run_id = 'mr:b03:1'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_responses WHERE model_run_id = 'mr:b03:1'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_parse_results WHERE model_run_id = 'mr:b03:1'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM model_runs WHERE model_run_id = 'mr:b03:1'", [], |row| row.get(0)).unwrap(), "COMPLETED");
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_responses WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_parse_results WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "COMPLETED"
+    );
 }
 
 #[test]
@@ -81,9 +171,67 @@ fn b03_timeout_is_unknown_remote_outcome_and_does_not_retry_transport() {
     let mut transport = FakeModelTransport::failure(TransportFailure::Timeout);
     assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
     assert_eq!(transport.send_calls(), 1);
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM model_runs WHERE model_run_id = 'mr:b03:1'", [], |row| row.get(0)).unwrap(), "UNKNOWN_REMOTE_OUTCOME");
-    assert_eq!(DurableModelRunner::retry(&connection, &mut transport, &model_spec(), NOW).unwrap_err().to_string(), "UNKNOWN_REMOTE_OUTCOME requires explicit decision");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(
+        DurableModelRunner::retry(&connection, &mut transport, &model_spec(), NOW)
+            .unwrap_err()
+            .to_string(),
+        "UNKNOWN_REMOTE_OUTCOME requires explicit decision"
+    );
     assert_eq!(transport.send_calls(), 1);
+}
+
+#[test]
+fn b03_parse_failure_keeps_raw_response_and_replays_without_transport() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::raw_success("not-json");
+    assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
+    assert_eq!(transport.send_calls(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_responses WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_parse_results WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "SCHEMA_INVALID"
+    );
+    let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(
+        DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).is_err()
+    );
+    assert_eq!(retry_transport.send_calls(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_responses WHERE model_run_id = 'mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -100,7 +248,16 @@ fn b03_authoritative_hard_budget_blocks_transport_and_records_decision() {
     let mut transport = FakeModelTransport::success(json!({"draft":"should-not-send"}));
     assert!(DurableModelRunner::execute(&connection, &mut transport, &spec, NOW).is_err());
     assert_eq!(transport.send_calls(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type = 'BUDGET_REPLAN'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM decisions WHERE decision_type = 'BUDGET_REPLAN'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -109,5 +266,94 @@ fn b03_secret_store_keeps_secret_out_of_project_database() {
     let store = MemorySecretStore::new();
     store.put("fake", "sk-secret-b03").unwrap();
     assert_eq!(store.get("fake").unwrap(), "sk-secret-b03");
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%sk-secret-b03%'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%sk-secret-b03%'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn b03_real_command_path_controls_durable_job_and_runtime_projection() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "A", NOW).unwrap());
+    let command = |command_id: &str, command_type: &str, revision: i64| {
+        execute_command_impl(
+            &state,
+            json!({
+                "type": command_type,
+                "commandId": command_id,
+                "idempotencyKey": format!("{command_id}-key"),
+                "projectId": "p1",
+                "expectedRevision": revision,
+                "requestedAt": NOW
+            }),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        command("b03-start", "production_start", 0)["finalStatus"],
+        "committed"
+    );
+    let connection = state.manager.open("p1", "A", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT run_state FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "ACTIVE"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE project_id='p1' ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "RUNNING"
+    );
+    drop(connection);
+    assert_eq!(
+        command("b03-pause", "production_pause", 1)["finalStatus"],
+        "committed"
+    );
+    assert_eq!(
+        command("b03-resume", "production_resume", 2)["finalStatus"],
+        "committed"
+    );
+    assert_eq!(
+        command("b03-cancel", "production_cancel", 3)["finalStatus"],
+        "committed"
+    );
+    let connection = state.manager.open("p1", "A", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT run_state FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "FAILED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE project_id='p1' ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "CANCELLED"
+    );
 }

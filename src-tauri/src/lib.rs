@@ -4,6 +4,7 @@ pub mod commit;
 pub mod generated;
 pub mod project_db;
 pub mod repositories;
+pub mod runtime;
 pub mod stable_id;
 
 pub mod hash {
