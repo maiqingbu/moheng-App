@@ -309,7 +309,7 @@ impl DurableJobService {
         now: &str,
     ) -> Result<RecoverySummary, RuntimeError> {
         connection.execute(
-            "UPDATE job_leases SET released_at=?1 WHERE project_id=?2 AND released_at IS NULL AND expires_at<=?1",
+            "UPDATE job_leases SET released_at=?1 WHERE project_id=?2 AND released_at IS NULL",
             libsql_rusqlite::params![now, project_id],
         )?;
         let mut statement = connection.prepare(
@@ -342,6 +342,10 @@ impl DurableJobService {
                 connection.execute(
                     "UPDATE jobs SET status='WAITING_DECISION', error_code='UNKNOWN_REMOTE_OUTCOME', updated_at=?1 WHERE project_id=?2 AND job_id=?3",
                     libsql_rusqlite::params![now, project_id, job_id],
+                )?;
+                connection.execute(
+                    "INSERT INTO project_runtime_state(project_id, run_state, block_reason, updated_at) VALUES (?1, 'WAITING_DECISION', 'UNKNOWN_REMOTE_OUTCOME', ?2) ON CONFLICT(project_id) DO UPDATE SET run_state='WAITING_DECISION', block_reason='UNKNOWN_REMOTE_OUTCOME', updated_at=excluded.updated_at",
+                    libsql_rusqlite::params![project_id, now],
                 )?;
                 continue;
             }
@@ -512,12 +516,26 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    pub fn prepare(
+        connection: &Connection,
+        spec: &ModelRunSpec,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        validate_model_run_id(spec)?;
+        if existing_model_status(connection, spec)?.is_none() {
+            enforce_budget(connection, spec)?;
+            persist_before_send(connection, spec, now)?;
+        }
+        Ok(())
+    }
+
     pub fn execute<T: ModelTransport>(
         connection: &Connection,
         transport: &mut T,
         spec: &ModelRunSpec,
         now: &str,
     ) -> Result<ModelRunOutcome, RuntimeError> {
+        validate_model_run_id(spec)?;
         if let Some(status) = existing_model_status(connection, spec)? {
             if status == "COMPLETED" {
                 return Ok(ModelRunOutcome {
@@ -544,7 +562,10 @@ impl DurableModelRunner {
             persist_before_send(connection, spec, now)?;
         }
         mark_sending(connection, spec, now)?;
-        transport.before_send(connection, spec)?;
+        if let Err(error) = transport.before_send(connection, spec) {
+            mark_confirmed_failure(connection, spec, now)?;
+            return Err(error);
+        }
         let response = match transport.send(spec) {
             Ok(response) => response,
             Err(TransportFailure::Timeout) => {
@@ -574,6 +595,7 @@ impl DurableModelRunner {
         spec: &ModelRunSpec,
         now: &str,
     ) -> Result<ModelRunOutcome, RuntimeError> {
+        validate_model_run_id(spec)?;
         let status = existing_model_status(connection, spec)?;
         let raw: Option<String> = connection
             .query_row(
@@ -596,6 +618,82 @@ impl DurableModelRunner {
         }
         Self::execute(connection, transport, spec, now)
     }
+
+    pub fn resolve_unknown<T: ModelTransport>(
+        connection: &Connection,
+        model_run_id: &str,
+        action: &str,
+        transport: &mut T,
+        next_spec: &ModelRunSpec,
+        now: &str,
+    ) -> Result<ModelRunOutcome, RuntimeError> {
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [model_run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RuntimeError::JobNotFound)?;
+        if status != "UNKNOWN_REMOTE_OUTCOME" {
+            return Err(RuntimeError::InvalidTransition(
+                status,
+                "explicit-unknown-decision".into(),
+            ));
+        }
+        let decision_id = format!("decision:model-run:{model_run_id}");
+        match action {
+            "RETRY_REMOTE" => {
+                validate_model_run_id(next_spec)?;
+                if next_spec.model_run_id == model_run_id {
+                    return Err(RuntimeError::StableIdRejected);
+                }
+                connection.execute(
+                    "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE decision_id=?2 AND outcome IN ('OPEN','PENDING')",
+                    libsql_rusqlite::params![now, decision_id],
+                )?;
+                if let Some(job_id) = &next_spec.job_id {
+                    connection.execute(
+                        "UPDATE jobs SET status='RUNNING', error_code=NULL, updated_at=?1 WHERE job_id=?2",
+                        libsql_rusqlite::params![now, job_id],
+                    )?;
+                }
+                Self::execute(connection, transport, next_spec, now)
+            }
+            "MARK_FAILED" | "CANCEL_JOB" => {
+                let job_status = if action == "CANCEL_JOB" {
+                    "CANCELLED"
+                } else {
+                    "FAILED"
+                };
+                connection.execute(
+                    "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
+                    libsql_rusqlite::params![now, model_run_id],
+                )?;
+                connection.execute(
+                    "UPDATE decisions SET outcome=?1, updated_at=?2 WHERE decision_id=?3",
+                    libsql_rusqlite::params![action, now, decision_id],
+                )?;
+                connection.execute(
+                    "UPDATE jobs SET status=?1, updated_at=?2 WHERE job_id=(SELECT job_id FROM model_runs WHERE model_run_id=?3)",
+                    libsql_rusqlite::params![job_status, now, model_run_id],
+                )?;
+                Ok(ModelRunOutcome {
+                    status: "FAILED".into(),
+                    parsed: None,
+                    replayed: false,
+                })
+            }
+            _ => Err(RuntimeError::UnknownRemoteOutcome),
+        }
+    }
+}
+
+fn validate_model_run_id(spec: &ModelRunSpec) -> Result<(), RuntimeError> {
+    if !spec.model_run_id.starts_with("mr:") {
+        return Err(RuntimeError::StableIdRejected);
+    }
+    Ok(())
 }
 
 fn existing_model_status(
@@ -993,6 +1091,53 @@ fn finish_parse(
 
 pub trait SecretStore {
     fn get(&self, provider: &str) -> Result<String, RuntimeError>;
+}
+
+pub struct SecretBackedTransport<T, S> {
+    inner: T,
+    store: S,
+    provider: String,
+}
+
+impl<T, S> SecretBackedTransport<T, S> {
+    pub fn new(inner: T, store: S, provider: impl Into<String>) -> Self {
+        Self {
+            inner,
+            store,
+            provider: provider.into(),
+        }
+    }
+}
+
+impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport<T, S> {
+    fn before_send(
+        &mut self,
+        connection: &Connection,
+        spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        self.store.get(&self.provider)?;
+        self.inner.before_send(connection, spec)
+    }
+
+    fn before_raw_persist(
+        &mut self,
+        connection: &Connection,
+        spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        self.inner.before_raw_persist(connection, spec)
+    }
+
+    fn send(&mut self, spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure> {
+        self.inner.send(spec)
+    }
+}
+
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(secret, "[REDACTED]")
+    }
 }
 
 #[derive(Clone, Default)]

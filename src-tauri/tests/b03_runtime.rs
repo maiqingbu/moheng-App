@@ -5,8 +5,10 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::runtime::{
     DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec, MemorySecretStore,
-    ModelRunSpec, SecretStore, TransportFailure,
+    ModelRunSpec, ModelTransport, RuntimeError, SecretStore, TransportFailure, TransportResponse,
+    TransportUsage,
 };
+use libsql_rusqlite::Connection;
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -69,6 +71,77 @@ fn seed_budget(
     connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('vol:b03:budget','p1','book:b03:budget',1,'Volume','PLANNING',1,1,1000,?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter-budget','p1','vol:b03:budget',1,'Chapter','NORMAL','PLANNED',0,?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO chapter_production_budgets(budget_id, project_id, chapter_id, importance_class, soft_max_model_runs, hard_max_model_runs, cost_budget_cents, frozen_at) VALUES (?1,'p1','chapter-budget','NORMAL',?2,?3,?4,?5)", libsql_rusqlite::params![budget_id, soft_runs, hard_runs, cost, NOW]).unwrap();
+}
+
+struct PreSendAssertingTransport {
+    calls: usize,
+}
+
+impl ModelTransport for PreSendAssertingTransport {
+    fn before_send(
+        &mut self,
+        connection: &Connection,
+        spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .map_err(RuntimeError::Sqlite)?;
+        assert_eq!(status, "RUNNING");
+        let reservation_status: String = connection
+            .query_row(
+                "SELECT status FROM budget_reservations WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .map_err(RuntimeError::Sqlite)?;
+        assert_eq!(reservation_status, "RESERVED");
+        Ok(())
+    }
+
+    fn send(&mut self, _spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure> {
+        self.calls += 1;
+        Ok(TransportResponse {
+            raw_response: json!({"draft":"send-boundary"}).to_string(),
+            usage: TransportUsage {
+                input_tokens: 3,
+                output_tokens: 4,
+                cached_tokens: Some(1),
+                provider_reported_cost_cents: Some(2),
+                latency_ms: 7,
+                provider_request_id: Some("pre-send-check".into()),
+            },
+        })
+    }
+}
+
+struct RawPersistFailureTransport;
+
+impl ModelTransport for RawPersistFailureTransport {
+    fn before_raw_persist(
+        &mut self,
+        _connection: &Connection,
+        _spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::RawResponsePersistenceFailed)
+    }
+
+    fn send(&mut self, _spec: &ModelRunSpec) -> Result<TransportResponse, TransportFailure> {
+        Ok(TransportResponse {
+            raw_response: json!({"draft":"not-committed"}).to_string(),
+            usage: TransportUsage {
+                input_tokens: 2,
+                output_tokens: 3,
+                cached_tokens: None,
+                provider_reported_cost_cents: Some(4),
+                latency_ms: 5,
+                provider_request_id: None,
+            },
+        })
+    }
 }
 
 #[test]
@@ -439,6 +512,316 @@ fn b03_unknown_remote_outcome_creates_decision_and_waiting_projection() {
             .unwrap(),
         "WAITING_DECISION"
     );
+}
+
+#[test]
+fn b03_send_boundary_is_durable_before_transport() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = PreSendAssertingTransport { calls: 0 };
+    DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
+    assert_eq!(transport.calls, 1);
+}
+
+#[test]
+fn b03_prepared_recovery_reuses_model_run_and_reservation() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableModelRunner::prepare(&connection, &model_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::success(json!({"draft":"recovered"}));
+    DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
+    assert_eq!(transport.send_calls(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM budget_reservations WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn b03_running_model_run_recovers_to_unknown_without_resend() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
+    assert_eq!(transport.send_calls(), 1);
+    let mut retry_transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
+    assert!(
+        DurableModelRunner::execute(&connection, &mut retry_transport, &model_spec(), NOW).is_err()
+    );
+    assert_eq!(retry_transport.send_calls(), 0);
+}
+
+#[test]
+fn b03_raw_persistence_failure_stops_parse_and_commit_but_keeps_cost() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = RawPersistFailureTransport;
+    assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_responses WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_parse_results WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "FAILED"
+    );
+}
+
+#[test]
+fn b03_lease_is_finite_reclaimable_and_released_on_pause_cancel() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::acquire_lease(
+        &connection,
+        "p1",
+        "job:b03:chapter:1",
+        "worker-a",
+        "2026-08-27T00:01:00Z",
+        NOW,
+    )
+    .unwrap();
+    assert!(matches!(
+        DurableJobService::acquire_lease(
+            &connection,
+            "p1",
+            "job:b03:chapter:1",
+            "worker-b",
+            "2026-08-27T00:03:00Z",
+            NOW
+        ),
+        Err(RuntimeError::LeaseHeld)
+    ));
+    DurableJobService::acquire_lease(
+        &connection,
+        "p1",
+        "job:b03:chapter:1",
+        "worker-b",
+        "2026-08-27T00:03:00Z",
+        "2026-08-27T00:02:00Z",
+    )
+    .unwrap();
+    DurableJobService::pause(&connection, "p1", "job:b03:chapter:1", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_leases WHERE job_id='job:b03:chapter:1' AND released_at IS NULL", [], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn b03_job_hierarchy_uses_parent_job_id_and_rejects_wrong_parent() {
+    let (_temp, _manager, connection) = project();
+    let mut book = job_spec();
+    book.job_id = "job:b03:book:1".into();
+    book.job_type = "BOOK".into();
+    book.parent_job_id = None;
+    DurableJobService::start_job(&connection, &book, NOW).unwrap();
+    let mut volume = job_spec();
+    volume.job_id = "job:b03:volume:1".into();
+    volume.job_type = "VOLUME".into();
+    volume.parent_job_id = Some(book.job_id.clone());
+    DurableJobService::start_job(&connection, &volume, NOW).unwrap();
+    let mut chapter = job_spec();
+    chapter.parent_job_id = Some(volume.job_id.clone());
+    DurableJobService::start_job(&connection, &chapter, NOW).unwrap();
+    let mut invalid = job_spec();
+    invalid.job_id = "job:b03:invalid:1".into();
+    invalid.parent_job_id = Some(chapter.job_id.clone());
+    assert!(DurableJobService::start_job(&connection, &invalid, NOW).is_err());
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT parent_job_id FROM jobs WHERE job_id='job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        volume.job_id
+    );
+}
+
+#[test]
+fn b03_runtime_rejects_arbitrary_durable_ids() {
+    let (_temp, _manager, connection) = project();
+    let mut invalid = job_spec();
+    invalid.job_id = "my-job".into();
+    assert!(matches!(
+        DurableJobService::start_job(&connection, &invalid, NOW),
+        Err(RuntimeError::StableIdRejected)
+    ));
+    let mut invalid_model = model_spec();
+    invalid_model.model_run_id = "my-run".into();
+    let mut transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &invalid_model, NOW),
+        Err(RuntimeError::StableIdRejected)
+    ));
+    assert_eq!(transport.send_calls(), 0);
+}
+
+#[test]
+fn b03_unknown_requires_explicit_retry_decision_for_new_attempt() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut timeout_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(
+        DurableModelRunner::execute(&connection, &mut timeout_transport, &model_spec(), NOW)
+            .is_err()
+    );
+    let mut next_spec = budgeted_model_spec("mr:b03:explicit-retry", "", 1);
+    next_spec.budget_id = None;
+    next_spec.attempt_no = 1;
+    let mut retry_transport = FakeModelTransport::success(json!({"draft":"explicit"}));
+    DurableModelRunner::resolve_unknown(
+        &connection,
+        "mr:b03:1",
+        "RETRY_REMOTE",
+        &mut retry_transport,
+        &next_spec,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(retry_transport.send_calls(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "RETRY_REMOTE"
+    );
+}
+
+#[test]
+fn b03_restart_recovery_projects_unknown_decision_state() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableModelRunner::prepare(&connection, &model_spec(), NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE model_runs SET status='RUNNING' WHERE model_run_id='mr:b03:1'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET status='RUNNING' WHERE job_id='job:b03:chapter:1'",
+            [],
+        )
+        .unwrap();
+    let recovered =
+        DurableJobService::recover_after_restart(&connection, "p1", "2026-08-27T00:02:00Z")
+            .unwrap();
+    assert_eq!(recovered.recovered_jobs, 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT run_state FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "WAITING_DECISION"
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome='OPEN'", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn b03_secret_store_is_consumed_at_transport_boundary_and_redacted() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let store = MemorySecretStore::new();
+    let mut transport = ai_novel_production_system_core::runtime::SecretBackedTransport::new(
+        FakeModelTransport::success(json!({"draft":"secret-boundary"})),
+        store.clone(),
+        "fake",
+    );
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW),
+        Err(RuntimeError::SecretUnavailable)
+    ));
+    store.put("fake", "sk-secret-b03").unwrap();
+    let mut transport = ai_novel_production_system_core::runtime::SecretBackedTransport::new(
+        FakeModelTransport::success(json!({"draft":"secret-boundary"})),
+        store,
+        "fake",
+    );
+    assert!(DurableModelRunner::execute(
+        &connection,
+        &mut transport,
+        &ModelRunSpec {
+            model_run_id: "mr:b03:secret".into(),
+            idempotency_key: "model-key:secret".into(),
+            ..model_spec()
+        },
+        NOW
+    )
+    .is_ok());
+    assert_eq!(
+        ai_novel_production_system_core::runtime::redact_secret(
+            "Authorization: Bearer sk-secret-b03",
+            "sk-secret-b03"
+        ),
+        "Authorization: Bearer [REDACTED]"
+    );
+}
+
+#[test]
+fn b03_production_start_rejects_caller_supplied_new_job_id() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "A", NOW).unwrap());
+    let result = execute_command_impl(
+        &state,
+        json!({"type":"production_start","commandId":"b03-id","idempotencyKey":"b03-id-key","projectId":"p1","expectedRevision":0,"requestedAt":NOW,"payload":{"jobId":"job:caller-supplied"}}),
+    );
+    assert!(result.is_err());
 }
 
 #[test]

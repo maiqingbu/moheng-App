@@ -344,6 +344,13 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
 
 fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String> {
     let payload = request.get("payload");
+    if payload
+        .and_then(|value| value.get("jobId"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Err("new production jobs must use factory-derived stable ids".into());
+    }
     let job_id = payload
         .and_then(|value| value.get("jobId"))
         .and_then(Value::as_str)
