@@ -825,6 +825,123 @@ fn b03_production_start_rejects_caller_supplied_new_job_id() {
 }
 
 #[test]
+fn b03_explicit_unknown_retry_keeps_original_budget_binding() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:unknown-retry", 3, 0, 100);
+    let first = budgeted_model_spec("mr:b03:unknown-budget-first", "budget:unknown-retry", 5);
+    let mut timeout_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout_transport, &first, NOW).is_err());
+    let second = budgeted_model_spec("mr:b03:unknown-budget-second", "budget:unknown-retry", 5);
+    let mut retry_transport = FakeModelTransport::success(json!({"draft":"same-budget"}));
+    DurableModelRunner::resolve_unknown(
+        &connection,
+        &first.model_run_id,
+        "RETRY_REMOTE",
+        &mut retry_transport,
+        &second,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(retry_transport.send_calls(), 1);
+    assert_eq!(connection.query_row::<String, _, _>("SELECT budget_ref FROM budget_reservations WHERE model_run_id='mr:b03:unknown-budget-second'", [], |row| row.get(0)).unwrap(), "budget:unknown-retry");
+}
+
+#[test]
+fn b03_explicit_unknown_retry_is_budget_blocked_before_transport_when_hold_exceeds_hard() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:unknown-hard", 1, 0, 10);
+    let first = budgeted_model_spec("mr:b03:unknown-hard-first", "budget:unknown-hard", 5);
+    let mut timeout_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout_transport, &first, NOW).is_err());
+    let second = budgeted_model_spec("mr:b03:unknown-hard-second", "budget:unknown-hard", 5);
+    let mut retry_transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
+    assert!(DurableModelRunner::resolve_unknown(
+        &connection,
+        &first.model_run_id,
+        "RETRY_REMOTE",
+        &mut retry_transport,
+        &second,
+        NOW,
+    )
+    .is_err());
+    assert_eq!(retry_transport.send_calls(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type='BUDGET_BLOCKED'", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn b03_actual_settlement_is_not_overwritten_by_predicted_cost() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::success_with_usage(
+        json!({"draft":"actual-cost"}),
+        TransportUsage {
+            input_tokens: 8,
+            output_tokens: 13,
+            cached_tokens: None,
+            provider_reported_cost_cents: Some(8),
+            latency_ms: 21,
+            provider_request_id: Some("actual-cost-request".into()),
+        },
+    );
+    let mut spec = model_spec();
+    spec.predicted_cost_cents = 2;
+    DurableModelRunner::execute(&connection, &mut transport, &spec, NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT settled_cents FROM budget_reservations WHERE model_run_id='mr:b03:1'", [], |row| row.get(0)).unwrap(), 8);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT cost_cents FROM model_usage WHERE model_run_id='mr:b03:1'", [], |row| row.get(0)).unwrap(), 8);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT cost_cents FROM model_cost_ledger WHERE model_run_id='mr:b03:1' AND cost_type='ACTUAL'", [], |row| row.get(0)).unwrap(), 8);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 8);
+}
+
+#[test]
+fn b03_parse_and_completed_recovery_do_not_duplicate_settlement() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = FakeModelTransport::success(json!({"draft":"completed"}));
+    DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).unwrap();
+    let before = connection.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:b03:1'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:b03:1' AND cost_type='ACTUAL'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
+    DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).unwrap();
+    let after = connection.query_row::<(i64, i64, i64), _, _>("SELECT (SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:b03:1'), (SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:b03:1' AND cost_type='ACTUAL'), (SELECT total_cost_cents FROM project_runtime_state WHERE project_id='p1')", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    assert_eq!(before, after);
+    assert_eq!(retry_transport.send_calls(), 0);
+}
+
+#[test]
+fn b03_full_stable_validator_rejects_prefixed_non_opaque_ids() {
+    let (_temp, _manager, connection) = project();
+    let mut invalid_job = job_spec();
+    invalid_job.job_id = "job:hello".into();
+    assert!(matches!(DurableJobService::start_job(&connection, &invalid_job, NOW), Err(RuntimeError::StableIdRejected)));
+    let mut invalid_model = model_spec();
+    invalid_model.model_run_id = "mr:anything".into();
+    let mut transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
+    assert!(matches!(DurableModelRunner::execute(&connection, &mut transport, &invalid_model, NOW), Err(RuntimeError::StableIdRejected)));
+    assert_eq!(transport.send_calls(), 0);
+}
+
+#[test]
+fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::acquire_lease(&connection, "p1", "job:b03:chapter:1", "worker-a", "2026-08-27T00:01:00Z", NOW).unwrap();
+    DurableJobService::renew_lease(&connection, "p1", "job:b03:chapter:1", "worker-a", "2026-08-27T00:03:00Z", "2026-08-27T00:00:30Z").unwrap();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT expires_at FROM job_leases WHERE job_id='job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), "2026-08-27T00:03:00Z");
+    DurableJobService::cancel(&connection, "p1", "job:b03:chapter:1", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_leases WHERE job_id='job:b03:chapter:1' AND released_at IS NULL", [], |row| row.get(0)).unwrap(), 0);
+    let mut restart_job = job_spec();
+    restart_job.job_id = "job:b03:chapter:2".into();
+    DurableJobService::start_job(&connection, &restart_job, "2026-08-27T00:00:01Z").unwrap();
+    DurableJobService::acquire_lease(&connection, "p1", "job:b03:chapter:2", "old-worker", "2026-08-27T00:01:00Z", "2026-08-27T00:00:01Z").unwrap();
+    DurableJobService::transition(&connection, "p1", "job:b03:chapter:2", "RUNNING", "2026-08-27T00:00:01Z").unwrap();
+    DurableJobService::recover_after_restart(&connection, "p1", "2026-08-27T00:02:00Z").unwrap();
+    DurableJobService::resume(&connection, "p1", "job:b03:chapter:2", "2026-08-27T00:02:00Z").unwrap();
+    DurableJobService::acquire_lease(&connection, "p1", "job:b03:chapter:2", "new-worker", "2026-08-27T00:03:00Z", "2026-08-27T00:02:00Z").unwrap();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT holder FROM job_leases WHERE job_id='job:b03:chapter:2'", [], |row| row.get(0)).unwrap(), "new-worker");
+}
+
+#[test]
 fn b03_secret_store_keeps_secret_out_of_project_database() {
     let (_temp, _manager, connection) = project();
     let store = MemorySecretStore::new();
