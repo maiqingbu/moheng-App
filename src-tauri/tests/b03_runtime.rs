@@ -930,6 +930,16 @@ fn b03_explicit_unknown_retry_is_budget_blocked_before_transport_when_hold_excee
             .unwrap(),
         1
     );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "BUDGET_BLOCKED"
+    );
 }
 
 #[test]

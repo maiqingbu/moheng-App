@@ -782,6 +782,7 @@ fn enforce_budget(
             "REPLAN_REQUIRED",
             "held reservation requires explicit decision",
         )?;
+        mark_budget_blocked(connection, spec)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
     let used: i64 = connection.query_row(
@@ -812,6 +813,7 @@ fn enforce_budget(
             "REPLAN_REQUIRED",
             "hard model-run limit reached",
         )?;
+        mark_budget_blocked(connection, spec)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
     if cost_budget > 0
@@ -828,6 +830,7 @@ fn enforce_budget(
             "REPLAN_REQUIRED",
             "hard cost limit reached",
         )?;
+        mark_budget_blocked(connection, spec)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
     let soft_max: i64 = connection.query_row(
@@ -870,6 +873,24 @@ fn record_budget_decision(
         "INSERT INTO decisions(decision_id, project_id, decision_type, outcome, reason, payload_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now')) ON CONFLICT(decision_id) DO NOTHING",
         libsql_rusqlite::params![format!("decision:budget:{budget_id}:{decision_type}"), project_id, decision_type, outcome, reason, serde_json::json!({"budgetId":budget_id}).to_string()],
     )?;
+    Ok(())
+}
+
+fn mark_budget_blocked(connection: &Connection, spec: &ModelRunSpec) -> Result<(), RuntimeError> {
+    let project_id: String =
+        connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+            row.get(0)
+        })?;
+    connection.execute(
+        "INSERT INTO project_runtime_state(project_id, run_state, block_reason, updated_at) VALUES (?1, 'WAITING_BUDGET', 'BUDGET_BLOCKED', datetime('now')) ON CONFLICT(project_id) DO UPDATE SET run_state='WAITING_BUDGET', block_reason='BUDGET_BLOCKED', updated_at=excluded.updated_at",
+        [&project_id],
+    )?;
+    if let Some(job_id) = &spec.job_id {
+        connection.execute(
+            "UPDATE jobs SET status='WAITING_BUDGET', error_code='BUDGET_BLOCKED', updated_at=datetime('now') WHERE project_id=?1 AND job_id=?2 AND status NOT IN ('COMPLETED','CANCELLED')",
+            libsql_rusqlite::params![project_id, job_id],
+        )?;
+    }
     Ok(())
 }
 
