@@ -350,3 +350,132 @@ fn b02_revision_conflict_performs_no_delta_writes() {
         0
     );
 }
+
+#[test]
+fn b02_final_gate_revalidates_gate_policy_type_and_dependency_source_hash() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+
+    let bundle = full_bundle();
+    assert!(matches!(
+        CommitService::commit(&connection, &bundle, NOW),
+        Err(CommitError::ContractInvalid(_))
+    ));
+
+    let mut dependency_bundle = full_bundle();
+    dependency_bundle.dependency_edges.as_mut().unwrap()[0].source_ref =
+        "fact:p1:existing".into();
+    dependency_bundle.dependency_edges.as_mut().unwrap()[0].source_hash = HASH.into();
+    connection
+        .execute(
+            "INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, authority_level, created_at, updated_at) VALUES ('fact:p1:existing', 'p1', 'ent:p1:root:1', 'status', '{}', 'C', ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+    assert!(matches!(
+        CommitService::commit(&connection, &dependency_bundle, NOW),
+        Err(CommitError::ContractInvalid(_))
+    ));
+}
+
+#[test]
+fn b02_final_gate_checks_knowledge_refs_and_authoritative_budget_state() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+
+    let mut orphan_knowledge = full_bundle();
+    orphan_knowledge.knowledge_delta.as_mut().unwrap()[0].fact_id = "fact:missing".into();
+    assert!(matches!(
+        CommitService::commit(&connection, &orphan_knowledge, NOW),
+        Err(CommitError::ContractInvalid(_))
+    ));
+
+    connection
+        .execute(
+            "INSERT INTO chapter_production_budgets(budget_id, project_id, chapter_id, importance_class, hard_max_model_runs, frozen_at) VALUES ('budget:p1:1', 'p1', 'chapter-1', 'NORMAL', 1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO budget_reservations(reservation_id, project_id, budget_ref, reserved_cents, status, created_at) VALUES ('reservation:p1:1', 'p1', 'budget:p1:1', 1, 'OVER_LIMIT', ?1)",
+            [NOW],
+        )
+        .unwrap();
+    let mut over_budget = full_bundle();
+    over_budget.state_delta.as_mut().unwrap()[0]
+        .payload_json
+        .as_mut()
+        .unwrap()
+        .remove("hardLimitExceeded");
+    assert!(matches!(
+        CommitService::commit(&connection, &over_budget, NOW),
+        Err(CommitError::BudgetHardLimit)
+    ));
+}
+
+#[test]
+fn b02_candidate_cannot_become_a_canonical_head() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    let mut bundle = full_bundle();
+    bundle.head_updates = Some(vec![serde_json::from_value(json!({
+        "artifactType": "ChapterCandidate",
+        "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
+        "artifactId": "art:p1:chapter:1",
+        "version": 1,
+        "payloadHash": bundle.artifacts[0].payload_hash
+    })).unwrap()]);
+    assert!(matches!(
+        CommitService::commit(&connection, &bundle, NOW),
+        Err(CommitError::CandidateStatusRequired | CommitError::Artifact(_))
+    ));
+}
+
+#[test]
+fn b02_receipt_counts_are_net_rows_and_head_changes_are_read_back() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    let before_entities: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_entities", [], |row| row.get(0))
+        .unwrap();
+    let before_facts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_facts", [], |row| row.get(0))
+        .unwrap();
+    let before_events: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_events", [], |row| row.get(0))
+        .unwrap();
+
+    let mut bundle = full_bundle();
+    bundle.head_updates = Some(vec![serde_json::from_value(json!({
+        "artifactType": "ChapterCandidate",
+        "scope": {"level":"CHAPTER","chapterId":"chapter-1"},
+        "artifactId": "art:p1:chapter:1",
+        "version": 1,
+        "payloadHash": bundle.artifacts[0].payload_hash
+    })).unwrap()]);
+    let receipt = CommitService::commit(&connection, &bundle, NOW).unwrap();
+    let after_entities: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_entities", [], |row| row.get(0))
+        .unwrap();
+    let after_facts: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_facts", [], |row| row.get(0))
+        .unwrap();
+    let after_events: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canon_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        receipt.applied_delta_counts["canon"],
+        (after_entities - before_entities) + (after_facts - before_facts) + (after_events - before_events)
+    );
+    assert_eq!(receipt.head_changes[0].artifact_id, "art:p1:chapter:1");
+    assert_eq!(receipt.head_changes[0].payload_hash, bundle.artifacts[0].payload_hash);
+}
