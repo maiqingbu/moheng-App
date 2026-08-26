@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 const evidence = resolve(root, 'evidence/B02')
 const read = name => readFileSync(resolve(evidence, name), 'utf8')
+const gateResults = JSON.parse(read('gate-results.json'))
 const countRust = text => [...text.matchAll(/test result: ok[.;] (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0)
 const targetedRust = countRust(read('b02_targeted_test.log'))
 const allRust = countRust(read('cargo_all_targets.log'))
@@ -15,13 +16,18 @@ const contractLog = read('contracts_gate.log')
 const contractCounts = contractLog.match(/(\d+) valid accepted, (\d+) invalid rejected/)
 const sourceCommit = process.env.B02_SOURCE_COMMIT ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
 const sourceDirty = execFileSync('git', ['status', '--porcelain=v1', '--', '.', ':!evidence/B02'], { cwd: root, encoding: 'utf8' }).trim().length > 0
+const requiredGates = ['contracts', 'node_tests', 'frontend_vitest', 'typecheck', 'build', 'architecture', 'm0a', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets', 'b02_targeted_rust', 'sqlite_integrity', 'b01_regression']
+const gateByName = new Map(gateResults.gates.map(gate => [gate.name, gate]))
+const gates = requiredGates.map(name => gateByName.get(name) ?? { name, status: 'FAIL', exitCode: 1, blocking: true, log: '' })
+const finalStatus = gates.filter(gate => gate.blocking !== false).every(gate => gate.status === 'PASS') ? 'PASS' : 'FAIL'
 
 const acceptance = {
   batch: 'B02',
   milestone: 'M0C',
-  status: 'PASS',
+  status: finalStatus,
   sourceCommit,
   workingTreeDirty: sourceDirty,
+  gates,
   predecessor: {
     batch: 'B01',
     status: 'FROZEN_PASS',
