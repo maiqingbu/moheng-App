@@ -3,7 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
-use crate::runtime::{lease_expiry, DurableJobService, JobSpec};
+use crate::runtime::{lease_expiry, pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::State;
@@ -220,13 +220,8 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
         let pending_decisions: i64 = state
             .manager
             .with_read_connection(&row.project_id, &row.updated_at, |connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
-                        [&row.project_id],
-                        |query| query.get(0),
-                    )
-                    .map_err(ManagerError::from)
+                pending_decision_count(connection, &row.project_id)
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
             })
             .unwrap_or(0);
         let (
@@ -309,13 +304,8 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
     let pending_decisions: i64 = state
         .manager
         .with_read_connection(project_id, &updated_at, |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
-                    [project_id],
-                    |row| row.get(0),
-                )
-                .map_err(ManagerError::from)
+            pending_decision_count(connection, project_id)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
         .map_err(|error| error.to_string())?;
     let mut project = project_snapshot(project_id, &title, revision, &updated_at);

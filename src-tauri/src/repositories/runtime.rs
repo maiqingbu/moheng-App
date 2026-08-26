@@ -58,6 +58,17 @@ pub struct RecoverySummary {
 
 pub struct DurableJobService;
 
+pub fn pending_decision_count(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<i64, RuntimeError> {
+    Ok(connection.query_row(
+        "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
+        [project_id],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn lease_expiry(now: &str) -> String {
     let Some(prefix) = now.get(..19) else {
         return format!("{now}.000+00:01:00");
