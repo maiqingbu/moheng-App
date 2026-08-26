@@ -17,8 +17,9 @@ const contractCounts = contractLog.match(/(\d+) valid accepted, (\d+) invalid re
 let sourceCommit = process.env.B02_SOURCE_COMMIT
 let sourceDirty = false
 try {
-  sourceCommit ??= execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-  sourceDirty = execFileSync('git', ['status', '--porcelain=v1', '--', '.', ':!evidence/B02'], { cwd: root, encoding: 'utf8' }).trim().length > 0
+  const gitOptions = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+  sourceCommit ??= execFileSync('git', ['rev-parse', 'HEAD'], gitOptions).trim()
+  sourceDirty = execFileSync('git', ['status', '--porcelain=v1', '--', '.', ':!evidence/B02'], gitOptions).trim().length > 0
 } catch {
   sourceCommit ??= JSON.parse(read('acceptance.json')).sourceCommit ?? 'untracked-archive'
 }
