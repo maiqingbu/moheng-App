@@ -23,6 +23,7 @@ fn job_spec() -> JobSpec {
     JobSpec {
         job_id: "job:b03:chapter:1".into(),
         job_type: "CHAPTER".into(),
+        parent_job_id: None,
         chapter_id: Some("chapter-1".into()),
         volume_id: None,
         book_id: None,
@@ -57,7 +58,13 @@ fn budgeted_model_spec(run_id: &str, budget_id: &str, predicted_cost_cents: i64)
     spec
 }
 
-fn seed_budget(connection: &ProjectHandle, budget_id: &str, hard_runs: i64, soft_runs: i64, cost: i64) {
+fn seed_budget(
+    connection: &ProjectHandle,
+    budget_id: &str,
+    hard_runs: i64,
+    soft_runs: i64,
+    cost: i64,
+) {
     connection.execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:b03:budget','p1',1,'Book','ACTIVE',?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('vol:b03:budget','p1','book:b03:budget',1,'Volume','PLANNING',1,1,1000,?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter-budget','p1','vol:b03:budget',1,'Chapter','NORMAL','PLANNED',0,?1,?1)", [NOW]).unwrap();
@@ -292,7 +299,13 @@ fn b03_hard_run_limit_counts_settled_runs_before_transport() {
     )
     .unwrap();
     assert_eq!(
-        connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:first'", [], |row| row.get(0)).unwrap(),
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:first'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
         "SETTLED"
     );
     let mut second_transport = FakeModelTransport::success(json!({"draft":"must-not-send"}));
@@ -355,7 +368,13 @@ fn b03_definite_transport_failure_releases_reservation() {
     let mut transport = FakeModelTransport::failure(TransportFailure::Unavailable);
     assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
     assert_eq!(
-        connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:1'", [], |row| row.get(0)).unwrap(),
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
         "RELEASED"
     );
 }
@@ -366,10 +385,30 @@ fn b03_parse_failure_settles_remote_cost_once_and_replay_does_not_send() {
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
     let mut transport = FakeModelTransport::raw_success("not-json");
     assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:1'", [], |row| row.get(0)).unwrap(), "SETTLED");
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:b03:1'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM budget_reservations WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "SETTLED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_usage WHERE model_run_id='mr:b03:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
     let mut retry_transport = FakeModelTransport::failure(TransportFailure::Timeout);
-    assert!(DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).is_err());
+    assert!(
+        DurableModelRunner::retry(&connection, &mut retry_transport, &model_spec(), NOW).is_err()
+    );
     assert_eq!(retry_transport.send_calls(), 0);
     assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_cost_ledger WHERE model_run_id='mr:b03:1' AND cost_type='ACTUAL'", [], |row| row.get(0)).unwrap(), 1);
 }
@@ -380,8 +419,26 @@ fn b03_unknown_remote_outcome_creates_decision_and_waiting_projection() {
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
     let mut transport = FakeModelTransport::failure(TransportFailure::Timeout);
     assert!(DurableModelRunner::execute(&connection, &mut transport, &model_spec(), NOW).is_err());
-    assert_eq!(connection.query_row::<String, _, _>("SELECT outcome FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'", [], |row| row.get(0)).unwrap(), "OPEN");
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM jobs WHERE job_id='job:b03:chapter:1'", [], |row| row.get(0)).unwrap(), "WAITING_DECISION");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "OPEN"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id='job:b03:chapter:1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "WAITING_DECISION"
+    );
 }
 
 #[test]

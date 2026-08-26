@@ -3,7 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
-use crate::runtime::{DurableJobService, JobSpec};
+use crate::runtime::{lease_expiry, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use tauri::State;
@@ -217,6 +217,18 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
         // Default carries truthful defaults so a library row never presents a
         // fabricated revision/state or leaks a signed/committed count it does not own.
         let runtime = projection.runtime.unwrap_or_default();
+        let pending_decisions: i64 = state
+            .manager
+            .with_read_connection(&row.project_id, &row.updated_at, |connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
+                        [&row.project_id],
+                        |query| query.get(0),
+                    )
+                    .map_err(ManagerError::from)
+            })
+            .unwrap_or(0);
         let (
             phase,
             run_state,
@@ -257,7 +269,7 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
         entry["totalWords"] = json!(words);
         entry["committedChapters"] = json!(committed);
         entry["candidateChapters"] = json!(candidate);
-        entry["pendingDecisions"] = json!(0);
+        entry["pendingDecisions"] = json!(pending_decisions);
         entry["revision"] = json!(revision);
         entry["generatedRevision"] = json!(generated_revision);
         entry["operational"] = json!(true);
@@ -294,6 +306,18 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
         .map_err(|error| error.to_string())?
         .runtime
         .unwrap_or_default();
+    let pending_decisions: i64 = state
+        .manager
+        .with_read_connection(project_id, &updated_at, |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
+                    [project_id],
+                    |row| row.get(0),
+                )
+                .map_err(ManagerError::from)
+        })
+        .map_err(|error| error.to_string())?;
     let mut project = project_snapshot(project_id, &title, revision, &updated_at);
     project["phase"] = json!(runtime.current_phase);
     project["runState"] = json!(runtime.run_state);
@@ -307,7 +331,7 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
     project["progress"] = json!(runtime.progress);
     Ok(json!({
         "project": project,
-        "pendingDecisionCount": 0,
+        "pendingDecisionCount": pending_decisions,
         "recentChapters": [],
         "recentArtifacts": [],
         "healthSummary": {
@@ -324,10 +348,13 @@ fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String
         .and_then(|value| value.get("jobId"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            StableIdentityFactory::from_command(StableIdKind::Job, command_id)
-                .unwrap_or_else(|_| format!("job:{command_id}"))
-        });
+        .unwrap_or(StableIdentityFactory::from_command(
+            StableIdKind::Job,
+            command_id,
+        )?);
+    if !job_id.starts_with("job:") {
+        return Err("stable job id required".into());
+    }
     let stages = payload
         .and_then(|value| value.get("stages"))
         .and_then(Value::as_array)
@@ -347,6 +374,10 @@ fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String
             .and_then(Value::as_str)
             .unwrap_or("CHAPTER")
             .to_string(),
+        parent_job_id: payload
+            .and_then(|value| value.get("parentJobId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         book_id: payload
             .and_then(|value| value.get("bookId"))
             .and_then(Value::as_str)
@@ -410,7 +441,7 @@ fn execute_runtime_command(
                         project_id,
                         &job.job_id,
                         "production-ipc",
-                        "9999-12-31T00:00:00Z",
+                        &lease_expiry(requested_at),
                         requested_at,
                     )
                     .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
@@ -445,6 +476,25 @@ fn execute_runtime_command(
                         requested_at,
                     )
                     .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    if command_type == "production_pause" || command_type == "production_cancel" {
+                        DurableJobService::release_lease(
+                            connection,
+                            project_id,
+                            &job_id,
+                            requested_at,
+                        )
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    } else {
+                        DurableJobService::acquire_lease(
+                            connection,
+                            project_id,
+                            &job_id,
+                            "production-ipc",
+                            &lease_expiry(requested_at),
+                            requested_at,
+                        )
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    }
                     DurableJobService::set_runtime_state(
                         connection,
                         project_id,
