@@ -208,7 +208,16 @@ fn b04_search_query_and_backup_command_use_real_tauri_paths() {
     .unwrap();
     assert_eq!(receipt["finalStatus"], "committed");
     let connection = state.manager.open("p1", "B04", NOW).unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM backup_manifests WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM backup_manifests WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[allow(dead_code)]
