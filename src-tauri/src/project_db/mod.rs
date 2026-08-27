@@ -193,6 +193,8 @@ impl ProjectManager {
                 migrate_project(&connection, project_id, title, now)?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
+                crate::repositories::ops::SearchService::rebuild(&connection, project_id, now)
+                    .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 quick_check(&connection)?;
                 // Flush WAL into the main DB and close so rename yields a
                 // self-contained DB snapshot (no lingering -wal to migrate).
@@ -293,6 +295,10 @@ impl ProjectManager {
             record_runtime_profile(&connection, project_id, now).map_err(|error| {
                 ManagerError::Database(DatabaseError::Integrity(error.to_string()))
             })?;
+            crate::repositories::ops::SearchService::rebuild(&connection, project_id, now)
+                .map_err(|error| {
+                    ManagerError::Database(DatabaseError::Integrity(error.to_string()))
+                })?;
             let catalog = CatalogRepository::open(&self.paths, now)?;
             CatalogRepository::touch_opened(&catalog, project_id, now)?;
             CatalogRepository::set_compatibility(&catalog, project_id, "COMPATIBLE", now)?;
