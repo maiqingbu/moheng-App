@@ -453,14 +453,30 @@ fn execute_runtime_command(
                         "production_resume" => ("RUNNING", "ACTIVE", None),
                         _ => ("CANCELLED", "FAILED", None),
                     };
-                    DurableJobService::transition(
-                        connection,
-                        project_id,
-                        &job_id,
-                        next,
-                        requested_at,
-                    )
-                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    if command_type == "production_resume" {
+                        let worker_id = request
+                            .pointer("/payload/workerId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("production-ipc");
+                        DurableJobService::transition_for_worker(
+                            connection,
+                            project_id,
+                            &job_id,
+                            next,
+                            worker_id,
+                            requested_at,
+                        )
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    } else {
+                        DurableJobService::transition(
+                            connection,
+                            project_id,
+                            &job_id,
+                            next,
+                            requested_at,
+                        )
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    }
                     if command_type == "production_pause" || command_type == "production_cancel" {
                         DurableJobService::release_lease(
                             connection,

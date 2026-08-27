@@ -180,6 +180,17 @@ impl DurableJobService {
         next: &str,
         now: &str,
     ) -> Result<(), RuntimeError> {
+        Self::transition_for_worker(connection, project_id, job_id, next, "runtime-worker", now)
+    }
+
+    pub fn transition_for_worker(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        next: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
         let current: String = connection
             .query_row(
                 "SELECT status FROM jobs WHERE project_id = ?1 AND job_id = ?2",
@@ -192,7 +203,7 @@ impl DurableJobService {
             return Err(RuntimeError::InvalidTransition(current, next.to_string()));
         }
         if next == "RUNNING" {
-            ensure_active_lease(connection, project_id, job_id, now)?;
+            ensure_active_lease_for_holder(connection, project_id, job_id, worker_id, now)?;
         }
         connection.execute(
             "UPDATE jobs SET status = ?1, updated_at = ?2 WHERE project_id = ?3 AND job_id = ?4",
@@ -227,10 +238,13 @@ impl DurableJobService {
                 return Err(RuntimeError::LeaseHeld);
             }
         }
-        connection.execute(
-            "INSERT INTO job_leases(lease_id, project_id, job_id, holder, expires_at, acquired_at, released_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(project_id, job_id) DO UPDATE SET holder=excluded.holder, expires_at=excluded.expires_at, acquired_at=excluded.acquired_at, released_at=NULL",
+        let updated = connection.execute(
+            "INSERT INTO job_leases(lease_id, project_id, job_id, holder, expires_at, acquired_at, released_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL) ON CONFLICT(project_id, job_id) DO UPDATE SET holder=excluded.holder, expires_at=excluded.expires_at, acquired_at=excluded.acquired_at, released_at=NULL WHERE job_leases.released_at IS NOT NULL OR job_leases.expires_at <= excluded.acquired_at",
             libsql_rusqlite::params![format!("lease:{}", job_id), project_id, job_id, holder, expires_at, now],
         )?;
+        if updated == 0 {
+            return Err(RuntimeError::LeaseHeld);
+        }
         Ok(())
     }
 
@@ -295,9 +309,10 @@ impl DurableJobService {
         connection: &Connection,
         project_id: &str,
         job_id: &str,
+        worker_id: &str,
         now: &str,
     ) -> Result<(), RuntimeError> {
-        Self::transition(connection, project_id, job_id, "RUNNING", now)
+        Self::transition_for_worker(connection, project_id, job_id, "RUNNING", worker_id, now)
     }
 
     pub fn cancel(
@@ -399,28 +414,33 @@ impl DurableJobService {
     }
 }
 
-fn ensure_active_lease(
+fn ensure_active_lease_for_holder(
     connection: &Connection,
     project_id: &str,
     job_id: &str,
+    worker_id: &str,
     now: &str,
 ) -> Result<(), RuntimeError> {
-    let active: Option<String> = connection
+    let active: Option<(String, String)> = connection
         .query_row(
-            "SELECT lease_id FROM job_leases WHERE project_id=?1 AND job_id=?2 AND released_at IS NULL AND expires_at>?3",
+            "SELECT lease_id, holder FROM job_leases WHERE project_id=?1 AND job_id=?2 AND released_at IS NULL AND expires_at>?3",
             libsql_rusqlite::params![project_id, job_id, now],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if active.is_none() {
-        DurableJobService::acquire_lease(
-            connection,
-            project_id,
-            job_id,
-            "runtime-worker",
-            &lease_expiry(now),
-            now,
-        )?;
+    match active {
+        Some((_, holder)) if holder != worker_id => return Err(RuntimeError::LeaseHeld),
+        Some(_) => {}
+        None => {
+            DurableJobService::acquire_lease(
+                connection,
+                project_id,
+                job_id,
+                worker_id,
+                &lease_expiry(now),
+                now,
+            )?;
+        }
     }
     Ok(())
 }
@@ -740,26 +760,37 @@ impl DurableModelRunner {
                 if next_spec.budget_id.as_deref().unwrap_or("UNSCOPED") != old_budget {
                     return Err(RuntimeError::BudgetBindingMismatch);
                 }
-                connection.execute(
-                    "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE decision_id=?2 AND outcome IN ('OPEN','PENDING')",
-                    libsql_rusqlite::params![now, decision_id],
-                )?;
+                resolve_unknown_responsibility(connection, model_run_id, now)?;
                 if let Some(job_id) = &next_spec.job_id {
+                    let project_id: String = connection.query_row(
+                        "SELECT project_id FROM project_meta LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    DurableJobService::transition_for_worker(
+                        connection,
+                        &project_id,
+                        job_id,
+                        "RUNNING",
+                        "runtime-worker",
+                        now,
+                    )?;
                     connection.execute(
-                        "UPDATE jobs SET status='RUNNING', error_code=NULL, updated_at=?1 WHERE job_id=?2",
-                        libsql_rusqlite::params![now, job_id],
+                        "UPDATE jobs SET error_code=NULL WHERE project_id=?1 AND job_id=?2",
+                        libsql_rusqlite::params![project_id, job_id],
                     )?;
                 }
                 let result =
                     Self::execute_with_budget_mode(connection, transport, next_spec, now, true);
-                if !matches!(
-                    &result,
-                    Err(RuntimeError::BudgetHardLimit)
-                        | Err(RuntimeError::BudgetBindingMismatch)
-                        | Err(RuntimeError::UnknownRemoteOutcome)
-                ) {
-                    resolve_unknown_responsibility(connection, model_run_id, now)?;
-                }
+                let decision_outcome = if matches!(&result, Err(RuntimeError::BudgetHardLimit)) {
+                    "BUDGET_BLOCKED"
+                } else {
+                    "RETRY_REMOTE"
+                };
+                connection.execute(
+                    "UPDATE decisions SET outcome=?1, updated_at=?2 WHERE decision_id=?3 AND outcome IN ('OPEN','PENDING')",
+                    libsql_rusqlite::params![decision_outcome, now, decision_id],
+                )?;
                 result
             }
             "MARK_FAILED" | "CANCEL_JOB" | "MANUAL_RESOLVE" => {

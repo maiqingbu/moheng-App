@@ -198,11 +198,12 @@ fn b03_job_lifecycle_persists_steps_lease_checkpoint_and_restart_recovery() {
         NOW,
     )
     .unwrap();
-    DurableJobService::transition(
+    DurableJobService::transition_for_worker(
         &connection,
         "p1",
         "job:111111111111111111111111",
         "RUNNING",
+        "worker-1",
         NOW,
     )
     .unwrap();
@@ -1101,11 +1102,12 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
         "2026-08-27T00:00:01Z",
     )
     .unwrap();
-    DurableJobService::transition(
+    DurableJobService::transition_for_worker(
         &connection,
         "p1",
         "job:222222222222222222222222",
         "RUNNING",
+        "old-worker",
         "2026-08-27T00:00:01Z",
     )
     .unwrap();
@@ -1164,6 +1166,7 @@ fn b03_unknown_chain_resolves_each_old_reservation_at_decision_time() {
         NOW,
     )
     .unwrap_err();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:303030303030303030303030'", [], |row| row.get(0)).unwrap(), "SETTLED");
     let run3 = budgeted_model_spec("mr:323232323232323232323232", "budget:unknown-chain", 5);
     let mut success3 = FakeModelTransport::success(json!({"draft":"chain-success"}));
     DurableModelRunner::resolve_unknown(
@@ -1194,26 +1197,170 @@ fn b03_mark_failed_and_cancel_resolve_unknown_reservations_without_orphans() {
     assert!(DurableModelRunner::execute(&connection, &mut timeout, &first, NOW).is_err());
     let second = budgeted_model_spec("mr:353535353535353535353535", "budget:unknown-actions", 5);
     let mut retry_timeout = FakeModelTransport::failure(TransportFailure::Timeout);
-    assert!(DurableModelRunner::resolve_unknown(&connection, &first.model_run_id, "RETRY_REMOTE", &mut retry_timeout, &second, NOW).is_err());
-    DurableModelRunner::resolve_unknown::<FakeModelTransport>(&connection, &second.model_run_id, "MARK_FAILED", &mut FakeModelTransport::success(json!({})), &second, NOW).unwrap();
+    assert!(DurableModelRunner::resolve_unknown(
+        &connection,
+        &first.model_run_id,
+        "RETRY_REMOTE",
+        &mut retry_timeout,
+        &second,
+        NOW
+    )
+    .is_err());
+    DurableModelRunner::resolve_unknown::<FakeModelTransport>(
+        &connection,
+        &second.model_run_id,
+        "MARK_FAILED",
+        &mut FakeModelTransport::success(json!({})),
+        &second,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM budget_reservations WHERE budget_ref='budget:unknown-actions' AND status='OVER_LIMIT'", [], |row| row.get(0)).unwrap(), 0);
-    assert_eq!(connection.query_row::<String, _, _>("SELECT outcome FROM decisions WHERE source_ref='mr:353535353535353535353535'", [], |row| row.get(0)).unwrap(), "MARK_FAILED");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE source_ref='mr:353535353535353535353535'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "MARK_FAILED"
+    );
+}
+
+#[test]
+fn b03_cancel_job_resolves_unknown_reservation_and_closes_job() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let first = budgeted_model_spec("mr:363636363636363636363636", "budget:unknown-cancel", 5);
+    seed_budget(&connection, "budget:unknown-cancel", 3, 0, 100);
+    let mut timeout = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout, &first, NOW).is_err());
+    DurableModelRunner::resolve_unknown::<FakeModelTransport>(
+        &connection,
+        &first.model_run_id,
+        "CANCEL_JOB",
+        &mut FakeModelTransport::success(json!({})),
+        &first,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM budget_reservations WHERE model_run_id='mr:363636363636363636363636'", [], |row| row.get(0)).unwrap(), "SETTLED");
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id='job:111111111111111111111111'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "CANCELLED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM budget_reservations WHERE status='OVER_LIMIT'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
 fn b03_resume_enforces_lease_holder_ownership_and_expired_reclaim() {
     let (_temp, _manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
-    DurableJobService::transition(&connection, "p1", "job:111111111111111111111111", "PAUSED", NOW).unwrap();
-    DurableJobService::acquire_lease(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:05:00Z", NOW).unwrap();
-    assert!(matches!(DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-b", "2026-08-27T00:01:00Z"), Err(RuntimeError::LeaseHeld)));
-    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM jobs WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "PAUSED");
-    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:01:00Z").unwrap();
-    assert_eq!(connection.query_row::<String, _, _>("SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "worker-a");
-    DurableJobService::pause(&connection, "p1", "job:111111111111111111111111", "2026-08-27T00:01:00Z").unwrap();
-    DurableJobService::acquire_lease(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:02:00Z", "2026-08-27T00:01:00Z").unwrap();
-    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-b", "2026-08-27T00:03:00Z").unwrap();
-    assert_eq!(connection.query_row::<String, _, _>("SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "worker-b");
+    DurableJobService::transition(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "PAUSED",
+        NOW,
+    )
+    .unwrap();
+    DurableJobService::acquire_lease(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "worker-a",
+        "2026-08-27T00:05:00Z",
+        NOW,
+    )
+    .unwrap();
+    assert!(matches!(
+        DurableJobService::resume(
+            &connection,
+            "p1",
+            "job:111111111111111111111111",
+            "worker-b",
+            "2026-08-27T00:01:00Z"
+        ),
+        Err(RuntimeError::LeaseHeld)
+    ));
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id='job:111111111111111111111111'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "PAUSED"
+    );
+    DurableJobService::resume(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "worker-a",
+        "2026-08-27T00:01:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "worker-a"
+    );
+    DurableJobService::pause(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "2026-08-27T00:01:00Z",
+    )
+    .unwrap();
+    DurableJobService::acquire_lease(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "worker-a",
+        "2026-08-27T00:02:00Z",
+        "2026-08-27T00:01:00Z",
+    )
+    .unwrap();
+    DurableJobService::resume(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "worker-b",
+        "2026-08-27T00:03:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "worker-b"
+    );
 }
 
 #[test]
