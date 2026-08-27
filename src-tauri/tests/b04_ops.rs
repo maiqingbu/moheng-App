@@ -1,3 +1,6 @@
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_search_fulltext_impl, KernelState,
+};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
@@ -168,6 +171,44 @@ fn b04_backup_restore_uses_manifest_checksum_and_rejects_tamper() {
         BackupService::restore(&backup, &restored, &manifest.checksum_sha256),
         Err(ai_novel_production_system_core::repositories::ops::OpsError::BackupChecksumMismatch)
     ));
+}
+
+#[test]
+fn b04_search_query_and_backup_command_use_real_tauri_paths() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    SearchService::index_document(
+        &connection,
+        &SearchDocument {
+            project_id: "p1".into(),
+            doc_id: "doc:ipc".into(),
+            chapter_id: None,
+            volume_id: None,
+            title: "正式检索".into(),
+            body: "FTS5 正式路径".into(),
+            kind: "EVIDENCE".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    drop(connection);
+    let search = query_search_fulltext_impl(
+        &state,
+        serde_json::json!({"projectId":"p1","scope":"PROJECT","text":"正式","pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(search["total"], 1);
+    assert_eq!(search["items"][0]["docId"], "doc:ipc");
+    let receipt = execute_command_impl(
+        &state,
+        serde_json::json!({"type":"backup_create","commandId":"b04-backup","idempotencyKey":"b04-backup-key","projectId":"p1","expectedRevision":0,"requestedAt":NOW,"payload":{"kind":"milestone"}}),
+    )
+    .unwrap();
+    assert_eq!(receipt["finalStatus"], "committed");
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM backup_manifests WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 1);
 }
 
 #[allow(dead_code)]
