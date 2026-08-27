@@ -119,6 +119,20 @@ pub struct ProjectManager {
     paths: AppPaths,
     writers: Arc<Mutex<HashSet<String>>>,
     read_pool: Arc<Mutex<read_pool::ReadPool>>,
+    maintenance: Arc<Mutex<HashSet<String>>>,
+}
+
+struct ProjectMaintenanceGuard {
+    maintenance: Arc<Mutex<HashSet<String>>>,
+    project_id: String,
+}
+
+impl Drop for ProjectMaintenanceGuard {
+    fn drop(&mut self) {
+        if let Ok(mut projects) = self.maintenance.lock() {
+            projects.remove(&self.project_id);
+        }
+    }
 }
 
 impl ProjectManager {
@@ -127,6 +141,7 @@ impl ProjectManager {
             paths,
             writers: Arc::new(Mutex::new(HashSet::new())),
             read_pool: Arc::new(Mutex::new(read_pool::ReadPool::new(16, 4))),
+            maintenance: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -193,8 +208,12 @@ impl ProjectManager {
                 migrate_project(&connection, project_id, title, now)?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
-                crate::repositories::ops::SearchService::projection_health(&connection, project_id)
-                    .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
+                crate::repositories::ops::SearchService::ensure_projection(
+                    &connection,
+                    project_id,
+                    now,
+                )
+                .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 quick_check(&connection)?;
                 // Flush WAL into the main DB and close so rename yields a
                 // self-contained DB snapshot (no lingering -wal to migrate).
@@ -297,10 +316,12 @@ impl ProjectManager {
             record_runtime_profile(&connection, project_id, now).map_err(|error| {
                 ManagerError::Database(DatabaseError::Integrity(error.to_string()))
             })?;
-            crate::repositories::ops::SearchService::projection_health(&connection, project_id)
-                .map_err(|error| {
-                    ManagerError::Database(DatabaseError::Integrity(error.to_string()))
-                })?;
+            crate::repositories::ops::SearchService::ensure_projection(
+                &connection,
+                project_id,
+                now,
+            )
+            .map_err(|error| ManagerError::Database(DatabaseError::Integrity(error.to_string())))?;
             let catalog = CatalogRepository::open(&self.paths, now)?;
             CatalogRepository::touch_opened(&catalog, project_id, now)?;
             CatalogRepository::set_compatibility(&catalog, project_id, "COMPATIBLE", now)?;
@@ -368,11 +389,21 @@ impl ProjectManager {
     pub fn read_lease(&self, project_id: &str, _now: &str) -> Result<ReadLease, ManagerError> {
         let directory = self.resolve_registered_project_path(project_id)?;
         let database = directory.join("project.db");
+        let maintenance = self
+            .maintenance
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?;
+        if maintenance.contains(project_id) {
+            return Err(ManagerError::ProjectCommand(
+                "RETRYABLE_MAINTENANCE_ERROR: project reader gate is closed".into(),
+            ));
+        }
         let mut pool = self
             .read_pool
             .lock()
             .map_err(|_| ManagerError::WriterLockPoisoned)?;
         let connection = pool.acquire(project_id, &database)?;
+        drop(maintenance);
         Ok(ReadLease {
             project_id: project_id.to_string(),
             connection: Some(connection),
@@ -516,6 +547,21 @@ impl ProjectManager {
     ) -> Result<ProjectCommandOutcome<crate::repositories::ops::RestoreReport>, ManagerError> {
         self.acquire_writer(spec.project_id)?;
         let result = (|| {
+            let mut maintenance = self
+                .maintenance
+                .lock()
+                .map_err(|_| ManagerError::WriterLockPoisoned)?;
+            if maintenance.contains(spec.project_id) {
+                return Err(ManagerError::ProjectCommand(
+                    "RESTORE_ALREADY_IN_PROGRESS".into(),
+                ));
+            }
+            maintenance.insert(spec.project_id.to_string());
+            drop(maintenance);
+            let _maintenance_guard = ProjectMaintenanceGuard {
+                maintenance: Arc::clone(&self.maintenance),
+                project_id: spec.project_id.to_string(),
+            };
             let directory = self.resolve_registered_project_path(spec.project_id)?;
             let database = directory.join("project.db");
             let staging = directory.join("project.db.restore.tmp");

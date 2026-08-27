@@ -16,6 +16,7 @@ const profile = targeted.match(/B04_PROFILE_RESULT page_size=(\d+) auto_vacuum=(
 const wal = targeted.match(/B04_WAL_VACUUM_RESULT wal_bytes=(\d+) checkpointed_pages=(\d+) vacuum_pages=(\d+) threshold=(\w+)/)
 const backup = targeted.match(/B04_BACKUP_RESULT checksum=([a-f0-9]{64}) restored=PASS tamper_rejected=PASS/)
 const restore = targeted.match(/B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .*checksum=PASS .*quick_check=PASS .*foreign_key_check=PASS .*deep_integrity=PASS .*receipt=PASS/)
+const upgrade = targeted.match(/B04_FTS_UPGRADE_RESULT .*source_chapters=(\d+) source_artifacts=(\d+) pre_projection_docs=(\d+) post_projection_docs=(\d+) rebuild_triggered=(true|false) second_open_full_rebuild=(true|false) projection_version=([^ ]+) status=PASS/)
 const integrityMatches = [...targeted.matchAll(/B04_INTEGRITY_RESULT failures=(\d+) status=FAIL_CLOSED/g)]
 const materialized = scaleMaterialized.match(/B04_SCALE_MATERIALIZED books=(\d+) volumes=(\d+) chapters=(\d+) artifacts=(\d+) canon_facts=(\d+) dependencies=(\d+) model_runs=(\d+) target_words=(\d+) status=PASS/)
 const scaleCertification = scaleMaterialized.match(/B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS status=PASS/)
@@ -37,7 +38,7 @@ try {
 } catch {
   throw new Error('B04 scale certification evidence files are incomplete')
 }
-if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !scaleCertification || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
+if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !upgrade || !scaleCertification || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
   throw new Error('B04 targeted evidence markers are incomplete')
 }
 const integrityFailures = integrityMatches.reduce((sum, match) => sum + Number(match[1]), 0)
@@ -50,6 +51,7 @@ write('backup_restore_report.json', { checksumSha256: backup[1], restored: true,
 write('integrity_tamper_cases.json', { detectedFailureCount: integrityFailures, cases: ['ARTIFACT_PAYLOAD_HASH_MISMATCH', 'CANONICAL_HEAD_HASH_MISMATCH', 'DEPENDENCY_SOURCE_HASH_MISMATCH', 'COMMIT_RECEIPT_DIGEST_MISMATCH', 'BACKUP_CHECKSUM_MISMATCH'], failClosed: true })
 write('long_book_scale_integrity.json', scaleIntegrity)
 write('fts_incremental_scale.json', readJson('fts_incremental_scale.json'))
+write('fts_upgrade_backfill.json', { sourceChapters: Number(upgrade[1]), sourceArtifacts: Number(upgrade[2]), preProjectionDocs: Number(upgrade[3]), postProjectionDocs: Number(upgrade[4]), rebuildTriggered: upgrade[5] === 'true', secondOpenFullRebuild: upgrade[6] === 'true', projectionVersion: upgrade[7] })
 write('scale_perf_p95.json', scalePerformance)
 write('scale_backup_restore.json', scaleRestore)
 write('long_book_scale_certification.json', scaleCertificationReport)

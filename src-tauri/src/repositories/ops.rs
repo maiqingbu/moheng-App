@@ -58,6 +58,8 @@ pub struct SearchPage {
 
 pub struct SearchService;
 
+const FTS_PROJECTION_VERSION: &str = "m0e.fts.v1";
+
 impl SearchService {
     pub fn projection_health(connection: &Connection, project_id: &str) -> Result<bool, OpsError> {
         let table_exists: bool = connection.query_row(
@@ -68,11 +70,43 @@ impl SearchService {
         if !table_exists {
             return Ok(false);
         }
-        let _ = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM search_documents WHERE project_id=?1 LIMIT 1)",
+        let version: Option<String> = connection
+            .query_row("SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key='fts.projectionVersion'", [project_id], |row| row.get(0))
+            .optional()?;
+        let indexed_revision: Option<i64> = connection
+            .query_row("SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key='fts.indexedSourceRevision'", [project_id], |row| row.get::<_, String>(0))
+            .optional()?
+            .and_then(|value| value.parse().ok());
+        let source_revision: i64 = connection.query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
             [project_id],
-            |row| row.get::<_, bool>(0),
+            |row| row.get(0),
         )?;
+        let source_count: i64 = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM chapters WHERE project_id=?1) + (SELECT COUNT(*) FROM artifacts WHERE project_id=?1)",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        let projection_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_documents WHERE project_id=?1 AND (doc_id LIKE 'chapter:%' OR doc_id LIKE 'artifact:%')",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        Ok(version.as_deref() == Some(FTS_PROJECTION_VERSION)
+            && indexed_revision == Some(source_revision)
+            && (source_count == 0 || projection_count > 0)
+            && projection_count == source_count)
+    }
+
+    pub fn ensure_projection(
+        connection: &Connection,
+        project_id: &str,
+        now: &str,
+    ) -> Result<bool, OpsError> {
+        if Self::projection_health(connection, project_id)? {
+            return Ok(false);
+        }
+        Self::rebuild(connection, project_id, now)?;
         Ok(true)
     }
 
@@ -165,6 +199,25 @@ impl SearchService {
                 [project_id],
                 |row| row.get(0),
             )?;
+            let revision: i64 = connection.query_row(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )?;
+            for (key, value) in [
+                ("fts.projectionVersion", FTS_PROJECTION_VERSION.to_string()),
+                ("fts.indexedSourceRevision", revision.to_string()),
+                (
+                    "fts.lastRebuildReason",
+                    "explicit_repair_or_backfill".to_string(),
+                ),
+                ("fts.lastRebuildAt", now.to_string()),
+            ] {
+                connection.execute(
+                    "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
+                    libsql_rusqlite::params![project_id, key, value, now],
+                )?;
+            }
             Ok::<_, OpsError>(count)
         })();
         match result {
@@ -1013,6 +1066,44 @@ impl LongBookFixture {
             }
             drop(artifacts);
             drop(artifact_payloads);
+            let mut final_artifacts = connection.prepare(
+                "INSERT OR IGNORE INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES (?1, ?2, 'FinalChapter', 'CHAPTER', ?3, 1, 'm0e.fixture.v1', 'CANDIDATE', ?4, '{}', ?5, NULL)",
+            )?;
+            let mut final_payloads = connection.prepare(
+                "INSERT OR IGNORE INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1, 1, ?2, ?3)",
+            )?;
+            for index in 0..spec.chapters {
+                let chapter_id = fixture_id("chap", &spec.seed, index);
+                let body = fixture_chapter_body(&spec.seed, index, 2_500);
+                let payload = serde_json::json!({"chapterId":chapter_id,"body":body}).to_string();
+                let payload_hash = hex::encode(Sha256::digest(payload.as_bytes()));
+                let artifact_id = fixture_id("final", &spec.seed, index);
+                final_artifacts.execute(libsql_rusqlite::params![
+                    artifact_id,
+                    project_id,
+                    chapter_id,
+                    payload_hash,
+                    now
+                ])?;
+                final_payloads.execute(libsql_rusqlite::params![
+                    artifact_id,
+                    payload,
+                    payload_hash
+                ])?;
+            }
+            drop(final_artifacts);
+            drop(final_payloads);
+            let mut chapter_final = connection.prepare(
+                "UPDATE chapters SET final_artifact_id=?1, final_version=1, status='COMMITTED' WHERE project_id=?2 AND chapter_id=?3",
+            )?;
+            for index in 0..spec.chapters {
+                chapter_final.execute(libsql_rusqlite::params![
+                    fixture_id("final", &spec.seed, index),
+                    project_id,
+                    fixture_id("chap", &spec.seed, index)
+                ])?;
+            }
+            drop(chapter_final);
             // Long-term topology markers make the fixture a single book with
             // cross-volume aging/reference rows rather than unrelated bulk data.
             let mut ledgers = connection.prepare(
@@ -1172,6 +1263,20 @@ impl LongBookFixture {
         }
         Ok(Self::manifest(spec))
     }
+}
+
+fn fixture_chapter_body(seed: &str, index: u64, target_chars: usize) -> String {
+    let mut body = format!("commonTerm chapterUnique{index} 人物{index} 地点{index} 事件{index} ");
+    if index.is_multiple_of(10) {
+        body.push_str("middleTerm ");
+    }
+    if index == 3999 {
+        body.push_str("rareTerm3999 ");
+    }
+    while body.chars().count() < target_chars {
+        body.push_str(&format!("{seed} commonTerm 叙事推进 "));
+    }
+    body.chars().take(target_chars).collect()
 }
 
 fn fixture_id(prefix: &str, seed: &str, index: u64) -> String {
@@ -1564,6 +1669,126 @@ pub fn chapter_page(
         items,
         next_cursor,
         total,
+    })
+}
+
+type SingleChapterRow = (
+    String,
+    i64,
+    String,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    String,
+);
+
+/// Formal reader query for one chapter. It returns authority metadata and the
+/// body from the chapter's committed FinalChapter artifact when available.
+pub fn single_chapter(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Option<serde_json::Value>, OpsError> {
+    let row: Option<SingleChapterRow> = connection
+        .query_row(
+            "SELECT chapter_id, chapter_no, volume_id, title, word_count, final_artifact_id, final_version, status FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        )
+        .optional()?;
+    let Some((id, ordinal, volume_id, title, word_count, artifact_id, version, status)) = row
+    else {
+        return Ok(None);
+    };
+    let final_text = match (artifact_id.as_deref(), version) {
+        (Some(artifact_id), Some(version)) => connection
+            .query_row(
+                "SELECT json_extract(payload_json, '$.body') FROM artifact_payloads WHERE artifact_id=?1 AND version=?2",
+                libsql_rusqlite::params![artifact_id, version],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten(),
+        _ => None,
+    };
+    Ok(Some(json!({
+        "chapterId": id,
+        "volumeId": volume_id,
+        "ordinal": ordinal,
+        "title": title,
+        "wordCount": word_count,
+        "finalText": final_text,
+        "finalArtifactRef": artifact_id.map(|artifact_id| json!({"artifactId": artifact_id, "version": version})),
+        "status": status,
+    })))
+}
+
+pub fn canon_current_page(
+    connection: &Connection,
+    project_id: &str,
+    subject_id: &str,
+    limit: usize,
+) -> Result<ProjectionPage, OpsError> {
+    if !(1..=100).contains(&limit) {
+        return Err(OpsError::InvalidPageRequest);
+    }
+    let mut statement = connection.prepare(
+        "SELECT fact_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id=?2 AND superseded_by IS NULL LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, subject_id, limit as i64],
+        |row| {
+            Ok(json!({
+                "factId": row.get::<_, String>(0)?,
+                "predicate": row.get::<_, String>(1)?,
+                "object": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?).unwrap_or(serde_json::Value::Null),
+                "authorityLevel": row.get::<_, String>(3)?,
+            }))
+        },
+    )?;
+    let items = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(ProjectionPage {
+        total: items.len() as i64,
+        next_cursor: None,
+        items,
+    })
+}
+
+pub fn dependency_adjacency_page(
+    connection: &Connection,
+    project_id: &str,
+    source_ref: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ProjectionPage, OpsError> {
+    if !(1..=100).contains(&limit) {
+        return Err(OpsError::InvalidPageRequest);
+    }
+    let after = cursor.unwrap_or("");
+    let mut statement = connection.prepare(
+        "SELECT edge_id, target_ref, dependency_type, impact_class, source_hash FROM dependency_edges WHERE project_id=?1 AND source_ref=?2 AND edge_id>?3 ORDER BY edge_id LIMIT ?4",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, source_ref, after, limit as i64 + 1],
+        |row| Ok(json!({"edgeId":row.get::<_,String>(0)?,"targetRef":row.get::<_,String>(1)?,"dependencyType":row.get::<_,String>(2)?,"impactClass":row.get::<_,String>(3)?,"sourceHash":row.get::<_,String>(4)?})),
+    )?;
+    let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = if items.len() > limit {
+        Some(
+            items[limit - 1]["edgeId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    items.truncate(limit);
+    Ok(ProjectionPage {
+        total: items.len() as i64,
+        next_cursor,
+        items,
     })
 }
 

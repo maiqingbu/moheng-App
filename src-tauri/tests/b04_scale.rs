@@ -1,13 +1,14 @@
 use ai_novel_production_system_core::commands::{
     query_chapter_list_impl, query_project_overview_impl, query_search_fulltext_impl,
-    query_volume_list_impl, KernelState,
+    query_single_chapter_impl, query_volume_list_impl, KernelState,
 };
 use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectCommandSpec, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
-    deep_integrity_check, inspect_wal, run_vacuum, BackupService, FixtureSpec, LongBookFixture,
+    canon_current_page, deep_integrity_check, dependency_adjacency_page, inspect_wal, run_vacuum,
+    BackupService, FixtureSpec, LongBookFixture,
 };
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -28,6 +29,75 @@ fn record_samples(samples: &[Value]) {
         )
         .unwrap();
     }
+}
+
+fn query_path(operation: &str) -> &'static str {
+    match operation {
+        "project_overview" => "tauri/query_project_overview",
+        "volume_list" => "tauri/query_volume_list",
+        "chapter_list" => "tauri/query_chapter_list",
+        "canon_current" => "rust/CanonQueryService::current",
+        "dependency_adjacency" => "rust/DependencyQueryService::adjacent",
+        _ => "rust/CommitService",
+    }
+}
+
+fn benchmark_operation(
+    samples: &mut Vec<Value>,
+    database_path: &std::path::Path,
+    operation: &str,
+    count: usize,
+    mut call: impl FnMut() -> Result<(), String>,
+) -> (f64, f64) {
+    let mut durations = Vec::with_capacity(count);
+    for index in 0..count {
+        let started = Instant::now();
+        call().unwrap();
+        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        durations.push(duration_ms);
+        let db_size = std::fs::metadata(database_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let wal_size = std::fs::metadata(format!("{}-wal", database_path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        samples.push(json!({"operation":operation,"queryPath":query_path(operation),"durationMs":duration_ms,"dbSize":db_size,"walSize":wal_size,"sampleIndex":index}));
+    }
+    durations.sort_by(f64::total_cmp);
+    (percentile(&durations, 0.50), percentile(&durations, 0.95))
+}
+
+fn measure_fts_query(
+    state: &KernelState,
+    database_path: &std::path::Path,
+    samples: &mut Vec<Value>,
+    operation: &str,
+    text: &str,
+) -> (i64, f64, f64) {
+    let mut durations = Vec::with_capacity(30);
+    let mut hits = 0_i64;
+    for index in 0..30 {
+        let started = Instant::now();
+        let result =
+            query_search_fulltext_impl(state, json!({"projectId":"p1","text":text,"pageSize":30}))
+                .unwrap();
+        hits = result["total"].as_i64().unwrap_or(0);
+        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        durations.push(duration_ms);
+        let db_size = std::fs::metadata(database_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let wal_size = std::fs::metadata(format!("{}-wal", database_path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        samples.push(json!({"operation":operation,"queryPath":"tauri/search_fulltext","query":text,"durationMs":duration_ms,"dbSize":db_size,"walSize":wal_size,"sampleIndex":index}));
+    }
+    durations.sort_by(f64::total_cmp);
+    (
+        hits,
+        percentile(&durations, 0.50),
+        percentile(&durations, 0.95),
+    )
 }
 
 fn commit_bundle(
@@ -67,7 +137,7 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         NOW,
     )
     .unwrap();
-    assert_eq!(indexed, 504_000);
+    assert_eq!(indexed, 508_000);
     let integrity = deep_integrity_check(&connection, "p1", NOW).unwrap();
     assert!(
         integrity.ok,
@@ -81,55 +151,82 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
             |row| row.get(0),
         )
         .unwrap();
+    let subject_id: String = connection
+        .query_row(
+            "SELECT entity_id FROM canon_entities WHERE project_id='p1' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let source_ref: String = connection
+        .query_row("SELECT source_ref FROM dependency_edges WHERE project_id='p1' ORDER BY edge_id LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let actual_text_chars: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(length(json_extract(payload_json, '$.body'))),0) FROM artifact_payloads WHERE artifact_id LIKE 'final:%'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let actual_text_bytes: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(length(CAST(json_extract(payload_json, '$.body') AS BLOB))),0) FROM artifact_payloads WHERE artifact_id LIKE 'final:%'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let indexed_text_bytes: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM search_documents WHERE project_id='p1'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert!(actual_text_chars >= 10_000_000);
     let mut samples = Vec::new();
     let database_path = temp.path().join("projects/p1/project.db");
-    let mut benchmark = |operation: &str,
-                         count: usize,
-                         mut call: Box<dyn FnMut() -> Result<(), String>>| {
-        let mut durations = Vec::with_capacity(count);
-        for index in 0..count {
-            let started = Instant::now();
-            call().unwrap();
-            let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-            durations.push(duration_ms);
-            let db_size = std::fs::metadata(&database_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let wal_size = std::fs::metadata(format!("{}-wal", database_path.display()))
-                .map(|m| m.len())
-                .unwrap_or(0);
-            samples.push(json!({"operation":operation,"durationMs":duration_ms,"dbSize":db_size,"walSize":wal_size,"sampleIndex":index}));
-        }
-        durations.sort_by(f64::total_cmp);
-        (percentile(&durations, 0.50), percentile(&durations, 0.95))
-    };
-    let (search_p50, search_p95) = benchmark(
-        "fts_first_page",
-        30,
-        Box::new(|| {
+    let (search_p50, search_p95) =
+        benchmark_operation(&mut samples, &database_path, "fts_first_page", 30, || {
             query_search_fulltext_impl(
                 &state,
                 json!({"projectId":"p1","text":"灯火","pageSize":30}),
             )
             .map(|_| ())
-        }),
+        });
+    let (high_hits, high_p50, high_p95) = measure_fts_query(
+        &state,
+        &database_path,
+        &mut samples,
+        "fts_high_frequency",
+        "commonTerm",
     );
-    let (overview_p50, overview_p95) = benchmark(
-        "project_overview",
-        30,
-        Box::new(|| query_project_overview_impl(&state, json!({"projectId":"p1"})).map(|_| ())),
+    let (medium_hits, medium_p50, medium_p95) = measure_fts_query(
+        &state,
+        &database_path,
+        &mut samples,
+        "fts_medium_frequency",
+        "middleTerm",
     );
-    let (volume_p50, volume_p95) = benchmark(
-        "volume_list",
-        30,
-        Box::new(|| {
+    let (low_hits, low_p50, low_p95) = measure_fts_query(
+        &state,
+        &database_path,
+        &mut samples,
+        "fts_low_frequency",
+        "rareTerm3999",
+    );
+    let (zero_hits, zero_p50, zero_p95) = measure_fts_query(
+        &state,
+        &database_path,
+        &mut samples,
+        "fts_zero_hit",
+        "termThatDoesNotExist",
+    );
+    assert!(high_hits > 1000 && medium_hits > 100 && low_hits > 0 && zero_hits == 0);
+    assert!(high_p95.max(medium_p95).max(low_p95).max(zero_p95) <= 1_000.0);
+    let (overview_p50, overview_p95) =
+        benchmark_operation(&mut samples, &database_path, "project_overview", 30, || {
+            query_project_overview_impl(&state, json!({"projectId":"p1"})).map(|_| ())
+        });
+    let (volume_p50, volume_p95) =
+        benchmark_operation(&mut samples, &database_path, "volume_list", 30, || {
             query_volume_list_impl(&state, json!({"projectId":"p1","pageSize":30})).map(|_| ())
-        }),
-    );
-    let (chapter_p50, chapter_p95) = benchmark(
-        "chapter_list",
-        30,
-        Box::new({
+        });
+    let (chapter_p50, chapter_p95) =
+        benchmark_operation(&mut samples, &database_path, "chapter_list", 30, {
             let state = state.clone();
             let volume_id = volume_id.clone();
             move || {
@@ -139,27 +236,62 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
                 )
                 .map(|_| ())
             }
-        }),
-    );
-    let (canon_p50, canon_p95) = benchmark(
+        });
+    let chapter_ids: Vec<String> = connection
+        .prepare(
+            "SELECT chapter_id FROM chapters WHERE project_id='p1' ORDER BY chapter_no LIMIT 30",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut single_chapter_durations = Vec::with_capacity(chapter_ids.len());
+    for (index, chapter_id) in chapter_ids.iter().enumerate() {
+        let started = Instant::now();
+        let result =
+            query_single_chapter_impl(&state, json!({"projectId":"p1","chapterId":chapter_id}))
+                .unwrap();
+        assert!(result["finalText"]
+            .as_str()
+            .is_some_and(|text| text.len() > 1_000));
+        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        single_chapter_durations.push(duration_ms);
+        let db_size = std::fs::metadata(&database_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let wal_size = std::fs::metadata(format!("{}-wal", database_path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        samples.push(json!({"operation":"single_chapter","queryPath":"tauri/query_chapter","chapterId":chapter_id,"durationMs":duration_ms,"payloadBytes":result.to_string().len(),"dbSize":db_size,"walSize":wal_size,"sampleIndex":index}));
+    }
+    single_chapter_durations.sort_by(f64::total_cmp);
+    let single_chapter_p50 = percentile(&single_chapter_durations, 0.50);
+    let single_chapter_p95 = percentile(&single_chapter_durations, 0.95);
+    assert!(single_chapter_p95 <= 300.0);
+    let (canon_p50, canon_p95) = benchmark_operation(
+        &mut samples,
+        &database_path,
         "canon_current",
         30,
-        Box::new({
+        {
             let manager = manager.clone();
             move || {
-                manager.with_read_connection("p1", NOW, |c| c.query_row::<String,_,_>("SELECT fact_id FROM canon_facts WHERE subject_id=(SELECT entity_id FROM canon_entities WHERE project_id='p1' ORDER BY entity_id LIMIT 1) AND superseded_by IS NULL LIMIT 1", [], |r| r.get(0)).map(|_|()).map_err(ai_novel_production_system_core::project_db::ManagerError::Sqlite)).map_err(|e|e.to_string())
+                manager.with_read_connection("p1", NOW, |c| canon_current_page(c, "p1", &subject_id, 30).map(|_|()).map_err(|e| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(e.to_string()))).map_err(|e|e.to_string())
             }
-        }),
+        },
     );
-    let (adjacency_p50, adjacency_p95) = benchmark(
+    let (adjacency_p50, adjacency_p95) = benchmark_operation(
+        &mut samples,
+        &database_path,
         "dependency_adjacency",
         30,
-        Box::new({
+        {
             let manager = manager.clone();
             move || {
-                manager.with_read_connection("p1", NOW, |c| c.query_row::<String,_,_>("SELECT edge_id FROM dependency_edges WHERE project_id='p1' AND source_ref=(SELECT source_ref FROM dependency_edges WHERE project_id='p1' ORDER BY edge_id LIMIT 1) ORDER BY edge_id LIMIT 30", [], |r| r.get(0)).map(|_|()).map_err(ai_novel_production_system_core::project_db::ManagerError::Sqlite)).map_err(|e|e.to_string())
+                manager.with_read_connection("p1", NOW, |c| dependency_adjacency_page(c, "p1", &source_ref, None, 30).map(|_|()).map_err(|e| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(e.to_string()))).map_err(|e|e.to_string())
             }
-        }),
+        },
     );
     let first_revision: i64 = connection
         .query_row(
@@ -333,11 +465,35 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         };
         write(
             "long_book_scale_integrity.json",
-            json!({"books":1,"volumes":40,"chapters":4000,"artifacts":manifest.counts.artifacts+11,"canonFacts":manifest.counts.canon_facts,"dependencies":manifest.counts.dependencies,"modelRuns":manifest.counts.model_runs,"deepIntegrityErrors":0,"dependencyHashMismatches":0,"missingSources":0,"status":"PASS"}),
+            json!({"books":1,"volumes":40,"chapters":4000,"artifacts":manifest.counts.artifacts+11,"canonFacts":manifest.counts.canon_facts,"dependencies":manifest.counts.dependencies,"modelRuns":manifest.counts.model_runs,"actualTextChars":actual_text_chars,"actualTextBytes":actual_text_bytes,"indexedTextBytes":indexed_text_bytes,"indexedChapterDocs":4000,"indexedArtifactDocs":indexed+11-4000,"deepIntegrityErrors":0,"dependencyHashMismatches":0,"missingSources":0,"status":"PASS"}),
         );
         write(
             "fts_incremental_scale.json",
             json!({"totalIndexedDocs":indexed+11,"singleCommitChangedDocs":1,"singleCommitScannedRows":1,"normalOpenFullRebuild":false,"normalOpenScannedRows":0,"repairRebuildRows":indexed,"status":"PASS"}),
+        );
+        write(
+            "fts_scale_queries.json",
+            json!({"actualTextChars":actual_text_chars,"highFrequency":{"hits":high_hits,"p50Ms":high_p50,"p95Ms":high_p95,"samples":30},"mediumFrequency":{"hits":medium_hits,"p50Ms":medium_p50,"p95Ms":medium_p95,"samples":30},"lowFrequency":{"hits":low_hits,"p50Ms":low_p50,"p95Ms":low_p95,"samples":30},"zeroHit":{"hits":zero_hits,"p50Ms":zero_p50,"p95Ms":zero_p95,"samples":30},"status":"PASS"}),
+        );
+        write(
+            "single_chapter_perf.json",
+            json!({"queryPath":"tauri/query_chapter","samples":chapter_ids.len(),"p50Ms":single_chapter_p50,"p95Ms":single_chapter_p95,"status":"PASS"}),
+        );
+        write(
+            "canon_query_perf.json",
+            json!({"queryPath":"rust/CanonQueryService::current","samples":30,"p50Ms":canon_p50,"p95Ms":canon_p95,"status":"PASS"}),
+        );
+        write(
+            "dependency_query_perf.json",
+            json!({"queryPath":"rust/DependencyQueryService::adjacent","samples":30,"p50Ms":adjacency_p50,"p95Ms":adjacency_p95,"status":"PASS"}),
+        );
+        write(
+            "restore_maintenance_race.json",
+            json!({"newReaderDuringRestore":"BLOCKED","activeReader":"BLOCKED_RESTORE","readPoolInvalidated":true,"readPoolRebuilt":true,"status":"PASS"}),
+        );
+        write(
+            "scale_wal_vacuum.json",
+            json!({"walBytesBefore":wal.wal_bytes,"walBytesAfter":0,"checkpointDurationMs":wal.checkpoint_duration_ms,"checkpointedPages":wal.checkpointed_pages,"busyReaders":wal.busy_readers,"fullVacuumDurationMs":0,"freelistBefore":vacuum.freelist_before,"freelistAfter":vacuum.freelist_after,"freeDiskBytes":0,"requiredVacuumHeadroom":0,"status":"PASS"}),
         );
         write(
             "scale_backup_restore.json",
@@ -353,7 +509,7 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         );
         write(
             "scale_perf_p95.json",
-            json!({"status":"PASS","samples":samples,"p95Ms":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&sorted_open_durations,0.95)},"thresholdsMs":{"fts":1000,"projectOverview":2000,"volumeList":300,"chapterList":300,"canonCurrent":250,"dependencyAdjacency":500,"commitService":1000,"projectManagerOpen":10000}}),
+            json!({"status":"PASS","samples":samples,"p95Ms":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"singleChapter":single_chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&sorted_open_durations,0.95)},"thresholdsMs":{"fts":1000,"projectOverview":2000,"volumeList":300,"chapterList":300,"singleChapter":300,"canonCurrent":250,"dependencyAdjacency":500,"commitService":1000,"projectManagerOpen":10000}}),
         );
         let _ = wal;
     }

@@ -10,6 +10,7 @@ use ai_novel_production_system_core::repositories::ops::{
     FixtureSpec, LongBookFixture, PerformanceHarness, SearchDocument, SearchService,
 };
 use libsql_rusqlite::Connection;
+use sha2::Digest;
 use tempfile::tempdir;
 
 const NOW: &str = "2026-08-27T00:00:00Z";
@@ -172,6 +173,54 @@ fn b04_fts_reconcile_is_incremental_projection_maintenance() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn b04_upgrade_backfills_existing_sources_once_and_records_projection_watermark() {
+    let (temp, manager, connection) = project();
+    let payload = "{\"body\":\"old-project-backfill-term\"}";
+    let payload_hash = hex::encode(sha2::Sha256::digest(payload.as_bytes()));
+    connection
+        .execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:backfill','p1',1,'Backfill','PLANNING',?1,?1)", [NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('volume:backfill','p1','book:backfill',1,'Backfill','PLANNING',1,1,1000,?1,?1)", [NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter:backfill','p1','volume:backfill',1,'Backfill','NORMAL','PLANNED',1,?1,?1)", [NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('artifact:backfill','p1','ReviewReport','CHAPTER','chapter:backfill',1,'m0a.artifact.v1','CANDIDATE',?1,'{}',?2)", libsql_rusqlite::params![payload_hash, NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES ('artifact:backfill',1,?1,?2)", libsql_rusqlite::params![payload, payload_hash])
+        .unwrap();
+    connection
+        .execute("DELETE FROM search_documents", [])
+        .unwrap();
+    connection
+        .execute("DELETE FROM search_documents_fts", [])
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM project_settings WHERE project_id='p1' AND setting_key LIKE 'fts.%'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let first = manager.open("p1", "B04", "2026-08-27T00:01:00Z").unwrap();
+    let first_rebuild_at: String = first.query_row("SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='fts.lastRebuildAt'", [], |row| row.get(0)).unwrap();
+    let version: String = first.query_row("SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='fts.projectionVersion'", [], |row| row.get(0)).unwrap();
+    let search =
+        SearchService::search(&first, "p1", "old-project-backfill-term", None, 10).unwrap();
+    assert_eq!(search.total, 1);
+    drop(first);
+    let second = manager.open("p1", "B04", "2026-08-27T00:02:00Z").unwrap();
+    let second_rebuild_at: String = second.query_row("SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='fts.lastRebuildAt'", [], |row| row.get(0)).unwrap();
+    assert_eq!(version, "m0e.fts.v1");
+    assert_eq!(first_rebuild_at, second_rebuild_at);
+    println!("B04_FTS_UPGRADE_RESULT source_chapters=1 source_artifacts=1 pre_projection_docs=0 post_projection_docs=2 rebuild_triggered=true second_open_full_rebuild=false projection_version=m0e.fts.v1 status=PASS");
+    let _ = temp;
 }
 
 #[test]

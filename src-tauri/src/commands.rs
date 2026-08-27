@@ -3,7 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
-use crate::repositories::ops::{chapter_page, volume_page, SearchService};
+use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
 use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -394,6 +394,19 @@ pub fn query_chapter_list_impl(state: &KernelState, request: Value) -> Result<Va
                     serde_json::to_value(page)
                         .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
                 })
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_single_chapter_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let chapter_id = required_string(&request, "chapterId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            single_chapter(connection, project_id, chapter_id)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                .ok_or_else(|| ManagerError::ProjectNotFound)
         })
         .map_err(|error| error.to_string())
 }
@@ -945,6 +958,11 @@ pub fn query_chapter_list(state: State<'_, KernelState>, request: Value) -> Resu
 }
 
 #[tauri::command]
+pub fn query_chapter(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_single_chapter_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -984,6 +1002,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_list,
         query_reader_volumes,
         query_chapter_list,
+        query_chapter,
         execute_command,
         query_global_settings,
         test_provider,

@@ -354,6 +354,14 @@ impl CommitService {
         if updated != 1 {
             return Err(CommitError::RevisionConflict);
         }
+        connection.execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.indexedSourceRevision', ?2, ?3) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
+            libsql_rusqlite::params![bundle.project_id, after.to_string(), committed_at],
+        )?;
+        connection.execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.projectionVersion', 'm0e.fts.v1', ?2) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
+            libsql_rusqlite::params![bundle.project_id, committed_at],
+        )?;
         let refs: Vec<ArtifactRef> = bundle
             .artifacts
             .iter()
