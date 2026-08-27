@@ -1,4 +1,5 @@
 use crate::commit::CommitService;
+use crate::generated::types::ArtifactEnvelope;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -58,6 +59,23 @@ pub struct SearchPage {
 pub struct SearchService;
 
 impl SearchService {
+    pub fn projection_health(connection: &Connection, project_id: &str) -> Result<bool, OpsError> {
+        let table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_documents_fts')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !table_exists {
+            return Ok(false);
+        }
+        let _ = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM search_documents WHERE project_id=?1 LIMIT 1)",
+            [project_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(true)
+    }
+
     pub fn index_document(
         connection: &Connection,
         document: &SearchDocument,
@@ -86,47 +104,67 @@ impl SearchService {
                 "DELETE FROM search_documents_fts WHERE project_id=?1",
                 [project_id],
             )?;
-            let mut count = 0_i64;
-            let mut chapters = connection.prepare(
-                "SELECT chapter_id, volume_id, title FROM chapters WHERE project_id=?1 ORDER BY chapter_no, chapter_id",
+            connection.execute(
+                "INSERT INTO search_documents(project_id, doc_id, chapter_id, volume_id, title, body, kind, updated_at) SELECT project_id, 'chapter:'||chapter_id, chapter_id, volume_id, title, title, 'CHAPTER', ?2 FROM chapters WHERE project_id=?1",
+                libsql_rusqlite::params![project_id, now],
             )?;
-            let rows = chapters.query_map([project_id], |row| {
-                Ok(SearchDocument {
-                    project_id: project_id.to_string(),
-                    doc_id: format!("chapter:{}", row.get::<_, String>(0)?),
-                    chapter_id: Some(row.get(0)?),
-                    volume_id: Some(row.get(1)?),
-                    title: row.get(2)?,
-                    body: row.get(2)?,
-                    kind: "CHAPTER".into(),
-                })
-            })?;
-            for document in rows {
-                upsert_search_document(connection, &document?, now)?;
-                count += 1;
-            }
-            let mut artifacts = connection.prepare(
-                "SELECT artifacts.artifact_id, artifacts.version, artifacts.scope_key, artifact_payloads.payload_json FROM artifacts LEFT JOIN artifact_payloads ON artifact_payloads.artifact_id=artifacts.artifact_id AND artifact_payloads.version=artifacts.version WHERE artifacts.project_id=?1 ORDER BY artifacts.artifact_id, artifacts.version",
+            connection.execute(
+                "INSERT INTO search_documents(project_id, doc_id, chapter_id, volume_id, title, body, kind, updated_at) SELECT artifacts.project_id, 'artifact:'||artifacts.artifact_id||':'||artifacts.version, artifacts.scope_key, NULL, artifacts.artifact_id, COALESCE(artifact_payloads.payload_json,''), 'EVIDENCE', ?2 FROM artifacts LEFT JOIN artifact_payloads ON artifact_payloads.artifact_id=artifacts.artifact_id AND artifact_payloads.version=artifacts.version WHERE artifacts.project_id=?1",
+                libsql_rusqlite::params![project_id, now],
             )?;
-            let rows = artifacts.query_map([project_id], |row| {
-                let artifact_id: String = row.get(0)?;
-                let version: i64 = row.get(1)?;
-                let scope_key: String = row.get(2)?;
-                let body: Option<String> = row.get(3)?;
-                Ok(SearchDocument {
-                    project_id: project_id.to_string(),
-                    doc_id: format!("artifact:{artifact_id}:{version}"),
-                    chapter_id: Some(scope_key),
-                    volume_id: None,
-                    title: artifact_id,
-                    body: body.unwrap_or_default(),
-                    kind: "EVIDENCE".into(),
+            connection.execute(
+                "INSERT INTO search_documents_fts(project_id, doc_id, chapter_id, volume_id, title, body, kind) SELECT project_id, doc_id, chapter_id, volume_id, title, body, kind FROM search_documents WHERE project_id=?1",
+                [project_id],
+            )?;
+            let mut non_ascii = connection.prepare(
+                "SELECT project_id, doc_id, chapter_id, volume_id, title, body, kind FROM search_documents WHERE project_id=?1",
+            )?;
+            let documents = non_ascii
+                .query_map([project_id], |row| {
+                    Ok(SearchDocument {
+                        project_id: row.get(0)?,
+                        doc_id: row.get(1)?,
+                        chapter_id: row.get(2)?,
+                        volume_id: row.get(3)?,
+                        title: row.get(4)?,
+                        body: row.get(5)?,
+                        kind: row.get(6)?,
+                    })
+                })?
+                .filter_map(|row| match row {
+                    Ok(document) if !document.title.is_ascii() || !document.body.is_ascii() => {
+                        Some(Ok(document))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
                 })
-            })?;
-            for document in rows {
-                upsert_search_document(connection, &document?, now)?;
-                count += 1;
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(non_ascii);
+            let mut delete_fts = connection
+                .prepare("DELETE FROM search_documents_fts WHERE project_id=?1 AND doc_id=?2")?;
+            let mut insert_fts = connection.prepare(
+                "INSERT INTO search_documents_fts(project_id, doc_id, chapter_id, volume_id, title, body, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for document in documents {
+                delete_fts.execute(libsql_rusqlite::params![
+                    document.project_id,
+                    document.doc_id
+                ])?;
+                insert_fts.execute(libsql_rusqlite::params![
+                    document.project_id,
+                    document.doc_id,
+                    document.chapter_id,
+                    document.volume_id,
+                    fts_text(&document.title),
+                    fts_text(&document.body),
+                    document.kind
+                ])?;
             }
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM search_documents WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )?;
             Ok::<_, OpsError>(count)
         })();
         match result {
@@ -236,6 +274,41 @@ impl SearchService {
             }
         }
         Ok(count)
+    }
+
+    /// Applies only the artifacts supplied by the current CommitBundle. This is
+    /// the normal commit path; it never scans the authoritative artifact table.
+    pub(crate) fn apply_commit_delta_in_transaction(
+        connection: &Connection,
+        artifacts: &[ArtifactEnvelope],
+        now: &str,
+    ) -> Result<i64, OpsError> {
+        let mut changed = 0_i64;
+        for artifact in artifacts {
+            let artifact_type = serde_json::to_value(&artifact.artifact_type)?
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let scope_key = crate::repositories::artifacts::scope_key(&artifact.scope)
+                .map_err(|error| OpsError::RestoreIntegrity(error.to_string()))?;
+            let payload: String = connection.query_row(
+                "SELECT payload_json FROM artifact_payloads WHERE artifact_id=?1 AND version=?2",
+                libsql_rusqlite::params![artifact.artifact_id, artifact.version],
+                |row| row.get(0),
+            )?;
+            let document = SearchDocument {
+                project_id: artifact.project_id.clone(),
+                doc_id: format!("artifact:{}:{}", artifact.artifact_id, artifact.version),
+                chapter_id: Some(scope_key),
+                volume_id: None,
+                title: artifact.artifact_id.clone(),
+                body: payload,
+                kind: artifact_type,
+            };
+            upsert_search_document(connection, &document, now)?;
+            changed += 1;
+        }
+        Ok(changed)
     }
 
     pub fn search(
@@ -479,49 +552,21 @@ pub fn deep_integrity_check(
     if bad_heads > 0 {
         failures.push("CANONICAL_HEAD_HASH_MISMATCH".into());
     }
-    let mut dependencies = connection
-        .prepare("SELECT source_ref, source_hash FROM dependency_edges WHERE project_id=?1")?;
-    let dependency_rows = dependencies.query_map([project_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for dependency in dependency_rows {
-        let (source_ref, source_hash) = dependency?;
-        let artifact_hash: Option<String> = connection
-            .query_row(
-                "SELECT payload_hash FROM artifacts WHERE project_id=?1 AND artifact_id=?2 ORDER BY version DESC LIMIT 1",
-                libsql_rusqlite::params![project_id, source_ref],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match artifact_hash {
-            Some(hash) if hash != source_hash => {
-                failures.push("DEPENDENCY_SOURCE_HASH_MISMATCH".into());
-            }
-            Some(_) => {}
-            None => {
-                let typed_source_exists: i64 = connection.query_row(
-                    "SELECT EXISTS(
-                       SELECT 1 FROM canon_facts WHERE project_id=?1 AND fact_id=?2
-                       UNION ALL SELECT 1 FROM canon_relations WHERE project_id=?1 AND relation_id=?2
-                       UNION ALL SELECT 1 FROM canon_events WHERE project_id=?1 AND event_id=?2
-                       UNION ALL SELECT 1 FROM canon_knowledge WHERE project_id=?1 AND knowledge_id=?2
-                       UNION ALL SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2
-                       UNION ALL SELECT 1 FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2
-                       UNION ALL SELECT 1 FROM reader_desires WHERE project_id=?1 AND desire_id=?2
-                     )",
-                    libsql_rusqlite::params![project_id, source_ref],
-                    |row| row.get(0),
-                )?;
-                if typed_source_exists == 0 {
-                    failures.push("DEPENDENCY_SOURCE_REF_MISSING".into());
-                } else {
-                    // Non-artifact sources have no common payload_hash column.
-                    // Do not silently accept an unverifiable digest: callers must
-                    // publish an artifact ref when the source hash is required.
-                    failures.push("DEPENDENCY_SOURCE_HASH_UNVERIFIABLE".into());
-                }
-            }
-        }
+    let dependency_hash_mismatches: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM dependency_edges AS edge JOIN artifacts AS artifact ON artifact.project_id=edge.project_id AND artifact.artifact_id=edge.source_ref AND artifact.version=(SELECT MAX(version) FROM artifacts WHERE project_id=edge.project_id AND artifact_id=edge.source_ref) WHERE edge.project_id=?1 AND artifact.payload_hash<>edge.source_hash",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if dependency_hash_mismatches > 0 {
+        failures.push("DEPENDENCY_SOURCE_HASH_MISMATCH".into());
+    }
+    let missing_dependency_sources: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM dependency_edges AS edge LEFT JOIN artifacts AS artifact ON artifact.project_id=edge.project_id AND artifact.artifact_id=edge.source_ref WHERE edge.project_id=?1 AND artifact.artifact_id IS NULL AND NOT EXISTS (SELECT 1 FROM canon_facts WHERE project_id=edge.project_id AND fact_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM canon_relations WHERE project_id=edge.project_id AND relation_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM canon_events WHERE project_id=edge.project_id AND event_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM canon_knowledge WHERE project_id=edge.project_id AND knowledge_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM narrative_obligations WHERE project_id=edge.project_id AND obligation_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM foreshadows WHERE project_id=edge.project_id AND foreshadow_id=edge.source_ref) AND NOT EXISTS (SELECT 1 FROM reader_desires WHERE project_id=edge.project_id AND desire_id=edge.source_ref)",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if missing_dependency_sources > 0 {
+        failures.push("DEPENDENCY_SOURCE_REF_MISSING".into());
     }
 
     // Canon evidence is the durable bridge from an official chapter artifact to
@@ -542,6 +587,77 @@ pub fn deep_integrity_check(
         )?;
         if evidence_count == 0 {
             failures.push("FINAL_CHAPTER_CANON_EVIDENCE_MISSING".into());
+        }
+    }
+
+    let dangling_foreshadows: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM foreshadows AS f LEFT JOIN chapters AS plant ON plant.project_id=f.project_id AND plant.chapter_id=f.plant_chapter_id LEFT JOIN chapters AS recover ON recover.project_id=f.project_id AND recover.chapter_id=f.recover_window_end_chapter WHERE f.project_id=?1 AND ((f.plant_chapter_id IS NOT NULL AND plant.chapter_id IS NULL) OR (f.recover_window_end_chapter IS NOT NULL AND recover.chapter_id IS NULL))",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if dangling_foreshadows > 0 {
+        failures.push("FORESHADOW_CHAPTER_REF_MISSING".into());
+    }
+    let dangling_desires: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM reader_desires AS d LEFT JOIN chapters AS created ON created.project_id=d.project_id AND created.chapter_id=d.created_chapter_id LEFT JOIN chapters AS touched ON touched.project_id=d.project_id AND touched.chapter_id=d.last_touched_chapter_id WHERE d.project_id=?1 AND ((d.created_chapter_id IS NOT NULL AND created.chapter_id IS NULL) OR (d.last_touched_chapter_id IS NOT NULL AND touched.chapter_id IS NULL))",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if dangling_desires > 0 {
+        failures.push("READER_DESIRE_CHAPTER_REF_MISSING".into());
+    }
+    let dangling_obligations: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM narrative_obligations AS o LEFT JOIN chapters AS touched ON touched.project_id=o.project_id AND touched.chapter_id=o.last_touched_chapter_id LEFT JOIN chapters AS resolve_before ON resolve_before.project_id=o.project_id AND resolve_before.chapter_id=o.must_resolve_before_chapter WHERE o.project_id=?1 AND ((o.last_touched_chapter_id IS NOT NULL AND touched.chapter_id IS NULL) OR (o.must_resolve_before_chapter IS NOT NULL AND resolve_before.chapter_id IS NULL))",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    if dangling_obligations > 0 {
+        failures.push("OBLIGATION_CHAPTER_REF_MISSING".into());
+    }
+    let mut ledgers = connection.prepare(
+        "SELECT volume_id, obligation_ids_json, foreshadow_ids_json FROM planning_state_ledger_index WHERE project_id=?1",
+    )?;
+    let ledger_rows = ledgers
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(ledgers);
+    for (volume_id, obligation_json, foreshadow_json) in ledger_rows {
+        let volume_exists: i64 = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM volumes WHERE project_id=?1 AND volume_id=?2)",
+            libsql_rusqlite::params![project_id, volume_id],
+            |row| row.get(0),
+        )?;
+        let parse_refs = |value: &str| -> Result<Vec<String>, OpsError> {
+            serde_json::from_str(value).map_err(OpsError::Json)
+        };
+        if volume_exists == 0
+            || parse_refs(&obligation_json)?.iter().any(|reference| {
+                !connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2)",
+                        libsql_rusqlite::params![project_id, reference],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+            })
+            || parse_refs(&foreshadow_json)?.iter().any(|reference| {
+                !connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2)",
+                        libsql_rusqlite::params![project_id, reference],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+            })
+        {
+            failures.push("PLANNING_LEDGER_REF_MISSING".into());
+            break;
         }
     }
     let mut receipts =
@@ -650,6 +766,12 @@ pub fn run_vacuum(
     let freelist_before: i64 =
         connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     if mode == "INCREMENTAL" {
+        let auto_vacuum: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+        if auto_vacuum != 2 {
+            return Err(OpsError::RestoreIntegrity(
+                "INCREMENTAL vacuum is unavailable when auto_vacuum is NONE".into(),
+            ));
+        }
         connection.execute_batch("PRAGMA incremental_vacuum")?;
     } else if mode == "FULL" {
         let maintenance_state: String = connection.query_row(
@@ -661,6 +783,21 @@ pub fn run_vacuum(
             return Err(OpsError::RestoreIntegrity(
                 "FULL vacuum requires project maintenance mode".into(),
             ));
+        }
+        let database_path: String =
+            connection.query_row("PRAGMA database_list", [], |row| row.get(2))?;
+        let database_bytes = std::fs::metadata(&database_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let wal_bytes = std::fs::metadata(format!("{database_path}-wal"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let required_headroom = database_bytes.saturating_mul(2).saturating_add(wal_bytes);
+        let available_bytes = available_disk_bytes(Path::new(&database_path))?;
+        if available_bytes < required_headroom {
+            return Err(OpsError::RestoreIntegrity(format!(
+                "FULL vacuum free disk preflight failed: available={available_bytes} required={required_headroom}"
+            )));
         }
         connection.execute_batch("VACUUM")?;
     }
@@ -683,6 +820,29 @@ pub fn run_vacuum(
     Ok(report)
 }
 
+fn available_disk_bytes(path: &Path) -> Result<u64, OpsError> {
+    let output = std::process::Command::new("df")
+        .args(["-Pk", &path.to_string_lossy()])
+        .output()
+        .map_err(OpsError::Io)?;
+    if !output.status.success() {
+        return Err(OpsError::RestoreIntegrity(
+            "unable to determine free disk space".into(),
+        ));
+    }
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let line = output_text
+        .lines()
+        .nth(1)
+        .ok_or_else(|| OpsError::RestoreIntegrity("df output is incomplete".into()))?;
+    let available_kib = line
+        .split_whitespace()
+        .nth(3)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| OpsError::RestoreIntegrity("df available bytes are invalid".into()))?;
+    Ok(available_kib.saturating_mul(1024))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureSpec {
     pub seed: String,
@@ -700,7 +860,7 @@ impl FixtureSpec {
     pub fn long_book_10m(seed: impl Into<String>) -> Self {
         Self {
             seed: seed.into(),
-            books: 40,
+            books: 1,
             volumes: 40,
             chapters: 4000,
             artifacts: 500_000,
@@ -765,6 +925,7 @@ impl LongBookFixture {
             })?;
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
+            let book_id = fixture_id("bk", &spec.seed, 0);
             let mut books = connection.prepare(
                 "INSERT OR IGNORE INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'PLANNING', ?5, ?5)",
             )?;
@@ -780,18 +941,21 @@ impl LongBookFixture {
             }
             drop(books);
             let mut volumes = connection.prepare(
-                "INSERT OR IGNORE INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'PLANNING', 0, 0, ?6, ?7, ?7)",
+                "INSERT OR IGNORE INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'PLANNING', ?6, ?7, ?8, ?9, ?9)",
             )?;
             for index in 0..spec.volumes {
                 let volume_id = fixture_id("vol", &spec.seed, index);
-                let book_index = index % spec.books;
-                let book_id = fixture_id("bk", &spec.seed, book_index);
+                let chapter_start = (index * spec.chapters / spec.volumes.max(1)) + 1;
+                let chapter_end =
+                    ((index + 1) * spec.chapters / spec.volumes.max(1)).max(chapter_start);
                 volumes.execute(libsql_rusqlite::params![
                     volume_id,
                     project_id,
                     book_id,
-                    index / spec.books + 1,
+                    index + 1,
                     format!("B04 Volume {index}"),
+                    chapter_start,
+                    chapter_end,
                     spec.target_words / spec.volumes.max(1),
                     now
                 ])?;
@@ -802,19 +966,27 @@ impl LongBookFixture {
             )?;
             for index in 0..spec.chapters {
                 let chapter_id = fixture_id("chap", &spec.seed, index);
-                let volume_index = index % spec.volumes.max(1);
+                let volume_index = (index * spec.volumes.max(1)) / spec.chapters.max(1);
                 let volume_id = fixture_id("vol", &spec.seed, volume_index);
+                let chapter_no = (index % (spec.chapters / spec.volumes.max(1)).max(1)) + 1;
                 chapters.execute(libsql_rusqlite::params![
                     chapter_id,
                     project_id,
                     volume_id,
-                    index + 1,
+                    chapter_no,
                     format!("B04 Chapter {index}"),
                     spec.target_words / spec.chapters.max(1),
                     now
                 ])?;
             }
             drop(chapters);
+            let artifact_hashes: Vec<String> = (0..spec.artifacts)
+                .map(|index| {
+                    let payload =
+                        serde_json::json!({"seed":spec.seed,"artifactIndex":index}).to_string();
+                    hex::encode(Sha256::digest(payload.as_bytes()))
+                })
+                .collect();
             let mut artifacts = connection.prepare(
                 "INSERT OR IGNORE INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES (?1, ?2, 'FixtureEvidence', 'PROJECT', ?3, 1, 'm0e.fixture.v1', 'CANDIDATE', ?4, '{}', ?5, NULL)",
             )?;
@@ -825,7 +997,7 @@ impl LongBookFixture {
                 let artifact_id = fixture_id("art", &spec.seed, index);
                 let payload =
                     serde_json::json!({"seed":spec.seed,"artifactIndex":index}).to_string();
-                let payload_hash = hex::encode(Sha256::digest(payload.as_bytes()));
+                let payload_hash = &artifact_hashes[index as usize];
                 artifacts.execute(libsql_rusqlite::params![
                     artifact_id,
                     project_id,
@@ -841,6 +1013,27 @@ impl LongBookFixture {
             }
             drop(artifacts);
             drop(artifact_payloads);
+            // Long-term topology markers make the fixture a single book with
+            // cross-volume aging/reference rows rather than unrelated bulk data.
+            let mut ledgers = connection.prepare(
+                "INSERT OR IGNORE INTO planning_state_ledger_index(project_id, volume_id, entry_state, plan_state, coverage_state, obligation_ids_json, foreshadow_ids_json, evidence_need_ids_json, repair_state, updated_at) VALUES (?1, ?2, 'OPEN', 'APPROVED', 'INCOMPLETE', ?3, ?4, '[]', 'NONE', ?5)",
+            )?;
+            for index in 0..spec.volumes {
+                let volume_id = fixture_id("vol", &spec.seed, index);
+                let obligations =
+                    serde_json::json!([fixture_id("obl", &spec.seed, index)]).to_string();
+                let foreshadows =
+                    serde_json::json!([fixture_id("foreshadow", &spec.seed, index % 20)])
+                        .to_string();
+                ledgers.execute(libsql_rusqlite::params![
+                    project_id,
+                    volume_id,
+                    obligations,
+                    foreshadows,
+                    now
+                ])?;
+            }
+            drop(ledgers);
             if spec.canon_facts > 0 {
                 let entity_id = fixture_id("ent", &spec.seed, 0);
                 connection.execute(
@@ -862,13 +1055,80 @@ impl LongBookFixture {
                 }
                 drop(facts);
             }
+            let mut foreshadows = connection.prepare(
+                "INSERT OR IGNORE INTO foreshadows(foreshadow_id, project_id, intent, plant_chapter_id, recover_window_end_chapter, status, source_authority, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'PLANTED', 'B04_FIXTURE', ?6, ?6)",
+            )?;
+            for index in 0..spec.volumes.min(20) {
+                let plant_index = (index * spec.chapters.max(1)) / spec.volumes.max(1);
+                let recover_index = ((index + 20) * spec.chapters.max(1)) / spec.volumes.max(1);
+                foreshadows.execute(libsql_rusqlite::params![
+                    fixture_id("foreshadow", &spec.seed, index),
+                    project_id,
+                    format!("B04 cross-volume foreshadow {index}"),
+                    fixture_id("chap", &spec.seed, plant_index),
+                    fixture_id(
+                        "chap",
+                        &spec.seed,
+                        recover_index.min(spec.chapters.saturating_sub(1))
+                    ),
+                    now
+                ])?;
+            }
+            drop(foreshadows);
+            let mut obligations = connection.prepare(
+                "INSERT OR IGNORE INTO narrative_obligations(obligation_id, project_id, scope, obligation_type, authority_level, source_artifact_id, source_version, description, must_resolve_before_chapter, lifecycle, last_touched_chapter_id, created_at, updated_at) VALUES (?1, ?2, 'VOLUME', 'LONG_TERM_FIXTURE', 'C', ?3, 1, ?4, ?5, 'PROPOSED', ?6, ?7, ?7)",
+            )?;
+            for index in 0..spec.volumes {
+                let chapter_index =
+                    ((index + 1) * spec.chapters / spec.volumes.max(1)).saturating_sub(1);
+                obligations.execute(libsql_rusqlite::params![
+                    fixture_id("obl", &spec.seed, index),
+                    project_id,
+                    fixture_id("art", &spec.seed, index % spec.artifacts.max(1)),
+                    format!("B04 obligation across volume {index}"),
+                    fixture_id("chap", &spec.seed, chapter_index),
+                    fixture_id(
+                        "chap",
+                        &spec.seed,
+                        index * spec.chapters / spec.volumes.max(1)
+                    ),
+                    now
+                ])?;
+            }
+            drop(obligations);
+            let mut desires = connection.prepare(
+                "INSERT OR IGNORE INTO reader_desires(desire_id, project_id, desire_type, status, expected_payoff_chapter, created_chapter_id, last_touched_chapter_id, aging_score, payload_json, created_at, updated_at) VALUES (?1, ?2, 'LONG_TERM_FIXTURE', 'OPEN', ?3, ?4, ?5, ?6, '{}', ?7, ?7)",
+            )?;
+            for index in 0..spec.volumes {
+                let created_index = index * spec.chapters / spec.volumes.max(1);
+                let payoff_index =
+                    ((index + 1) * spec.chapters / spec.volumes.max(1)).saturating_sub(1);
+                desires.execute(libsql_rusqlite::params![
+                    fixture_id("desire", &spec.seed, index),
+                    project_id,
+                    fixture_id("chap", &spec.seed, payoff_index),
+                    fixture_id("chap", &spec.seed, created_index),
+                    fixture_id("chap", &spec.seed, payoff_index),
+                    index as f64,
+                    now
+                ])?;
+            }
+            drop(desires);
+            // The scale fixture is a dedicated bulk loader. Commit fixed-size
+            // chunks so a single failed batch does not create an unbounded WAL.
+            connection.execute_batch("COMMIT; BEGIN IMMEDIATE")?;
             let mut dependencies = connection.prepare(
                 "INSERT OR IGNORE INTO dependency_edges(edge_id, project_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash, created_by, created_at) VALUES (?1, ?2, ?3, ?4, 'EVIDENCE', 'PROJECT', 'EVIDENCE', ?5, 'B04_FIXTURE', ?6)",
             )?;
             for index in 0..spec.dependencies {
                 let edge_id = fixture_id("edge", &spec.seed, index);
+                let source_index = if spec.artifacts > 0 {
+                    index % spec.artifacts
+                } else {
+                    0
+                };
                 let source_ref = if spec.artifacts > 0 {
-                    fixture_id("art", &spec.seed, index % spec.artifacts)
+                    fixture_id("art", &spec.seed, source_index)
                 } else {
                     project_id.clone()
                 };
@@ -877,9 +1137,12 @@ impl LongBookFixture {
                     project_id,
                     source_ref,
                     project_id,
-                    hex::encode(Sha256::digest(format!("{}:{index}", spec.seed).as_bytes())),
+                    &artifact_hashes[source_index as usize],
                     now
                 ])?;
+                if (index + 1) % 10_000 == 0 {
+                    connection.execute_batch("COMMIT; BEGIN IMMEDIATE")?;
+                }
             }
             drop(dependencies);
             let mut model_runs = connection.prepare(
@@ -893,6 +1156,9 @@ impl LongBookFixture {
                     format!("fixture:{}:{index}", spec.seed),
                     now
                 ])?;
+                if (index + 1) % 10_000 == 0 {
+                    connection.execute_batch("COMMIT; BEGIN IMMEDIATE")?;
+                }
             }
             drop(model_runs);
             Ok::<_, OpsError>(())
@@ -1010,23 +1276,43 @@ impl PerformanceHarness {
             (
                 "canon_current",
                 Box::new(move |connection| {
-                    let _: i64 = connection.query_row(
-                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND superseded_by IS NULL",
-                        [project_id],
-                        |row| row.get(0),
-                    )?;
-                    Ok(())
+                    let subject_id: Option<String> = connection
+                        .query_row(
+                            "SELECT entity_id FROM canon_entities WHERE project_id=?1 ORDER BY entity_id LIMIT 1",
+                            [project_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(subject_id) = subject_id {
+                        let mut rows = connection.prepare(
+                            "SELECT fact_id FROM canon_facts WHERE subject_id=?1 AND superseded_by IS NULL LIMIT 30",
+                        )?;
+                        let _ = rows
+                            .query_map([subject_id], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                    Ok::<(), OpsError>(())
                 }),
             ),
             (
                 "adjacency",
                 Box::new(move |connection| {
-                    let _: i64 = connection.query_row(
-                        "SELECT COUNT(*) FROM dependency_edges WHERE project_id=?1",
-                        [project_id],
-                        |row| row.get(0),
-                    )?;
-                    Ok(())
+                    let source_ref: Option<String> = connection
+                        .query_row(
+                            "SELECT source_ref FROM dependency_edges WHERE project_id=?1 ORDER BY edge_id LIMIT 1",
+                            [project_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(source_ref) = source_ref {
+                        let mut rows = connection.prepare(
+                            "SELECT edge_id FROM dependency_edges WHERE source_ref=?1 ORDER BY edge_id LIMIT 30",
+                        )?;
+                        let _ = rows
+                            .query_map([source_ref], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                    Ok::<(), OpsError>(())
                 }),
             ),
             (

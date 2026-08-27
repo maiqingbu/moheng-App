@@ -340,9 +340,9 @@ impl CommitService {
             committed_at,
             fallback_artifact,
         )?;
-        crate::repositories::ops::SearchService::reconcile_in_transaction(
+        crate::repositories::ops::SearchService::apply_commit_delta_in_transaction(
             connection,
-            &bundle.project_id,
+            &bundle.artifacts,
             committed_at,
         )
         .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;

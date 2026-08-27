@@ -18,13 +18,26 @@ const backup = targeted.match(/B04_BACKUP_RESULT checksum=([a-f0-9]{64}) restore
 const restore = targeted.match(/B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .*checksum=PASS .*quick_check=PASS .*foreign_key_check=PASS .*deep_integrity=PASS .*receipt=PASS/)
 const integrityMatches = [...targeted.matchAll(/B04_INTEGRITY_RESULT failures=(\d+) status=FAIL_CLOSED/g)]
 const materialized = scaleMaterialized.match(/B04_SCALE_MATERIALIZED books=(\d+) volumes=(\d+) chapters=(\d+) artifacts=(\d+) canon_facts=(\d+) dependencies=(\d+) model_runs=(\d+) target_words=(\d+) status=PASS/)
+const scaleCertification = scaleMaterialized.match(/B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS status=PASS/)
 const perfOperations = [...targeted.matchAll(/B04_PERF_OPERATION operation=([a-z_]+) samples=(\d+) p50_ms=([0-9.]+) p95_ms=([0-9.]+)/g)]
 const requiredOperations = { project_overview: 2000, volume_list: 300, chapter_list: 300, canon_current: 250, adjacency: 500, normal_commit: 1000, recovery_readable: 10000 }
 const performancePass = Object.entries(requiredOperations).every(([operation, threshold]) => {
   const marker = perfOperations.find(item => item[1] === operation)
   return marker && Number(marker[2]) > 0 && Number(marker[4]) <= threshold
 }) && Number(performance[3]) <= 1000
-if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || integrityMatches.length === 0 || !materialized || !performancePass) {
+const readJson = name => JSON.parse(readFileSync(resolve(evidenceDir, name), 'utf8'))
+let scaleIntegrity; let scalePerformance; let scaleRestore; let scaleCertificationReport; let benchmarkSamples; let benchmarkEnvironment
+try {
+  scaleIntegrity = readJson('long_book_scale_integrity.json')
+  scalePerformance = readJson('scale_perf_p95.json')
+  scaleRestore = readJson('scale_backup_restore.json')
+  scaleCertificationReport = readJson('long_book_scale_certification.json')
+  benchmarkSamples = readJson('scale_benchmark_samples.json')
+  benchmarkEnvironment = readJson('benchmark_environment.json')
+} catch {
+  throw new Error('B04 scale certification evidence files are incomplete')
+}
+if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !scaleCertification || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
   throw new Error('B04 targeted evidence markers are incomplete')
 }
 const integrityFailures = integrityMatches.reduce((sum, match) => sum + Number(match[1]), 0)
@@ -35,6 +48,11 @@ write('sqlite_runtime_profile.json', { profileVersion: 'm0e.sqlite.v1', pageSize
 write('wal_vacuum_report.json', { walBytes: Number(wal[1]), checkpointedPages: Number(wal[2]), vacuumPageCount: Number(wal[3]), thresholdState: wal[4], policy: 'PASSIVE_WITH_MILESTONE_CHECKPOINT' })
 write('backup_restore_report.json', { checksumSha256: backup[1], restored: true, tamperRejected: true, restoreMode: 'maintenance-staged-atomic', quickCheck: true, foreignKeyCheck: true, deepIntegrity: true, receipt: true })
 write('integrity_tamper_cases.json', { detectedFailureCount: integrityFailures, cases: ['ARTIFACT_PAYLOAD_HASH_MISMATCH', 'CANONICAL_HEAD_HASH_MISMATCH', 'DEPENDENCY_SOURCE_HASH_MISMATCH', 'COMMIT_RECEIPT_DIGEST_MISMATCH', 'BACKUP_CHECKSUM_MISMATCH'], failClosed: true })
+write('long_book_scale_integrity.json', scaleIntegrity)
+write('scale_perf_p95.json', scalePerformance)
+write('scale_backup_restore.json', scaleRestore)
+write('long_book_scale_certification.json', scaleCertificationReport)
+write('benchmark_environment.json', benchmarkEnvironment)
 writeFileSync(resolve(evidenceDir, 'changed-files.txt'), execFileSync('git', ['diff', '--name-status', 'd39e35ca3a4a9998e69fdc4c22cadaf5e281e494', sourceCommit], { cwd: root, encoding: 'utf8' }))
 writeFileSync(resolve(evidenceDir, 'commands.log'), gates.gates.map(gate => `${gate.status} ${gate.name}: ${gate.command}`).join('\n') + '\n')
 console.log(`B04 evidence assembled: 6 required files at ${evidenceDir}`)

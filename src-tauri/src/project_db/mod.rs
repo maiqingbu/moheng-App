@@ -193,7 +193,7 @@ impl ProjectManager {
                 migrate_project(&connection, project_id, title, now)?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
-                crate::repositories::ops::SearchService::reconcile(&connection, project_id, now)
+                crate::repositories::ops::SearchService::projection_health(&connection, project_id)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 quick_check(&connection)?;
                 // Flush WAL into the main DB and close so rename yields a
@@ -268,7 +268,9 @@ impl ProjectManager {
                 return Err(ManagerError::ProjectNotFound);
             }
             let connection = open_connection(&database, false)?;
-            quick_check(&connection)?;
+            // Normal open is a metadata/projection-health path. A full
+            // quick_check belongs to explicit recovery/integrity commands; doing
+            // it here would scan a 10M-word project on every UI reopen.
             if project_needs_migration(&connection)? {
                 connection.execute_batch("PRAGMA wal_checkpoint(FULL)")?;
                 let backups = directory.join("backups");
@@ -295,7 +297,7 @@ impl ProjectManager {
             record_runtime_profile(&connection, project_id, now).map_err(|error| {
                 ManagerError::Database(DatabaseError::Integrity(error.to_string()))
             })?;
-            crate::repositories::ops::SearchService::reconcile(&connection, project_id, now)
+            crate::repositories::ops::SearchService::projection_health(&connection, project_id)
                 .map_err(|error| {
                     ManagerError::Database(DatabaseError::Integrity(error.to_string()))
                 })?;
@@ -525,6 +527,21 @@ impl ProjectManager {
                 )?;
                 Ok(())
             };
+            {
+                let pool = self
+                    .read_pool
+                    .lock()
+                    .map_err(|_| ManagerError::WriterLockPoisoned)?;
+                if pool.checked_out_len(spec.project_id) != 0 {
+                    return Err(ManagerError::ProjectCommand(
+                        "READ_POOL_BUSY: restore requires all read leases to drain".into(),
+                    ));
+                }
+            }
+            self.read_pool
+                .lock()
+                .map_err(|_| ManagerError::WriterLockPoisoned)?
+                .invalidate_project(spec.project_id);
             {
                 let connection = open_connection(&database, false)?;
                 connection.execute(

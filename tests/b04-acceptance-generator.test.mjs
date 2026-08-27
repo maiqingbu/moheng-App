@@ -31,3 +31,11 @@ for (const gateName of ['deep_integrity', 'performance', 'git_binding']) {
     assert.equal(evaluateAcceptance({ gateResults: results, actualMetrics: results.metrics }).status, 'FAIL')
   })
 }
+
+for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
+  test(`B04 acceptance fails when ${gateName} fails`, () => {
+    const results = passingResults()
+    results.gates.find(gate => gate.name === gateName).status = 'FAIL'
+    assert.equal(evaluateAcceptance({ gateResults: results, actualMetrics: results.metrics }).status, 'FAIL')
+  })
+}

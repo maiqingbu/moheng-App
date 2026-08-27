@@ -43,8 +43,17 @@ if (scaleCommand) {
   const content = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1
   logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  const scaleLog = logs.get(logName) ?? ''
+  const scalePass = exitCode === 0 && /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS status=PASS/.test(scaleLog)
+  results.push({ name: 'long_book_scale_certification', command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
+    results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  }
 } else {
   results.push({ name: 'long_book_materialization', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
+  for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
+    results.push({ name: gateName, command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
+  }
 }
 const requiredOperations = {
   project_overview: 2000, volume_list: 300, chapter_list: 300, canon_current: 250,

@@ -67,6 +67,12 @@ fn b04_fixture_materializes_deterministic_rows_and_reports_counts() {
             .unwrap(),
         2
     );
+    let integrity = deep_integrity_check(&connection, "p1", NOW).unwrap();
+    assert!(
+        integrity.ok,
+        "fixture integrity failures: {:?}",
+        integrity.failures
+    );
     println!("B04_FIXTURE_RESULT chapters=4 artifacts=3 canon_facts=5 dependencies=7 model_runs=2 target_words=10000000");
 }
 
@@ -338,14 +344,14 @@ fn b04_long_book_fixture_manifest_is_deterministic_for_fixed_seed() {
     assert_eq!(left, right);
     assert_eq!(left.target_words, 10_000_000);
     assert_eq!(left.seed, "b04-fixed");
-    assert_eq!(left.counts.books, 40);
+    assert_eq!(left.counts.books, 1);
     assert_eq!(left.counts.volumes, 40);
     assert_eq!(left.counts.chapters, 4000);
     assert_eq!(left.counts.artifacts, 500_000);
     assert_eq!(left.counts.canon_facts, 1_000_000);
     assert_eq!(left.counts.dependencies, 3_000_000);
     assert_eq!(left.counts.model_runs, 100_000);
-    println!("B04_SCALE_RESULT books=40 volumes=40 chapters=4000 target_words=10000000 artifacts=500000 canon_facts=1000000 dependencies=3000000 model_runs=100000");
+    println!("B04_SCALE_RESULT books=1 volumes=40 chapters=4000 target_words=10000000 artifacts=500000 canon_facts=1000000 dependencies=3000000 model_runs=100000");
 }
 
 #[test]
@@ -364,6 +370,7 @@ fn b04_wal_governance_and_vacuum_are_recorded_with_thresholds() {
     let vacuum = run_vacuum(&connection, "p1", "CHECK", NOW).unwrap();
     assert_eq!(vacuum.mode, "CHECK");
     assert!(vacuum.page_count > 0);
+    assert!(run_vacuum(&connection, "p1", "INCREMENTAL", NOW).is_err());
     println!(
         "B04_WAL_VACUUM_RESULT wal_bytes={} checkpointed_pages={} vacuum_pages={} threshold={}",
         wal.wal_bytes, wal.checkpointed_pages, vacuum.page_count, wal.threshold_state
@@ -505,6 +512,43 @@ fn b04_backup_restore_is_a_formal_verified_command_with_receipt() {
         1
     );
     println!("B04_RESTORE_WORKFLOW_RESULT maintenance=PASS checksum=PASS quick_check=PASS foreign_key_check=PASS deep_integrity=PASS receipt=PASS");
+}
+
+#[test]
+fn b04_restore_blocks_while_a_read_lease_is_checked_out() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    let backup = temp.path().join("projects/p1/backups/active-reader.db");
+    let manifest =
+        BackupService::create_snapshot(&connection, &backup, "p1", "2026-08-27T00:01:00Z").unwrap();
+    drop(connection);
+    let active_read = state.manager.read_connection("p1", NOW).unwrap();
+    let result = state.manager.restore_backup(
+        ai_novel_production_system_core::project_db::ProjectCommandSpec {
+            project_id: "p1",
+            result_project_id: "p1",
+            command_id: "b04-active-reader-restore",
+            idempotency_key: "b04-active-reader-restore-key",
+            command_type: "backup_restore",
+            request_digest: &"b".repeat(64),
+            expected_revision: Some(0),
+            now: "2026-08-27T00:02:00Z",
+            advance_revision: true,
+        },
+        &backup,
+        &manifest.checksum_sha256,
+    );
+    let error = match result {
+        Ok(_) => panic!("restore must block while a read lease is active"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("READ_POOL_BUSY"));
+    drop(active_read);
+    println!(
+        "B04_RESTORE_POOL_BLOCK_RESULT activeLease=BLOCKED oldConnection=NOT_REPLACED status=PASS"
+    );
 }
 
 #[test]

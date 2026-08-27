@@ -83,6 +83,19 @@ impl ReadPool {
         self.idle.get(project_id).map_or(0, Vec::len)
     }
 
+    pub fn checked_out_len(&self, project_id: &str) -> usize {
+        self.project_checked_out(project_id)
+    }
+
+    /// Invalidates only one project's idle connections before a database file
+    /// replacement. Checked-out leases are intentionally not silently killed;
+    /// the caller must either wait for them to drain or return a blocking error.
+    pub fn invalidate_project(&mut self, project_id: &str) {
+        if let Some(idle) = self.idle.remove(project_id) {
+            self.live = self.live.saturating_sub(idle.len());
+        }
+    }
+
     /// Live connections across the whole pool (idle + checked out).
     pub fn live_len(&self) -> usize {
         self.live
