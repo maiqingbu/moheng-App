@@ -1,0 +1,53 @@
+import { execFileSync, spawnSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { evaluateGitBinding, parseMetrics } from './generate-b04-acceptance.mjs'
+
+const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
+const evidence = process.env.B04_EVIDENCE_DIR ? resolve(process.env.B04_EVIDENCE_DIR) : mkdtempSync(join(tmpdir(), 'moheng-b04-evidence-'))
+mkdirSync(evidence, { recursive: true })
+const commands = [
+  ['contracts', 'npm run verify:contracts', 'contracts_gate.log'],
+  ['node_tests', 'npm test', 'npm_test.log'],
+  ['frontend_vitest', 'npm run test:store', 'frontend_vitest.log'],
+  ['typecheck', 'npm run typecheck', 'typecheck.log'],
+  ['build', 'npm run build', 'build.log'],
+  ['architecture', 'node scripts/verify-architecture.mjs', 'architecture_gate.log'],
+  ['module_boundary', 'npm run verify:boundaries', 'module_boundary.log'],
+  ['m0a', 'npm run verify:m0a', 'm0a_gate.log'],
+  ['b04_targeted', 'cargo test --manifest-path src-tauri/Cargo.toml --test b04_ops -- --nocapture', 'b04_targeted_test.log'],
+  ['cargo_all_targets', 'cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture', 'cargo_all_targets.log'],
+  ['cargo_fmt', 'cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check', 'cargo_fmt.log'],
+  ['cargo_check', 'cargo check --manifest-path src-tauri/Cargo.toml --all-targets', 'cargo_check.log'],
+  ['cargo_clippy', 'cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings', 'cargo_clippy.log']
+]
+function gitSnapshot() {
+  const options = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+  return { commit: execFileSync('git', ['rev-parse', 'HEAD'], options).trim(), dirty: execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], options).trim().length > 0 }
+}
+const before = gitSnapshot(); const results = []; const logs = new Map()
+for (const [name, command, logName] of commands) {
+  const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env: { ...process.env, B04_EVIDENCE_DIR: evidence } })
+  const content = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1
+  logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
+  results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
+}
+for (const path of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
+  try { execFileSync('git', ['restore', '--source', before.commit, '--', path], { cwd: root, stdio: 'ignore' }) } catch { results.push({ name: 'b01_frozen_evidence', status: 'FAIL', exitCode: 1, blocking: true, log: 'gate-results.json' }) }
+}
+const aliases = [
+  ['b01_regression', 'cargo_all_targets'], ['b02_regression', 'cargo_all_targets'], ['b03_regression', 'cargo_all_targets'],
+  ['sqlite_integrity', 'cargo_all_targets'], ['fts5', 'b04_targeted'], ['sqlite_runtime_profile', 'b04_targeted'],
+  ['wal_vacuum', 'b04_targeted'], ['backup_restore', 'b04_targeted'], ['deep_integrity', 'b04_targeted'],
+  ['long_book_fixture', 'b04_targeted'], ['performance', 'b04_targeted']
+]
+for (const [name, source] of aliases) { const gate = results.find(item => item.name === source); results.push({ name, command: gate.command, exitCode: gate.exitCode, status: gate.status, blocking: true, log: gate.log }) }
+const after = gitSnapshot(); const gitBinding = evaluateGitBinding({ beforeCommit: before.commit, afterCommit: after.commit, dirtyBefore: before.dirty, dirtyAfter: after.dirty })
+results.push({ name: 'git_binding', command: 'git rev-parse HEAD && git status --porcelain=v1', exitCode: gitBinding.status === 'PASS' ? 0 : 1, status: gitBinding.status, blocking: true, log: 'gate-results.json' })
+const metrics = parseMetrics({ targeted: logs.get('b04_targeted_test.log') ?? '', allRust: logs.get('cargo_all_targets.log') ?? '', node: logs.get('npm_test.log') ?? '', vitest: logs.get('frontend_vitest.log') ?? '', contract: logs.get('contracts_gate.log') ?? '' })
+const finalStatus = results.every(item => item.status === 'PASS' && item.exitCode === 0) && gitBinding.status === 'PASS' ? 'PASS' : 'FAIL'
+writeFileSync(resolve(evidence, 'test.log'), [...logs.values()].join('\n'))
+writeFileSync(resolve(evidence, 'gate-results.json'), `${JSON.stringify({ sourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: before.dirty, workingTreeDirtyAfter: after.dirty, gitBinding, finalStatus, runnerExitCode: finalStatus === 'PASS' ? 0 : 1, metrics, gates: results }, null, 2)}\n`)
+console.log(`B04 gates recorded: ${results.filter(item => item.status === 'PASS').length}/${results.length} PASS; gitBinding=${gitBinding.status}; evidence=${evidence}`)
+if (finalStatus !== 'PASS') process.exitCode = 1

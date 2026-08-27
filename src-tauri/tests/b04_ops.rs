@@ -170,6 +170,15 @@ fn b04_runtime_profile_is_recorded_and_deep_integrity_fails_closed_on_tamper() {
     let profile = read_runtime_profile(&connection, "p1").unwrap();
     assert!(profile.page_size > 0);
     assert_eq!(profile.busy_timeout_ms, 5000);
+    println!(
+        "B04_PROFILE_RESULT page_size={} auto_vacuum={} mmap_size={} busy_timeout_ms={} synchronous={} wal_autocheckpoint={}",
+        profile.page_size,
+        profile.auto_vacuum,
+        profile.mmap_size,
+        profile.busy_timeout_ms,
+        profile.synchronous,
+        profile.wal_autocheckpoint
+    );
     connection
         .execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('art:b04:tamper','p1','ChapterCandidate','CHAPTER','chap:one',1,'m0a.artifact.v1','CANDIDATE',?1,'{}',?2)", libsql_rusqlite::params!["a".repeat(64), NOW])
         .unwrap();
