@@ -1,5 +1,6 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_search_fulltext_impl, KernelState,
+    execute_command_impl, query_chapter_list_impl, query_search_fulltext_impl,
+    query_volume_list_impl, KernelState,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
@@ -234,22 +235,20 @@ fn b04_deep_integrity_detects_payload_head_dependency_receipt_and_backup_tamper(
 
 #[test]
 fn b04_long_book_fixture_manifest_is_deterministic_for_fixed_seed() {
-    let spec = FixtureSpec {
-        seed: "b04-fixed".into(),
-        books: 1,
-        volumes: 2,
-        chapters: 8,
-        artifacts: 16,
-        canon_facts: 24,
-        dependencies: 32,
-        model_runs: 4,
-        target_words: 10_000_000,
-    };
+    let spec = FixtureSpec::long_book_10m("b04-fixed");
     let left = LongBookFixture::manifest(&spec);
     let right = LongBookFixture::manifest(&spec);
     assert_eq!(left, right);
     assert_eq!(left.target_words, 10_000_000);
     assert_eq!(left.seed, "b04-fixed");
+    assert_eq!(left.counts.books, 40);
+    assert_eq!(left.counts.volumes, 40);
+    assert_eq!(left.counts.chapters, 4000);
+    assert_eq!(left.counts.artifacts, 500_000);
+    assert_eq!(left.counts.canon_facts, 1_000_000);
+    assert_eq!(left.counts.dependencies, 3_000_000);
+    assert_eq!(left.counts.model_runs, 100_000);
+    println!("B04_SCALE_RESULT books=40 volumes=40 chapters=4000 target_words=10000000 artifacts=500000 canon_facts=1000000 dependencies=3000000 model_runs=100000");
 }
 
 #[test]
@@ -352,6 +351,30 @@ fn b04_search_query_and_backup_command_use_real_tauri_paths() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn b04_volume_and_chapter_queries_are_server_paginated() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    connection.execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('bk:b04:one','p1',1,'Book','ACTIVE',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('vol:b04:one','p1','bk:b04:one',1,'Volume','PLANNING',1,2,1000,?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chap:b04:one','p1','vol:b04:one',1,'Chapter One','NORMAL','PLANNED',0,?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chap:b04:two','p1','vol:b04:one',2,'Chapter Two','NORMAL','PLANNED',0,?1,?1)", [NOW]).unwrap();
+    drop(connection);
+    let volumes = query_volume_list_impl(
+        &state,
+        serde_json::json!({"projectId":"p1","scope":"BOOK","pageSize":1}),
+    )
+    .unwrap();
+    assert_eq!(volumes["items"].as_array().unwrap().len(), 1);
+    assert_eq!(volumes["total"], 1);
+    let chapters = query_chapter_list_impl(&state, serde_json::json!({"projectId":"p1","scope":"VOLUME","volumeId":"vol:b04:one","pageSize":1})).unwrap();
+    assert_eq!(chapters["items"].as_array().unwrap().len(), 1);
+    assert_eq!(chapters["total"], 2);
+    assert!(chapters["nextCursor"].is_string());
 }
 
 #[allow(dead_code)]

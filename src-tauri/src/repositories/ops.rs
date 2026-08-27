@@ -1,6 +1,7 @@
 use crate::commit::CommitService;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Instant;
@@ -535,6 +536,22 @@ pub struct FixtureSpec {
     pub target_words: u64,
 }
 
+impl FixtureSpec {
+    pub fn long_book_10m(seed: impl Into<String>) -> Self {
+        Self {
+            seed: seed.into(),
+            books: 40,
+            volumes: 40,
+            chapters: 4000,
+            artifacts: 500_000,
+            canon_facts: 1_000_000,
+            dependencies: 3_000_000,
+            model_runs: 100_000,
+            target_words: 10_000_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixtureManifest {
     pub seed: String,
@@ -720,6 +737,172 @@ impl PerformanceHarness {
             reference_hardware: std::env::consts::ARCH.into(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionPage {
+    pub items: Vec<serde_json::Value>,
+    pub next_cursor: Option<String>,
+    pub total: i64,
+}
+
+pub fn volume_page(
+    connection: &Connection,
+    project_id: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ProjectionPage, OpsError> {
+    if !(1..=100).contains(&limit) {
+        return Err(OpsError::InvalidPageRequest);
+    }
+    let after = cursor.unwrap_or("");
+    let total: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM volumes WHERE project_id=?1",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT volume_id, volume_no, title, status, chapter_start, chapter_end, target_words, updated_at FROM volumes WHERE project_id=?1 AND volume_id>?2 ORDER BY volume_id LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, after, (limit + 1) as i64],
+        |row| {
+            let volume_id: String = row.get(0)?;
+            let chapter_start: i64 = row.get(4)?;
+            let chapter_end: i64 = row.get(5)?;
+            let committed: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND volume_id=?2 AND status='COMMITTED'",
+                libsql_rusqlite::params![project_id, volume_id],
+                |count| count.get(0),
+            )?;
+            let words: i64 = connection.query_row(
+                "SELECT COALESCE(SUM(word_count),0) FROM chapters WHERE project_id=?1 AND volume_id=?2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |count| count.get(0),
+            )?;
+            Ok((
+                volume_id,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                chapter_start,
+                chapter_end,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                committed,
+                words,
+            ))
+        },
+    )?;
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = if rows.len() > limit {
+        Some(rows[limit - 1].0.clone())
+    } else {
+        None
+    };
+    rows.truncate(limit);
+    let items = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                number,
+                title,
+                status,
+                start,
+                end,
+                target_words,
+                updated_at,
+                committed,
+                words,
+            )| {
+                let planned = (end - start + 1).max(0);
+                json!({
+                    "id": id,
+                    "number": number,
+                    "title": title,
+                    "status": status,
+                    "chapterStart": start,
+                    "chapterEnd": end,
+                    "committedChapters": committed,
+                    "plannedChapters": planned,
+                    "wordCount": words,
+                    "targetWords": target_words,
+                    "progress": if planned == 0 { 0.0 } else { committed as f64 / planned as f64 },
+                    "goal": "",
+                    "health": "healthy",
+                    "updatedAt": updated_at
+                })
+            },
+        )
+        .collect();
+    Ok(ProjectionPage {
+        items,
+        next_cursor,
+        total,
+    })
+}
+
+pub fn chapter_page(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<ProjectionPage, OpsError> {
+    if !(1..=100).contains(&limit) {
+        return Err(OpsError::InvalidPageRequest);
+    }
+    let after = cursor.unwrap_or("");
+    let total: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND volume_id=?2",
+        libsql_rusqlite::params![project_id, volume_id],
+        |row| row.get(0),
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT chapter_id, chapter_no, title, status, word_count, final_version, updated_at FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_id>?3 ORDER BY chapter_id LIMIT ?4",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, volume_id, after, (limit + 1) as i64],
+        |row| {
+            let id: String = row.get(0)?;
+            let status: String = row.get(3)?;
+            let version: Option<i64> = row.get(5)?;
+            Ok((
+                id,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                if status == "COMMITTED" {
+                    "official"
+                } else {
+                    "producing"
+                }
+                .to_string(),
+                row.get::<_, i64>(4)?,
+                version.map(|value| format!("v{value}")),
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )?;
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let next_cursor = if rows.len() > limit {
+        Some(rows[limit - 1].0.clone())
+    } else {
+        None
+    };
+    rows.truncate(limit);
+    let items = rows
+        .into_iter()
+        .map(|(id, number, title, status, word_count, version, updated_at)| {
+            json!({"id":id,"volumeId":volume_id,"number":number,"title":title,"status":status,"version":version.unwrap_or_default(),"wordCount":word_count,"updatedAt":updated_at})
+        })
+        .collect();
+    Ok(ProjectionPage {
+        items,
+        next_cursor,
+        total,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3,7 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
-use crate::repositories::ops::SearchService;
+use crate::repositories::ops::{chapter_page, volume_page, SearchService};
 use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -346,6 +346,49 @@ pub fn query_search_fulltext_impl(state: &KernelState, request: Value) -> Result
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
             SearchService::search(connection, project_id, text, cursor, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                .and_then(|page| {
+                    serde_json::to_value(page)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_volume_list_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            volume_page(connection, project_id, cursor, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                .and_then(|page| {
+                    serde_json::to_value(page)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_chapter_list_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let volume_id = required_string(&request, "volumeId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            chapter_page(connection, project_id, volume_id, cursor, limit)
                 .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
                 .and_then(|page| {
                     serde_json::to_value(page)
@@ -842,6 +885,24 @@ pub fn search_fulltext(state: State<'_, KernelState>, request: Value) -> Result<
 }
 
 #[tauri::command]
+pub fn query_volume_list(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_volume_list_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_reader_volumes(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_volume_list_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_chapter_list(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_chapter_list_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -878,6 +939,9 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_project_library,
         query_project_overview,
         search_fulltext,
+        query_volume_list,
+        query_reader_volumes,
+        query_chapter_list,
         execute_command,
         query_global_settings,
         test_provider,
