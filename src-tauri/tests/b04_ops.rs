@@ -5,7 +5,7 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
     deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService,
-    FixtureSpec, LongBookFixture, SearchDocument, SearchService,
+    FixtureSpec, LongBookFixture, PerformanceHarness, SearchDocument, SearchService,
 };
 use libsql_rusqlite::Connection;
 use tempfile::tempdir;
@@ -17,6 +17,52 @@ fn project() -> (tempfile::TempDir, ProjectManager, ProjectHandle) {
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p1", "B04", NOW).unwrap();
     (temp, manager, connection)
+}
+
+#[test]
+fn b04_fixture_materializes_deterministic_rows_and_reports_counts() {
+    let (_temp, _manager, connection) = project();
+    let spec = FixtureSpec {
+        seed: "materialize-fixed".into(),
+        books: 1,
+        volumes: 1,
+        chapters: 4,
+        artifacts: 3,
+        canon_facts: 5,
+        dependencies: 7,
+        model_runs: 2,
+        target_words: 10_000_000,
+    };
+    let manifest = LongBookFixture::materialize(&connection, &spec, NOW).unwrap();
+    assert_eq!(manifest.counts.chapters, 4);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM books WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM chapters WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 4);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_runs WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 2);
+}
+
+#[test]
+fn b04_performance_harness_reports_search_percentiles() {
+    let (_temp, _manager, connection) = project();
+    for index in 0..20 {
+        SearchService::index_document(
+            &connection,
+            &SearchDocument {
+                project_id: "p1".into(),
+                doc_id: format!("doc:perf:{index}"),
+                chapter_id: None,
+                volume_id: None,
+                title: format!("性能样本 {index}"),
+                body: "固定性能查询样本 灯火".into(),
+                kind: "CHAPTER".into(),
+            },
+            NOW,
+        )
+        .unwrap();
+    }
+    let report = PerformanceHarness::measure_search(&connection, "p1", "灯火", 20).unwrap();
+    assert_eq!(report.samples, 20);
+    assert!(report.p50_ms >= 0.0);
+    assert!(report.p95_ms >= report.p50_ms);
 }
 
 #[test]
