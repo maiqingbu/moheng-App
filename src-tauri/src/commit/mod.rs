@@ -340,6 +340,12 @@ impl CommitService {
             committed_at,
             fallback_artifact,
         )?;
+        crate::repositories::ops::SearchService::reconcile_in_transaction(
+            connection,
+            &bundle.project_id,
+            committed_at,
+        )
+        .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
         let after = before + 1;
         let updated = connection.execute(
             "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",

@@ -2,6 +2,7 @@ use ai_novel_production_system_core::commands::{
     execute_command_impl, query_chapter_list_impl, query_search_fulltext_impl,
     query_volume_list_impl, KernelState,
 };
+use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
@@ -92,10 +93,25 @@ fn b04_performance_harness_reports_search_percentiles() {
     assert_eq!(report.samples, 20);
     assert!(report.p50_ms >= 0.0);
     assert!(report.p95_ms >= report.p50_ms);
+    assert!(report.p95_ms <= 1_000.0);
     println!(
         "B04_PERF_RESULT samples={} p50_ms={:.6} p95_ms={:.6}",
         report.samples, report.p50_ms, report.p95_ms
     );
+}
+
+#[test]
+fn b04_performance_harness_measures_and_enforces_all_prd_operations() {
+    let (_temp, _manager, connection) = project();
+    let reports = PerformanceHarness::measure_standard(&connection, "p1", 5).unwrap();
+    assert_eq!(reports.len(), 7);
+    PerformanceHarness::assert_thresholds(&reports).unwrap();
+    for report in reports {
+        println!(
+            "B04_PERF_OPERATION operation={} samples={} p50_ms={:.6} p95_ms={:.6}",
+            report.operation, report.samples, report.p50_ms, report.p95_ms
+        );
+    }
 }
 
 #[test]
@@ -122,6 +138,70 @@ fn b04_migration_creates_fts_and_runtime_ops_authority_tables() {
             "missing B04 table {table}"
         );
     }
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM migration_history WHERE version=6",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1,
+        "M0E migration must be recorded as version 6"
+    );
+}
+
+#[test]
+fn b04_fts_reconcile_is_incremental_projection_maintenance() {
+    let (_temp, _manager, connection) = project();
+    SearchService::reconcile(&connection, "p1", NOW).unwrap();
+    SearchService::reconcile(&connection, "p1", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM search_documents WHERE project_id='p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn b04_commit_updates_search_projection_inside_the_same_transaction() {
+    let (_temp, _manager, connection) = project();
+    let payload = serde_json::json!({"body":"增量生产路径 灯火"});
+    let hash = ai_novel_production_system_core::hash::sha256_canonical(&payload).unwrap();
+    let bundle = serde_json::from_value(serde_json::json!({
+        "commitId":"b04-fts-commit",
+        "projectId":"p1",
+        "commandId":"b04-fts-command",
+        "idempotencyKey":"b04-fts-key",
+        "expectedProjectRevision":0,
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[{
+            "artifactId":"review:b04:fts",
+            "projectId":"p1",
+            "artifactType":"ReviewReport",
+            "scope":{"level":"PROJECT"},
+            "version":1,
+            "schemaVersion":"m0a.artifact.v1",
+            "artifactStatus":"CANDIDATE",
+            "payload":payload,
+            "payloadHash":hash,
+            "dependencyRefs":[],
+            "provenance":{"createdBy":"b04-test","commandId":"b04-fts-command"},
+            "createdAt":NOW
+        }],
+        "receiptDraft":{"domain":"b04"}
+    }))
+    .unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
+    let page = SearchService::search(&connection, "p1", "增量", None, 10).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].doc_id, "artifact:review:b04:fts:1");
 }
 
 #[test]
@@ -231,6 +311,23 @@ fn b04_deep_integrity_detects_payload_head_dependency_receipt_and_backup_tamper(
         "B04_INTEGRITY_RESULT failures={} status=FAIL_CLOSED",
         report.failures.len()
     );
+}
+
+#[test]
+fn b04_deep_integrity_rejects_a_dependency_with_a_missing_typed_source() {
+    let (_temp, _manager, connection) = project();
+    connection
+        .execute(
+            "INSERT INTO dependency_edges(edge_id, project_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash, created_by, created_at) VALUES ('edge:b04:missing','p1','fact:missing','p1','CANON_FACT','PROJECT','HARD',?1,'test',?2)",
+            libsql_rusqlite::params!["a".repeat(64), NOW],
+        )
+        .unwrap();
+    let report = deep_integrity_check(&connection, "p1", NOW).unwrap();
+    assert!(!report.ok);
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure == "DEPENDENCY_SOURCE_REF_MISSING"));
 }
 
 #[test]
@@ -351,6 +448,63 @@ fn b04_search_query_and_backup_command_use_real_tauri_paths() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn b04_backup_restore_is_a_formal_verified_command_with_receipt() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','restore-proof','before',?1)",
+            [NOW],
+        )
+        .unwrap();
+    let backup = temp.path().join("projects/p1/backups/formal.db");
+    let manifest =
+        BackupService::create_snapshot(&connection, &backup, "p1", "2026-08-27T00:01:00Z").unwrap();
+    connection
+        .execute("UPDATE project_settings SET setting_value='mutated' WHERE project_id='p1' AND setting_key='restore-proof'", [])
+        .unwrap();
+    drop(connection);
+    let receipt = execute_command_impl(
+        &state,
+        serde_json::json!({
+            "type":"backup_restore",
+            "commandId":"b04-restore",
+            "idempotencyKey":"b04-restore-key",
+            "projectId":"p1",
+            "expectedRevision":0,
+            "requestedAt":"2026-08-27T00:02:00Z",
+            "payload":{"backupName":"formal.db","checksumSha256":manifest.checksum_sha256}
+        }),
+    )
+    .unwrap();
+    assert_eq!(receipt["finalStatus"], "committed");
+    let restored = state.manager.open("p1", "B04", NOW).unwrap();
+    assert_eq!(
+        restored
+            .query_row::<String, _, _>(
+                "SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='restore-proof'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "before"
+    );
+    assert_eq!(
+        restored
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM project_command_receipts WHERE project_id='p1' AND command_type='backup_restore'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    println!("B04_RESTORE_WORKFLOW_RESULT maintenance=PASS checksum=PASS quick_check=PASS foreign_key_check=PASS deep_integrity=PASS receipt=PASS");
 }
 
 #[test]

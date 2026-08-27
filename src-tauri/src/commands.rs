@@ -862,6 +862,48 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 .map_err(|error| error.to_string())?;
             Ok(project_command_response(&outcome_receipt(outcome)))
         }
+        "backup_restore" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                return Ok(replayed);
+            }
+            let backup_name = request
+                .pointer("/payload/backupName")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "IPC_INVALID:payload.backupName".to_string())?;
+            let checksum = request
+                .pointer("/payload/checksumSha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "IPC_INVALID:payload.checksumSha256".to_string())?;
+            if backup_name.contains('/') || backup_name.contains('\\') || backup_name.is_empty() {
+                return Err("IPC_INVALID:payload.backupName".to_string());
+            }
+            let backup_path = state
+                .paths
+                .project_dir(id)
+                .map_err(|error| error.to_string())?
+                .join("backups")
+                .join(backup_name);
+            let outcome = state
+                .manager
+                .restore_backup(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    &backup_path,
+                    checksum,
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(project_command_response(&outcome_receipt(outcome)))
+        }
         _ => Err(format!("IPC_UNSUPPORTED:{command_type}")),
     }
 }

@@ -193,7 +193,7 @@ impl ProjectManager {
                 migrate_project(&connection, project_id, title, now)?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
-                crate::repositories::ops::SearchService::rebuild(&connection, project_id, now)
+                crate::repositories::ops::SearchService::reconcile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 quick_check(&connection)?;
                 // Flush WAL into the main DB and close so rename yields a
@@ -295,7 +295,7 @@ impl ProjectManager {
             record_runtime_profile(&connection, project_id, now).map_err(|error| {
                 ManagerError::Database(DatabaseError::Integrity(error.to_string()))
             })?;
-            crate::repositories::ops::SearchService::rebuild(&connection, project_id, now)
+            crate::repositories::ops::SearchService::reconcile(&connection, project_id, now)
                 .map_err(|error| {
                     ManagerError::Database(DatabaseError::Integrity(error.to_string()))
                 })?;
@@ -499,6 +499,87 @@ impl ProjectManager {
         })
         .map_err(manager_error_from_commit);
         drop(handle);
+        result
+    }
+
+    /// Performs a formal, checksum-gated project restore. The project enters
+    /// MAINTENANCE before the old writer is closed, the staged database must
+    /// pass quick/FK/deep integrity plus identity checks, and only then is the
+    /// staged file atomically promoted and stamped with a project receipt.
+    pub fn restore_backup(
+        &self,
+        spec: ProjectCommandSpec<'_>,
+        backup_path: &Path,
+        expected_checksum: &str,
+    ) -> Result<ProjectCommandOutcome<crate::repositories::ops::RestoreReport>, ManagerError> {
+        self.acquire_writer(spec.project_id)?;
+        let result = (|| {
+            let directory = self.resolve_registered_project_path(spec.project_id)?;
+            let database = directory.join("project.db");
+            let staging = directory.join("project.db.restore.tmp");
+            let mark_ready = || -> Result<(), ManagerError> {
+                let connection = open_connection(&database, false)?;
+                connection.execute(
+                    "UPDATE project_meta SET maintenance_state='READY', updated_at=?1 WHERE project_id=?2",
+                    libsql_rusqlite::params![spec.now, spec.project_id],
+                )?;
+                Ok(())
+            };
+            {
+                let connection = open_connection(&database, false)?;
+                connection.execute(
+                    "UPDATE project_meta SET maintenance_state='MAINTENANCE', updated_at=?1 WHERE project_id=?2",
+                    libsql_rusqlite::params![spec.now, spec.project_id],
+                )?;
+            }
+            if staging.exists() {
+                std::fs::remove_file(&staging)?;
+            }
+            let report = match crate::repositories::ops::BackupService::restore_verified(
+                backup_path,
+                &staging,
+                expected_checksum,
+                spec.project_id,
+                spec.now,
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    let _ = mark_ready();
+                    let _ = std::fs::remove_file(&staging);
+                    return Err(ManagerError::ProjectCommand(error.to_string()));
+                }
+            };
+            let outcome = (|| -> Result<_, ManagerError> {
+                let connection = open_connection(&staging, false)?;
+                connection.execute(
+                    "UPDATE project_meta SET maintenance_state='READY', updated_at=?1 WHERE project_id=?2",
+                    libsql_rusqlite::params![spec.now, spec.project_id],
+                )?;
+                let outcome =
+                    CommitService::commit_project_command(
+                        &connection,
+                        spec,
+                        |_| Ok(report.clone()),
+                    )
+                    .map_err(manager_error_from_commit)?;
+                let _ = connection
+                    .execute_batch("PRAGMA wal_checkpoint(FULL); PRAGMA journal_mode = DELETE;");
+                drop(connection);
+                std::fs::rename(&database, database.with_extension("db.pre-restore"))?;
+                if let Err(error) = std::fs::rename(&staging, &database) {
+                    let _ = std::fs::rename(database.with_extension("db.pre-restore"), &database);
+                    return Err(error.into());
+                }
+                let _ = std::fs::remove_file(database.with_extension("db.pre-restore"));
+                Ok(outcome)
+            })();
+            if outcome.is_err() {
+                let _ = std::fs::remove_file(&staging);
+                let _ = mark_ready();
+            }
+            outcome
+        })();
+        self.release_writer(spec.project_id);
         result
     }
 

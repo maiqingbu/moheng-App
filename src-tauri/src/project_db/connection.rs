@@ -36,7 +36,7 @@ pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, Datab
         connection.execute_batch("PRAGMA query_only = ON;")?;
     } else {
         connection.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 1000;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 1000; PRAGMA mmap_size = 268435456;",
         )?;
     }
     Ok(connection)
@@ -89,9 +89,9 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    // A project is up to date only when both the authority migration (v2), the
-    // project-command migration (v3) and the long-term authority migration (v4)
-    // have been applied.
+    // A project is up to date only when every numbered project migration has
+    // been recorded. The SQL is replay-safe, but the history is the authority
+    // used by ProjectManager to decide whether an upgrade backup is required.
     let applied_v3: Option<i64> = connection
         .query_row(
             "SELECT version FROM migration_history WHERE version = 3",
@@ -113,7 +113,18 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    Ok(applied.is_none() || applied_v3.is_none() || applied_v4.is_none() || applied_v5.is_none())
+    let applied_v6: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 6",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(applied.is_none()
+        || applied_v3.is_none()
+        || applied_v4.is_none()
+        || applied_v5.is_none()
+        || applied_v6.is_none())
 }
 
 pub fn migrate_project(
@@ -143,6 +154,10 @@ pub fn migrate_project(
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (5, ?1)",
+            [now],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (6, ?1)",
             [now],
         )?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;

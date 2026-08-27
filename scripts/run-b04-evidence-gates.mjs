@@ -33,13 +33,40 @@ for (const [name, command, logName] of commands) {
   logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
 }
+const targetedLog = logs.get('b04_targeted_test.log') ?? ''
+const scaleCommand = process.env.B04_RUN_SCALE === '1'
+  ? ['long_book_materialization', 'cargo test --manifest-path src-tauri/Cargo.toml --test b04_scale -- --ignored --nocapture', 'b04_scale_materialization.log']
+  : null
+if (scaleCommand) {
+  const [name, command, logName] = scaleCommand
+  const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env: { ...process.env, B04_EVIDENCE_DIR: evidence } })
+  const content = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1
+  logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
+  results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
+} else {
+  results.push({ name: 'long_book_materialization', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
+}
+const requiredOperations = {
+  project_overview: 2000, volume_list: 300, chapter_list: 300, canon_current: 250,
+  adjacency: 500, normal_commit: 1000, recovery_readable: 10000
+}
+const operationMarkers = [...targetedLog.matchAll(/B04_PERF_OPERATION operation=([a-z_]+) samples=(\d+) p50_ms=([0-9.]+) p95_ms=([0-9.]+)/g)]
+const performanceEvidenceValid = Object.entries(requiredOperations).every(([operation, threshold]) => {
+  const marker = operationMarkers.find(item => item[1] === operation)
+  return marker && Number(marker[2]) > 0 && Number(marker[4]) <= threshold
+})
+const restoreEvidenceValid = /B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .*checksum=PASS .*quick_check=PASS .*foreign_key_check=PASS .*deep_integrity=PASS .*receipt=PASS/.test(targetedLog)
+const targetedGate = results.find(item => item.name === 'b04_targeted')
+if (targetedGate && (!performanceEvidenceValid || !restoreEvidenceValid)) {
+  targetedGate.status = 'FAIL'; targetedGate.exitCode = 1
+}
 for (const path of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
   try { execFileSync('git', ['restore', '--source', before.commit, '--', path], { cwd: root, stdio: 'ignore' }) } catch { results.push({ name: 'b01_frozen_evidence', status: 'FAIL', exitCode: 1, blocking: true, log: 'gate-results.json' }) }
 }
 const aliases = [
   ['b01_regression', 'cargo_all_targets'], ['b02_regression', 'cargo_all_targets'], ['b03_regression', 'cargo_all_targets'],
   ['sqlite_integrity', 'cargo_all_targets'], ['fts5', 'b04_targeted'], ['sqlite_runtime_profile', 'b04_targeted'],
-  ['wal_vacuum', 'b04_targeted'], ['backup_restore', 'b04_targeted'], ['deep_integrity', 'b04_targeted'],
+  ['wal_vacuum', 'b04_targeted'], ['backup_restore', 'b04_targeted'], ['restore_workflow', 'b04_targeted'], ['deep_integrity', 'b04_targeted'],
   ['long_book_fixture', 'b04_targeted'], ['performance', 'b04_targeted']
 ]
 for (const [name, source] of aliases) { const gate = results.find(item => item.name === source); results.push({ name, command: gate.command, exitCode: gate.exitCode, status: gate.status, blocking: true, log: gate.log }) }

@@ -10,7 +10,8 @@ export const REQUIRED_BLOCKING_GATES = [
   'architecture', 'module_boundary', 'm0a', 'b01_regression', 'b02_regression',
   'b03_regression', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets',
   'b04_targeted', 'sqlite_integrity', 'fts5', 'sqlite_runtime_profile', 'wal_vacuum',
-  'backup_restore', 'deep_integrity', 'long_book_fixture', 'performance', 'git_binding'
+  'backup_restore', 'restore_workflow', 'deep_integrity', 'long_book_fixture', 'long_book_materialization',
+  'performance', 'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {

@@ -17,6 +17,12 @@ test('B04 acceptance fails when a required gate is missing', () => {
   assert.equal(evaluateAcceptance({ gateResults: results, actualMetrics: results.metrics }).status, 'FAIL')
 })
 
+test('B04 acceptance requires the release-scale materialization gate', () => {
+  const results = passingResults()
+  results.gates = results.gates.filter(gate => gate.name !== 'long_book_materialization')
+  assert.equal(evaluateAcceptance({ gateResults: results, actualMetrics: results.metrics }).status, 'FAIL')
+})
+
 for (const gateName of ['deep_integrity', 'performance', 'git_binding']) {
   test(`B04 acceptance fails when ${gateName} fails`, () => {
     const results = passingResults()
