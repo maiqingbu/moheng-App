@@ -1114,6 +1114,7 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
         &connection,
         "p1",
         "job:222222222222222222222222",
+        "runtime-worker",
         "2026-08-27T00:02:00Z",
     )
     .unwrap();
@@ -1133,8 +1134,86 @@ fn b03_lease_renew_cancel_restart_and_resume_are_observable() {
 fn b03_resume_kernel_invariant_acquires_lease_without_command_wrapper() {
     let (_temp, _manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
-    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", NOW).unwrap();
+    DurableJobService::resume(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "runtime-worker",
+        NOW,
+    )
+    .unwrap();
     assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM job_leases WHERE job_id='job:111111111111111111111111' AND released_at IS NULL", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn b03_unknown_chain_resolves_each_old_reservation_at_decision_time() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:unknown-chain", 6, 0, 100);
+    let run1 = budgeted_model_spec("mr:303030303030303030303030", "budget:unknown-chain", 5);
+    let mut timeout1 = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout1, &run1, NOW).is_err());
+    let run2 = budgeted_model_spec("mr:313131313131313131313131", "budget:unknown-chain", 5);
+    let mut timeout2 = FakeModelTransport::failure(TransportFailure::Timeout);
+    DurableModelRunner::resolve_unknown(
+        &connection,
+        &run1.model_run_id,
+        "RETRY_REMOTE",
+        &mut timeout2,
+        &run2,
+        NOW,
+    )
+    .unwrap_err();
+    let run3 = budgeted_model_spec("mr:323232323232323232323232", "budget:unknown-chain", 5);
+    let mut success3 = FakeModelTransport::success(json!({"draft":"chain-success"}));
+    DurableModelRunner::resolve_unknown(
+        &connection,
+        &run2.model_run_id,
+        "RETRY_REMOTE",
+        &mut success3,
+        &run3,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(success3.send_calls(), 1);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM budget_reservations WHERE budget_ref='budget:unknown-chain' AND status='OVER_LIMIT'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome IN ('OPEN','PENDING')", [], |row| row.get(0)).unwrap(), 0);
+    let run4 = budgeted_model_spec("mr:333333333333333333333333", "budget:unknown-chain", 5);
+    let mut success4 = FakeModelTransport::success(json!({"draft":"after-chain"}));
+    DurableModelRunner::execute(&connection, &mut success4, &run4, NOW).unwrap();
+    assert_eq!(success4.send_calls(), 1);
+}
+
+#[test]
+fn b03_mark_failed_and_cancel_resolve_unknown_reservations_without_orphans() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:unknown-actions", 6, 0, 100);
+    let first = budgeted_model_spec("mr:343434343434343434343434", "budget:unknown-actions", 5);
+    let mut timeout = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout, &first, NOW).is_err());
+    let second = budgeted_model_spec("mr:353535353535353535353535", "budget:unknown-actions", 5);
+    let mut retry_timeout = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::resolve_unknown(&connection, &first.model_run_id, "RETRY_REMOTE", &mut retry_timeout, &second, NOW).is_err());
+    DurableModelRunner::resolve_unknown::<FakeModelTransport>(&connection, &second.model_run_id, "MARK_FAILED", &mut FakeModelTransport::success(json!({})), &second, NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM budget_reservations WHERE budget_ref='budget:unknown-actions' AND status='OVER_LIMIT'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<String, _, _>("SELECT outcome FROM decisions WHERE source_ref='mr:353535353535353535353535'", [], |row| row.get(0)).unwrap(), "MARK_FAILED");
+}
+
+#[test]
+fn b03_resume_enforces_lease_holder_ownership_and_expired_reclaim() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(&connection, "p1", "job:111111111111111111111111", "PAUSED", NOW).unwrap();
+    DurableJobService::acquire_lease(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:05:00Z", NOW).unwrap();
+    assert!(matches!(DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-b", "2026-08-27T00:01:00Z"), Err(RuntimeError::LeaseHeld)));
+    assert_eq!(connection.query_row::<String, _, _>("SELECT status FROM jobs WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "PAUSED");
+    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:01:00Z").unwrap();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "worker-a");
+    DurableJobService::pause(&connection, "p1", "job:111111111111111111111111", "2026-08-27T00:01:00Z").unwrap();
+    DurableJobService::acquire_lease(&connection, "p1", "job:111111111111111111111111", "worker-a", "2026-08-27T00:02:00Z", "2026-08-27T00:01:00Z").unwrap();
+    DurableJobService::resume(&connection, "p1", "job:111111111111111111111111", "worker-b", "2026-08-27T00:03:00Z").unwrap();
+    assert_eq!(connection.query_row::<String, _, _>("SELECT holder FROM job_leases WHERE job_id='job:111111111111111111111111'", [], |row| row.get(0)).unwrap(), "worker-b");
 }
 
 #[test]
