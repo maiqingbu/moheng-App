@@ -1,8 +1,8 @@
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
-    deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService, FixtureSpec,
-    LongBookFixture, SearchDocument, SearchService,
+    deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService,
+    FixtureSpec, LongBookFixture, SearchDocument, SearchService,
 };
 use libsql_rusqlite::Connection;
 use tempfile::tempdir;
@@ -77,14 +77,8 @@ fn b04_search_uses_fts_and_server_side_cursor_pagination() {
     assert_eq!(first.items.len(), 1);
     assert_eq!(first.total, 2);
     assert!(first.next_cursor.is_some());
-    let second = SearchService::search(
-        &connection,
-        "p1",
-        "灯火",
-        first.next_cursor.as_deref(),
-        1,
-    )
-    .unwrap();
+    let second =
+        SearchService::search(&connection, "p1", "灯火", first.next_cursor.as_deref(), 1).unwrap();
     assert_eq!(second.items.len(), 1);
     assert_ne!(first.items[0].doc_id, second.items[0].doc_id);
 }
@@ -103,7 +97,10 @@ fn b04_runtime_profile_is_recorded_and_deep_integrity_fails_closed_on_tamper() {
         .unwrap();
     let report = deep_integrity_check(&connection, "p1", NOW).unwrap();
     assert!(!report.ok);
-    assert!(report.failures.iter().any(|failure| failure == "ARTIFACT_PAYLOAD_HASH_MISMATCH"));
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure == "ARTIFACT_PAYLOAD_HASH_MISMATCH"));
 }
 
 #[test]
@@ -135,7 +132,10 @@ fn b04_wal_governance_and_vacuum_are_recorded_with_thresholds() {
     let database = temp.path().join("projects/p1/project.db");
     let wal = inspect_wal(&connection, &database, "p1", NOW).unwrap();
     assert!(wal.checkpointed_pages >= 0);
-    assert!(matches!(wal.threshold_state.as_str(), "SOFT" | "HARD" | "NORMAL"));
+    assert!(matches!(
+        wal.threshold_state.as_str(),
+        "SOFT" | "HARD" | "NORMAL"
+    ));
     let vacuum = run_vacuum(&connection, "p1", "CHECK", NOW).unwrap();
     assert_eq!(vacuum.mode, "CHECK");
     assert!(vacuum.page_count > 0);
@@ -153,9 +153,21 @@ fn b04_backup_restore_uses_manifest_checksum_and_rejects_tamper() {
     let restored = temp.path().join("restore/project.db");
     BackupService::restore(&backup, &restored, &manifest.checksum_sha256).unwrap();
     let restored_connection = Connection::open(&restored).unwrap();
-    assert_eq!(restored_connection.query_row::<String, _, _>("SELECT setting_value FROM project_settings WHERE setting_key='backup-proof'", [], |row| row.get(0)).unwrap(), "before");
+    assert_eq!(
+        restored_connection
+            .query_row::<String, _, _>(
+                "SELECT setting_value FROM project_settings WHERE setting_key='backup-proof'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "before"
+    );
     std::fs::write(&backup, b"tampered-backup").unwrap();
-    assert!(matches!(BackupService::restore(&backup, &restored, &manifest.checksum_sha256), Err(ai_novel_production_system_core::repositories::ops::OpsError::BackupChecksumMismatch)));
+    assert!(matches!(
+        BackupService::restore(&backup, &restored, &manifest.checksum_sha256),
+        Err(ai_novel_production_system_core::repositories::ops::OpsError::BackupChecksumMismatch)
+    ));
 }
 
 #[allow(dead_code)]
