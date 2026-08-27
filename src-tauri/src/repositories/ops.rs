@@ -805,6 +805,8 @@ pub struct VacuumReport {
     pub page_count: i64,
     pub mode: String,
     pub maintenance_required: bool,
+    pub free_disk_bytes: u64,
+    pub required_headroom: u64,
 }
 
 pub fn run_vacuum(
@@ -818,6 +820,16 @@ pub fn run_vacuum(
     }
     let freelist_before: i64 =
         connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    let database_path: String =
+        connection.query_row("PRAGMA database_list", [], |row| row.get(2))?;
+    let database_bytes = std::fs::metadata(&database_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let wal_bytes = std::fs::metadata(format!("{database_path}-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let required_headroom = database_bytes.saturating_mul(2).saturating_add(wal_bytes);
+    let free_disk_bytes = available_disk_bytes(Path::new(&database_path))?;
     if mode == "INCREMENTAL" {
         let auto_vacuum: i64 = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
         if auto_vacuum != 2 {
@@ -837,19 +849,9 @@ pub fn run_vacuum(
                 "FULL vacuum requires project maintenance mode".into(),
             ));
         }
-        let database_path: String =
-            connection.query_row("PRAGMA database_list", [], |row| row.get(2))?;
-        let database_bytes = std::fs::metadata(&database_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let wal_bytes = std::fs::metadata(format!("{database_path}-wal"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let required_headroom = database_bytes.saturating_mul(2).saturating_add(wal_bytes);
-        let available_bytes = available_disk_bytes(Path::new(&database_path))?;
-        if available_bytes < required_headroom {
+        if free_disk_bytes < required_headroom {
             return Err(OpsError::RestoreIntegrity(format!(
-                "FULL vacuum free disk preflight failed: available={available_bytes} required={required_headroom}"
+                "FULL vacuum free disk preflight failed: available={free_disk_bytes} required={required_headroom}"
             )));
         }
         connection.execute_batch("VACUUM")?;
@@ -865,6 +867,8 @@ pub fn run_vacuum(
         page_count,
         mode: mode.into(),
         maintenance_required: freelist_after > page_count / 4,
+        free_disk_bytes,
+        required_headroom,
     };
     connection.execute(
         "INSERT INTO vacuum_reports(report_id, project_id, freelist_before, freelist_after, page_count, mode, maintenance_required, created_at, report_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

@@ -27,18 +27,24 @@ const performancePass = Object.entries(requiredOperations).every(([operation, th
   return marker && Number(marker[2]) > 0 && Number(marker[4]) <= threshold
 }) && Number(performance[3]) <= 1000
 const readJson = name => JSON.parse(readFileSync(resolve(evidenceDir, name), 'utf8'))
-let scaleIntegrity; let scalePerformance; let scaleRestore; let scaleCertificationReport; let benchmarkSamples; let benchmarkEnvironment
+let scaleIntegrity; let scalePerformance; let scaleRestore; let scaleCertificationReport; let scaleFts; let singleChapter; let canonQuery; let dependencyQuery; let restoreRace; let scaleWal; let benchmarkSamples; let benchmarkEnvironment
 try {
   scaleIntegrity = readJson('long_book_scale_integrity.json')
   scalePerformance = readJson('scale_perf_p95.json')
   scaleRestore = readJson('scale_backup_restore.json')
   scaleCertificationReport = readJson('long_book_scale_certification.json')
+  scaleFts = readJson('fts_scale_queries.json')
+  singleChapter = readJson('single_chapter_perf.json')
+  canonQuery = readJson('canon_query_perf.json')
+  dependencyQuery = readJson('dependency_query_perf.json')
+  restoreRace = readJson('restore_maintenance_race.json')
+  scaleWal = readJson('scale_wal_vacuum.json')
   benchmarkSamples = readJson('scale_benchmark_samples.json')
   benchmarkEnvironment = readJson('benchmark_environment.json')
 } catch {
   throw new Error('B04 scale certification evidence files are incomplete')
 }
-if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !upgrade || !scaleCertification || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
+if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !upgrade || !scaleCertification || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scaleIntegrity.actualTextChars < 10000000 || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || scaleFts.status !== 'PASS' || scaleFts.actualTextChars < 10000000 || singleChapter.status !== 'PASS' || canonQuery.status !== 'PASS' || dependencyQuery.status !== 'PASS' || restoreRace.status !== 'PASS' || scaleWal.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
   throw new Error('B04 targeted evidence markers are incomplete')
 }
 const integrityFailures = integrityMatches.reduce((sum, match) => sum + Number(match[1]), 0)
@@ -52,6 +58,12 @@ write('integrity_tamper_cases.json', { detectedFailureCount: integrityFailures, 
 write('long_book_scale_integrity.json', scaleIntegrity)
 write('fts_incremental_scale.json', readJson('fts_incremental_scale.json'))
 write('fts_upgrade_backfill.json', { sourceChapters: Number(upgrade[1]), sourceArtifacts: Number(upgrade[2]), preProjectionDocs: Number(upgrade[3]), postProjectionDocs: Number(upgrade[4]), rebuildTriggered: upgrade[5] === 'true', secondOpenFullRebuild: upgrade[6] === 'true', projectionVersion: upgrade[7] })
+write('fts_scale_queries.json', scaleFts)
+write('single_chapter_perf.json', singleChapter)
+write('canon_query_perf.json', canonQuery)
+write('dependency_query_perf.json', dependencyQuery)
+write('restore_maintenance_race.json', restoreRace)
+write('scale_wal_vacuum.json', scaleWal)
 write('scale_perf_p95.json', scalePerformance)
 write('scale_backup_restore.json', scaleRestore)
 write('long_book_scale_certification.json', scaleCertificationReport)

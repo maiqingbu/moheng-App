@@ -403,6 +403,19 @@ impl ProjectManager {
             .lock()
             .map_err(|_| ManagerError::WriterLockPoisoned)?;
         let connection = pool.acquire(project_id, &database)?;
+        let maintenance_state: String = connection
+            .query_row(
+                "SELECT maintenance_state FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .map_err(ManagerError::Sqlite)?;
+        if maintenance_state != "READY" {
+            pool.release(project_id, connection);
+            return Err(ManagerError::ProjectCommand(
+                "RETRYABLE_MAINTENANCE_ERROR: project database is not ready".into(),
+            ));
+        }
         drop(maintenance);
         Ok(ReadLease {
             project_id: project_id.to_string(),
@@ -574,11 +587,19 @@ impl ProjectManager {
                 Ok(())
             };
             {
+                let connection = open_connection(&database, false)?;
+                connection.execute(
+                    "UPDATE project_meta SET maintenance_state='MAINTENANCE', updated_at=?1 WHERE project_id=?2",
+                    libsql_rusqlite::params![spec.now, spec.project_id],
+                )?;
+            }
+            {
                 let pool = self
                     .read_pool
                     .lock()
                     .map_err(|_| ManagerError::WriterLockPoisoned)?;
                 if pool.checked_out_len(spec.project_id) != 0 {
+                    let _ = mark_ready();
                     return Err(ManagerError::ProjectCommand(
                         "READ_POOL_BUSY: restore requires all read leases to drain".into(),
                     ));
@@ -588,13 +609,6 @@ impl ProjectManager {
                 .lock()
                 .map_err(|_| ManagerError::WriterLockPoisoned)?
                 .invalidate_project(spec.project_id);
-            {
-                let connection = open_connection(&database, false)?;
-                connection.execute(
-                    "UPDATE project_meta SET maintenance_state='MAINTENANCE', updated_at=?1 WHERE project_id=?2",
-                    libsql_rusqlite::params![spec.now, spec.project_id],
-                )?;
-            }
             if staging.exists() {
                 std::fs::remove_file(&staging)?;
             }
