@@ -647,6 +647,21 @@ impl ProjectManager {
                     let _ = std::fs::rename(database.with_extension("db.pre-restore"), &database);
                     return Err(error.into());
                 }
+                let ready = open_connection(&database, false)?;
+                ready.execute(
+                    "UPDATE project_meta SET maintenance_state='READY', updated_at=?1 WHERE project_id=?2",
+                    libsql_rusqlite::params![spec.now, spec.project_id],
+                )?;
+                let state: String = ready.query_row(
+                    "SELECT maintenance_state FROM project_meta WHERE project_id=?1",
+                    [spec.project_id],
+                    |row| row.get(0),
+                )?;
+                if state != "READY" {
+                    return Err(ManagerError::ProjectCommand(
+                        "RESTORE_NOT_READY_AFTER_REPLACE".into(),
+                    ));
+                }
                 let _ = std::fs::remove_file(database.with_extension("db.pre-restore"));
                 Ok(outcome)
             })();
