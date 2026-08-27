@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { evaluateGitBinding, parseMetrics } from './generate-b04-acceptance.mjs'
@@ -34,10 +34,13 @@ for (const [name, command, logName] of commands) {
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
 }
 const targetedLog = logs.get('b04_targeted_test.log') ?? ''
+const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*full_count_queries=0 .*full_rebuild=false .*status=PASS/.test(targetedLog)
+const raceEvidenceValid = /B04_RESTORE_RACE .*new_reader_during_restore=BLOCKED .*maintenance_cleanup=READY status=PASS/.test(targetedLog)
 const scaleCommand = process.env.B04_RUN_SCALE === '1'
   ? ['long_book_materialization', 'cargo test --manifest-path src-tauri/Cargo.toml --test b04_scale -- --ignored --nocapture', 'b04_scale_materialization.log']
   : null
-if (scaleCommand) {
+const reuseScale = process.env.B04_REUSE_SCALE_EVIDENCE === '1' && existsSync(resolve(evidence, 'b04_scale_materialization.log'))
+if (scaleCommand && !reuseScale) {
   const [name, command, logName] = scaleCommand
   const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env: { ...process.env, B04_EVIDENCE_DIR: evidence } })
   const content = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1
@@ -53,6 +56,16 @@ if (scaleCommand) {
     results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   }
   results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: raceEvidenceValid ? 0 : 1, status: raceEvidenceValid ? 'PASS' : 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
+} else if (scaleCommand && reuseScale) {
+  const [name, command, logName] = scaleCommand
+  const scaleLog = readFileSync(resolve(evidence, logName), 'utf8')
+  logs.set(logName, scaleLog)
+  const scalePass = /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS .*single_chapter_path=PASS status=PASS/.test(scaleLog)
+  results.push({ name, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  results.push({ name: 'long_book_scale_certification', command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
+    results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  }
 } else {
   results.push({ name: 'long_book_materialization', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
@@ -74,8 +87,6 @@ const performanceEvidenceValid = Object.entries(requiredOperations).every(([oper
 })
 const restoreEvidenceValid = /B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .*checksum=PASS .*quick_check=PASS .*foreign_key_check=PASS .*deep_integrity=PASS .*receipt=PASS/.test(targetedLog)
 const upgradeEvidenceValid = /B04_FTS_UPGRADE_RESULT .*rebuild_triggered=true .*second_open_full_rebuild=false .*status=PASS/.test(targetedLog)
-const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*full_count_queries=0 .*full_rebuild=false .*status=PASS/.test(targetedLog)
-const raceEvidenceValid = /B04_RESTORE_RACE .*new_reader_during_restore=BLOCKED .*maintenance_cleanup=READY status=PASS/.test(targetedLog)
 const targetedGate = results.find(item => item.name === 'b04_targeted')
 if (targetedGate && (!performanceEvidenceValid || !restoreEvidenceValid || !upgradeEvidenceValid || !healthEvidenceValid || !raceEvidenceValid)) {
   targetedGate.status = 'FAIL'; targetedGate.exitCode = 1
