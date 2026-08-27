@@ -100,6 +100,7 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
                 .unwrap_or(0);
             samples.push(json!({"operation":operation,"durationMs":duration_ms,"dbSize":db_size,"walSize":wal_size,"sampleIndex":index}));
         }
+        durations.sort_by(f64::total_cmp);
         (percentile(&durations, 0.50), percentile(&durations, 0.95))
     };
     let (search_p50, search_p95) = benchmark(
@@ -189,8 +190,10 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         CommitService::commit(&connection, &commit_bundle(index, revision), &committed_at).unwrap();
         commit_durations.push(started.elapsed().as_secs_f64() * 1000.0);
     }
-    let commit_p50 = percentile(&commit_durations, 0.50);
-    let commit_p95 = percentile(&commit_durations, 0.95);
+    let mut sorted_commit_durations = commit_durations.clone();
+    sorted_commit_durations.sort_by(f64::total_cmp);
+    let commit_p50 = percentile(&sorted_commit_durations, 0.50);
+    let commit_p95 = percentile(&sorted_commit_durations, 0.95);
     assert!(search_p95 <= 1_000.0);
     assert!(overview_p95 <= 2_000.0);
     assert!(volume_p95 <= 300.0);
@@ -317,7 +320,9 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         )
         .unwrap();
     drop(handle);
-    assert!(percentile(&open_durations, 0.95) <= 10_000.0);
+    let mut sorted_open_durations = open_durations.clone();
+    sorted_open_durations.sort_by(f64::total_cmp);
+    assert!(percentile(&sorted_open_durations, 0.95) <= 10_000.0);
     assert!(post_integrity.ok);
     assert!(vacuum.page_count > 0);
     record_samples(&samples);
@@ -344,11 +349,11 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         );
         write(
             "long_book_scale_certification.json",
-            json!({"fixture":{"books":1,"volumes":40,"chapters":4000,"words":manifest.target_words,"artifacts":manifest.counts.artifacts+11,"canonFacts":manifest.counts.canon_facts,"dependencies":manifest.counts.dependencies,"modelRuns":manifest.counts.model_runs},"integrity":"PASS","ftsIncremental":"PASS","performance":"PASS","wal":"PASS","backupRestore":"PASS","readPoolRestore":"PASS","finalIntegrity":"PASS","status":"PASS","performanceP95":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&open_durations,0.95)},"performanceP50":{"fts":search_p50,"projectOverview":overview_p50,"volumeList":volume_p50,"chapterList":chapter_p50,"canonCurrent":canon_p50,"dependencyAdjacency":adjacency_p50,"commitService":commit_p50},"singleCommitMs":single_commit_ms}),
+            json!({"fixture":{"books":1,"volumes":40,"chapters":4000,"words":manifest.target_words,"artifacts":manifest.counts.artifacts+11,"canonFacts":manifest.counts.canon_facts,"dependencies":manifest.counts.dependencies,"modelRuns":manifest.counts.model_runs},"integrity":"PASS","ftsIncremental":"PASS","performance":"PASS","wal":"PASS","backupRestore":"PASS","readPoolRestore":"PASS","finalIntegrity":"PASS","status":"PASS","performanceP95":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&sorted_open_durations,0.95)},"performanceP50":{"fts":search_p50,"projectOverview":overview_p50,"volumeList":volume_p50,"chapterList":chapter_p50,"canonCurrent":canon_p50,"dependencyAdjacency":adjacency_p50,"commitService":commit_p50},"singleCommitMs":single_commit_ms}),
         );
         write(
             "scale_perf_p95.json",
-            json!({"status":"PASS","samples":samples,"p95Ms":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&open_durations,0.95)},"thresholdsMs":{"fts":1000,"projectOverview":2000,"volumeList":300,"chapterList":300,"canonCurrent":250,"dependencyAdjacency":500,"commitService":1000,"projectManagerOpen":10000}}),
+            json!({"status":"PASS","samples":samples,"p95Ms":{"fts":search_p95,"projectOverview":overview_p95,"volumeList":volume_p95,"chapterList":chapter_p95,"canonCurrent":canon_p95,"dependencyAdjacency":adjacency_p95,"commitService":commit_p95,"projectManagerOpen":percentile(&sorted_open_durations,0.95)},"thresholdsMs":{"fts":1000,"projectOverview":2000,"volumeList":300,"chapterList":300,"canonCurrent":250,"dependencyAdjacency":500,"commitService":1000,"projectManagerOpen":10000}}),
         );
         let _ = wal;
     }

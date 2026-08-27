@@ -49,6 +49,7 @@ write('wal_vacuum_report.json', { walBytes: Number(wal[1]), checkpointedPages: N
 write('backup_restore_report.json', { checksumSha256: backup[1], restored: true, tamperRejected: true, restoreMode: 'maintenance-staged-atomic', quickCheck: true, foreignKeyCheck: true, deepIntegrity: true, receipt: true })
 write('integrity_tamper_cases.json', { detectedFailureCount: integrityFailures, cases: ['ARTIFACT_PAYLOAD_HASH_MISMATCH', 'CANONICAL_HEAD_HASH_MISMATCH', 'DEPENDENCY_SOURCE_HASH_MISMATCH', 'COMMIT_RECEIPT_DIGEST_MISMATCH', 'BACKUP_CHECKSUM_MISMATCH'], failClosed: true })
 write('long_book_scale_integrity.json', scaleIntegrity)
+write('fts_incremental_scale.json', readJson('fts_incremental_scale.json'))
 write('scale_perf_p95.json', scalePerformance)
 write('scale_backup_restore.json', scaleRestore)
 write('long_book_scale_certification.json', scaleCertificationReport)
