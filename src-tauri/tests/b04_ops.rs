@@ -35,9 +35,37 @@ fn b04_fixture_materializes_deterministic_rows_and_reports_counts() {
     };
     let manifest = LongBookFixture::materialize(&connection, &spec, NOW).unwrap();
     assert_eq!(manifest.counts.chapters, 4);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM books WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM chapters WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 4);
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM model_runs WHERE project_id='p1'", [], |row| row.get(0)).unwrap(), 2);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM books WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM chapters WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p1'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        2
+    );
+    println!("B04_FIXTURE_RESULT chapters=4 artifacts=3 canon_facts=5 dependencies=7 model_runs=2 target_words=10000000");
 }
 
 #[test]
@@ -63,6 +91,10 @@ fn b04_performance_harness_reports_search_percentiles() {
     assert_eq!(report.samples, 20);
     assert!(report.p50_ms >= 0.0);
     assert!(report.p95_ms >= report.p50_ms);
+    println!(
+        "B04_PERF_RESULT samples={} p50_ms={:.6} p95_ms={:.6}",
+        report.samples, report.p50_ms, report.p95_ms
+    );
 }
 
 #[test]
@@ -150,6 +182,45 @@ fn b04_runtime_profile_is_recorded_and_deep_integrity_fails_closed_on_tamper() {
         .failures
         .iter()
         .any(|failure| failure == "ARTIFACT_PAYLOAD_HASH_MISMATCH"));
+    println!("B04_INTEGRITY_RESULT failures=1 status=FAIL_CLOSED");
+}
+
+#[test]
+fn b04_deep_integrity_detects_payload_head_dependency_receipt_and_backup_tamper() {
+    let (temp, _manager, connection) = project();
+    let payload = "{\"body\":\"stable\"}";
+    let payload_hash = ai_novel_production_system_core::hash::sha256_canonical(
+        &serde_json::json!({"body":"stable"}),
+    )
+    .unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('art:b04:integrity','p1','FixtureEvidence','PROJECT','p1',1,'m0e.fixture.v1','CANDIDATE',?1,'{}',?2)", libsql_rusqlite::params![payload_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES ('art:b04:integrity',1,?1,?2)", libsql_rusqlite::params![payload, payload_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id, artifact_type, scope_level, scope_key, artifact_id, version, payload_hash) VALUES ('p1','FixtureEvidence','PROJECT','p1','art:b04:integrity',1,?1)", ["c".repeat(64)]).unwrap();
+    connection.execute("INSERT INTO dependency_edges(edge_id, project_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash, created_by, created_at) VALUES ('edge:b04:integrity','p1','art:b04:integrity','p1','EVIDENCE','PROJECT','EVIDENCE',?1,'test',?2)", libsql_rusqlite::params!["d".repeat(64), NOW]).unwrap();
+    connection.execute("INSERT INTO commands(project_id, command_id, idempotency_key, request_digest, status, created_at) VALUES ('p1','command','key',?1,'COMMITTED',?2)", libsql_rusqlite::params!["a".repeat(64), NOW]).unwrap();
+    connection.execute("INSERT INTO commit_receipts(receipt_id, project_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_json, receipt_digest, committed_at) VALUES ('receipt:b04:integrity','p1','commit','command','key',0,1,?1,'{}',?2,?3)", libsql_rusqlite::params!["e".repeat(64), "f".repeat(64), NOW]).unwrap();
+    let backup = temp.path().join("backups/integrity.db");
+    let manifest =
+        BackupService::create(&connection, &backup, "p1", "2026-08-27T00:01:00Z").unwrap();
+    std::fs::write(backup, b"tampered").unwrap();
+    let report = deep_integrity_check(&connection, "p1", "2026-08-27T00:02:00Z").unwrap();
+    for failure in [
+        "CANONICAL_HEAD_HASH_MISMATCH",
+        "DEPENDENCY_SOURCE_HASH_MISMATCH",
+        "COMMIT_RECEIPT_DIGEST_MISMATCH",
+        "BACKUP_CHECKSUM_MISMATCH",
+    ] {
+        assert!(
+            report.failures.iter().any(|item| item == failure),
+            "missing {failure}"
+        );
+    }
+    assert!(!report.ok);
+    assert_eq!(manifest.project_id, "p1");
+    println!(
+        "B04_INTEGRITY_RESULT failures={} status=FAIL_CLOSED",
+        report.failures.len()
+    );
 }
 
 #[test]
@@ -188,6 +259,10 @@ fn b04_wal_governance_and_vacuum_are_recorded_with_thresholds() {
     let vacuum = run_vacuum(&connection, "p1", "CHECK", NOW).unwrap();
     assert_eq!(vacuum.mode, "CHECK");
     assert!(vacuum.page_count > 0);
+    println!(
+        "B04_WAL_VACUUM_RESULT wal_bytes={} checkpointed_pages={} vacuum_pages={} threshold={}",
+        wal.wal_bytes, wal.checkpointed_pages, vacuum.page_count, wal.threshold_state
+    );
 }
 
 #[test]
@@ -217,6 +292,10 @@ fn b04_backup_restore_uses_manifest_checksum_and_rejects_tamper() {
         BackupService::restore(&backup, &restored, &manifest.checksum_sha256),
         Err(ai_novel_production_system_core::repositories::ops::OpsError::BackupChecksumMismatch)
     ));
+    println!(
+        "B04_BACKUP_RESULT checksum={} restored=PASS tamper_rejected=PASS",
+        manifest.checksum_sha256
+    );
 }
 
 #[test]

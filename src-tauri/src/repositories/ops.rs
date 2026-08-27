@@ -1,3 +1,4 @@
+use crate::commit::CommitService;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -374,6 +375,46 @@ pub fn deep_integrity_check(
     if bad_heads > 0 {
         failures.push("CANONICAL_HEAD_HASH_MISMATCH".into());
     }
+    let mut dependencies = connection
+        .prepare("SELECT source_ref, source_hash FROM dependency_edges WHERE project_id=?1")?;
+    let dependency_rows = dependencies.query_map([project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for dependency in dependency_rows {
+        let (source_ref, source_hash) = dependency?;
+        let artifact_hash: Option<String> = connection
+            .query_row(
+                "SELECT payload_hash FROM artifacts WHERE project_id=?1 AND artifact_id=?2 ORDER BY version DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, source_ref],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if artifact_hash.is_some_and(|hash| hash != source_hash) {
+            failures.push("DEPENDENCY_SOURCE_HASH_MISMATCH".into());
+        }
+    }
+    let mut receipts =
+        connection.prepare("SELECT idempotency_key FROM commit_receipts WHERE project_id=?1")?;
+    let receipt_keys = receipts.query_map([project_id], |row| row.get::<_, String>(0))?;
+    for key in receipt_keys {
+        if CommitService::find_receipt(connection, project_id, &key?).is_err() {
+            failures.push("COMMIT_RECEIPT_DIGEST_MISMATCH".into());
+        }
+    }
+    let mut backups = connection
+        .prepare("SELECT backup_path, checksum_sha256 FROM backup_manifests WHERE project_id=?1")?;
+    let backup_rows = backups.query_map([project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for backup in backup_rows {
+        let (backup_path, expected_checksum) = backup?;
+        let actual_checksum = std::fs::read(&backup_path)
+            .map(|bytes| hex::encode(Sha256::digest(&bytes)))
+            .unwrap_or_default();
+        if actual_checksum != expected_checksum {
+            failures.push("BACKUP_CHECKSUM_MISMATCH".into());
+        }
+    }
     let report = IntegrityReport {
         ok: failures.is_empty(),
         failures,
@@ -531,6 +572,153 @@ impl LongBookFixture {
             },
             generator_version: "m0e.fixture.v1".into(),
         }
+    }
+
+    pub fn materialize(
+        connection: &Connection,
+        spec: &FixtureSpec,
+        now: &str,
+    ) -> Result<FixtureManifest, OpsError> {
+        if (spec.volumes > 0 || spec.chapters > 0) && spec.books == 0 {
+            return Err(OpsError::InvalidPageRequest);
+        }
+        let project_id: String =
+            connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            for index in 0..spec.books {
+                let book_id = fixture_id("bk", &spec.seed, index);
+                connection.execute(
+                    "INSERT OR IGNORE INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'PLANNING', ?5, ?5)",
+                    libsql_rusqlite::params![book_id, project_id, index + 1, format!("B04 Book {index}"), now],
+                )?;
+            }
+            for index in 0..spec.volumes {
+                let volume_id = fixture_id("vol", &spec.seed, index);
+                let book_index = index % spec.books;
+                let book_id = fixture_id("bk", &spec.seed, book_index);
+                connection.execute(
+                    "INSERT OR IGNORE INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'PLANNING', 0, 0, ?6, ?7, ?7)",
+                    libsql_rusqlite::params![volume_id, project_id, book_id, index / spec.books + 1, format!("B04 Volume {index}"), spec.target_words / spec.volumes.max(1), now],
+                )?;
+            }
+            for index in 0..spec.chapters {
+                let chapter_id = fixture_id("chap", &spec.seed, index);
+                let volume_index = index % spec.volumes.max(1);
+                let volume_id = fixture_id("vol", &spec.seed, volume_index);
+                connection.execute(
+                    "INSERT OR IGNORE INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'NORMAL', 'PLANNED', ?6, ?7, ?7)",
+                    libsql_rusqlite::params![chapter_id, project_id, volume_id, index + 1, format!("B04 Chapter {index}"), spec.target_words / spec.chapters.max(1), now],
+                )?;
+            }
+            for index in 0..spec.artifacts {
+                let artifact_id = fixture_id("art", &spec.seed, index);
+                let payload =
+                    serde_json::json!({"seed":spec.seed,"artifactIndex":index}).to_string();
+                let payload_hash = hex::encode(Sha256::digest(payload.as_bytes()));
+                connection.execute(
+                    "INSERT OR IGNORE INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at, committed_at) VALUES (?1, ?2, 'FixtureEvidence', 'PROJECT', ?3, 1, 'm0e.fixture.v1', 'CANDIDATE', ?4, '{}', ?5, NULL)",
+                    libsql_rusqlite::params![artifact_id, project_id, project_id, payload_hash, now],
+                )?;
+                connection.execute(
+                    "INSERT OR IGNORE INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1, 1, ?2, ?3)",
+                    libsql_rusqlite::params![artifact_id, payload, payload_hash],
+                )?;
+            }
+            if spec.canon_facts > 0 {
+                let entity_id = fixture_id("ent", &spec.seed, 0);
+                connection.execute(
+                    "INSERT OR IGNORE INTO canon_entities(entity_id, project_id, canonical_name, entity_type, created_at, updated_at) VALUES (?1, ?2, 'B04 Fixture Entity', 'FIXTURE', ?3, ?3)",
+                    libsql_rusqlite::params![entity_id, project_id, now],
+                )?;
+                for index in 0..spec.canon_facts {
+                    let fact_id = fixture_id("fact", &spec.seed, index);
+                    connection.execute(
+                        "INSERT OR IGNORE INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, 'fixtureValue', ?4, 'C', ?5, ?5)",
+                        libsql_rusqlite::params![fact_id, project_id, entity_id, serde_json::json!({"seed":spec.seed,"factIndex":index}).to_string(), now],
+                    )?;
+                }
+            }
+            for index in 0..spec.dependencies {
+                let edge_id = fixture_id("edge", &spec.seed, index);
+                let source_ref = if spec.artifacts > 0 {
+                    fixture_id("art", &spec.seed, index % spec.artifacts)
+                } else {
+                    project_id.clone()
+                };
+                connection.execute(
+                    "INSERT OR IGNORE INTO dependency_edges(edge_id, project_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash, created_by, created_at) VALUES (?1, ?2, ?3, ?4, 'EVIDENCE', 'PROJECT', 'EVIDENCE', ?5, 'B04_FIXTURE', ?6)",
+                    libsql_rusqlite::params![edge_id, project_id, source_ref, project_id, hex::encode(Sha256::digest(format!("{}:{index}", spec.seed).as_bytes())), now],
+                )?;
+            }
+            for index in 0..spec.model_runs {
+                let model_run_id = fixture_id("mr", &spec.seed, index);
+                connection.execute(
+                    "INSERT OR IGNORE INTO model_runs(model_run_id, project_id, provider, model, idempotency_key, capability, predicted_cost_cents, reserved_cost_cents, status, created_at, updated_at) VALUES (?1, ?2, 'fixture', 'fixture', ?3, 'fixture', 0, 0, 'COMPLETED', ?4, ?4)",
+                    libsql_rusqlite::params![model_run_id, project_id, format!("fixture:{}:{index}", spec.seed), now],
+                )?;
+            }
+            Ok::<_, OpsError>(())
+        })();
+        match result {
+            Ok(()) => connection.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+        Ok(Self::manifest(spec))
+    }
+}
+
+fn fixture_id(prefix: &str, seed: &str, index: u64) -> String {
+    let digest = hex::encode(Sha256::digest(
+        format!("{seed}:{prefix}:{index}").as_bytes(),
+    ));
+    format!("{prefix}:{}", &digest[..24])
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerformanceReport {
+    pub operation: String,
+    pub samples: usize,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub reference_hardware: String,
+}
+
+pub struct PerformanceHarness;
+
+impl PerformanceHarness {
+    pub fn measure_search(
+        connection: &Connection,
+        project_id: &str,
+        text: &str,
+        samples: usize,
+    ) -> Result<PerformanceReport, OpsError> {
+        if samples == 0 {
+            return Err(OpsError::InvalidPageRequest);
+        }
+        let mut durations = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let started = Instant::now();
+            let _ = SearchService::search(connection, project_id, text, None, 30)?;
+            durations.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        durations.sort_by(f64::total_cmp);
+        let percentile = |fraction: f64| -> f64 {
+            let index = ((durations.len() as f64 * fraction).ceil() as usize).saturating_sub(1);
+            durations[index]
+        };
+        Ok(PerformanceReport {
+            operation: "search_fulltext".into(),
+            samples,
+            p50_ms: percentile(0.50),
+            p95_ms: percentile(0.95),
+            reference_hardware: std::env::consts::ARCH.into(),
+        })
     }
 }
 
