@@ -140,6 +140,11 @@ pub fn migrate_project(
         connection.execute_batch(PROJECT_LONGTERM_MIGRATION)?;
         connection.execute_batch(M0C_COMMIT_DELTA_MIGRATION)?;
         connection.execute_batch(M0E_OPS_MIGRATION)?;
+        // Additive B04 query-coverage index. It is replay-safe and intentionally
+        // does not alter any frozen migration SQL/history.
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_b04_dependency_project_source_edge ON dependency_edges(project_id, source_ref, edge_id);",
+        )?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (2, ?1)",
             [now],

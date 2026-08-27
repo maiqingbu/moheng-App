@@ -404,6 +404,33 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
     let pooled = manager.read_connection("p1", NOW).unwrap();
     drop(pooled);
     let pre_restore_counts: (i64,i64)=manager.read_connection("p1",NOW).unwrap().query_row("SELECT (SELECT COUNT(*) FROM artifacts WHERE project_id='p1'), (SELECT COUNT(*) FROM dependency_edges WHERE project_id='p1')",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let revision_before_restore: i64 = manager
+        .read_connection("p1", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id='p1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let active_restore_reader = manager.read_connection("p1", NOW).unwrap();
+    let blocked_restore = manager.restore_backup(
+        ProjectCommandSpec {
+            project_id: "p1",
+            result_project_id: "p1",
+            command_id: "scale-restore-active-reader",
+            idempotency_key: "scale-restore-active-reader-key",
+            command_type: "backup_restore",
+            request_digest: &"c".repeat(64),
+            expected_revision: Some(revision_before_restore),
+            now: "2026-08-27T00:10:30Z",
+            advance_revision: true,
+        },
+        &backup_path,
+        &scale_backup.checksum_sha256,
+    );
+    assert!(blocked_restore.is_err());
+    drop(active_restore_reader);
     let damage = manager.open("p1", "B04 scale", NOW).unwrap();
     damage
         .execute(
