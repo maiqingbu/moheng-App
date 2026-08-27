@@ -1,8 +1,8 @@
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
-    deep_integrity_check, read_runtime_profile, FixtureSpec, LongBookFixture, SearchDocument,
-    SearchService,
+    deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService, FixtureSpec,
+    LongBookFixture, SearchDocument, SearchService,
 };
 use libsql_rusqlite::Connection;
 use tempfile::tempdir;
@@ -22,7 +22,7 @@ fn b04_migration_creates_fts_and_runtime_ops_authority_tables() {
     for table in [
         "search_documents",
         "search_documents_fts",
-        "sqlite_runtime_profiles",
+        "b04_runtime_profiles",
         "wal_governance_reports",
         "vacuum_reports",
         "backup_manifests",
@@ -96,7 +96,7 @@ fn b04_runtime_profile_is_recorded_and_deep_integrity_fails_closed_on_tamper() {
     assert!(profile.page_size > 0);
     assert_eq!(profile.busy_timeout_ms, 5000);
     connection
-        .execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('art:b04:tamper','p1','ChapterCandidate','CHAPTER','chap:one',1,'m0a.artifact.v1','CANDIDATE',?1,'{}',?2)", ["a".repeat(64), NOW])
+        .execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('art:b04:tamper','p1','ChapterCandidate','CHAPTER','chap:one',1,'m0a.artifact.v1','CANDIDATE',?1,'{}',?2)", libsql_rusqlite::params!["a".repeat(64), NOW])
         .unwrap();
     connection
         .execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES ('art:b04:tamper',1,'{\"body\":\"changed\"}',?1)", ["b".repeat(64)])
@@ -124,6 +124,38 @@ fn b04_long_book_fixture_manifest_is_deterministic_for_fixed_seed() {
     assert_eq!(left, right);
     assert_eq!(left.target_words, 10_000_000);
     assert_eq!(left.seed, "b04-fixed");
+}
+
+#[test]
+fn b04_wal_governance_and_vacuum_are_recorded_with_thresholds() {
+    let (temp, _manager, connection) = project();
+    connection
+        .execute("INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','b04','x',?1)", [NOW])
+        .unwrap();
+    let database = temp.path().join("projects/p1/project.db");
+    let wal = inspect_wal(&connection, &database, "p1", NOW).unwrap();
+    assert!(wal.checkpointed_pages >= 0);
+    assert!(matches!(wal.threshold_state.as_str(), "SOFT" | "HARD" | "NORMAL"));
+    let vacuum = run_vacuum(&connection, "p1", "CHECK", NOW).unwrap();
+    assert_eq!(vacuum.mode, "CHECK");
+    assert!(vacuum.page_count > 0);
+}
+
+#[test]
+fn b04_backup_restore_uses_manifest_checksum_and_rejects_tamper() {
+    let (temp, _manager, connection) = project();
+    connection
+        .execute("INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','backup-proof','before',?1)", [NOW])
+        .unwrap();
+    let backup = temp.path().join("backups/b04-milestone.db");
+    let manifest = BackupService::create(&connection, &backup, "p1", NOW).unwrap();
+    assert_eq!(manifest.checksum_sha256.len(), 64);
+    let restored = temp.path().join("restore/project.db");
+    BackupService::restore(&backup, &restored, &manifest.checksum_sha256).unwrap();
+    let restored_connection = Connection::open(&restored).unwrap();
+    assert_eq!(restored_connection.query_row::<String, _, _>("SELECT setting_value FROM project_settings WHERE setting_key='backup-proof'", [], |row| row.get(0)).unwrap(), "before");
+    std::fs::write(&backup, b"tampered-backup").unwrap();
+    assert!(matches!(BackupService::restore(&backup, &restored, &manifest.checksum_sha256), Err(ai_novel_production_system_core::repositories::ops::OpsError::BackupChecksumMismatch)));
 }
 
 #[allow(dead_code)]
