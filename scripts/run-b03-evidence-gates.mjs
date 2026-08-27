@@ -89,6 +89,8 @@ for (const [name, source, note] of [
   ,['lease_time_boundary', 'b03_targeted', 'midnight/month/year lease boundaries are covered by B03 targeted Rust tests']
   ,['recovery_raw_reopen', 'b03_targeted', 'raw response close/reopen recovery is covered by B03 targeted Rust tests']
   ,['recovery_completed_reopen', 'b03_targeted', 'completed close/reopen recovery is covered by B03 targeted Rust tests']
+  ,['unknown_chain_resolution', 'b03_targeted', 'consecutive UNKNOWN resolution is covered by B03 targeted Rust tests']
+  ,['lease_holder_ownership', 'b03_targeted', 'worker ownership and single active lease are covered by B03 targeted Rust tests']
 ]) {
   const sourceResult = results.find(result => result.name === source)
   results.push({

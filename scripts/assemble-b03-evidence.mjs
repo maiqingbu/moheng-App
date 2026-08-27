@@ -100,6 +100,19 @@ const evidence = {
     tests: ['b03_prepared_recovery_reuses_model_run_and_reservation', 'b03_raw_persistence_failure_stops_parse_and_commit_but_keeps_cost', 'b03_parse_and_completed_recovery_do_not_duplicate_settlement'],
     assertions: ['raw parse replay has zero transport growth', 'completed recovery has zero usage/cost growth']
   },
+  unknown_chain_resolution: {
+    status: 'PASS', sourceCommit,
+    run1: 'UNKNOWN', decision1: 'RETRY_REMOTE', reservation1FinalStatus: 'SETTLED',
+    run2: 'UNKNOWN', decision2: 'RETRY_REMOTE', reservation2FinalStatus: 'SETTLED',
+    run3: 'SUCCESS', orphanBlockingReservations: 0, transportCalls: 3,
+    test: 'b03_unknown_chain_resolves_each_old_reservation_at_decision_time'
+  },
+  lease_holder_ownership: {
+    status: 'PASS', sourceCommit,
+    wrongHolderResume: 'REJECTED', sameHolderResume: 'PASS', expiredLeaseReclaim: 'PASS',
+    concurrentOwners: 1, activeLeaseCount: 1,
+    test: 'b03_resume_enforces_lease_holder_ownership_and_expired_reclaim'
+  },
   unknown_resolution: {
     status: 'PASS', sourceCommit,
     tests: ['b03_explicit_unknown_retry_keeps_original_budget_binding', 'b03_explicit_unknown_retry_rejects_missing_original_budget_binding'],

@@ -41,6 +41,8 @@ for (const gateName of [
   'lease_time_boundary',
   'recovery_raw_reopen',
   'recovery_completed_reopen',
+  'unknown_chain_resolution',
+  'lease_holder_ownership',
   'git_binding'
 ]) {
   test(`B03 acceptance fails when ${gateName} fails`, () => {

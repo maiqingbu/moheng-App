@@ -13,7 +13,8 @@ export const REQUIRED_BLOCKING_GATES = [
   'stable_id_regression', 'secret_provider_wiring', 'secret_scan',
   'unknown_resolution', 'budget_runtime', 'modelrun_recovery', 'lease_runtime',
   'lease_kernel_invariant', 'lease_time_boundary', 'recovery_matrix',
-  'recovery_raw_reopen', 'recovery_completed_reopen', 'git_binding'
+  'recovery_raw_reopen', 'recovery_completed_reopen', 'unknown_chain_resolution',
+  'lease_holder_ownership', 'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {
