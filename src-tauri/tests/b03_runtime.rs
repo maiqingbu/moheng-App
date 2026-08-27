@@ -10,6 +10,7 @@ use ai_novel_production_system_core::runtime::{
 };
 use libsql_rusqlite::Connection;
 use serde_json::json;
+use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
 const NOW: &str = "2026-08-27T00:00:00Z";
@@ -1265,6 +1266,120 @@ fn b03_cancel_job_resolves_unknown_reservation_and_closes_job() {
             )
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn b03_concurrent_workers_have_one_lease_owner() {
+    let (temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "PAUSED",
+        NOW,
+    )
+    .unwrap();
+    let database = temp.path().join("projects/p1/project.db");
+    drop(connection);
+    let barrier = Arc::new(Barrier::new(2));
+    let worker_a_barrier = Arc::clone(&barrier);
+    let worker_a_database = database.clone();
+    let worker_a = std::thread::spawn(move || {
+        let connection = Connection::open(worker_a_database).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+            .unwrap();
+        worker_a_barrier.wait();
+        DurableJobService::resume(
+            &connection,
+            "p1",
+            "job:111111111111111111111111",
+            "worker-a",
+            NOW,
+        )
+    });
+    let worker_b_barrier = Arc::clone(&barrier);
+    let worker_b_database = database.clone();
+    let worker_b = std::thread::spawn(move || {
+        let connection = Connection::open(worker_b_database).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+            .unwrap();
+        worker_b_barrier.wait();
+        DurableJobService::resume(
+            &connection,
+            "p1",
+            "job:111111111111111111111111",
+            "worker-b",
+            NOW,
+        )
+    });
+    let result_a = worker_a.join().unwrap();
+    let result_b = worker_b.join().unwrap();
+    let verifier = Connection::open(database).unwrap();
+    let active_count: i64 = verifier
+        .query_row(
+            "SELECT COUNT(*) FROM job_leases WHERE project_id='p1' AND job_id='job:111111111111111111111111' AND released_at IS NULL AND expires_at>?1",
+            [NOW],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let holder: String = verifier
+        .query_row(
+            "SELECT holder FROM job_leases WHERE project_id='p1' AND job_id='job:111111111111111111111111' AND released_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let successes = [result_a.is_ok(), result_b.is_ok()]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1);
+    assert_eq!(active_count, 1);
+    assert!(holder == "worker-a" || holder == "worker-b");
+    println!(
+        "B03_CONCURRENT_LEASE_RESULT successes={} active={} holder={}",
+        successes, active_count, holder
+    );
+}
+
+#[test]
+fn b03_manual_resolve_is_not_advertised_or_accepted() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut timeout = FakeModelTransport::failure(TransportFailure::Timeout);
+    assert!(DurableModelRunner::execute(&connection, &mut timeout, &model_spec(), NOW).is_err());
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!payload.contains("MANUAL_RESOLVE"));
+    assert!(matches!(
+        DurableModelRunner::resolve_unknown::<FakeModelTransport>(
+            &connection,
+            "mr:aaaaaaaaaaaaaaaaaaaaaaaa",
+            "MANUAL_RESOLVE",
+            &mut FakeModelTransport::success(json!({})),
+            &model_spec(),
+            NOW,
+        ),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "OPEN"
     );
 }
 

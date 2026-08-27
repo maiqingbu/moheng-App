@@ -387,7 +387,7 @@ impl DurableJobService {
                 )?;
                 connection.execute(
                     "INSERT OR IGNORE INTO decisions(decision_id, project_id, decision_type, outcome, reason, source_ref, payload_json, created_at, updated_at) VALUES (?1, ?2, 'UNKNOWN_REMOTE_OUTCOME', 'OPEN', 'restart found in-flight model run', ?3, ?4, ?5, ?5)",
-                    libsql_rusqlite::params![format!("decision:model-run:{model_run_id}"), project_id, model_run_id, serde_json::json!({"allowedActions":["RETRY_REMOTE","MARK_FAILED","MANUAL_RESOLVE","CANCEL_JOB"]}).to_string(), now],
+                    libsql_rusqlite::params![format!("decision:model-run:{model_run_id}"), project_id, model_run_id, serde_json::json!({"allowedActions":["RETRY_REMOTE","MARK_FAILED","CANCEL_JOB"]}).to_string(), now],
                 )?;
                 connection.execute(
                     "UPDATE jobs SET status='WAITING_DECISION', error_code='UNKNOWN_REMOTE_OUTCOME', updated_at=?1 WHERE project_id=?2 AND job_id=?3",
@@ -793,7 +793,7 @@ impl DurableModelRunner {
                 )?;
                 result
             }
-            "MARK_FAILED" | "CANCEL_JOB" | "MANUAL_RESOLVE" => {
+            "MARK_FAILED" | "CANCEL_JOB" => {
                 let job_status = if action == "CANCEL_JOB" {
                     "CANCELLED"
                 } else {
@@ -1132,7 +1132,7 @@ fn mark_unknown_remote_outcome(
             format!("decision:model-run:{}", spec.model_run_id),
             project_id,
             spec.model_run_id,
-            serde_json::json!({"allowedActions":["RETRY_REMOTE","MARK_FAILED","MANUAL_RESOLVE","CANCEL_JOB"]}).to_string(),
+            serde_json::json!({"allowedActions":["RETRY_REMOTE","MARK_FAILED","CANCEL_JOB"]}).to_string(),
             now,
         ],
     )?;

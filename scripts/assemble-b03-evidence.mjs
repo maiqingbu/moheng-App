@@ -7,6 +7,13 @@ const evidenceDir = resolve(process.env.B03_EVIDENCE_DIR ?? resolve(root, 'evide
 mkdirSync(evidenceDir, { recursive: true })
 const gates = JSON.parse(readFileSync(resolve(evidenceDir, 'gate-results.json'), 'utf8'))
 const sourceCommit = gates.sourceCommit
+const targetedLog = readFileSync(resolve(evidenceDir, 'b03_targeted_test.log'), 'utf8')
+const concurrentMatch = targetedLog.match(/B03_CONCURRENT_LEASE_RESULT successes=(\d+) active=(\d+) holder=([^\s]+)/)
+if (!concurrentMatch) throw new Error('missing real concurrent lease result marker')
+const concurrentSuccesses = Number(concurrentMatch[1])
+const concurrentActive = Number(concurrentMatch[2])
+const concurrentHolder = concurrentMatch[3]
+if (concurrentSuccesses !== 1 || concurrentActive !== 1) throw new Error('concurrent lease invariant failed')
 const changedFiles = execFileSync('git', ['diff', '--name-status', '82172418fbae09d8856e35f6aad19c7514444e6c', sourceCommit], { cwd: root, encoding: 'utf8' })
 writeFileSync(resolve(evidenceDir, 'changed-files.txt'), changedFiles)
 
@@ -110,8 +117,8 @@ const evidence = {
   lease_holder_ownership: {
     status: 'PASS', sourceCommit,
     wrongHolderResume: 'REJECTED', sameHolderResume: 'PASS', expiredLeaseReclaim: 'PASS',
-    concurrentOwners: 1, activeLeaseCount: 1,
-    test: 'b03_resume_enforces_lease_holder_ownership_and_expired_reclaim'
+    concurrentOwners: concurrentSuccesses, activeLeaseCount: concurrentActive, concurrentWinner: concurrentHolder,
+    test: 'b03_concurrent_workers_have_one_lease_owner'
   },
   unknown_resolution: {
     status: 'PASS', sourceCommit,
