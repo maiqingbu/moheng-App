@@ -113,18 +113,7 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
-    let applied_v6: Option<i64> = connection
-        .query_row(
-            "SELECT version FROM migration_history WHERE version = 6",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(applied.is_none()
-        || applied_v3.is_none()
-        || applied_v4.is_none()
-        || applied_v5.is_none()
-        || applied_v6.is_none())
+    Ok(applied.is_none() || applied_v3.is_none() || applied_v4.is_none() || applied_v5.is_none())
 }
 
 pub fn migrate_project(
@@ -154,10 +143,6 @@ pub fn migrate_project(
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (5, ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (6, ?1)",
             [now],
         )?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;

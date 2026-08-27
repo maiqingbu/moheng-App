@@ -3,6 +3,7 @@ use crate::generated::types::ProjectCommandReceipt;
 use crate::hash::sha256_canonical;
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
+use crate::repositories::ops::SearchService;
 use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -330,6 +331,28 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
             "note": "M0A 存储与完整性检查已通过"
         }
     }))
+}
+
+pub fn query_search_fulltext_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let text = required_string(&request, "text")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            SearchService::search(connection, project_id, text, cursor, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                .and_then(|page| {
+                    serde_json::to_value(page)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String> {
@@ -769,6 +792,33 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             let receipt = outcome_receipt(outcome);
             Ok(project_command_response(&receipt))
         }
+        "backup_create" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            let backup_dir = state
+                .paths
+                .project_dir(id)
+                .map_err(|error| error.to_string())?
+                .join("backups");
+            let backup_path = backup_dir.join(format!("b04-{command_id}.db"));
+            let outcome = state
+                .manager
+                .commit_backup(
+                    project_command_spec(
+                        id,
+                        id,
+                        command_id,
+                        idempotency_key,
+                        command_type,
+                        &digest,
+                        expected_revision,
+                        requested_at,
+                        true,
+                    ),
+                    &backup_path,
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(project_command_response(&outcome_receipt(outcome)))
+        }
         _ => Err(format!("IPC_UNSUPPORTED:{command_type}")),
     }
 }
@@ -784,6 +834,11 @@ pub fn query_project_overview(
     request: Value,
 ) -> Result<Value, String> {
     query_project_overview_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn search_fulltext(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_search_fulltext_impl(&state, request)
 }
 
 #[tauri::command]
@@ -822,6 +877,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         query_project_library,
         query_project_overview,
+        search_fulltext,
         execute_command,
         query_global_settings,
         test_provider,

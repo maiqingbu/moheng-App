@@ -460,9 +460,40 @@ impl ProjectManager {
         spec: ProjectCommandSpec<'_>,
     ) -> Result<ProjectCommandOutcome<()>, ManagerError> {
         self.commit_project_command(spec, |connection| {
-            quick_check(connection)?;
+            let report = crate::repositories::ops::deep_integrity_check(
+                connection,
+                spec.project_id,
+                spec.now,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            if !report.ok {
+                return Err(ManagerError::ProjectCommand(report.failures.join(",")));
+            }
             Ok(())
         })
+    }
+
+    pub fn commit_backup(
+        &self,
+        spec: ProjectCommandSpec<'_>,
+        backup_path: &Path,
+    ) -> Result<ProjectCommandOutcome<()>, ManagerError> {
+        let handle = self.open(spec.project_id, "", spec.now)?;
+        let manifest = crate::repositories::ops::BackupService::create_snapshot(
+            &handle,
+            backup_path,
+            spec.project_id,
+            spec.now,
+        )
+        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+        let result = CommitService::commit_project_command(&handle, spec, |connection| {
+            crate::repositories::ops::BackupService::persist_manifest(connection, &manifest)
+                .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
+            Ok(())
+        })
+        .map_err(manager_error_from_commit);
+        drop(handle);
+        result
     }
 
     pub fn overview(&self, project_id: &str) -> Result<(String, i64, String), ManagerError> {

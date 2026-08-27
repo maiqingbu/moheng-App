@@ -29,7 +29,8 @@ pub struct SearchDocument {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub doc_id: String,
     pub chapter_id: Option<String>,
@@ -39,7 +40,8 @@ pub struct SearchHit {
     pub matched_by: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchPage {
     pub items: Vec<SearchHit>,
     pub next_cursor: Option<String>,
@@ -545,7 +547,7 @@ pub struct BackupManifest {
 pub struct BackupService;
 
 impl BackupService {
-    pub fn create(
+    pub fn create_snapshot(
         connection: &Connection,
         backup_path: &Path,
         project_id: &str,
@@ -566,10 +568,28 @@ impl BackupService {
             profile,
             created_at: now.into(),
         };
+        Ok(manifest)
+    }
+
+    pub fn persist_manifest(
+        connection: &Connection,
+        manifest: &BackupManifest,
+    ) -> Result<(), OpsError> {
         connection.execute(
             "INSERT INTO backup_manifests(backup_id, project_id, backup_path, checksum_sha256, profile_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            libsql_rusqlite::params![manifest.backup_id, manifest.project_id, manifest.backup_path, manifest.checksum_sha256, serde_json::to_string(&manifest.profile)?, now],
+            libsql_rusqlite::params![manifest.backup_id, manifest.project_id, manifest.backup_path, manifest.checksum_sha256, serde_json::to_string(&manifest.profile)?, manifest.created_at],
         )?;
+        Ok(())
+    }
+
+    pub fn create(
+        connection: &Connection,
+        backup_path: &Path,
+        project_id: &str,
+        now: &str,
+    ) -> Result<BackupManifest, OpsError> {
+        let manifest = Self::create_snapshot(connection, backup_path, project_id, now)?;
+        Self::persist_manifest(connection, &manifest)?;
         Ok(manifest)
     }
 
