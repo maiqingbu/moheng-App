@@ -21,7 +21,7 @@ const health = targeted.match(/B04_FTS_HEALTH_RESULT .*mode=(\w+) .*full_count_q
 const race = targeted.match(/B04_RESTORE_RACE .*new_reader_during_restore=(\w+) .*existing_reader_policy=([A-Z_]+) .*post_restore_reader=([A-Z_]+) .*maintenance_cleanup=([A-Z_]+) status=PASS/)
 const integrityMatches = [...targeted.matchAll(/B04_INTEGRITY_RESULT failures=(\d+) status=FAIL_CLOSED/g)]
 const materialized = scaleMaterialized.match(/B04_SCALE_MATERIALIZED books=(\d+) volumes=(\d+) chapters=(\d+) artifacts=(\d+) canon_facts=(\d+) dependencies=(\d+) model_runs=(\d+) target_words=(\d+) status=PASS/)
-const scaleCertification = scaleMaterialized.match(/B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS status=PASS/)
+const scaleCertification = scaleMaterialized.match(/B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS .*single_chapter_path=PASS status=PASS/)
 const perfOperations = [...targeted.matchAll(/B04_PERF_OPERATION operation=([a-z_]+) samples=(\d+) p50_ms=([0-9.]+) p95_ms=([0-9.]+)/g)]
 const requiredOperations = { project_overview: 2000, volume_list: 300, chapter_list: 300, canon_current: 250, adjacency: 500, normal_commit: 1000, recovery_readable: 10000 }
 const performancePass = Object.entries(requiredOperations).every(([operation, threshold]) => {

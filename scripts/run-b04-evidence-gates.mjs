@@ -66,6 +66,7 @@ if (scaleCommand && !reuseScale) {
   for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
     results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   }
+  results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: raceEvidenceValid ? 0 : 1, status: raceEvidenceValid ? 'PASS' : 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
 } else {
   results.push({ name: 'long_book_materialization', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
