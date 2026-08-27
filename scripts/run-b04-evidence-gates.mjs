@@ -44,22 +44,24 @@ if (scaleCommand) {
   logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
   const scaleLog = logs.get(logName) ?? ''
-  const scalePass = exitCode === 0 && /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS status=PASS/.test(scaleLog)
+  const scalePass = exitCode === 0 && /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS .*single_chapter_path=PASS status=PASS/.test(scaleLog)
   results.push({ name: 'long_book_scale_certification', command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
     results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   }
-  for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race']) {
+  for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
     results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   }
+  results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: raceEvidenceValid ? 0 : 1, status: raceEvidenceValid ? 'PASS' : 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
 } else {
   results.push({ name: 'long_book_materialization', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
     results.push({ name: gateName, command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   }
-  for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race']) {
+  for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
     results.push({ name: gateName, command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   }
+  results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
 }
 const requiredOperations = {
   project_overview: 2000, volume_list: 300, chapter_list: 300, canon_current: 250,
@@ -72,8 +74,10 @@ const performanceEvidenceValid = Object.entries(requiredOperations).every(([oper
 })
 const restoreEvidenceValid = /B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .*checksum=PASS .*quick_check=PASS .*foreign_key_check=PASS .*deep_integrity=PASS .*receipt=PASS/.test(targetedLog)
 const upgradeEvidenceValid = /B04_FTS_UPGRADE_RESULT .*rebuild_triggered=true .*second_open_full_rebuild=false .*status=PASS/.test(targetedLog)
+const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*full_count_queries=0 .*full_rebuild=false .*status=PASS/.test(targetedLog)
+const raceEvidenceValid = /B04_RESTORE_RACE .*new_reader_during_restore=BLOCKED .*maintenance_cleanup=READY status=PASS/.test(targetedLog)
 const targetedGate = results.find(item => item.name === 'b04_targeted')
-if (targetedGate && (!performanceEvidenceValid || !restoreEvidenceValid || !upgradeEvidenceValid)) {
+if (targetedGate && (!performanceEvidenceValid || !restoreEvidenceValid || !upgradeEvidenceValid || !healthEvidenceValid || !raceEvidenceValid)) {
   targetedGate.status = 'FAIL'; targetedGate.exitCode = 1
 }
 for (const path of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
@@ -83,7 +87,7 @@ const aliases = [
   ['b01_regression', 'cargo_all_targets'], ['b02_regression', 'cargo_all_targets'], ['b03_regression', 'cargo_all_targets'],
   ['sqlite_integrity', 'cargo_all_targets'], ['fts5', 'b04_targeted'], ['sqlite_runtime_profile', 'b04_targeted'],
   ['wal_vacuum', 'b04_targeted'], ['backup_restore', 'b04_targeted'], ['restore_workflow', 'b04_targeted'], ['deep_integrity', 'b04_targeted'],
-  ['long_book_fixture', 'b04_targeted'], ['fts_upgrade_backfill', 'b04_targeted'], ['performance', 'b04_targeted']
+  ['long_book_fixture', 'b04_targeted'], ['fts_upgrade_backfill', 'b04_targeted'], ['fts_metadata_health', 'b04_targeted'], ['performance', 'b04_targeted']
 ]
 for (const [name, source] of aliases) { const gate = results.find(item => item.name === source); results.push({ name, command: gate.command, exitCode: gate.exitCode, status: gate.status, blocking: true, log: gate.log }) }
 const after = gitSnapshot(); const gitBinding = evaluateGitBinding({ beforeCommit: before.commit, afterCommit: after.commit, dirtyBefore: before.dirty, dirtyAfter: after.dirty })

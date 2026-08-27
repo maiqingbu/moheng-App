@@ -82,20 +82,19 @@ impl SearchService {
             [project_id],
             |row| row.get(0),
         )?;
-        let source_count: i64 = connection.query_row(
-            "SELECT (SELECT COUNT(*) FROM chapters WHERE project_id=?1) + (SELECT COUNT(*) FROM artifacts WHERE project_id=?1)",
+        let source_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 LIMIT 1) OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1 LIMIT 1)",
             [project_id],
             |row| row.get(0),
         )?;
-        let projection_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM search_documents WHERE project_id=?1 AND (doc_id LIKE 'chapter:%' OR doc_id LIKE 'artifact:%')",
+        let projection_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM search_documents WHERE project_id=?1 AND (doc_id LIKE 'chapter:%' OR doc_id LIKE 'artifact:%') LIMIT 1)",
             [project_id],
             |row| row.get(0),
         )?;
         Ok(version.as_deref() == Some(FTS_PROJECTION_VERSION)
             && indexed_revision == Some(source_revision)
-            && (source_count == 0 || projection_count > 0)
-            && projection_count == source_count)
+            && (!source_exists || projection_exists))
     }
 
     pub fn ensure_projection(
@@ -1685,6 +1684,7 @@ type SingleChapterRow = (
     Option<String>,
     Option<i64>,
     String,
+    String,
 );
 
 /// Formal reader query for one chapter. It returns authority metadata and the
@@ -1696,12 +1696,13 @@ pub fn single_chapter(
 ) -> Result<Option<serde_json::Value>, OpsError> {
     let row: Option<SingleChapterRow> = connection
         .query_row(
-            "SELECT chapter_id, chapter_no, volume_id, title, word_count, final_artifact_id, final_version, status FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            "SELECT chapter_id, chapter_no, volume_id, title, word_count, final_artifact_id, final_version, status, updated_at FROM chapters WHERE project_id=?1 AND chapter_id=?2",
             libsql_rusqlite::params![project_id, chapter_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
         )
         .optional()?;
-    let Some((id, ordinal, volume_id, title, word_count, artifact_id, version, status)) = row
+    let Some((id, ordinal, volume_id, title, word_count, artifact_id, version, status, updated_at)) =
+        row
     else {
         return Ok(None);
     };
@@ -1717,14 +1718,15 @@ pub fn single_chapter(
         _ => None,
     };
     Ok(Some(json!({
-        "chapterId": id,
+        "id": id,
         "volumeId": volume_id,
-        "ordinal": ordinal,
+        "number": ordinal,
         "title": title,
+        "status": if status == "COMMITTED" { "official" } else { "producing" },
+        "version": version.map(|value| format!("v{value}")).unwrap_or_default(),
         "wordCount": word_count,
-        "finalText": final_text,
-        "finalArtifactRef": artifact_id.map(|artifact_id| json!({"artifactId": artifact_id, "version": version})),
-        "status": status,
+        "updatedAt": updated_at,
+        "content": final_text.map(|text| vec![text]).unwrap_or_default(),
     })))
 }
 

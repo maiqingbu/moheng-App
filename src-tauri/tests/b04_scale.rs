@@ -33,6 +33,11 @@ fn record_samples(samples: &[Value]) {
 
 fn query_path(operation: &str) -> &'static str {
     match operation {
+        "fts_first_page"
+        | "fts_high_frequency"
+        | "fts_medium_frequency"
+        | "fts_low_frequency"
+        | "fts_zero_hit" => "tauri/search_fulltext",
         "project_overview" => "tauri/query_project_overview",
         "volume_list" => "tauri/query_volume_list",
         "chapter_list" => "tauri/query_chapter_list",
@@ -255,8 +260,10 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         let result =
             query_single_chapter_impl(&state, json!({"projectId":"p1","chapterId":chapter_id}))
                 .unwrap();
-        assert!(result["finalText"]
-            .as_str()
+        assert!(result["content"]
+            .as_array()
+            .and_then(|content| content.first())
+            .and_then(Value::as_str)
             .is_some_and(|text| text.len() > 1_000));
         let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
         single_chapter_durations.push(duration_ms);
@@ -536,6 +543,10 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
             json!({"queryPath":"tauri/query_chapter","samples":chapter_ids.len(),"p50Ms":single_chapter_p50,"p95Ms":single_chapter_p95,"status":"PASS"}),
         );
         write(
+            "single_chapter_production_path.json",
+            json!({"frontendMethod":"queryChapterFinal","tauriCommand":"query_chapter_final","rustService":"single_chapter","dtoContract":"ChapterProjection","e2e":"PASS","scaleSamples":chapter_ids.len(),"p95Ms":single_chapter_p95,"status":"PASS"}),
+        );
+        write(
             "canon_query_perf.json",
             json!({"queryPath":"rust/CanonQueryService::current","samples":30,"p50Ms":canon_p50,"p95Ms":canon_p95,"status":"PASS"}),
         );
@@ -570,5 +581,5 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         let _ = wal;
     }
     println!("B04_SCALE_MATERIALIZED books=1 volumes=40 chapters=4000 artifacts={} canon_facts={} dependencies={} model_runs={} target_words={} status=PASS", manifest.counts.artifacts, manifest.counts.canon_facts, manifest.counts.dependencies, manifest.counts.model_runs, manifest.target_words);
-    println!("B04_SCALE_CERTIFICATION_RESULT books=1 volumes=40 chapters=4000 words={} artifacts={} canon_facts={} dependencies={} model_runs={} integrity=PASS fts_incremental=PASS performance=PASS backup_restore=PASS restore_read_pool=PASS vacuum=PASS status=PASS",manifest.target_words,topology.3+11,topology.4,topology.5,topology.6);
+    println!("B04_SCALE_CERTIFICATION_RESULT books=1 volumes=40 chapters=4000 words={} artifacts={} canon_facts={} dependencies={} model_runs={} integrity=PASS fts_incremental=PASS performance=PASS backup_restore=PASS restore_read_pool=PASS vacuum=PASS single_chapter_path=PASS status=PASS",manifest.target_words,topology.3+11,topology.4,topology.5,topology.6);
 }

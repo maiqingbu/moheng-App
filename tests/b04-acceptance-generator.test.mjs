@@ -32,7 +32,7 @@ for (const gateName of ['deep_integrity', 'performance', 'git_binding']) {
   })
 }
 
-for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_upgrade_backfill', 'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race']) {
+for (const gateName of ['long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_upgrade_backfill', 'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race', 'fts_metadata_health', 'single_chapter_production_path']) {
   test(`B04 acceptance fails when ${gateName} fails`, () => {
     const results = passingResults()
     results.gates.find(gate => gate.name === gateName).status = 'FAIL'

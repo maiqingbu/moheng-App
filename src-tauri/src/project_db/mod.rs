@@ -122,7 +122,7 @@ pub struct ProjectManager {
     maintenance: Arc<Mutex<HashSet<String>>>,
 }
 
-struct ProjectMaintenanceGuard {
+pub struct ProjectMaintenanceGuard {
     maintenance: Arc<Mutex<HashSet<String>>>,
     project_id: String,
 }
@@ -136,6 +136,24 @@ impl Drop for ProjectMaintenanceGuard {
 }
 
 impl ProjectManager {
+    pub fn begin_maintenance(
+        &self,
+        project_id: &str,
+    ) -> Result<ProjectMaintenanceGuard, ManagerError> {
+        let mut maintenance = self
+            .maintenance
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?;
+        if !maintenance.insert(project_id.to_string()) {
+            return Err(ManagerError::ProjectCommand(
+                "RESTORE_ALREADY_IN_PROGRESS".into(),
+            ));
+        }
+        Ok(ProjectMaintenanceGuard {
+            maintenance: Arc::clone(&self.maintenance),
+            project_id: project_id.to_string(),
+        })
+    }
     pub fn new(paths: AppPaths) -> Self {
         Self {
             paths,
@@ -560,21 +578,7 @@ impl ProjectManager {
     ) -> Result<ProjectCommandOutcome<crate::repositories::ops::RestoreReport>, ManagerError> {
         self.acquire_writer(spec.project_id)?;
         let result = (|| {
-            let mut maintenance = self
-                .maintenance
-                .lock()
-                .map_err(|_| ManagerError::WriterLockPoisoned)?;
-            if maintenance.contains(spec.project_id) {
-                return Err(ManagerError::ProjectCommand(
-                    "RESTORE_ALREADY_IN_PROGRESS".into(),
-                ));
-            }
-            maintenance.insert(spec.project_id.to_string());
-            drop(maintenance);
-            let _maintenance_guard = ProjectMaintenanceGuard {
-                maintenance: Arc::clone(&self.maintenance),
-                project_id: spec.project_id.to_string(),
-            };
+            let _maintenance_guard = self.begin_maintenance(spec.project_id)?;
             let directory = self.resolve_registered_project_path(spec.project_id)?;
             let database = directory.join("project.db");
             let staging = directory.join("project.db.restore.tmp");

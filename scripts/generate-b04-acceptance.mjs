@@ -13,7 +13,7 @@ export const REQUIRED_BLOCKING_GATES = [
   'backup_restore', 'restore_workflow', 'deep_integrity', 'long_book_fixture', 'long_book_materialization',
   'long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore',
   'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_upgrade_backfill',
-  'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race', 'performance', 'git_binding'
+  'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race', 'fts_metadata_health', 'single_chapter_production_path', 'performance', 'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {

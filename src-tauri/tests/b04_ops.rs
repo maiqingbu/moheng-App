@@ -178,23 +178,26 @@ fn b04_fts_reconcile_is_incremental_projection_maintenance() {
 #[test]
 fn b04_upgrade_backfills_existing_sources_once_and_records_projection_watermark() {
     let (temp, manager, connection) = project();
-    let payload = "{\"body\":\"old-project-backfill-term\"}";
-    let payload_hash = hex::encode(sha2::Sha256::digest(payload.as_bytes()));
     connection
         .execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:backfill','p1',1,'Backfill','PLANNING',?1,?1)", [NOW])
         .unwrap();
     connection
-        .execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('volume:backfill','p1','book:backfill',1,'Backfill','PLANNING',1,1,1000,?1,?1)", [NOW])
+        .execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('volume:backfill','p1','book:backfill',1,'Backfill','PLANNING',1,100,1000,?1,?1)", [NOW])
         .unwrap();
-    connection
-        .execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter:backfill','p1','volume:backfill',1,'Backfill','NORMAL','PLANNED',1,?1,?1)", [NOW])
-        .unwrap();
-    connection
-        .execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES ('artifact:backfill','p1','ReviewReport','CHAPTER','chapter:backfill',1,'m0a.artifact.v1','CANDIDATE',?1,'{}',?2)", libsql_rusqlite::params![payload_hash, NOW])
-        .unwrap();
-    connection
-        .execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES ('artifact:backfill',1,?1,?2)", libsql_rusqlite::params![payload, payload_hash])
-        .unwrap();
+    for index in 0..100 {
+        let chapter_id = format!("chapter:backfill:{index}");
+        connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES (?1,'p1','volume:backfill',?2,?3,'NORMAL','PLANNED',1,?4,?4)", libsql_rusqlite::params![chapter_id, index + 1, format!("Backfill {index}"), NOW]).unwrap();
+        let artifact_id = format!("artifact:backfill:{index}");
+        let body = if index == 0 {
+            "old-project-backfill-term".to_string()
+        } else {
+            format!("old-project-history-{index}")
+        };
+        let payload = format!("{{\"body\":\"{body}\"}}");
+        let payload_hash = hex::encode(sha2::Sha256::digest(payload.as_bytes()));
+        connection.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES (?1,'p1','ReviewReport','CHAPTER',?2,1,'m0a.artifact.v1','CANDIDATE',?3,'{}',?4)", libsql_rusqlite::params![artifact_id, chapter_id, payload_hash, NOW]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id, payload, payload_hash]).unwrap();
+    }
     connection
         .execute("DELETE FROM search_documents", [])
         .unwrap();
@@ -219,7 +222,11 @@ fn b04_upgrade_backfills_existing_sources_once_and_records_projection_watermark(
     let second_rebuild_at: String = second.query_row("SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='fts.lastRebuildAt'", [], |row| row.get(0)).unwrap();
     assert_eq!(version, "m0e.fts.v1");
     assert_eq!(first_rebuild_at, second_rebuild_at);
-    println!("B04_FTS_UPGRADE_RESULT source_chapters=1 source_artifacts=1 pre_projection_docs=0 post_projection_docs=2 rebuild_triggered=true second_open_full_rebuild=false projection_version=m0e.fts.v1 status=PASS");
+    assert!(SearchService::projection_health(&second, "p1").unwrap());
+    println!("B04_FTS_UPGRADE_RESULT source_chapters=100 source_artifacts=100 pre_projection_docs=0 post_projection_docs=200 rebuild_triggered=true second_open_full_rebuild=false projection_version=m0e.fts.v1 status=PASS");
+    println!(
+        "B04_FTS_HEALTH_RESULT mode=metadata full_count_queries=0 full_rebuild=false status=PASS"
+    );
     let _ = temp;
 }
 
@@ -598,6 +605,42 @@ fn b04_restore_blocks_while_a_read_lease_is_checked_out() {
     println!(
         "B04_RESTORE_POOL_BLOCK_RESULT activeLease=BLOCKED oldConnection=NOT_REPLACED status=PASS"
     );
+}
+
+#[test]
+fn b04_restore_maintenance_gate_blocks_a_new_reader_at_the_barrier() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    drop(manager.create("p1", "B04", NOW).unwrap());
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let restore_manager = manager.clone();
+    let restore_entered = entered.clone();
+    let restore_release = release.clone();
+    let restore_thread = std::thread::spawn(move || {
+        let guard = restore_manager.begin_maintenance("p1").unwrap();
+        restore_entered.wait();
+        restore_release.wait();
+        drop(guard);
+    });
+    let reader_manager = manager.clone();
+    let reader_entered = entered.clone();
+    let reader_thread = std::thread::spawn(move || {
+        reader_entered.wait();
+        reader_manager.read_connection("p1", NOW)
+    });
+    let reader_result = reader_thread.join().unwrap();
+    let reader_error = match reader_result {
+        Ok(_) => panic!("reader must be blocked while restore maintenance is active"),
+        Err(error) => error,
+    };
+    assert!(reader_error
+        .to_string()
+        .contains("RETRYABLE_MAINTENANCE_ERROR"));
+    release.wait();
+    restore_thread.join().unwrap();
+    assert!(manager.read_connection("p1", NOW).is_ok());
+    println!("B04_RESTORE_RACE new_reader_during_restore=BLOCKED existing_reader_policy=READ_POOL_BUSY post_restore_reader=READY_DB maintenance_cleanup=READY status=PASS");
 }
 
 #[test]

@@ -963,6 +963,11 @@ pub fn query_chapter(state: State<'_, KernelState>, request: Value) -> Result<Va
 }
 
 #[tauri::command]
+pub fn query_chapter_final(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_single_chapter_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -1003,6 +1008,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_reader_volumes,
         query_chapter_list,
         query_chapter,
+        query_chapter_final,
         execute_command,
         query_global_settings,
         test_provider,
