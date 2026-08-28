@@ -1,12 +1,22 @@
 use crate::catalog::CatalogRepository;
 use crate::generated::types::ProjectCommandReceipt;
+use crate::harness::{
+    grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
+    BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, ReadCapabilityAdapter,
+    RequestedBounds, SupportCheckpoint, SupportSessionReceipt,
+};
 use crate::hash::sha256_canonical;
+use crate::narrative::{
+    build_continuity_threads, build_volume_progress, compile_context_manifest, evaluate_plan_stale,
+    CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
+};
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
 use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use tauri::State;
 
 #[derive(Clone)]
@@ -409,6 +419,613 @@ pub fn query_single_chapter_impl(state: &KernelState, request: Value) -> Result<
                 .ok_or_else(|| ManagerError::ProjectNotFound)
         })
         .map_err(|error| error.to_string())
+}
+
+fn request_strings(request: &Value, field: &str) -> Vec<String> {
+    request
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn request_resume_context(request: &Value) -> ResumeContext {
+    let mut context = ResumeContext {
+        current_chapter: request
+            .get("currentChapter")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        current_volume: request
+            .get("currentVolumeId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        ..ResumeContext::default()
+    };
+    context
+        .present_entities
+        .extend(request_strings(request, "presentEntityIds"));
+    context
+        .acquired_facts
+        .extend(request_strings(request, "acquiredFactIds"));
+    context
+        .satisfied_tasks
+        .extend(request_strings(request, "satisfiedTaskIds"));
+    for meeting in request
+        .get("meetings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(pair) = meeting
+            .as_array()
+            .and_then(|pair| (pair.len() == 2).then_some(pair))
+        {
+            if let (Some(left), Some(right)) = (pair[0].as_str(), pair[1].as_str()) {
+                context.meetings.insert((left.to_owned(), right.to_owned()));
+            }
+        }
+    }
+    context
+}
+
+fn narrative_state_from_request(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+) -> Result<CurrentNarrativeStateView, String> {
+    let entity_ids = request_strings(request, "entityIds");
+    let entity_refs = entity_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let references = request_strings(request, "references");
+    let reference_refs = references.iter().map(String::as_str).collect::<Vec<_>>();
+    let chapter_id = request.get("chapterId").and_then(Value::as_str);
+    let facts = crate::repositories::narrative::NarrativeRepository::current_canon(
+        connection,
+        project_id,
+        &entity_refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?;
+    let relations = crate::repositories::narrative::NarrativeRepository::current_relations(
+        connection,
+        project_id,
+        &entity_refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?;
+    let knowledge = crate::repositories::narrative::NarrativeRepository::knowledge_for_entities(
+        connection,
+        project_id,
+        &entity_refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?;
+    let events = chapter_id
+        .map(|chapter| {
+            crate::repositories::narrative::NarrativeRepository::canon_events(
+                connection, project_id, chapter, 100,
+            )
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let obligations =
+        crate::repositories::narrative::NarrativeRepository::active_obligations_for_relevance(
+            connection,
+            project_id,
+            &entity_refs,
+            &reference_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(CurrentNarrativeStateView::from_records(
+        RuntimeBounds {
+            project_id: project_id.into(),
+            entity_ids,
+            volume_id: request
+                .get("volumeId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            chapter_id: chapter_id.map(ToOwned::to_owned),
+            limit: 100,
+        },
+        facts,
+        relations,
+        knowledge,
+        events,
+        obligations,
+        false,
+    ))
+}
+
+fn continuity_from_request(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+) -> Result<Vec<crate::narrative::ContinuityThreadView>, String> {
+    let state = narrative_state_from_request(connection, request, project_id)?;
+    let chapter_refs = request
+        .get("chapterId")
+        .and_then(Value::as_str)
+        .map(|id| vec![id.to_owned()])
+        .unwrap_or_default();
+    let chapter_refs = chapter_refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let refs = request_strings(request, "references");
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let foreshadows = crate::repositories::narrative::NarrativeRepository::active_foreshadows(
+        connection,
+        project_id,
+        &chapter_refs,
+        &refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?;
+    let mysteries = crate::repositories::narrative::NarrativeRepository::open_mysteries(
+        connection, project_id, &refs, 100,
+    )
+    .map_err(|e| e.to_string())?;
+    let evidence = crate::repositories::narrative::NarrativeRepository::recent_evidence(
+        connection,
+        project_id,
+        &chapter_refs,
+        &refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?;
+    build_continuity_threads(
+        &state.active_responsibilities,
+        &foreshadows,
+        &mysteries,
+        &evidence,
+        &request_resume_context(request),
+    )
+}
+
+pub fn query_narrative_state_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let view = narrative_state_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            serde_json::to_value(
+                json!({"projectId":project_id,"projectRevision":revision,"view":view}),
+            )
+            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub fn query_continuity_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let threads = continuity_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            serde_json::to_value(
+                json!({"projectId":project_id,"projectRevision":revision,"threads":threads}),
+            )
+            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let volume_id = required_string(&request, "volumeId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    let task_ids = request_strings(&request, "taskIds");
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let refs = task_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            let tasks = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                connection, project_id, &refs, 100,
+            )
+            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
+            serde_json::to_value(build_volume_progress(VolumeProgressInput {
+                volume_id: volume_id.into(),
+                target_chapters: request
+                    .get("targetChapters")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                current_chapter: request
+                    .get("currentChapter")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+                tasks,
+                generated_revision: revision,
+            }))
+            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub fn query_context_manifest_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let state_view = narrative_state_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            let threads = continuity_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            let input = crate::narrative::ContextCompilerInput {
+                execution_mode: request
+                    .get("executionMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LONG_FORM")
+                    .into(),
+                project_revision: revision,
+                goal_contract_refs: Vec::new(),
+                state: state_view,
+                continuity_threads: threads,
+                active_task_refs: request_strings(&request, "activeTaskRefs"),
+                future_reservation_refs: request_strings(&request, "futureReservationRefs"),
+                selected_evidence: Vec::new(),
+                omitted_soft_sources: Vec::new(),
+                hard_tokens: request
+                    .get("hardTokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1024),
+                soft_tokens: request
+                    .get("softTokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0),
+            };
+            serde_json::to_value(
+                compile_context_manifest(input).map_err(ManagerError::ProjectCommand)?,
+            )
+            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub fn query_plan_stale_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let current_revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    let compiled_revision = request
+        .get("compiledFromProjectRevision")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "IPC_INVALID:compiledFromProjectRevision".to_string())?;
+    let compiled_digest = required_string(&request, "compiledFromStateDigest")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let state_view = narrative_state_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            let threads = continuity_from_request(connection, &request, project_id)
+                .map_err(ManagerError::ProjectCommand)?;
+            let input = crate::narrative::ContextCompilerInput {
+                execution_mode: request
+                    .get("executionMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LONG_FORM")
+                    .into(),
+                project_revision: current_revision,
+                goal_contract_refs: Vec::new(),
+                state: state_view,
+                continuity_threads: threads,
+                active_task_refs: request_strings(&request, "activeTaskRefs"),
+                future_reservation_refs: request_strings(&request, "futureReservationRefs"),
+                selected_evidence: Vec::new(),
+                omitted_soft_sources: Vec::new(),
+                hard_tokens: 0,
+                soft_tokens: 0,
+            };
+            let current_digest = crate::narrative::relevant_state_digest(&input)
+                .map_err(ManagerError::ProjectCommand)?;
+            let status = evaluate_plan_stale(
+                compiled_revision,
+                compiled_digest,
+                current_revision,
+                &current_digest,
+            );
+            Ok(json!({
+                "projectId": project_id,
+                "projectRevision": current_revision,
+                "currentStateDigest": current_digest,
+                "status": match status {
+                    PlanStaleStatus::Valid => "VALID",
+                    PlanStaleStatus::PlanStale => "PLAN_STALE",
+                }
+            }))
+        })
+        .map_err(|e| e.to_string())
+}
+
+struct RepositoryReadAdapter<'a> {
+    connection: &'a libsql_rusqlite::Connection,
+    project_id: &'a str,
+}
+impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
+    fn invoke(
+        &self,
+        capability_id: &str,
+        input: &Value,
+        bounds: &RequestedBounds,
+    ) -> Result<(Value, Vec<String>, bool), String> {
+        let entity_ids = input
+            .get("entityIds")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let references = input
+            .get("references")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let value = match capability_id {
+            "query_knowledge" => serde_json::to_value(
+                crate::repositories::narrative::NarrativeRepository::knowledge_for_entities(
+                    self.connection,
+                    self.project_id,
+                    &entity_ids,
+                    bounds.max_results as i64,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+            "query_events" => {
+                let chapter = input
+                    .get("chapterId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "CAPABILITY_INPUT_INVALID:chapterId".to_string())?;
+                serde_json::to_value(
+                    crate::repositories::narrative::NarrativeRepository::canon_events(
+                        self.connection,
+                        self.project_id,
+                        chapter,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?
+            }
+            "query_evidence" => serde_json::to_value(
+                crate::repositories::narrative::NarrativeRepository::recent_evidence(
+                    self.connection,
+                    self.project_id,
+                    &[],
+                    &references,
+                    bounds.max_results as i64,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+            "query_continuity" => serde_json::to_value(continuity_from_request(
+                self.connection,
+                input,
+                self.project_id,
+            )?)
+            .map_err(|e| e.to_string())?,
+            "query_context_manifest" => serde_json::to_value(compile_context_manifest(
+                crate::narrative::ContextCompilerInput {
+                    execution_mode: "LONG_FORM".into(),
+                    project_revision: input
+                        .get("projectRevision")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    goal_contract_refs: Vec::new(),
+                    state: narrative_state_from_request(self.connection, input, self.project_id)?,
+                    continuity_threads: continuity_from_request(
+                        self.connection,
+                        input,
+                        self.project_id,
+                    )?,
+                    active_task_refs: Vec::new(),
+                    future_reservation_refs: Vec::new(),
+                    selected_evidence: Vec::new(),
+                    omitted_soft_sources: Vec::new(),
+                    hard_tokens: 1024,
+                    soft_tokens: 0,
+                },
+            )?)
+            .map_err(|e| e.to_string())?,
+            "query_project_meta" => serde_json::to_value(
+                crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
+                    self.connection,
+                    self.project_id,
+                    bounds.max_results as i64,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+            _ => return Err("CAPABILITY_UNSUPPORTED_BY_ADAPTER".into()),
+        };
+        let source_refs = match &value {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|item| {
+                    item.get("factId")
+                        .or_else(|| item.get("eventId"))
+                        .or_else(|| item.get("evidenceId"))
+                        .or_else(|| item.get("threadId"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Ok((value, source_refs, false))
+    }
+}
+
+pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("DIAGNOSE");
+    let requested_scope = request
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("PROJECT");
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
+    let mut plan = plan_support(&scope, question, "1970-01-01T00:00:00Z")?;
+    let registry = CapabilityRegistry::read_only_r1();
+    let executor = BoundedCapabilityExecutor {
+        registry: registry.clone(),
+    };
+    let input = request.clone();
+    let mut calls = Vec::new();
+    let mut source_refs = BTreeSet::new();
+    let mut result_digests = Vec::new();
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let adapter = RepositoryReadAdapter {
+                connection,
+                project_id,
+            };
+            for step in &mut plan.steps {
+                step.status = crate::harness::SupportStepStatus::RUNNING;
+                let spec = registry
+                    .specs
+                    .get(&step.capability_id)
+                    .ok_or_else(|| ManagerError::ProjectCommand("CAPABILITY_UNKNOWN".into()))?;
+                let call_input = if step.capability_id == "query_knowledge" {
+                    json!({"entityIds":request_strings(&input,"entityIds")})
+                } else {
+                    input.clone()
+                };
+                let call = CapabilityCallEnvelope {
+                    call_id: format!("call:{}", step.step_id),
+                    capability_id: spec.capability_id.clone(),
+                    capability_version: spec.version.clone(),
+                    spec_digest: spec.spec_digest.clone(),
+                    mode: mode.into(),
+                    project_id: project_id.into(),
+                    project_revision: revision,
+                    input_digest: sha256_canonical(&call_input)
+                        .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?,
+                    input: call_input,
+                    requested_bounds: RequestedBounds {
+                        max_results: 100,
+                        max_tokens: 4096,
+                    },
+                };
+                let result = executor
+                    .execute(&adapter, &call)
+                    .map_err(ManagerError::ProjectCommand)?;
+                source_refs.extend(result.source_refs.clone());
+                result_digests.push(result.result_digest.clone());
+                calls.push(result);
+                step.status = crate::harness::SupportStepStatus::DONE;
+            }
+            Ok::<(), ManagerError>(())
+        })
+        .map_err(|e| e.to_string())?;
+    let finding = grounded_finding(
+        &scope,
+        if question.contains("知道") {
+            "diagnose_knowledge_event"
+        } else {
+            "NO_ISSUE"
+        },
+        question,
+        source_refs.iter().cloned().collect(),
+        Vec::new(),
+    );
+    let plan_digest = sha256_canonical(&serde_json::to_value(&plan).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let checkpoint = SupportCheckpoint {
+        checkpoint_id: format!("checkpoint:{}", &scope.question_digest[..16]),
+        session_id: format!("session:{}", &scope.question_digest[..16]),
+        project_id: project_id.into(),
+        project_revision: revision,
+        question_digest: scope.question_digest.clone(),
+        plan_digest: plan_digest.clone(),
+        completed_step_ids: plan.steps.iter().map(|step| step.step_id.clone()).collect(),
+        capability_spec_digests: registry_digest_map(&registry),
+        evidence_refs: source_refs.iter().cloned().collect(),
+        last_result_digests: result_digests,
+        pending_authorization_ref: None,
+        created_at: "1970-01-01T00:00:00Z".into(),
+    };
+    let handle = state
+        .manager
+        .open(project_id, "", "1970-01-01T00:00:00Z")
+        .map_err(|e| e.to_string())?;
+    crate::repositories::support::save_checkpoint(&handle, &checkpoint)
+        .map_err(|e| e.to_string())?;
+    let receipt = SupportSessionReceipt {
+        session_id: checkpoint.session_id.clone(),
+        question_digest: scope.question_digest,
+        project_id: project_id.into(),
+        project_revision: revision,
+        plan_digest,
+        capabilities_invoked: plan
+            .steps
+            .iter()
+            .map(|step| step.capability_id.clone())
+            .collect(),
+        source_refs: source_refs.into_iter().collect(),
+        finding_refs: vec![finding.finding_id.clone()],
+        checkpoint_ref: Some(checkpoint.checkpoint_id),
+        final_support_status: finding.support_status.clone(),
+        started_at: "1970-01-01T00:00:00Z".into(),
+        finished_at: "1970-01-01T00:00:00Z".into(),
+    };
+    Ok(json!({"plan":plan,"calls":calls,"finding":finding,"receipt":receipt}))
+}
+
+pub fn support_checkpoint_resume_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let checkpoint_id = required_string(&request, "checkpointId")?;
+    let current_revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    let registry = CapabilityRegistry::read_only_r1();
+    let checkpoint = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::support::load_checkpoint(connection, project_id, checkpoint_id)
+                .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
+        })
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "CHECKPOINT_NOT_FOUND".to_string())?;
+    let status = crate::harness::check_checkpoint_resume(
+        &checkpoint,
+        current_revision,
+        &registry_digest_map(&registry),
+    );
+    Ok(
+        json!({"checkpointId":checkpoint_id,"projectId":project_id,"projectRevision":current_revision,"status":match status { crate::harness::CheckpointResume::Safe => "SAFE", crate::harness::CheckpointResume::Stale => "CHECKPOINT_STALE" }}),
+    )
 }
 
 fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String> {
@@ -968,6 +1585,53 @@ pub fn query_chapter_final(state: State<'_, KernelState>, request: Value) -> Res
 }
 
 #[tauri::command]
+pub fn query_narrative_state(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_narrative_state_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_continuity(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_continuity_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_volume_progress(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_volume_progress_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_context_manifest(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_context_manifest_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_plan_stale(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_plan_stale_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    support_session_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn support_checkpoint_resume(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    support_checkpoint_resume_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -1009,6 +1673,13 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_chapter_list,
         query_chapter,
         query_chapter_final,
+        query_narrative_state,
+        query_continuity,
+        query_volume_progress,
+        query_context_manifest,
+        query_plan_stale,
+        support_session,
+        support_checkpoint_resume,
         execute_command,
         query_global_settings,
         test_provider,

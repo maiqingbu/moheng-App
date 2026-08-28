@@ -442,6 +442,14 @@ export class BrowserDemoPort implements FrontendPort {
     return clone(this.globalSettings)
   }
 
+  async queryNarrativeState(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_narrative_state') }
+  async queryContinuity(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_continuity') }
+  async queryVolumeProgress(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_volume_progress') }
+  async queryContextManifest(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_context_manifest') }
+  async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }
+  async supportSession(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_session') }
+  async supportCheckpointResume(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_checkpoint_resume') }
+
   async executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
     const prior = this.receipts.get(commandId)

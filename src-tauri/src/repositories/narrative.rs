@@ -12,6 +12,7 @@ pub enum NarrativeRepositoryError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanonFactRecord {
     pub fact_id: String,
     pub subject_id: String,
@@ -21,6 +22,7 @@ pub struct CanonFactRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeRecord {
     pub knowledge_id: String,
     pub knower_id: String,
@@ -30,6 +32,7 @@ pub struct KnowledgeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct RelationRecord {
     pub relation_id: String,
     pub subject_id: String,
@@ -39,6 +42,7 @@ pub struct RelationRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct EvidenceRecord {
     pub evidence_id: String,
     pub fact_id: Option<String>,
@@ -54,6 +58,7 @@ pub struct EvidenceRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ForeshadowRecord {
     pub foreshadow_id: String,
     pub intent: String,
@@ -64,6 +69,7 @@ pub struct ForeshadowRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct MysteryRecord {
     pub mystery_id: String,
     pub mystery_type: String,
@@ -72,6 +78,7 @@ pub struct MysteryRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ObligationRecord {
     pub obligation_id: String,
     pub obligation_type: String,
@@ -82,6 +89,7 @@ pub struct ObligationRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskStateRecord {
     pub state_id: String,
     pub value: Value,
@@ -89,6 +97,7 @@ pub struct TaskStateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CanonEventRecord {
     pub event_id: String,
     pub chapter_id: String,

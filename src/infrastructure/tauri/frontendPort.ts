@@ -16,11 +16,19 @@ import type {
   ProjectLibraryProjection,
   ProjectOverviewProjection,
   ProjectQueryRequest,
+  NarrativeContextProjection,
+  NarrativeRuntimeQueryRequest,
+  NarrativeStateProjection,
+  ContinuityProjection,
+  PlanStaleProjection,
+  SupportSessionProjection,
+  SupportCheckpointProjection,
   SearchHit,
   SettingsProjection,
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
+  VolumeProgressProjection,
   VolumeSummary,
 } from '../../application/contracts'
 
@@ -49,6 +57,13 @@ export class TauriFrontendPort implements FrontendPort {
     })
   }
   queryGlobalSettings(): Promise<SettingsProjection> { return invokeQuery(this.ipc, 'query_global_settings') }
+  queryNarrativeState(request: NarrativeRuntimeQueryRequest): Promise<NarrativeStateProjection> { return invokeQuery(this.ipc, 'query_narrative_state', { request }) }
+  queryContinuity(request: NarrativeRuntimeQueryRequest): Promise<ContinuityProjection> { return invokeQuery(this.ipc, 'query_continuity', { request }) }
+  queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<VolumeProgressProjection> { return invokeQuery(this.ipc, 'query_volume_progress', { request }) }
+  queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection> { return invokeQuery(this.ipc, 'query_context_manifest', { request }) }
+  queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection> { return invokeQuery(this.ipc, 'query_plan_stale', { request }) }
+  supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }
+  supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection> { return invokeQuery(this.ipc, 'support_checkpoint_resume', { request }) }
   testProvider(settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     onStatus?.('submitting', '正在测试 Provider')
     return invokeQuery<CommandReceipt>(this.ipc, 'test_provider', { settings }).then(receipt => {

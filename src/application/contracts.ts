@@ -50,6 +50,26 @@ export interface ProjectQueryRequest extends PageRequest {
   scope: string
 }
 
+export interface NarrativeRuntimeQueryRequest extends ProjectQueryRequest {
+  entityIds?: string[]
+  references?: string[]
+  chapterId?: string
+  volumeId?: string
+  currentChapter?: number
+  currentVolumeId?: string
+  presentEntityIds?: string[]
+  acquiredFactIds?: string[]
+  satisfiedTaskIds?: string[]
+  meetings?: string[][]
+}
+
+export interface NarrativeStateProjection { projectId: string; projectRevision: number; view: Record<string, unknown> }
+export interface ContinuityProjection { projectId: string; projectRevision: number; threads: import('../generated/contracts').ContinuityThreadProjection[] }
+export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
+export interface PlanStaleProjection { projectId: string; projectRevision: number; status: 'VALID' | 'PLAN_STALE' }
+export interface SupportSessionProjection { plan: Record<string, unknown>; calls: Record<string, unknown>[]; finding: Record<string, unknown>; receipt: Record<string, unknown> }
+export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
+
 export interface ProjectSnapshot {
   id: string
   title: string
@@ -569,6 +589,13 @@ export interface FrontendPort {
   searchFulltext(request: ProjectQueryRequest & { text: string }): Promise<PageResult<SearchHit>>
   queryMarketOpportunities(): Promise<MarketOpportunity[]>
   queryGlobalSettings(): Promise<SettingsProjection>
+  queryNarrativeState(request: NarrativeRuntimeQueryRequest): Promise<NarrativeStateProjection>
+  queryContinuity(request: NarrativeRuntimeQueryRequest): Promise<ContinuityProjection>
+  queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<import('../generated/contracts').VolumeProgressProjection>
+  queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection>
+  queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection>
+  supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
+  supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
   testProvider(settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
 }
