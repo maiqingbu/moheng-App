@@ -51,7 +51,7 @@ const markers = {
   b06_bounded_retrieval: marker(/B06_CURRENT_STATE_RESULT .*bounded=PASS/),
   b06_frontend_projection: marker(/B06_H01_INTEGRATION_RESULT .*tauri=PASS .*repository=PASS .*context=PASS/),
   b06_deterministic_digest: marker(/B06_CONTEXT_RESULT .*digest_deterministic=PASS/),
-  b06_compiler_performance: Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*compiler_p95_ms=([0-9.]+) .*hard_context_bounded=true status=PASS/.test(logs.get('b06_h01_scale.log') ?? ''),
+  b06_compiler_performance: Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*compiler_p95_ms=([0-9.]+) .*hard_context_bounded=true .*status=PASS/.test(logs.get('b06_h01_scale.log') ?? ''),
   h01_project_scope: marker(/H01_RESULT .*scope=PASS/),
   h01_capability_registry: marker(/H01_RESULT .*registry=PASS/),
   h01_support_planner: marker(/H01_RESULT .*max_steps=7/),
@@ -69,7 +69,7 @@ const markers = {
   b05_regression: results.find(item => item.name === 'b05_regression')?.status === 'PASS',
   architecture_boundary: /B06_H01_ARCHITECTURE_RESULT .*legacyPlannerCount=0 .*narrativeRuntimeDeltaCount=0 .*commitBundleV3Count=0 .*secondAuthorityCount=0 .*tsAuthoritativeCompilerCount=0 .*narrativeRawSqlCount=0 .*harnessRawSqlCount=0 .*h01WriteCapabilityCount=0 .*skillRuntimeIntegrationCount=0 .*b07SymbolCount=0 .*b08SymbolCount=0 status=PASS/.test(architecture),
 }
-for (const [name, pass] of Object.entries(markers)) results.push({ name, command: 'b06_h01_targeted/architecture', exitCode: pass ? 0 : 1, status: pass ? 'PASS' : 'FAIL', blocking: true, log: name === 'architecture_boundary' ? 'b06_h01_architecture.log' : 'b06_h01_targeted.log' })
+for (const [name, pass] of Object.entries(markers)) results.push({ name, command: 'b06_h01_targeted/architecture', exitCode: pass ? 0 : 1, status: pass ? 'PASS' : 'FAIL', blocking: true, log: name === 'architecture_boundary' ? 'b06_h01_architecture.log' : name === 'b06_compiler_performance' ? 'b06_h01_scale.log' : 'b06_h01_targeted.log' })
 const after = snapshot()
 const sourceBinding = { status: before.commit === after.commit && !before.dirty && !after.dirty ? 'PASS' : 'FAIL', beforeCommit: before.commit, afterCommit: after.commit, dirtyBefore: before.dirty, dirtyAfter: after.dirty }
 results.push({ name: 'source_binding', command: 'git rev-parse HEAD && git status --porcelain=v1', exitCode: sourceBinding.status === 'PASS' ? 0 : 1, status: sourceBinding.status, blocking: true, log: 'gate-results.json' })
