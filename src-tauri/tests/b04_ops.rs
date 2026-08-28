@@ -1,10 +1,11 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_chapter_list_impl, query_search_fulltext_impl,
+    query_single_chapter_impl,
     query_volume_list_impl, KernelState,
 };
 use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
+use ai_novel_production_system_core::project_db::{ProjectCommandSpec, ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repositories::ops::{
     deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService,
     FixtureSpec, LongBookFixture, PerformanceHarness, SearchDocument, SearchService,
@@ -14,6 +15,7 @@ use sha2::Digest;
 use tempfile::tempdir;
 
 const NOW: &str = "2026-08-27T00:00:00Z";
+const REQUEST_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn project() -> (tempfile::TempDir, ProjectManager, ProjectHandle) {
     let temp = tempdir().unwrap();
@@ -641,6 +643,166 @@ fn b04_restore_maintenance_gate_blocks_a_new_reader_at_the_barrier() {
     restore_thread.join().unwrap();
     assert!(manager.read_connection("p1", NOW).is_ok());
     println!("B04_RESTORE_RACE new_reader_during_restore=BLOCKED existing_reader_policy=READ_POOL_BUSY post_restore_reader=READY_DB maintenance_cleanup=READY status=PASS");
+}
+
+#[test]
+fn b04_real_restore_backup_blocks_readers_and_cleans_up_after_failure() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "B04", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','restore-marker','before',?1)",
+            [NOW],
+        )
+        .unwrap();
+    let backup = temp.path().join("projects/p1/backups/real-race.db");
+    let manifest = BackupService::create_snapshot(&connection, &backup, "p1", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE project_settings SET setting_value='after' WHERE project_id='p1' AND setting_key='restore-marker'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = entered.clone();
+    let hook_release = release.clone();
+    manager
+        .set_restore_test_hook(Some(std::sync::Arc::new(move || {
+            hook_entered.wait();
+            hook_release.wait();
+            Ok(())
+        })))
+        .unwrap();
+    let restore_manager = manager.clone();
+    let restore_backup_path = backup.clone();
+    let checksum = manifest.checksum_sha256.clone();
+    let restore_thread = std::thread::spawn(move || {
+        restore_manager.restore_backup(
+            ProjectCommandSpec {
+                project_id: "p1",
+                result_project_id: "p1",
+                command_id: "b04-real-race",
+                idempotency_key: "b04-real-race-key",
+                command_type: "backup_restore",
+                request_digest: REQUEST_DIGEST,
+                expected_revision: Some(0),
+                now: "2026-08-27T00:02:00Z",
+                advance_revision: true,
+            },
+            &restore_backup_path,
+            &checksum,
+        )
+    });
+    entered.wait();
+
+    let reader_manager = manager.clone();
+    let reader_thread = std::thread::spawn(move || reader_manager.read_connection("p1", NOW));
+    let reader_error = match reader_thread.join().unwrap() {
+        Ok(_) => panic!("reader must be blocked inside real restore_backup maintenance"),
+        Err(error) => error,
+    };
+    assert!(reader_error
+        .to_string()
+        .contains("RETRYABLE_MAINTENANCE_ERROR"));
+    release.wait();
+    assert!(restore_thread.join().unwrap().is_ok());
+
+    let restored_reader = manager.read_connection("p1", NOW).unwrap();
+    let marker: String = restored_reader
+        .query_row(
+            "SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='restore-marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, "before");
+    drop(restored_reader);
+
+    let survivor = manager.open("p1", "B04", NOW).unwrap();
+    survivor
+        .execute(
+            "UPDATE project_settings SET setting_value='survivor' WHERE project_id='p1' AND setting_key='restore-marker'",
+            [],
+        )
+        .unwrap();
+    let failed_backup = temp.path().join("projects/p1/backups/failure-cleanup.db");
+    let failed_manifest =
+        BackupService::create_snapshot(&survivor, &failed_backup, "p1", NOW).unwrap();
+    drop(survivor);
+    manager
+        .set_restore_test_hook(Some(std::sync::Arc::new(|| {
+            Err("intentional restore failure".to_string())
+        })))
+        .unwrap();
+    let failed = manager.restore_backup(
+        ProjectCommandSpec {
+            project_id: "p1",
+            result_project_id: "p1",
+            command_id: "b04-real-race-failure",
+            idempotency_key: "b04-real-race-failure-key",
+            command_type: "backup_restore",
+            request_digest: REQUEST_DIGEST,
+            expected_revision: Some(1),
+            now: "2026-08-27T00:03:00Z",
+            advance_revision: true,
+        },
+        &failed_backup,
+        &failed_manifest.checksum_sha256,
+    );
+    assert!(failed.is_err());
+    manager.set_restore_test_hook(None).unwrap();
+    let cleanup_reader = manager.read_connection("p1", NOW).unwrap();
+    let cleanup_marker: String = cleanup_reader
+        .query_row(
+            "SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='restore-marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cleanup_marker, "survivor");
+    drop(cleanup_reader);
+    assert!(manager.open("p1", "B04", NOW).is_ok());
+    println!(
+        "B04_RESTORE_REAL_RACE_RESULT new_reader_during_restore=BLOCKED existing_reader_policy=READ_POOL_BUSY post_restore_reader=RESTORED_DB failure_cleanup=READY restore_api=restore_backup"
+    );
+}
+
+#[test]
+fn b04_chapter_binding_matches_manifest_registered_command_and_dto() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../contracts/manifests/chapter_query_binding.json")).unwrap();
+    assert_eq!(manifest["frontendMethod"], "queryChapterFinal");
+    assert_eq!(manifest["tauriCommand"], "query_chapter_final");
+    assert_eq!(manifest["rustCommand"], "query_chapter_final");
+    assert_eq!(manifest["dto"], "ChapterProjection");
+    let commands = include_str!("../src/commands.rs");
+    assert!(commands.contains("pub fn query_chapter_final"));
+    assert!(commands.contains("        query_chapter_final,"));
+
+    let (temp, _manager, connection) = project();
+    connection
+        .execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:binding','p1',1,'Binding','ACTIVE',?1,?1)", [NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('volume:binding','p1','book:binding',1,'Binding','PLANNING',1,1,1000,?1,?1)", [NOW])
+        .unwrap();
+    connection
+        .execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter:binding','p1','volume:binding',1,'Binding','NORMAL','PLANNED',12,?1,?1)", [NOW])
+        .unwrap();
+    drop(connection);
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let result = query_single_chapter_impl(
+        &state,
+        serde_json::json!({"projectId":"p1","chapterId":"chapter:binding"}),
+    )
+    .unwrap();
+    let mut fields: Vec<&str> = result.as_object().unwrap().keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["content", "id", "number", "status", "title", "updatedAt", "version", "volumeId", "wordCount"]);
+    println!("B04_CHAPTER_BINDING_RESULT frontend=PASS rust_registered=PASS dto=ChapterProjection output=PASS status=PASS");
 }
 
 #[test]
