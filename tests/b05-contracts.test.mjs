@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const root = new URL('..', import.meta.url).pathname
+const root = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(fs.readFileSync(`${root}contracts/manifests/schema-manifest.json`, 'utf8'))
 
 test('B05 manifest registers all R1 payload contracts', () => {
@@ -19,4 +20,13 @@ test('B05 invalid narrative fixtures are not accepted by the R1 schema boundary'
     const value = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/invalid/${file}`, 'utf8'))
     assert.notEqual(value.payloadSchema, undefined, file)
   }
+})
+
+test('B05 frontend narrative projections use the shared DTO fixture boundary', () => {
+  const thread = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/valid/narrative-continuity-thread-projection.json`, 'utf8'))
+  const progress = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/valid/narrative-volume-progress-projection.json`, 'utf8'))
+  assert.equal(thread.authorityLevel, 'B')
+  assert.equal(thread.status, 'OPEN')
+  assert.deepEqual(progress.activeTaskIds, ['task:1'])
+  assert.equal(progress.remainingChapterCapacity, 10)
 })

@@ -769,8 +769,8 @@ fn repeated_open_does_not_repeat_migration_or_backup_storm() {
             })
             .unwrap();
         assert_eq!(
-            max_version, 6,
-            "schema version must settle at v6 and not grow"
+            max_version, 7,
+            "schema version must settle at v7 and not grow"
         );
         drop(conn);
     }

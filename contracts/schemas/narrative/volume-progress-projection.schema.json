@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/volume-progress-projection.schema.json", "title":"VolumeProgressProjection", "type":"object",
+  "properties":{"volumeId":{"type":"string","minLength":1},"activeTaskIds":{"type":"array","items":{"type":"string"}},"blockedTaskIds":{"type":"array","items":{"type":"string"}},"remainingChapterCapacity":{"type":"integer","minimum":0},"planningPressure":{"type":"object"},"generatedRevision":{"type":"integer","minimum":0}},
+  "required":["volumeId","activeTaskIds","blockedTaskIds","remainingChapterCapacity","planningPressure","generatedRevision"], "additionalProperties":false
+}

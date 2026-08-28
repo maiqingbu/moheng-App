@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import crypto from 'node:crypto'
 
 const root = path.resolve('src')
 const files = []
@@ -23,6 +24,34 @@ const generatedRoot = path.join(root, 'generated/contracts')
 const rustGeneratedRoot = path.join(projectRoot, 'src-tauri/src/generated/contracts')
 const manifestPath = path.join(contractRoot, 'manifests/schema-manifest.json')
 const errors = []
+
+const frozenDocuments = {
+  'docs/architecture/Narrative_Runtime_Architecture_Amendment_R1_FROZEN.md': '1207bc780fd63df5ce4dd8495432c5ec518ee2b3f56acfd8ee37ff1c8adf101b',
+  'docs/product/Narrative_Runtime_PRD_R1_FROZEN.md': '5cfc22ac950b799982302989695b026931b8eb2d54e1db86b0897ce37a71ab44',
+  'docs/development/Narrative_Runtime_Batch_Master_Plan_R1_FROZEN.md': '71e07de16c609c381c3fe27dd75b574d1a973488792e9d910af9958fff0fa206',
+}
+const frozenMigrations = {
+  'src-tauri/migrations/0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
+  'src-tauri/migrations/0002_project_authority.sql': '7396fe1ec7769a898d423c97c3d063d7a64c3dc217de3967332bd25b84864924',
+  'src-tauri/migrations/0003_project_command.sql': '2734404c53a80872b29d5fc4b455830e9fa8bda9d52760d0b812d9370e1630c7',
+  'src-tauri/migrations/0004_project_longterm.sql': 'd06fbae9138bc15a72012b1e2b7ce063a5d25b3d54fa5f9deafe8bdcb6c5ae11',
+  'src-tauri/migrations/0005_m0c_commit_delta.sql': 'e13b964f497c6398d912dc7f0ded92f39199de6f79f6d40043116e5d51a31d70',
+  'src-tauri/migrations/0006_m0e_ops.sql': '13f11ea79c897a56580251fdf6b88b8babba4c67e623710246f56f694c516305',
+}
+const digestFile = relative => {
+  const file = path.join(projectRoot, relative)
+  if (!fs.existsSync(file)) return null
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+}
+for (const [relative, expected] of Object.entries(frozenDocuments)) {
+  if (digestFile(relative) !== expected) errors.push(`R1 frozen document digest mismatch: ${relative}`)
+}
+for (const [relative, expected] of Object.entries(frozenMigrations)) {
+  if (digestFile(relative) !== expected) errors.push(`frozen migration digest mismatch: ${relative}`)
+}
+for (const adr of ['ADR-026-goal-constrained-rolling-planning.md', 'ADR-027-continuity-thread-is-a-projection.md', 'ADR-028-exit-state-is-closure-snapshot.md', 'ADR-029-relevant-state-digest-determines-plan-staleness.md', 'ADR-030-single-production-path-and-deferred-legacy-removal.md']) {
+  if (!fs.existsSync(path.join(projectRoot, 'docs/adr', adr))) errors.push(`缺少 R1 ADR: ${adr}`)
+}
 
 // Rust authoritative write boundary: SQL may live only in migration/project DB,
 // catalog, repository, or CommitService ownership modules.
@@ -53,6 +82,18 @@ for (const generatedPath of [generatedRoot, rustGeneratedRoot]) {
 for (const token of ['localStorage', 'sessionStorage', 'indexedDB']) {
   if (text.includes(token)) errors.push(`禁止使用 ${token} 冒充权威状态`)
 }
+const narrativeSchemaNames = ['book-plan-r1', 'volume-intent-r1', 'volume-plan-r1', 'context-manifest-r1', 'chapter-plan-r1', 'chapter-exit-state-r1', 'volume-exit-state-r1', 'task-progress', 'continuity-thread-projection', 'volume-progress-projection']
+const schemaManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+for (const name of narrativeSchemaNames) {
+  if (!schemaManifest.schemas.some(entry => entry.name === name)) errors.push(`缺少 B05 Narrative schema: ${name}`)
+}
+const productionRustText = rustFiles.filter(file => !file.includes(`${path.sep}tests${path.sep}`)).map(file => fs.readFileSync(file, 'utf8')).join('\n')
+for (const forbidden of ['continuity_threads', 'narrative_state', 'memory_store', 'future_reservations', 'volume_task_graph', 'rolling_horizon', 'timeline_events_v2']) {
+  if (new RegExp(`CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${forbidden}\\b`, 'i').test(productionRustText)) errors.push(`B05 禁止的第二 Authority/Runtime table: ${forbidden}`)
+}
+for (const forbidden of ['NarrativeRuntimeDelta', 'CommitBundle V3']) {
+  if (productionRustText.includes(forbidden)) errors.push(`B05 禁止的第二 Authority/Runtime implementation: ${forbidden}`)
+}
 const frozenRoutes = [
   '/projects', '/projects/new', '/projects/:id', '/projects/:id/market', '/projects/:id/directions',
   '/projects/:id/production', '/projects/:id/volumes', '/projects/:id/volumes/:volumeId',
@@ -65,6 +106,9 @@ for (const route of frozenRoutes) {
 }
 
 const contracts = read('application/contracts.ts')
+for (const contract of ['BookPlanR1', 'VolumeIntentR1', 'VolumePlanR1', 'VolumeTask', 'TaskStatus', 'ContextManifestR1', 'ChapterPlanR1', 'ContinuityThreadProjection', 'VolumeProgressProjection']) {
+  if (!contracts.includes(contract)) errors.push(`缺少 Frontend Narrative contract: ${contract}`)
+}
 for (const contract of [
   'ProjectQueryRequest', 'PageResult', 'queryProjectOverview', 'queryMarketStrategy', 'queryStoryDirections',
   'queryProductionCenter', 'queryVolumeList', 'queryVolumeDetail', 'queryDecisions', 'queryReaderVolumes',

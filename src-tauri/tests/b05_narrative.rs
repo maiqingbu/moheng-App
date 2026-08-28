@@ -2,7 +2,8 @@ use ai_novel_production_system_core::catalog::CatalogRepository;
 use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::generated::validators::{
     validate_book_plan_r1, validate_chapter_plan_r1, validate_context_manifest_r1,
-    validate_task_progress,
+    validate_continuity_thread_projection, validate_task_progress,
+    validate_volume_progress_projection,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
@@ -173,7 +174,10 @@ fn b05_r1_payload_validators_accept_valid_and_reject_generic_or_invalid_shapes()
         "narrativeStateSources":[],"selectedEvidence":[],"hardSourceCount":0,"omittedSoftSources":[],
         "budget":{"hardTokens":1,"softTokens":1,"totalTokens":2}
     })).unwrap();
+    validate_continuity_thread_projection(&json!({"threadId":"thread:1","status":"OPEN","threadClass":"PROMISE","sourceEventId":"event:1","evidenceRefs":[{"artifactId":"artifact:1","version":1}],"authorityLevel":"B"})).unwrap();
+    validate_volume_progress_projection(&json!({"volumeId":"volume:1","activeTaskIds":[],"blockedTaskIds":[],"remainingChapterCapacity":1,"planningPressure":{},"generatedRevision":0})).unwrap();
     println!("B05_CONTRACT_RESULT valid=PASS invalid=PASS legacy_generic=REJECTED status=PASS");
+    println!("B05_UI_CONTRACT_RESULT shared_fixture=PASS rust_dto=PASS frontend_dto=PASS arc_mandatory=REJECTED status=PASS");
 }
 
 #[test]

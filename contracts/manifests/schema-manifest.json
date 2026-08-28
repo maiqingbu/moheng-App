@@ -48,6 +48,16 @@
       "version": "r1.task-progress.v1"
     },
     {
+      "name": "continuity-thread-projection",
+      "path": "schemas/narrative/continuity-thread-projection.schema.json",
+      "version": "r1.continuity-thread-projection.v1"
+    },
+    {
+      "name": "volume-progress-projection",
+      "path": "schemas/narrative/volume-progress-projection.schema.json",
+      "version": "r1.volume-progress-projection.v1"
+    },
+    {
       "name": "shared-definitions",
       "path": "schemas/shared/definitions.schema.json",
       "version": "m0a.shared.v1"

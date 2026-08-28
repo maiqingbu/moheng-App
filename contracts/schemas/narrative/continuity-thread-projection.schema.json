@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/continuity-thread-projection.schema.json", "title":"ContinuityThreadProjection", "type":"object",
+  "properties":{"threadId":{"type":"string","minLength":1},"status":{"type":"string","enum":["OPEN","SUSPENDED","RESOLVED","ABANDONED"]},"threadClass":{"type":"string","minLength":1},"sourceEventId":{"type":["string","null"]},"evidenceRefs":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/EvidenceRef"}},"authorityLevel":{"type":"string","enum":["A","B","C"]}},
+  "required":["threadId","status","threadClass","evidenceRefs","authorityLevel"], "additionalProperties":false
+}
