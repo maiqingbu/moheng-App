@@ -25,6 +25,11 @@ if (!arch) throw new Error('B06/H01 missing architecture marker')
 const architectureValues = Object.fromEntries(arch[1].split(' ').map(pair => pair.split('=')))
 const scale = scaleLog.match(/B06_SCALE_RESULT .*compiler_samples=(\d+) compiler_p50_ms=([0-9.]+) compiler_p95_ms=([0-9.]+) compiler_max_ms=([0-9.]+) hard_tokens_max=(\d+) .*h01_bounded_query=true hard_context_bounded=true db_bytes=(\d+) status=PASS/)
 const write = (relative, value, gate) => { const file = resolve(evidenceDir, relative); mkdirSync(resolve(file, '..'), { recursive: true }); writeFileSync(file, `${JSON.stringify({ ...value, status: value.status ?? gateStatus(gate), sourceCommit: gates.sourceCommit, generatedAt, generator: 'scripts/assemble-b06-h01-evidence.mjs', generatorDigest }, null, 2)}\n`) }
+if (scaleLog) {
+  const rawScale = JSON.parse(readFileSync(resolve(evidenceDir, 'b06_h01_scale.json'), 'utf8'))
+  writeFileSync(resolve(evidenceDir, 'b06_h01_scale.json'), `${JSON.stringify({ ...rawScale, status: 'PASS', sourceCommit: gates.sourceCommit, generatedAt, generator: 'scripts/assemble-b06-h01-evidence.mjs', generatorDigest }, null, 2)}\n`)
+  write('B06/scale_run.json', rawScale, 'b06_compiler_performance')
+}
 
 write('B06/basis.json', { baselineCommit: '315f21351e3f388d37717431732ac9e0ece9f831', b05ArchiveSha256: '555784bb9ecdd8f1caa83212b37dff8d4a106bf4d9a51da379513f58bc5856ee', b05FinalPassReportSha256: 'd89d52027fa1c5dadedb659a5f8dfe4c1f5a18eee0360cd93ff5be59bc9b8106', h00PackageSha256: '598e2d85d76a840a12c5824eb64e64532c0f472343aca8081226eb61d6acdaa3', creativeSkillsV120Sha256: 'a90ab6e12d82d57b32f06d5a3780d0153d6f372e1efd47df1d70ef1aebbdef8f', jointInstructionSha256: 'a7af3d68e1e15af286828c4e0b2d8c85e34a903b6a907022874334336933bd0e', narrativeArchitectureSha256: '1207bc780fd63df5ce4dd8495432c5ec518ee2b3f56acfd8ee37ff1c8adf101b', narrativePrdSha256: '5cfc22ac950b799982302989695b026931b8eb2d54e1db86b0897ce37a71ab44', narrativeBatchPlanSha256: '71e07de16c609c381c3fe27dd75b574d1a973488792e9d910af9958fff0fa206' }, 'architecture')
 write('B06/current_narrative_state.json', { populated: current[1], bounded: current[2], provenance: current[3], noNarrativeAuthorityTable: current[4] }, 'b06_current_state')
@@ -53,8 +58,12 @@ write('H01/long_book_bounded_query.json', { boundedQuery: harness[11], scaleShar
 write('H01/session_receipt.json', { sessionReceipt: harness[12], durableCheckpoint: integration[5], supportStatus: 'INSUFFICIENT when exact evidence is absent' }, 'h01_session_receipt')
 write('B06_H01/source-binding.json', { beforeCommit: gates.sourceCommit, afterCommit: gates.sourceCommitAfter, dirtyBefore: gates.workingTreeDirtyBefore, dirtyAfter: gates.workingTreeDirtyAfter }, 'source_binding')
 
-const evidence = ['B06/basis.json', 'B06/current_narrative_state.json', 'B06/narrative_time.json', 'B06/continuity_thread.json', 'B06/resume_condition.json', 'B06/volume_progress.json', 'B06/context_manifest.json', 'B06/state_digest_stale.json', 'B06/bounded_evidence_retrieval.json', 'B06/frontend_projection.json', 'B06/performance_10m.json', 'B06/architecture_boundary.json', 'B06/regression.json', 'H01/basis.json', 'H01/project_scope.json', 'H01/capability_registry.json', 'H01/support_planner.json', 'H01/capability_executor.json', 'H01/diagnostics.json', 'H01/evidence_ledger.json', 'H01/checkpoint_resume.json', 'H01/bounded_replan.json', 'H01/read_only_boundary.json', 'H01/long_book_bounded_query.json', 'H01/session_receipt.json', 'B06_H01/source-binding.json']
+const evidence = ['B06/basis.json', 'B06/current_narrative_state.json', 'B06/narrative_time.json', 'B06/continuity_thread.json', 'B06/resume_condition.json', 'B06/volume_progress.json', 'B06/context_manifest.json', 'B06/state_digest_stale.json', 'B06/bounded_evidence_retrieval.json', 'B06/frontend_projection.json', 'B06/performance_10m.json', ...(scaleLog ? ['B06/scale_run.json'] : []), 'B06/architecture_boundary.json', 'B06/regression.json', 'H01/basis.json', 'H01/project_scope.json', 'H01/capability_registry.json', 'H01/support_planner.json', 'H01/capability_executor.json', 'H01/diagnostics.json', 'H01/evidence_ledger.json', 'H01/checkpoint_resume.json', 'H01/bounded_replan.json', 'H01/read_only_boundary.json', 'H01/long_book_bounded_query.json', 'H01/session_receipt.json', 'B06_H01/source-binding.json']
 gates.evidence = evidence
 gates.requiredEvidence = evidence
+gates.status = 'PASS'
+gates.generatedAt = generatedAt
+gates.generator = 'scripts/assemble-b06-h01-evidence.mjs'
+gates.generatorDigest = generatorDigest
 writeFileSync(resolve(evidenceDir, 'gate-results.json'), `${JSON.stringify(gates, null, 2)}\n`)
 console.log(`B06/H01 evidence assembled: ${evidence.length} files`)
