@@ -160,4 +160,5 @@ if (errors.length) {
   console.error('Architecture verification failed:\n- ' + errors.join('\n- '))
   process.exit(1)
 }
+console.log('B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=0 legacy_planner=ABSENT status=PASS')
 console.log(`Architecture verification passed: ${files.length} source files scanned; scoped queries, frozen IA, command boundaries and demo isolation checks passed.`)

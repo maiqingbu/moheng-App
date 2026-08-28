@@ -30,6 +30,48 @@ pub struct KnowledgeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelationRecord {
+    pub relation_id: String,
+    pub subject_id: String,
+    pub predicate: String,
+    pub object_id: String,
+    pub authority_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvidenceRecord {
+    pub evidence_id: String,
+    pub fact_id: Option<String>,
+    pub relation_id: Option<String>,
+    pub event_id: Option<String>,
+    pub final_chapter_id: String,
+    pub source_artifact_id: String,
+    pub version: i64,
+    pub evidence_type: String,
+    pub quote: Option<String>,
+    pub range_start: Option<i64>,
+    pub range_end: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ForeshadowRecord {
+    pub foreshadow_id: String,
+    pub intent: String,
+    pub status: String,
+    pub plant_chapter_id: Option<String>,
+    pub recover_window_end_chapter: Option<String>,
+    pub secret_payload_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MysteryRecord {
+    pub mystery_id: String,
+    pub mystery_type: String,
+    pub status: String,
+    pub core_fact_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ObligationRecord {
     pub obligation_id: String,
     pub obligation_type: String,
@@ -60,6 +102,10 @@ pub struct NarrativeRepository;
 impl NarrativeRepository {
     fn limit(limit: i64) -> i64 {
         limit.clamp(1, 100)
+    }
+
+    fn ids_json(ids: &[&str]) -> Result<String, NarrativeRepositoryError> {
+        Ok(serde_json::to_string(ids)?)
     }
 
     pub fn goal_contract_refs(
@@ -112,6 +158,57 @@ impl NarrativeRepository {
         Ok(records)
     }
 
+    pub fn current_relations(
+        connection: &Connection,
+        project_id: &str,
+        entity_ids: &[&str],
+        limit: i64,
+    ) -> Result<Vec<RelationRecord>, NarrativeRepositoryError> {
+        let ids = Self::ids_json(entity_ids)?;
+        let mut statement = connection.prepare("SELECT relation_id, subject_id, predicate, object_id, authority_level FROM canon_relations WHERE project_id=?1 AND (subject_id IN (SELECT value FROM json_each(?2)) OR object_id IN (SELECT value FROM json_each(?2))) ORDER BY relation_id LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, ids, Self::limit(limit)],
+            |row| {
+                Ok(RelationRecord {
+                    relation_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    predicate: row.get(2)?,
+                    object_id: row.get(3)?,
+                    authority_level: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn canon_evidence_by_ref(
+        connection: &Connection,
+        project_id: &str,
+        reference: &str,
+        limit: i64,
+    ) -> Result<Vec<EvidenceRecord>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare("SELECT evidence_id, fact_id, relation_id, event_id, final_chapter_id, source_artifact_id, source_version, evidence_type, quote, range_start, range_end FROM canon_evidence WHERE project_id=?1 AND (fact_id=?2 OR relation_id=?2 OR event_id=?2 OR source_artifact_id=?2) ORDER BY created_at DESC, evidence_id LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, reference, Self::limit(limit)],
+            |row| {
+                Ok(EvidenceRecord {
+                    evidence_id: row.get(0)?,
+                    fact_id: row.get(1)?,
+                    relation_id: row.get(2)?,
+                    event_id: row.get(3)?,
+                    final_chapter_id: row.get(4)?,
+                    source_artifact_id: row.get(5)?,
+                    version: row.get(6)?,
+                    evidence_type: row.get(7)?,
+                    quote: row.get(8)?,
+                    range_start: row.get(9)?,
+                    range_end: row.get(10)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn knowledge_for_entities(
         connection: &Connection,
         project_id: &str,
@@ -157,14 +254,18 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn active_obligations(
+    pub fn active_obligations_for_relevance(
         connection: &Connection,
         project_id: &str,
+        entity_ids: &[&str],
+        references: &[&str],
         limit: i64,
     ) -> Result<Vec<ObligationRecord>, NarrativeRepositoryError> {
-        let mut statement = connection.prepare("SELECT obligation_id, obligation_type, authority_level, lifecycle, source_event_id, resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND lifecycle IN ('APPROVED','PLANTED','PROGRESSING') ORDER BY updated_at DESC, obligation_id LIMIT ?2")?;
+        let entity_ids = Self::ids_json(entity_ids)?;
+        let references = Self::ids_json(references)?;
+        let mut statement = connection.prepare("SELECT o.obligation_id, o.obligation_type, o.authority_level, o.lifecycle, o.source_event_id, o.resume_condition_json FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges AS d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) ORDER BY o.updated_at DESC, o.obligation_id LIMIT ?4")?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, Self::limit(limit)],
+            libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)],
             |row| {
                 let resume_condition: String = row.get(5)?;
                 Ok(ObligationRecord {
@@ -181,15 +282,64 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn task_states(
+    pub fn active_foreshadows(
         connection: &Connection,
         project_id: &str,
-        volume_id: &str,
+        chapter_refs: &[&str],
+        responsibility_refs: &[&str],
+        limit: i64,
+    ) -> Result<Vec<ForeshadowRecord>, NarrativeRepositoryError> {
+        let chapters = Self::ids_json(chapter_refs)?;
+        let refs = Self::ids_json(responsibility_refs)?;
+        let mut statement = connection.prepare("SELECT foreshadow_id, intent, status, plant_chapter_id, recover_window_end_chapter, secret_payload_ref FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') AND (plant_chapter_id IN (SELECT value FROM json_each(?2)) OR recover_window_end_chapter IN (SELECT value FROM json_each(?2)) OR foreshadow_id IN (SELECT value FROM json_each(?3)) OR secret_payload_ref IN (SELECT value FROM json_each(?3))) ORDER BY updated_at DESC, foreshadow_id LIMIT ?4")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, chapters, refs, Self::limit(limit)],
+            |row| {
+                Ok(ForeshadowRecord {
+                    foreshadow_id: row.get(0)?,
+                    intent: row.get(1)?,
+                    status: row.get(2)?,
+                    plant_chapter_id: row.get(3)?,
+                    recover_window_end_chapter: row.get(4)?,
+                    secret_payload_ref: row.get(5)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn open_mysteries(
+        connection: &Connection,
+        project_id: &str,
+        references: &[&str],
+        limit: i64,
+    ) -> Result<Vec<MysteryRecord>, NarrativeRepositoryError> {
+        let refs = Self::ids_json(references)?;
+        let mut statement = connection.prepare("SELECT mystery_id, mystery_type, status, core_fact_id FROM mystery_states WHERE project_id=?1 AND status IN ('OPEN','PROGRESSING') AND (mystery_id IN (SELECT value FROM json_each(?2)) OR core_fact_id IN (SELECT value FROM json_each(?2))) ORDER BY updated_at DESC, mystery_id LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, refs, Self::limit(limit)],
+            |row| {
+                Ok(MysteryRecord {
+                    mystery_id: row.get(0)?,
+                    mystery_type: row.get(1)?,
+                    status: row.get(2)?,
+                    core_fact_id: row.get(3)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn task_states_by_ids(
+        connection: &Connection,
+        project_id: &str,
+        task_ids: &[&str],
         limit: i64,
     ) -> Result<Vec<TaskStateRecord>, NarrativeRepositoryError> {
-        let mut statement = connection.prepare("SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND json_extract(payload_json, '$.volumeId')=?2 ORDER BY updated_at DESC, state_id LIMIT ?3")?;
+        let task_ids = Self::ids_json(task_ids)?;
+        let mut statement = connection.prepare("SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3")?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, volume_id, Self::limit(limit)],
+            libsql_rusqlite::params![project_id, task_ids, Self::limit(limit)],
             |row| {
                 let value: String = row.get(1)?;
                 Ok(TaskStateRecord {
@@ -197,6 +347,37 @@ impl NarrativeRepository {
                     value: serde_json::from_str(&value)
                         .unwrap_or(Value::Object(Default::default())),
                     chapter_id: row.get(2)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn recent_evidence(
+        connection: &Connection,
+        project_id: &str,
+        chapter_ids: &[&str],
+        source_refs: &[&str],
+        limit: i64,
+    ) -> Result<Vec<EvidenceRecord>, NarrativeRepositoryError> {
+        let chapters = Self::ids_json(chapter_ids)?;
+        let refs = Self::ids_json(source_refs)?;
+        let mut statement = connection.prepare("SELECT evidence_id, fact_id, relation_id, event_id, final_chapter_id, source_artifact_id, source_version, evidence_type, quote, range_start, range_end FROM canon_evidence WHERE project_id=?1 AND (final_chapter_id IN (SELECT value FROM json_each(?2)) OR source_artifact_id IN (SELECT value FROM json_each(?3))) ORDER BY created_at DESC, evidence_id LIMIT ?4")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, chapters, refs, Self::limit(limit)],
+            |row| {
+                Ok(EvidenceRecord {
+                    evidence_id: row.get(0)?,
+                    fact_id: row.get(1)?,
+                    relation_id: row.get(2)?,
+                    event_id: row.get(3)?,
+                    final_chapter_id: row.get(4)?,
+                    source_artifact_id: row.get(5)?,
+                    version: row.get(6)?,
+                    evidence_type: row.get(7)?,
+                    quote: row.get(8)?,
+                    range_start: row.get(9)?,
+                    range_end: row.get(10)?,
                 })
             },
         )?;

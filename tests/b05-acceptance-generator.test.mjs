@@ -13,7 +13,7 @@ test('B05 acceptance fails closed when a required gate is missing', () => {
   assert.equal(evaluateAcceptance({ gateResults: results, actualMetrics: results.metrics }).status, 'FAIL')
 })
 
-for (const gateName of ['payload_contracts', 'legacy_compatibility', 'authority_separation', 'thread_promotion', 'task_state_contract', 'canon_event_time', 'frontend_contract', 'forbidden_authority_scan']) {
+for (const gateName of ['payload_contracts', 'legacy_compatibility', 'authority_separation', 'repository_coverage', 'repository_relevance', 'plan_canon_separation', 'thread_promotion', 'task_state_contract', 'canon_event_time', 'frontend_contract', 'forbidden_authority_scan']) {
   test(`B05 acceptance fails when ${gateName} fails`, () => {
     const results = passingResults()
     results.gates.find(gate => gate.name === gateName).status = 'FAIL'

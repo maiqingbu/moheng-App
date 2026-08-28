@@ -13,7 +13,13 @@ pub struct PromotionSignal {
     pub major_relationship_transition: bool,
     pub mystery_or_reveal_responsibility: bool,
     pub foreshadow_recovery_responsibility: bool,
+    pub key_future_use_object_or_information: bool,
+    pub goal_contract_responsibility: bool,
+    pub hard_authority_responsibility: bool,
     pub future_reservation_responsibility: bool,
+    pub ambient_description: bool,
+    pub completed_trivial_event: bool,
+    pub non_continuing_scene_detail: bool,
 }
 
 impl PromotionSignal {
@@ -35,6 +41,9 @@ pub fn decide_thread_promotion(signal: PromotionSignal) -> ThreadPromotionDecisi
         || signal.major_relationship_transition
         || signal.mystery_or_reveal_responsibility
         || signal.foreshadow_recovery_responsibility
+        || signal.key_future_use_object_or_information
+        || signal.goal_contract_responsibility
+        || signal.hard_authority_responsibility
         || signal.future_reservation_responsibility
     {
         ThreadPromotionDecision::Promote
