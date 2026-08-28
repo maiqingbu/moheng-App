@@ -106,12 +106,13 @@ export interface BookPlanR1 {
   "storyPromise": string
   "protagonistMacroDirection": string
   "endingBoundary": string
-  "mustAchieve": Array<GoalConstraint>
+  "mustAchieve"?: Array<GoalConstraint>
   "mustNotBreak": Array<GoalConstraint>
-  "relationshipMacroDirections": Array<MacroDirection>
-  "majorMysteryGoals": Array<MacroDirection>
-  "futureReservations": Array<FutureReservation>
-  "volumeIntentSeeds": Array<VolumeIntentSeed>
+  "relationshipMacroDirections"?: Array<MacroDirection>
+  "majorMysteryGoals"?: Array<MacroDirection>
+  "futureReservations"?: Array<FutureReservation>
+  "volumeIntentSeeds"?: Array<VolumeIntentSeed>
+  "openingHypotheses": Array<string>
   "globalLengthBudget": { "minWords"?: number | null; "preferredWords": number; "maxWords"?: number | null }
 }
 

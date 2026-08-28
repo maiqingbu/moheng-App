@@ -88,11 +88,20 @@ for (const name of narrativeSchemaNames) {
   if (!schemaManifest.schemas.some(entry => entry.name === name)) errors.push(`缺少 B05 Narrative schema: ${name}`)
 }
 const productionRustText = rustFiles.filter(file => !file.includes(`${path.sep}tests${path.sep}`)).map(file => fs.readFileSync(file, 'utf8')).join('\n')
-for (const forbidden of ['continuity_threads', 'narrative_state', 'memory_store', 'future_reservations', 'volume_task_graph', 'rolling_horizon', 'timeline_events_v2']) {
-  if (new RegExp(`CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${forbidden}\\b`, 'i').test(productionRustText)) errors.push(`B05 禁止的第二 Authority/Runtime table: ${forbidden}`)
-}
-for (const forbidden of ['NarrativeRuntimeDelta', 'CommitBundle V3']) {
-  if (productionRustText.includes(forbidden)) errors.push(`B05 禁止的第二 Authority/Runtime implementation: ${forbidden}`)
+const productionText = `${productionRustText}\n${text}`
+const migrationText = fs.readdirSync(path.join(projectRoot, 'src-tauri/migrations'))
+  .filter(name => name.endsWith('.sql'))
+  .map(name => fs.readFileSync(path.join(projectRoot, 'src-tauri/migrations', name), 'utf8'))
+  .join('\n')
+const forbiddenAuthorityTables = ['continuity_threads', 'narrative_state', 'memory_store', 'future_reservations', 'volume_task_graph', 'rolling_horizon', 'timeline_events_v2']
+const forbiddenAuthorityTableCount = forbiddenAuthorityTables.reduce((count, table) => count +
+  [...`${productionRustText}\n${migrationText}`.matchAll(new RegExp(`CREATE\\s+TABLE(?:\\s+IF\\s+NOT\\s+EXISTS)?\\s+${table}\\b`, 'ig'))].length, 0)
+const legacyPlannerCount = [...productionText.matchAll(/\bLegacyPlanner\b/g)].length
+const narrativeRuntimeDeltaCount = [...productionText.matchAll(/\bNarrativeRuntimeDelta\b/g)].length
+const commitBundleV3Count = [...productionText.matchAll(/CommitBundle\s+V3/g)].length
+if (forbiddenAuthorityTableCount > 0) errors.push(`B05 forbidden authority table declarations: ${forbiddenAuthorityTableCount}`)
+if (legacyPlannerCount > 0 || narrativeRuntimeDeltaCount > 0 || commitBundleV3Count > 0) {
+  errors.push(`B05 forbidden production implementation symbols: LegacyPlanner=${legacyPlannerCount}, NarrativeRuntimeDelta=${narrativeRuntimeDeltaCount}, CommitBundle V3=${commitBundleV3Count}`)
 }
 const frozenRoutes = [
   '/projects', '/projects/new', '/projects/:id', '/projects/:id/market', '/projects/:id/directions',
@@ -160,5 +169,5 @@ if (errors.length) {
   console.error('Architecture verification failed:\n- ' + errors.join('\n- '))
   process.exit(1)
 }
-console.log('B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=0 legacy_planner=ABSENT status=PASS')
+console.log(`B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=${forbiddenAuthorityTableCount} legacy_planner_count=${legacyPlannerCount} narrative_runtime_delta_count=${narrativeRuntimeDeltaCount} commit_bundle_v3_count=${commitBundleV3Count} status=PASS`)
 console.log(`Architecture verification passed: ${files.length} source files scanned; scoped queries, frozen IA, command boundaries and demo isolation checks passed.`)

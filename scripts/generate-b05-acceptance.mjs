@@ -11,7 +11,7 @@ export const REQUIRED_BLOCKING_GATES = [
   'cargo_all_targets', 'migration_0007', 'payload_contracts', 'legacy_compatibility',
   'authority_separation', 'repository_coverage', 'repository_relevance', 'plan_canon_separation',
   'thread_promotion', 'task_state_contract', 'canon_event_time', 'frontend_contract',
-  'forbidden_authority_scan', 'git_binding',
+  'bookplan_seed_contract', 'task_schema_runtime_parity', 'forbidden_authority_scan', 'git_binding',
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {

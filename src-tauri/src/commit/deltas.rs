@@ -209,7 +209,8 @@ fn apply_state(
     let project_id = delta_project(connection)?;
     let value_json = serde_json::to_value(delta.value_json.clone().unwrap_or_default())?;
     if delta.state_type == "volume.task.progress" {
-        crate::narrative::validate_task_progress(&value_json).map_err(invalid)?;
+        crate::generated::validators::validate_task_progress(&value_json).map_err(invalid)?;
+        crate::narrative::validate_task_progress_semantics(&value_json).map_err(invalid)?;
     }
     let existed = row_exists(
         connection,

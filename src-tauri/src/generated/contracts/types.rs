@@ -597,12 +597,18 @@ pub struct BookPlanR1 {
     pub story_promise: String,
     pub protagonist_macro_direction: String,
     pub ending_boundary: String,
-    pub must_achieve: Vec<GoalConstraint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub must_achieve: Option<Vec<GoalConstraint>>,
     pub must_not_break: Vec<GoalConstraint>,
-    pub relationship_macro_directions: Vec<MacroDirection>,
-    pub major_mystery_goals: Vec<MacroDirection>,
-    pub future_reservations: Vec<FutureReservation>,
-    pub volume_intent_seeds: Vec<VolumeIntentSeed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_macro_directions: Option<Vec<MacroDirection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub major_mystery_goals: Option<Vec<MacroDirection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub future_reservations: Option<Vec<FutureReservation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_intent_seeds: Option<Vec<VolumeIntentSeed>>,
+    pub opening_hypotheses: Vec<String>,
     pub global_length_budget: BookPlanR1GlobalLengthBudget,
 }
 

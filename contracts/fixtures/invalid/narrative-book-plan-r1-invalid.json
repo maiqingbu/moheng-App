@@ -1,1 +1,1 @@
-{"payloadSchema":"book-plan.r0","planningMaturity":"SEED"}
+{"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"globalLengthBudget":{"preferredWords":100000}}

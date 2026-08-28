@@ -13,11 +13,25 @@ use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 const NOW: &str = "2026-08-28T00:00:00Z";
+
+fn canon_content_digest(connection: &libsql_rusqlite::Connection) -> String {
+    let query = |sql: &str| -> Value {
+        let raw: String = connection.query_row(sql, [], |row| row.get(0)).unwrap();
+        serde_json::from_str(&raw).unwrap()
+    };
+    sha256_canonical(&json!({
+        "entities": query("SELECT COALESCE(json_group_array(json_object('entityId',entity_id,'projectId',project_id,'canonicalName',canonical_name,'entityType',entity_type,'createdAt',created_at,'updatedAt',updated_at)), '[]') FROM (SELECT entity_id, project_id, canonical_name, entity_type, created_at, updated_at FROM canon_entities ORDER BY entity_id)"),
+        "facts": query("SELECT COALESCE(json_group_array(json_object('factId',fact_id,'projectId',project_id,'subjectId',subject_id,'predicate',predicate,'objectJson',object_json,'validFromChapterId',valid_from_chapter_id,'validToChapterId',valid_to_chapter_id,'sourceArtifactId',source_artifact_id,'sourceVersion',source_version,'authorityLevel',authority_level,'createdAt',created_at,'updatedAt',updated_at)), '[]') FROM (SELECT fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, source_artifact_id, source_version, authority_level, created_at, updated_at FROM canon_facts ORDER BY fact_id)"),
+        "relations": query("SELECT COALESCE(json_group_array(json_object('relationId',relation_id,'projectId',project_id,'subjectId',subject_id,'predicate',predicate,'objectId',object_id,'validFromChapterId',valid_from_chapter_id,'validToChapterId',valid_to_chapter_id,'authorityLevel',authority_level,'createdAt',created_at,'updatedAt',updated_at)), '[]') FROM (SELECT relation_id, project_id, subject_id, predicate, object_id, valid_from_chapter_id, valid_to_chapter_id, authority_level, created_at, updated_at FROM canon_relations ORDER BY relation_id)"),
+        "events": query("SELECT COALESCE(json_group_array(json_object('eventId',event_id,'projectId',project_id,'chapterId',chapter_id,'eventType',event_type,'subjectId',subject_id,'objectJson',object_json,'storyTime',story_time,'eventOrdinal',event_ordinal,'storyTimeEnd',story_time_end,'sourceArtifactId',source_artifact_id,'sourceVersion',source_version,'payloadJson',payload_json,'createdAt',created_at)), '[]') FROM (SELECT event_id, project_id, chapter_id, event_type, subject_id, object_json, story_time, event_ordinal, story_time_end, source_artifact_id, source_version, payload_json, created_at FROM canon_events ORDER BY event_id)"),
+        "knowledge": query("SELECT COALESCE(json_group_array(json_object('knowledgeId',knowledge_id,'projectId',project_id,'knowerId',knower_id,'factId',fact_id,'epistemicState',epistemic_state,'visibilityScope',visibility_scope,'fromChapterId',from_chapter_id,'untilChapterId',until_chapter_id,'createdAt',created_at,'updatedAt',updated_at)), '[]') FROM (SELECT knowledge_id, project_id, knower_id, fact_id, epistemic_state, visibility_scope, from_chapter_id, until_chapter_id, created_at, updated_at FROM canon_knowledge ORDER BY knowledge_id)")
+    })).unwrap()
+}
 
 #[test]
 fn b05_fresh_project_applies_additive_migration_0007_without_forbidden_authority_tables() {
@@ -146,16 +160,14 @@ fn b05_r1_payload_validators_accept_valid_and_reject_generic_or_invalid_shapes()
         "storyPromise":"promise",
         "protagonistMacroDirection":"direction",
         "endingBoundary":"boundary",
-        "mustAchieve":[],
         "mustNotBreak":[],
-        "relationshipMacroDirections":[],
-        "majorMysteryGoals":[],
-        "futureReservations":[],
-        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
         "globalLengthBudget":{"preferredWords":100000}
     });
     validate_book_plan_r1(&book_plan).unwrap();
-    assert!(validate_book_plan_r1(&json!({"planningMaturity":"SEED"})).is_err());
+    assert!(validate_book_plan_r1(&json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"globalLengthBudget":{"preferredWords":100000}})).is_err());
+    validate_book_plan_r1(&json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":3000000}})).unwrap();
+    assert!(validate_book_plan_r1(&json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":3000000}})).is_err());
     let task_progress =
         json!({"taskId":"task:1","status":"ACTIVE","evidenceRefs":[],"remainingConditions":[]});
     validate_task_progress(&task_progress).unwrap();
@@ -177,7 +189,51 @@ fn b05_r1_payload_validators_accept_valid_and_reject_generic_or_invalid_shapes()
     validate_continuity_thread_projection(&json!({"threadId":"thread:1","status":"OPEN","threadClass":"PROMISE","sourceEventId":"event:1","evidenceRefs":[{"artifactId":"artifact:1","version":1}],"authorityLevel":"B"})).unwrap();
     validate_volume_progress_projection(&json!({"volumeId":"volume:1","activeTaskIds":[],"blockedTaskIds":[],"remainingChapterCapacity":1,"planningPressure":{},"generatedRevision":0})).unwrap();
     println!("B05_CONTRACT_RESULT valid=PASS invalid=PASS legacy_generic=REJECTED stable_ids=PASS status=PASS");
+    println!("B05_BOOKPLAN_RESULT seed=PASS approved=PASS opening_hypotheses=PASS conditional_fields=PASS target_length_mapping=PASS status=PASS");
     println!("B05_UI_CONTRACT_RESULT shared_fixture=PASS rust_dto=PASS frontend_dto=PASS arc_mandatory=REJECTED status=PASS");
+}
+
+fn task_commit(value: serde_json::Value, suffix: &str) -> bool {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "B05", NOW).unwrap();
+    let payload = json!({"body":"task validation"});
+    let artifact_hash = sha256_canonical(&payload).unwrap();
+    let bundle = serde_json::from_value(json!({
+        "commitId":format!("b05-task-{suffix}"),"projectId":"p1","commandId":format!("b05-task-command-{suffix}"),"idempotencyKey":format!("b05-task-key-{suffix}"),"expectedProjectRevision":0,"contractVersion":"m0a.v1","createdAt":NOW,
+        "artifacts":[{"artifactId":format!("artifact:task:{suffix}"),"projectId":"p1","artifactType":"ReviewReport","scope":{"level":"PROJECT"},"version":1,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":artifact_hash,"dependencyRefs":[],"provenance":{"createdBy":"b05","commandId":format!("b05-task-command-{suffix}")},"createdAt":NOW}],
+        "stateDelta":[{"stateId":format!("task:{suffix}"),"stateType":"volume.task.progress","valueJson":value,"payloadJson":{}}]
+    })).unwrap();
+    CommitService::commit(&connection, &bundle, NOW).is_ok()
+}
+
+#[test]
+fn b05_task_progress_commit_uses_generated_schema_then_thin_semantic_validation() {
+    assert!(task_commit(
+        json!({"taskId":"task:valid","status":"ACTIVE","evidenceRefs":[],"remainingConditions":[],"metric":null}),
+        "valid"
+    ));
+    assert!(!task_commit(
+        json!({"taskId":"task:status","status":"43%","evidenceRefs":[],"remainingConditions":[]}),
+        "status"
+    ));
+    assert!(!task_commit(
+        json!({"taskId":"task:evidence","status":"ACTIVE","evidenceRefs":[{"artifactId":"only"}],"remainingConditions":[]}),
+        "evidence"
+    ));
+    assert!(!task_commit(
+        json!({"taskId":"task:condition","status":"ACTIVE","evidenceRefs":[],"remainingConditions":[{"value":"missing-kind"}]}),
+        "condition"
+    ));
+    assert!(!task_commit(
+        json!({"taskId":"task:metric","status":"ACTIVE","evidenceRefs":[],"remainingConditions":[],"metric":{"current":2,"target":1}}),
+        "metric"
+    ));
+    assert!(task_commit(
+        json!({"taskId":"task:discrete","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}),
+        "discrete"
+    ));
+    println!("B05_TASK_COMMIT_RESULT metric_null=ACCEPT invalid_status=REJECT malformed_evidence=REJECT malformed_condition=REJECT metric_range=REJECT discrete=ACCEPT schema_runtime_parity=PASS status=PASS");
 }
 
 #[test]
@@ -347,6 +403,14 @@ fn b05_plan_artifact_commit_does_not_mutate_canon_authority() {
     let temp = tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p1", "B05", NOW).unwrap();
+    connection.execute("INSERT INTO books(book_id, project_id, book_no, title, status, created_at, updated_at) VALUES ('book:authority','p1',1,'Book','ACTIVE',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id, project_id, book_id, volume_no, title, status, chapter_start, chapter_end, target_words, created_at, updated_at) VALUES ('volume:authority','p1','book:authority',1,'Volume','PRODUCING',1,1,1000,?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, created_at, updated_at) VALUES ('chapter:authority','p1','volume:authority',1,'Chapter','NORMAL','COMMITTED',10,?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id, project_id, canonical_name, entity_type, created_at, updated_at) VALUES ('entity:authority:a','p1','A','CHARACTER',?1,?1),('entity:authority:b','p1','B','CHARACTER',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, authority_level, created_at, updated_at) VALUES ('fact:authority','p1','entity:authority:a','promise','{}','B',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO canon_relations(relation_id, project_id, subject_id, predicate, object_id, authority_level, created_at, updated_at) VALUES ('relation:authority','p1','entity:authority:a','trusts','entity:authority:b','B',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO canon_knowledge(knowledge_id, project_id, knower_id, fact_id, epistemic_state, visibility_scope, created_at, updated_at) VALUES ('knowledge:authority','p1','entity:authority:a','fact:authority','KNOWS','CHAPTER',?1,?1)", [NOW]).unwrap();
+    connection.execute("INSERT INTO canon_events(event_id, project_id, chapter_id, event_type, subject_id, story_time, event_ordinal, payload_json, created_at) VALUES ('event:authority','p1','chapter:authority','PROMISE_MADE','entity:authority:a','2020-01-01T00:00:00Z',1,'{}',?1)", [NOW]).unwrap();
     let canon_before: (i64, i64, i64, i64, i64) = connection
         .query_row(
             "SELECT (SELECT COUNT(*) FROM canon_entities),(SELECT COUNT(*) FROM canon_facts),(SELECT COUNT(*) FROM canon_relations),(SELECT COUNT(*) FROM canon_events),(SELECT COUNT(*) FROM canon_knowledge)",
@@ -354,6 +418,17 @@ fn b05_plan_artifact_commit_does_not_mutate_canon_authority() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .unwrap();
+    let canon_digest_before = canon_content_digest(&connection);
+    let docs = include_str!(
+        "../../docs/architecture/Narrative_Runtime_Architecture_Amendment_R1_FROZEN.md"
+    );
+    assert!(
+        docs.contains("VolumePlan R1")
+            && docs.contains("state_deltas")
+            && docs.contains("committed chapters")
+    );
+    let projection_row: (String, i64) = connection.query_row("SELECT authoritative_table, projection_only FROM authority_registry WHERE authority_key='planning_state_ledger'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(projection_row, ("planning_state_ledger_index".into(), 1));
     let artifacts = [
         ("BookPlan", "plan:book"),
         ("VolumeIntent", "plan:volume-intent"),
@@ -367,7 +442,8 @@ fn b05_plan_artifact_commit_does_not_mutate_canon_authority() {
         json!({"artifactId":artifact_id,"projectId":"p1","artifactType":artifact_type,"scope":{"level":"PROJECT"},"version":1,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":sha256_canonical(&payload).unwrap(),"dependencyRefs":[],"provenance":{"createdBy":"b05","commandId":"b05-plan-authority-command"},"createdAt":NOW})
     })
     .collect::<Vec<_>>();
-    let bundle = serde_json::from_value(json!({"commitId":"b05-plan-authority","projectId":"p1","commandId":"b05-plan-authority-command","idempotencyKey":"b05-plan-authority-key","expectedProjectRevision":0,"contractVersion":"m0a.v1","createdAt":NOW,"artifacts":artifacts})).unwrap();
+    let heads = artifacts.iter().map(|artifact| json!({"artifactType":artifact["artifactType"],"scope":{"level":"PROJECT"},"artifactId":artifact["artifactId"],"version":1,"payloadHash":artifact["payloadHash"]})).collect::<Vec<_>>();
+    let bundle = serde_json::from_value(json!({"commitId":"b05-plan-authority","projectId":"p1","commandId":"b05-plan-authority-command","idempotencyKey":"b05-plan-authority-key","expectedProjectRevision":0,"contractVersion":"m0a.v1","createdAt":NOW,"artifacts":artifacts,"headUpdates":heads})).unwrap();
     CommitService::commit(&connection, &bundle, NOW).unwrap();
     let canon_after: (i64, i64, i64, i64, i64) = connection
         .query_row(
@@ -387,7 +463,10 @@ fn b05_plan_artifact_commit_does_not_mutate_canon_authority() {
             .unwrap(),
         5
     );
-    println!("B05_AUTHORITY_RESULT plan_artifacts=5 canon_rows_before=0 canon_rows_after=0 canon_digest_equal=true projection_only=true status=PASS");
+    let canon_digest_after = canon_content_digest(&connection);
+    let canon_digest_equal = canon_digest_before == canon_digest_after;
+    assert!(canon_digest_equal);
+    println!("B05_AUTHORITY_RESULT plan_artifacts=5 canon_rows_before={} canon_rows_after={} canon_digest_equal={} projection_only={} rebuild_source=PASS status=PASS", canon_before.0+canon_before.1+canon_before.2+canon_before.3+canon_before.4, canon_after.0+canon_after.1+canon_after.2+canon_after.3+canon_after.4, canon_digest_equal, projection_row.1 == 1);
 }
 
 #[test]

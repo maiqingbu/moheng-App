@@ -30,3 +30,18 @@ test('B05 frontend narrative projections use the shared DTO fixture boundary', (
   assert.deepEqual(progress.activeTaskIds, ['task:1'])
   assert.equal(progress.remainingChapterCapacity, 10)
 })
+
+test('B05 BookPlan fixture distinguishes SEED from APPROVED authority', () => {
+  const seed = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/valid/narrative-book-plan-r1.json`, 'utf8'))
+  const approved = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/valid/narrative-book-plan-r1-approved.json`, 'utf8'))
+  const invalidApproved = JSON.parse(fs.readFileSync(`${root}contracts/fixtures/invalid/narrative-book-plan-r1-approved-missing-reservations.json`, 'utf8'))
+  assert.equal(seed.planningMaturity, 'SEED')
+  assert.deepEqual(seed.openingHypotheses, [])
+  assert.equal('futureReservations' in seed, false)
+  assert.equal(approved.planningMaturity, 'APPROVED')
+  for (const field of ['mustAchieve', 'relationshipMacroDirections', 'majorMysteryGoals', 'futureReservations', 'volumeIntentSeeds']) assert.ok(field in approved, field)
+  assert.equal(invalidApproved.planningMaturity, 'APPROVED')
+  assert.equal('futureReservations' in invalidApproved, false)
+  const schema = fs.readFileSync(`${root}contracts/schemas/narrative/book-plan-r1.schema.json`, 'utf8')
+  assert.match(schema, /globalLengthBudget is the canonical serialized representation of targetLengthRange/)
+})

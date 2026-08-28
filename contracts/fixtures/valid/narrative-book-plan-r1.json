@@ -1,1 +1,1 @@
-{"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"globalLengthBudget":{"preferredWords":100000}}
+{"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":100000}}

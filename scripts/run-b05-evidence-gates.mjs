@@ -37,16 +37,18 @@ const targeted = logs.get('b05_targeted_test.log') ?? ''
 const markers = {
   migration_0007: /B05_MIGRATION_RESULT .*fresh_0007=PASS .*forbidden_authority_tables=0 status=PASS/.test(targeted) && /B05_MIGRATION_UPGRADE_RESULT .*from=6 to=7 .*status=PASS/.test(targeted),
   payload_contracts: /B05_CONTRACT_RESULT valid=PASS invalid=PASS legacy_generic=REJECTED stable_ids=PASS status=PASS/.test(targeted),
+  bookplan_seed_contract: /B05_BOOKPLAN_RESULT seed=PASS approved=PASS opening_hypotheses=PASS conditional_fields=PASS target_length_mapping=PASS status=PASS/.test(targeted),
+  task_schema_runtime_parity: /B05_TASK_COMMIT_RESULT metric_null=ACCEPT invalid_status=REJECT malformed_evidence=REJECT malformed_condition=REJECT metric_range=REJECT discrete=ACCEPT schema_runtime_parity=PASS status=PASS/.test(targeted),
   legacy_compatibility: /B05_LEGACY_RESULT migrations_0001_0006=UNCHANGED status=PASS/.test(targeted),
   authority_separation: /B05_REPOSITORY_RESULT typed=PASS populated=PASS bounded=PASS relevant=PASS old_promise=PASS sql_owner=repositories status=PASS/.test(targeted),
   repository_coverage: /B05_REPOSITORY_COVERAGE_RESULT relations=PASS evidence=PASS obligations=PASS foreshadows=PASS mysteries=PASS tasks_by_id=PASS recent_evidence=PASS status=PASS/.test(targeted),
   repository_relevance: /B05_REPOSITORY_RESULT .*populated=PASS .*relevant=PASS .*old_promise=PASS/.test(targeted),
-  plan_canon_separation: /B05_AUTHORITY_RESULT plan_artifacts=5 canon_rows_before=0 canon_rows_after=0 canon_digest_equal=true projection_only=true status=PASS/.test(targeted),
+  plan_canon_separation: /B05_AUTHORITY_RESULT plan_artifacts=5 canon_rows_before=[1-9]\d* canon_rows_after=[1-9]\d* canon_digest_equal=true projection_only=true rebuild_source=PASS status=PASS/.test(targeted),
   thread_promotion: /B05_THREAD_RESULT ordinary=DO_NOT_PROMOTE ambient=DO_NOT_PROMOTE trivial=DO_NOT_PROMOTE detail=DO_NOT_PROMOTE promise=PROMOTE relationship=PROMOTE conflict=PROMOTE mystery=PROMOTE foreshadow=PROMOTE future_object=PROMOTE goal=PROMOTE authority=PROMOTE reservation=PROMOTE status=PASS/.test(targeted),
   task_state_contract: /B05_TASK_RESULT .*percentage=REJECTED status=PASS/.test(targeted),
   canon_event_time: /B05_CANON_TIME_RESULT story_time=PASS event_ordinal=PASS source_ref=PASS narrative_order_separate=PASS status=PASS/.test(targeted),
   frontend_contract: /B05_UI_CONTRACT_RESULT shared_fixture=PASS rust_dto=PASS frontend_dto=PASS arc_mandatory=REJECTED status=PASS/.test(targeted),
-  forbidden_authority_scan: /B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=0 legacy_planner=ABSENT status=PASS/.test(logs.get('architecture_gate.log') ?? ''),
+  forbidden_authority_scan: /B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=0 legacy_planner_count=0 narrative_runtime_delta_count=0 commit_bundle_v3_count=0 status=PASS/.test(logs.get('architecture_gate.log') ?? ''),
 }
 for (const [name, pass] of Object.entries(markers)) results.push({ name, command: 'b05_targeted/architecture', exitCode: pass ? 0 : 1, status: pass ? 'PASS' : 'FAIL', blocking: true, log: name === 'forbidden_authority_scan' ? 'architecture_gate.log' : 'b05_targeted_test.log' })
 for (const path of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
