@@ -66,7 +66,7 @@ const markers = {
   h01_checkpoint_replan: marker(/B06_H01_INTEGRATION_RESULT .*checkpoint_replan=PASS status=PASS/),
   h01_bounded_replan: marker(/H01_RESULT .*bounded_replan=PASS/),
   h01_session_receipt: marker(/B06_H01_INTEGRATION_RESULT .*support_receipt=PASS .*durable_checkpoint=PASS/),
-  h01_grounded_evidence: marker(/B06_H01_INTEGRATION_RESULT .*evidence_hits=1 missing_evidence=INSUFFICIENT status=PASS/),
+  h01_grounded_evidence: marker(/B06_H01_INTEGRATION_RESULT .*evidence_hits=1 missing_evidence=INSUFFICIENT .*status=PASS/),
   h01_bounded_query: marker(/H01_RESULT .*bounded_query=PASS/),
   migration_0008: marker(/H01_MIGRATION_RESULT .*support_checkpoint=PASS .*additive=PASS .*narrative_authority=UNCHANGED status=PASS/),
   b05_regression: results.find(item => item.name === 'b05_regression')?.status === 'PASS',
