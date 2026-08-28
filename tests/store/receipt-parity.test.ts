@@ -25,6 +25,31 @@ describe('B01 Receipt source/result parity', () => {
     expect(invoke.invoke).toHaveBeenCalledWith('query_chapter_final', { request: { projectId: 'p1', scope: 'CHAPTER', chapterId: 'chapter-1', pageSize: 1 } })
   })
 
+  it('CHAPTER-BINDING-01/04: frontend binding matches the shared ChapterProjection manifest and Rust fixture shape', async () => {
+    const manifest = JSON.parse(readFileSync('contracts/manifests/chapter_query_binding.json', 'utf8')) as {
+      frontendMethod: string
+      tauriCommand: string
+      rustCommand: string
+      dto: string
+      fields: string[]
+    }
+    const projection = {
+      id: 'chapter-binding', volumeId: 'volume-binding', number: 1, title: '绑定章',
+      status: 'official', version: 'v1', wordCount: 12, updatedAt: '2026-08-28T00:00:00Z', content: ['正文'],
+    }
+    const invoke = { invoke: vi.fn(async (command: string) => {
+      expect(manifest.frontendMethod).toBe('queryChapterFinal')
+      expect(command).toBe(manifest.tauriCommand)
+      expect(manifest.rustCommand).toBe('query_chapter_final')
+      expect(manifest.dto).toBe('ChapterProjection')
+      expect(Object.keys(projection).sort()).toEqual([...manifest.fields].sort())
+      return projection
+    }) }
+    const tauri = new TauriFrontendPort(invoke)
+    await expect(tauri.queryChapterFinal({ projectId: 'p1', scope: 'CHAPTER', chapterId: projection.id, pageSize: 1 })).resolves.toEqual(projection)
+    console.log('B04_CHAPTER_BINDING_FRONTEND_RESULT frontendMethod=queryChapterFinal tauriCommand=query_chapter_final dto=ChapterProjection mapping=PASS status=PASS')
+  })
+
   it('RECEIPT-PARITY-CREATE: create uses the created project for the current Rust shape', async () => {
     const demo = new BrowserDemoPort()
     const receipt = await demo.executeCommand({

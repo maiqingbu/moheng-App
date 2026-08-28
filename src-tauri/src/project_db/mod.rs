@@ -120,7 +120,10 @@ pub struct ProjectManager {
     writers: Arc<Mutex<HashSet<String>>>,
     read_pool: Arc<Mutex<read_pool::ReadPool>>,
     maintenance: Arc<Mutex<HashSet<String>>>,
+    restore_test_hook: Arc<Mutex<Option<RestoreTestHook>>>,
 }
+
+pub type RestoreTestHook = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 pub struct ProjectMaintenanceGuard {
     maintenance: Arc<Mutex<HashSet<String>>>,
@@ -160,7 +163,17 @@ impl ProjectManager {
             writers: Arc::new(Mutex::new(HashSet::new())),
             read_pool: Arc::new(Mutex::new(read_pool::ReadPool::new(16, 4))),
             maintenance: Arc::new(Mutex::new(HashSet::new())),
+            restore_test_hook: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_restore_test_hook(&self, hook: Option<RestoreTestHook>) -> Result<(), ManagerError> {
+        *self
+            .restore_test_hook
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)? = hook;
+        Ok(())
     }
 
     fn acquire_writer(&self, project_id: &str) -> Result<(), ManagerError> {
@@ -596,6 +609,19 @@ impl ProjectManager {
                     "UPDATE project_meta SET maintenance_state='MAINTENANCE', updated_at=?1 WHERE project_id=?2",
                     libsql_rusqlite::params![spec.now, spec.project_id],
                 )?;
+            }
+            let restore_test_hook = self
+                .restore_test_hook
+                .lock()
+                .map_err(|_| ManagerError::WriterLockPoisoned)?
+                .clone();
+            if let Some(hook) = restore_test_hook {
+                if let Err(error) = hook() {
+                    let _ = mark_ready();
+                    return Err(ManagerError::ProjectCommand(format!(
+                        "RESTORE_TEST_HOOK: {error}"
+                    )));
+                }
             }
             {
                 let pool = self

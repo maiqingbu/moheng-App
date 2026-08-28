@@ -1,0 +1,17 @@
+{
+  "frontendMethod": "queryChapterFinal",
+  "tauriCommand": "query_chapter_final",
+  "rustCommand": "query_chapter_final",
+  "dto": "ChapterProjection",
+  "fields": [
+    "id",
+    "volumeId",
+    "number",
+    "title",
+    "status",
+    "version",
+    "wordCount",
+    "updatedAt",
+    "content"
+  ]
+}

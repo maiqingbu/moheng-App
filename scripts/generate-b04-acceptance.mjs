@@ -13,13 +13,39 @@ export const REQUIRED_BLOCKING_GATES = [
   'backup_restore', 'restore_workflow', 'deep_integrity', 'long_book_fixture', 'long_book_materialization',
   'long_book_scale_certification', 'fts_incremental_scale', 'scale_performance', 'scale_backup_restore',
   'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_upgrade_backfill',
-  'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race', 'fts_metadata_health', 'single_chapter_production_path', 'performance', 'git_binding'
+  'fts_real_text_scale', 'single_chapter_query_perf', 'restore_maintenance_race', 'fts_metadata_health', 'single_chapter_production_path', 'scale_evidence_binding', 'performance', 'git_binding'
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {
   const pass = Boolean(beforeCommit) && beforeCommit === afterCommit
     && dirtyBefore === false && dirtyAfter === false
   return { status: pass ? 'PASS' : 'FAIL' }
+}
+
+export function evaluateScaleEvidenceBinding({
+  scaleRunMode,
+  scaleSourceCommit,
+  currentSourceCommit,
+  scaleHarnessDigestMatch,
+  fixtureGeneratorDigestMatch,
+  reuseRequested,
+  finalRelease,
+}) {
+  const fresh = scaleRunMode === 'FRESH'
+  const sameCommit = Boolean(scaleSourceCommit) && scaleSourceCommit === currentSourceCommit
+  const pass = !reuseRequested
+    && sameCommit
+    && scaleHarnessDigestMatch === true
+    && fixtureGeneratorDigestMatch === true
+    && (!finalRelease || fresh)
+  return {
+    status: pass ? 'PASS' : 'FAIL',
+    scaleRunMode,
+    sameCommit,
+    scaleHarnessDigestMatch: scaleHarnessDigestMatch === true,
+    fixtureGeneratorDigestMatch: fixtureGeneratorDigestMatch === true,
+    reuseRejected: reuseRequested !== true,
+  }
 }
 
 export function countRust(text = '') {

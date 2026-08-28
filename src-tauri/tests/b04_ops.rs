@@ -1,11 +1,12 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_chapter_list_impl, query_search_fulltext_impl,
-    query_single_chapter_impl,
-    query_volume_list_impl, KernelState,
+    query_single_chapter_impl, query_volume_list_impl, KernelState,
 };
 use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use ai_novel_production_system_core::project_db::{ProjectCommandSpec, ProjectHandle, ProjectManager};
+use ai_novel_production_system_core::project_db::{
+    ProjectCommandSpec, ProjectHandle, ProjectManager,
+};
 use ai_novel_production_system_core::repositories::ops::{
     deep_integrity_check, inspect_wal, read_runtime_profile, run_vacuum, BackupService,
     FixtureSpec, LongBookFixture, PerformanceHarness, SearchDocument, SearchService,
@@ -225,9 +226,16 @@ fn b04_upgrade_backfills_existing_sources_once_and_records_projection_watermark(
     assert_eq!(version, "m0e.fts.v1");
     assert_eq!(first_rebuild_at, second_rebuild_at);
     assert!(SearchService::projection_health(&second, "p1").unwrap());
+    let source = include_str!("../src/repositories/ops.rs");
+    let health_source = source
+        .split("pub fn projection_health")
+        .nth(1)
+        .and_then(|body| body.split("pub fn ensure_projection").next())
+        .unwrap();
+    assert!(!health_source.contains("COUNT("));
     println!("B04_FTS_UPGRADE_RESULT source_chapters=100 source_artifacts=100 pre_projection_docs=0 post_projection_docs=200 rebuild_triggered=true second_open_full_rebuild=false projection_version=m0e.fts.v1 status=PASS");
     println!(
-        "B04_FTS_HEALTH_RESULT mode=metadata full_count_queries=0 full_rebuild=false status=PASS"
+        "B04_FTS_HEALTH_RESULT mode=metadata production_source_contains_full_count_query=false health_check_mode=metadata full_rebuild=false status=PASS"
     );
     let _ = temp;
 }
@@ -610,42 +618,6 @@ fn b04_restore_blocks_while_a_read_lease_is_checked_out() {
 }
 
 #[test]
-fn b04_restore_maintenance_gate_blocks_a_new_reader_at_the_barrier() {
-    let temp = tempdir().unwrap();
-    let manager = ProjectManager::new(AppPaths::new(temp.path()));
-    drop(manager.create("p1", "B04", NOW).unwrap());
-    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let restore_manager = manager.clone();
-    let restore_entered = entered.clone();
-    let restore_release = release.clone();
-    let restore_thread = std::thread::spawn(move || {
-        let guard = restore_manager.begin_maintenance("p1").unwrap();
-        restore_entered.wait();
-        restore_release.wait();
-        drop(guard);
-    });
-    let reader_manager = manager.clone();
-    let reader_entered = entered.clone();
-    let reader_thread = std::thread::spawn(move || {
-        reader_entered.wait();
-        reader_manager.read_connection("p1", NOW)
-    });
-    let reader_result = reader_thread.join().unwrap();
-    let reader_error = match reader_result {
-        Ok(_) => panic!("reader must be blocked while restore maintenance is active"),
-        Err(error) => error,
-    };
-    assert!(reader_error
-        .to_string()
-        .contains("RETRYABLE_MAINTENANCE_ERROR"));
-    release.wait();
-    restore_thread.join().unwrap();
-    assert!(manager.read_connection("p1", NOW).is_ok());
-    println!("B04_RESTORE_RACE new_reader_during_restore=BLOCKED existing_reader_policy=READ_POOL_BUSY post_restore_reader=READY_DB maintenance_cleanup=READY status=PASS");
-}
-
-#[test]
 fn b04_real_restore_backup_blocks_readers_and_cleans_up_after_failure() {
     let temp = tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
@@ -773,7 +745,10 @@ fn b04_real_restore_backup_blocks_readers_and_cleans_up_after_failure() {
 
 #[test]
 fn b04_chapter_binding_matches_manifest_registered_command_and_dto() {
-    let manifest: serde_json::Value = serde_json::from_str(include_str!("../../contracts/manifests/chapter_query_binding.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../contracts/manifests/chapter_query_binding.json"
+    ))
+    .unwrap();
     assert_eq!(manifest["frontendMethod"], "queryChapterFinal");
     assert_eq!(manifest["tauriCommand"], "query_chapter_final");
     assert_eq!(manifest["rustCommand"], "query_chapter_final");
@@ -799,9 +774,27 @@ fn b04_chapter_binding_matches_manifest_registered_command_and_dto() {
         serde_json::json!({"projectId":"p1","chapterId":"chapter:binding"}),
     )
     .unwrap();
-    let mut fields: Vec<&str> = result.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut fields: Vec<&str> = result
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     fields.sort_unstable();
-    assert_eq!(fields, ["content", "id", "number", "status", "title", "updatedAt", "version", "volumeId", "wordCount"]);
+    assert_eq!(
+        fields,
+        [
+            "content",
+            "id",
+            "number",
+            "status",
+            "title",
+            "updatedAt",
+            "version",
+            "volumeId",
+            "wordCount"
+        ]
+    );
     println!("B04_CHAPTER_BINDING_RESULT frontend=PASS rust_registered=PASS dto=ChapterProjection output=PASS status=PASS");
 }
 

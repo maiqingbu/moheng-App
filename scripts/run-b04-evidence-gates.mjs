@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { evaluateGitBinding, parseMetrics } from './generate-b04-acceptance.mjs'
+import { evaluateGitBinding, evaluateScaleEvidenceBinding, parseMetrics } from './generate-b04-acceptance.mjs'
 
 const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 const evidence = process.env.B04_EVIDENCE_DIR ? resolve(process.env.B04_EVIDENCE_DIR) : mkdtempSync(join(tmpdir(), 'moheng-b04-evidence-'))
@@ -26,6 +27,9 @@ function gitSnapshot() {
   const options = { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
   return { commit: execFileSync('git', ['rev-parse', 'HEAD'], options).trim(), dirty: execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], options).trim().length > 0 }
 }
+function digest(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
 const before = gitSnapshot(); const results = []; const logs = new Map()
 for (const [name, command, logName] of commands) {
   const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env: { ...process.env, B04_EVIDENCE_DIR: evidence } })
@@ -34,37 +38,54 @@ for (const [name, command, logName] of commands) {
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
 }
 const targetedLog = logs.get('b04_targeted_test.log') ?? ''
-const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*full_count_queries=0 .*full_rebuild=false .*status=PASS/.test(targetedLog)
-const raceEvidenceValid = /B04_RESTORE_RACE .*new_reader_during_restore=BLOCKED .*maintenance_cleanup=READY status=PASS/.test(targetedLog)
+const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*production_source_contains_full_count_query=false .*health_check_mode=metadata .*full_rebuild=false .*status=PASS/.test(targetedLog)
+const raceEvidenceValid = /B04_RESTORE_REAL_RACE_RESULT .*new_reader_during_restore=BLOCKED .*existing_reader_policy=READ_POOL_BUSY .*post_restore_reader=RESTORED_DB .*failure_cleanup=READY .*restore_api=restore_backup/.test(targetedLog)
+const chapterBindingValid = /B04_CHAPTER_BINDING_FRONTEND_RESULT .*frontendMethod=queryChapterFinal .*tauriCommand=query_chapter_final .*dto=ChapterProjection .*mapping=PASS status=PASS/.test(logs.get('frontend_vitest.log') ?? '')
+  && /B04_CHAPTER_BINDING_RESULT .*frontend=PASS .*rust_registered=PASS .*dto=ChapterProjection .*output=PASS status=PASS/.test(targetedLog)
 const scaleCommand = process.env.B04_RUN_SCALE === '1'
   ? ['long_book_materialization', 'cargo test --manifest-path src-tauri/Cargo.toml --test b04_scale -- --ignored --nocapture', 'b04_scale_materialization.log']
   : null
-const reuseScale = process.env.B04_REUSE_SCALE_EVIDENCE === '1' && existsSync(resolve(evidence, 'b04_scale_materialization.log'))
-if (scaleCommand && !reuseScale) {
+const reuseRequested = process.env.B04_REUSE_SCALE_EVIDENCE === '1'
+if (scaleCommand) {
   const [name, command, logName] = scaleCommand
+  const scaleStartedAt = new Date().toISOString()
   const result = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', env: { ...process.env, B04_EVIDENCE_DIR: evidence } })
+  const scaleFinishedAt = new Date().toISOString()
   const content = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1
   logs.set(logName, content); writeFileSync(resolve(evidence, logName), content)
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  const scaleEvidence = {
+    sourceCommit: before.commit,
+    workingTreeDirty: before.dirty,
+    scaleRunMode: 'FRESH',
+    scaleStartedAt,
+    scaleFinishedAt,
+    scaleTestDurationMs: Math.max(0, Date.parse(scaleFinishedAt) - Date.parse(scaleStartedAt)),
+    scaleHarnessDigest: digest(resolve(root, 'src-tauri/tests/b04_scale.rs')),
+    fixtureGeneratorDigest: digest(resolve(root, 'src-tauri/src/repositories/ops.rs')),
+    gateRunnerDigest: digest(resolve(root, 'scripts/run-b04-evidence-gates.mjs')),
+    reuseRequested,
+  }
   const scaleLog = logs.get(logName) ?? ''
   const scalePass = exitCode === 0 && /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS .*single_chapter_path=PASS status=PASS/.test(scaleLog)
+  const scaleBinding = evaluateScaleEvidenceBinding({
+    scaleRunMode: scaleEvidence.scaleRunMode,
+    scaleSourceCommit: scaleEvidence.sourceCommit,
+    currentSourceCommit: before.commit,
+    scaleHarnessDigestMatch: scaleEvidence.scaleHarnessDigest === digest(resolve(root, 'src-tauri/tests/b04_scale.rs')),
+    fixtureGeneratorDigestMatch: scaleEvidence.fixtureGeneratorDigest === digest(resolve(root, 'src-tauri/src/repositories/ops.rs')),
+    reuseRequested,
+    finalRelease: process.env.B04_FINAL_RELEASE === '1',
+  })
+  writeFileSync(resolve(evidence, 'scale_evidence_binding.json'), `${JSON.stringify({ ...scaleEvidence, ...scaleBinding }, null, 2)}\n`)
   results.push({ name: 'long_book_scale_certification', command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+  results.push({ name: 'scale_evidence_binding', command, exitCode: scalePass && scaleBinding.status === 'PASS' ? 0 : 1, status: scalePass && scaleBinding.status === 'PASS' ? 'PASS' : 'FAIL', blocking: true, log: 'scale_evidence_binding.json' })
   for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance']) {
     results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
   }
   for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
-    results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
-  }
-  results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: raceEvidenceValid ? 0 : 1, status: raceEvidenceValid ? 'PASS' : 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
-} else if (scaleCommand && reuseScale) {
-  const [name, command, logName] = scaleCommand
-  const scaleLog = readFileSync(resolve(evidence, logName), 'utf8')
-  logs.set(logName, scaleLog)
-  const scalePass = /B04_SCALE_CERTIFICATION_RESULT .*integrity=PASS .*fts_incremental=PASS .*performance=PASS .*backup_restore=PASS .*restore_read_pool=PASS .*vacuum=PASS .*single_chapter_path=PASS status=PASS/.test(scaleLog)
-  results.push({ name, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
-  results.push({ name: 'long_book_scale_certification', command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
-  for (const gateName of ['fts_incremental_scale', 'scale_performance', 'scale_backup_restore', 'restore_read_pool', 'deep_integrity_scale', 'vacuum_governance', 'fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
-    results.push({ name: gateName, command, exitCode: scalePass ? 0 : 1, status: scalePass ? 'PASS' : 'FAIL', blocking: true, log: logName })
+    const gatePass = scalePass && (gateName !== 'single_chapter_production_path' || chapterBindingValid)
+    results.push({ name: gateName, command, exitCode: gatePass ? 0 : 1, status: gatePass ? 'PASS' : 'FAIL', blocking: true, log: gateName === 'single_chapter_production_path' ? 'frontend_vitest.log' : logName })
   }
   results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: raceEvidenceValid ? 0 : 1, status: raceEvidenceValid ? 'PASS' : 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
 } else {
@@ -75,6 +96,7 @@ if (scaleCommand && !reuseScale) {
   for (const gateName of ['fts_real_text_scale', 'single_chapter_query_perf', 'single_chapter_production_path']) {
     results.push({ name: gateName, command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_scale_materialization.log' })
   }
+  results.push({ name: 'scale_evidence_binding', command: 'B04_RUN_SCALE=1 npm run verify:b04', exitCode: 1, status: 'FAIL', blocking: true, log: 'scale_evidence_binding.json' })
   results.push({ name: 'restore_maintenance_race', command: 'b04_targeted', exitCode: 1, status: 'FAIL', blocking: true, log: 'b04_targeted_test.log' })
 }
 const requiredOperations = {

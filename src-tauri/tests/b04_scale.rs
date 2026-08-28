@@ -544,7 +544,7 @@ fn b04_long_book_scale_certification_uses_one_shared_database() {
         );
         write(
             "single_chapter_production_path.json",
-            json!({"frontendMethod":"queryChapterFinal","tauriCommand":"query_chapter_final","rustService":"single_chapter","dtoContract":"ChapterProjection","e2e":"PASS","scaleSamples":chapter_ids.len(),"p95Ms":single_chapter_p95,"status":"PASS"}),
+            json!({"frontendMethod":"queryChapterFinal","tauriCommand":"query_chapter_final","rustCommandRegistered":true,"dtoContract":"ChapterProjection","productionPathBinding":"PASS","trueE2E":false,"scaleSamples":chapter_ids.len(),"p95Ms":single_chapter_p95,"status":"PASS"}),
         );
         write(
             "canon_query_perf.json",
