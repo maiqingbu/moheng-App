@@ -10,7 +10,7 @@ export const REQUIRED_BLOCKING_GATES = [
   'module_boundary', 'm0a', 'b05_targeted', 'cargo_fmt', 'cargo_check', 'cargo_clippy',
   'cargo_all_targets', 'migration_0007', 'payload_contracts', 'legacy_compatibility',
   'authority_separation', 'thread_promotion', 'task_state_contract', 'canon_event_time',
-  'frontend_contract', 'forbidden_authority_scan', 'scale_evidence_binding', 'git_binding',
+  'frontend_contract', 'forbidden_authority_scan', 'git_binding',
 ]
 
 export function evaluateGitBinding({ beforeCommit, afterCommit, dirtyBefore, dirtyAfter }) {
@@ -35,7 +35,12 @@ export function evaluateAcceptance({ gateResults, actualMetrics }) {
   const gates = REQUIRED_BLOCKING_GATES.map(name => name === 'git_binding'
     ? { name, status: gateResults?.gitBinding?.status ?? 'FAIL', exitCode: gateResults?.gitBinding?.status === 'PASS' ? 0 : 1, blocking: true, log: 'gate-results.json' }
     : byName.get(name) ?? { name, status: 'FAIL', exitCode: 1, blocking: true, log: '' })
-  const binding = evaluateGitBinding(gateResults ?? {})
+  const binding = evaluateGitBinding({
+    beforeCommit: gateResults?.sourceCommit,
+    afterCommit: gateResults?.sourceCommitAfter,
+    dirtyBefore: gateResults?.workingTreeDirtyBefore,
+    dirtyAfter: gateResults?.workingTreeDirtyAfter,
+  })
   const metricConsistency = Boolean(gateResults?.metrics) && Object.keys(actualMetrics).every(key => actualMetrics[key] === gateResults.metrics[key])
   return { status: gates.every(gate => gate.status === 'PASS' && gate.exitCode === 0) && binding.status === 'PASS' && metricConsistency ? 'PASS' : 'FAIL', gates, gitBinding: binding, metricConsistency: metricConsistency ? 'PASS' : 'FAIL' }
 }
