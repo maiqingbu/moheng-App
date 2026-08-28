@@ -40,7 +40,13 @@ for (const [name, command, logName] of commands) {
 const targetedLog = logs.get('b04_targeted_test.log') ?? ''
 const healthEvidenceValid = /B04_FTS_HEALTH_RESULT .*mode=metadata .*production_source_contains_full_count_query=false .*health_check_mode=metadata .*full_rebuild=false .*status=PASS/.test(targetedLog)
 const raceEvidenceValid = /B04_RESTORE_REAL_RACE_RESULT .*new_reader_during_restore=BLOCKED .*existing_reader_policy=READ_POOL_BUSY .*post_restore_reader=RESTORED_DB .*failure_cleanup=READY .*restore_api=restore_backup/.test(targetedLog)
-const chapterBindingValid = /B04_CHAPTER_BINDING_FRONTEND_RESULT .*frontendMethod=queryChapterFinal .*tauriCommand=query_chapter_final .*dto=ChapterProjection .*mapping=PASS status=PASS/.test(logs.get('frontend_vitest.log') ?? '')
+let frontendBindingEvidence
+try { frontendBindingEvidence = JSON.parse(readFileSync(resolve(evidence, 'chapter_binding_frontend.json'), 'utf8')) } catch { frontendBindingEvidence = null }
+const chapterBindingValid = frontendBindingEvidence?.frontendMethod === 'queryChapterFinal'
+  && frontendBindingEvidence?.tauriCommand === 'query_chapter_final'
+  && frontendBindingEvidence?.dtoContract === 'ChapterProjection'
+  && frontendBindingEvidence?.bindingTests === 'PASS'
+  && frontendBindingEvidence?.status === 'PASS'
   && /B04_CHAPTER_BINDING_RESULT .*frontend=PASS .*rust_registered=PASS .*dto=ChapterProjection .*output=PASS status=PASS/.test(targetedLog)
 const scaleCommand = process.env.B04_RUN_SCALE === '1'
   ? ['long_book_materialization', 'cargo test --manifest-path src-tauri/Cargo.toml --test b04_scale -- --ignored --nocapture', 'b04_scale_materialization.log']

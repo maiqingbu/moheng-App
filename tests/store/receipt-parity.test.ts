@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 import type { CommandReceipt, CommandRequest } from '../../src/application/contracts'
 import { BrowserDemoPort } from '../../src/infrastructure/browser-demo/demoPort'
@@ -47,6 +48,10 @@ describe('B01 Receipt source/result parity', () => {
     }) }
     const tauri = new TauriFrontendPort(invoke)
     await expect(tauri.queryChapterFinal({ projectId: 'p1', scope: 'CHAPTER', chapterId: projection.id, pageSize: 1 })).resolves.toEqual(projection)
+    if (process.env.B04_EVIDENCE_DIR) {
+      mkdirSync(process.env.B04_EVIDENCE_DIR, { recursive: true })
+      writeFileSync(join(process.env.B04_EVIDENCE_DIR, 'chapter_binding_frontend.json'), `${JSON.stringify({ frontendMethod: manifest.frontendMethod, tauriCommand: manifest.tauriCommand, dtoContract: manifest.dto, bindingTests: 'PASS', status: 'PASS' })}\n`)
+    }
     console.log('B04_CHAPTER_BINDING_FRONTEND_RESULT frontendMethod=queryChapterFinal tauriCommand=query_chapter_final dto=ChapterProjection mapping=PASS status=PASS')
   })
 

@@ -19,7 +19,6 @@ const restore = targeted.match(/B04_RESTORE_WORKFLOW_RESULT .*maintenance=PASS .
 const upgrade = targeted.match(/B04_FTS_UPGRADE_RESULT .*source_chapters=(\d+) source_artifacts=(\d+) pre_projection_docs=(\d+) post_projection_docs=(\d+) rebuild_triggered=(true|false) second_open_full_rebuild=(true|false) projection_version=([^ ]+) status=PASS/)
 const health = targeted.match(/B04_FTS_HEALTH_RESULT .*mode=(\w+) .*production_source_contains_full_count_query=(true|false) .*health_check_mode=(\w+) .*full_rebuild=(true|false) .*status=PASS/)
 const race = targeted.match(/B04_RESTORE_REAL_RACE_RESULT .*new_reader_during_restore=(\w+) .*existing_reader_policy=([A-Z_]+) .*post_restore_reader=([A-Z_]+) .*failure_cleanup=([A-Z_]+) .*restore_api=([a-z_]+)/)
-const frontendBinding = (readFileSync(resolve(evidenceDir, 'frontend_vitest.log'), 'utf8')).match(/B04_CHAPTER_BINDING_FRONTEND_RESULT .*frontendMethod=(\w+) .*tauriCommand=([a-z_]+) .*dto=(\w+) .*mapping=PASS status=PASS/)
 const rustBinding = targeted.match(/B04_CHAPTER_BINDING_RESULT .*frontend=PASS .*rust_registered=PASS .*dto=(\w+) .*output=PASS status=PASS/)
 const integrityMatches = [...targeted.matchAll(/B04_INTEGRITY_RESULT failures=(\d+) status=FAIL_CLOSED/g)]
 const materialized = scaleMaterialized.match(/B04_SCALE_MATERIALIZED books=(\d+) volumes=(\d+) chapters=(\d+) artifacts=(\d+) canon_facts=(\d+) dependencies=(\d+) model_runs=(\d+) target_words=(\d+) status=PASS/)
@@ -31,7 +30,7 @@ const performancePass = Object.entries(requiredOperations).every(([operation, th
   return marker && Number(marker[2]) > 0 && Number(marker[4]) <= threshold
 }) && Number(performance[3]) <= 1000
 const readJson = name => JSON.parse(readFileSync(resolve(evidenceDir, name), 'utf8'))
-let scaleIntegrity; let scalePerformance; let scaleRestore; let scaleCertificationReport; let scaleFts; let singleChapter; let singleChapterBinding; let canonQuery; let dependencyQuery; let restoreRace; let scaleBinding; let scaleWal; let benchmarkSamples; let benchmarkEnvironment
+let scaleIntegrity; let scalePerformance; let scaleRestore; let scaleCertificationReport; let scaleFts; let singleChapter; let singleChapterBinding; let frontendBinding; let canonQuery; let dependencyQuery; let restoreRace; let scaleBinding; let scaleWal; let benchmarkSamples; let benchmarkEnvironment
 try {
   scaleIntegrity = readJson('long_book_scale_integrity.json')
   scalePerformance = readJson('scale_perf_p95.json')
@@ -40,6 +39,7 @@ try {
   scaleFts = readJson('fts_scale_queries.json')
   singleChapter = readJson('single_chapter_perf.json')
   singleChapterBinding = readJson('single_chapter_production_path.json')
+  frontendBinding = readJson('chapter_binding_frontend.json')
   canonQuery = readJson('canon_query_perf.json')
   dependencyQuery = readJson('dependency_query_perf.json')
   restoreRace = readJson('restore_maintenance_race.json')
@@ -50,7 +50,7 @@ try {
 } catch {
   throw new Error('B04 scale certification evidence files are incomplete')
 }
-if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !upgrade || !health || health[2] !== 'false' || health[3] !== 'metadata' || health[4] !== 'false' || !race || race[1] !== 'BLOCKED' || race[2] !== 'READ_POOL_BUSY' || race[3] !== 'RESTORED_DB' || race[4] !== 'READY' || race[5] !== 'restore_backup' || !frontendBinding || !rustBinding || frontendBinding[1] !== 'queryChapterFinal' || frontendBinding[2] !== 'query_chapter_final' || frontendBinding[3] !== 'ChapterProjection' || rustBinding[1] !== 'ChapterProjection' || !scaleCertification || !scaleBinding || scaleBinding.status !== 'PASS' || scaleBinding.scaleRunMode !== 'FRESH' || scaleBinding.sourceCommit !== sourceCommit || scaleBinding.reuseRejected !== true || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scaleIntegrity.actualTextChars < 10000000 || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || scaleFts.status !== 'PASS' || scaleFts.actualTextChars < 10000000 || singleChapter.status !== 'PASS' || !singleChapterBinding || singleChapterBinding.status !== 'PASS' || canonQuery.status !== 'PASS' || dependencyQuery.status !== 'PASS' || restoreRace.status !== 'PASS' || scaleWal.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
+if (!fixture || !scale || !performance || !profile || !wal || !backup || !restore || !upgrade || !health || health[2] !== 'false' || health[3] !== 'metadata' || health[4] !== 'false' || !race || race[1] !== 'BLOCKED' || race[2] !== 'READ_POOL_BUSY' || race[3] !== 'RESTORED_DB' || race[4] !== 'READY' || race[5] !== 'restore_backup' || !frontendBinding || frontendBinding.frontendMethod !== 'queryChapterFinal' || frontendBinding.tauriCommand !== 'query_chapter_final' || frontendBinding.dtoContract !== 'ChapterProjection' || frontendBinding.bindingTests !== 'PASS' || frontendBinding.status !== 'PASS' || !rustBinding || rustBinding[1] !== 'ChapterProjection' || !scaleCertification || !scaleBinding || scaleBinding.status !== 'PASS' || scaleBinding.scaleRunMode !== 'FRESH' || scaleBinding.sourceCommit !== sourceCommit || scaleBinding.reuseRejected !== true || integrityMatches.length === 0 || !materialized || !performancePass || scaleIntegrity.status !== 'PASS' || scaleIntegrity.actualTextChars < 10000000 || scalePerformance.status !== 'PASS' || scaleRestore.status !== 'PASS' || scaleCertificationReport.status !== 'PASS' || scaleFts.status !== 'PASS' || scaleFts.actualTextChars < 10000000 || singleChapter.status !== 'PASS' || !singleChapterBinding || singleChapterBinding.status !== 'PASS' || canonQuery.status !== 'PASS' || dependencyQuery.status !== 'PASS' || restoreRace.status !== 'PASS' || scaleWal.status !== 'PASS' || !Array.isArray(benchmarkSamples) || benchmarkSamples.length < 200 || benchmarkEnvironment.status !== 'PASS') {
   throw new Error('B04 targeted evidence markers are incomplete')
 }
 const integrityFailures = integrityMatches.reduce((sum, match) => sum + Number(match[1]), 0)
@@ -70,7 +70,7 @@ write('single_chapter_perf.json', singleChapter)
 write('canon_query_perf.json', canonQuery)
 write('dependency_query_perf.json', dependencyQuery)
 write('restore_maintenance_race.json', { newReaderDuringRestore: race[1], existingReaderPolicy: race[2], postRestoreReader: race[3], failureCleanup: race[4], restoreApi: race[5] })
-write('single_chapter_production_path.json', { frontendMethod: frontendBinding[1], tauriCommand: frontendBinding[2], rustCommandRegistered: true, dtoContract: frontendBinding[3], bindingTests: 'PASS', productionPathBinding: 'PASS', trueE2E: false, scaleP95Ms: singleChapter.p95Ms })
+write('single_chapter_production_path.json', { frontendMethod: frontendBinding.frontendMethod, tauriCommand: frontendBinding.tauriCommand, rustCommandRegistered: true, dtoContract: frontendBinding.dtoContract, bindingTests: 'PASS', productionPathBinding: 'PASS', trueE2E: false, scaleP95Ms: singleChapter.p95Ms })
 write('scale_evidence_binding.json', scaleBinding)
 write('scale_wal_vacuum.json', scaleWal)
 write('scale_perf_p95.json', scalePerformance)
