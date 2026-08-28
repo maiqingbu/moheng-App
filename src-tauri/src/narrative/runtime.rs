@@ -51,19 +51,19 @@ impl CurrentNarrativeStateView {
             .max();
         let mut source_refs = BTreeSet::new();
         for fact in &facts {
-            source_refs.insert(format!("fact:{}", fact.fact_id));
+            source_refs.insert(fact.fact_id.clone());
         }
         for relation in &relations {
-            source_refs.insert(format!("relation:{}", relation.relation_id));
+            source_refs.insert(relation.relation_id.clone());
         }
         for knowledge in &knowledge {
-            source_refs.insert(format!("knowledge:{}", knowledge.knowledge_id));
+            source_refs.insert(knowledge.knowledge_id.clone());
         }
         for event in &events {
-            source_refs.insert(format!("event:{}", event.event_id));
+            source_refs.insert(event.event_id.clone());
         }
         for obligation in &active_responsibilities {
-            source_refs.insert(format!("obligation:{}", obligation.obligation_id));
+            source_refs.insert(obligation.obligation_id.clone());
         }
         Self {
             bounds,
@@ -233,7 +233,7 @@ pub fn build_continuity_threads(
                 .clone()
                 .map(|id| format!("event:{id}")),
             evidence_refs,
-            participant_entities: Vec::new(),
+            participant_entities: obligation.participant_entities.clone(),
             resume_condition: obligation.resume_condition.clone(),
             authority_level: obligation.authority_level.clone(),
             current_disposition: obligation.lifecycle.clone(),

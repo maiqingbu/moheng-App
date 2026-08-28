@@ -1,6 +1,7 @@
 use ai_novel_production_system_core::commands::{
     query_context_manifest_impl, query_narrative_state_impl, query_plan_stale_impl,
-    support_session_impl, KernelState,
+    query_volume_progress_impl, support_checkpoint_resume_impl, support_session_impl, KernelState,
+    RepositoryReadAdapter,
 };
 use ai_novel_production_system_core::harness::{
     bounded_replan, can_expose_write_capability, check_checkpoint_resume, diagnose_knowledge_event,
@@ -51,6 +52,7 @@ fn populated_state() -> CurrentNarrativeStateView {
             fact_id: Some("fact:a".into()),
             epistemic_state: "KNOWS".into(),
             visibility_scope: Some("CHAPTER".into()),
+            from_chapter_id: Some("chapter:11".into()),
         }],
         vec![CanonEventRecord {
             event_id: "event:identity".into(),
@@ -73,10 +75,7 @@ fn b06_current_state_is_populated_bounded_and_keeps_narrative_time_separate() {
     assert_eq!(state.events.len(), 1);
     assert_eq!(state.world_time.as_deref(), Some("1999-01-01T00:00:00Z"));
     assert_eq!(state.bounds.entity_ids, vec!["entity:a"]);
-    assert!(state
-        .source_refs
-        .iter()
-        .any(|item| item.ref_ == "fact:fact:a"));
+    assert!(state.source_refs.iter().any(|item| item.ref_ == "fact:a"));
     assert!(!state.truncated);
     println!("B06_CURRENT_STATE_RESULT populated=PASS bounded=PASS provenance=PASS no_narrative_authority_table=PASS status=PASS");
 }
@@ -141,6 +140,7 @@ fn b06_continuity_lifecycle_and_cross_volume_recall_are_deterministic() {
             lifecycle: "APPROVED".into(),
             source_event_id: Some("event:promise".into()),
             resume_condition: json!({"kind":"NEXT_MEETING","value":{"entityA":"entity:a","entityB":"entity:b"}}),
+            participant_entities: vec!["entity:a".into(), "entity:b".into()],
         },
         ObligationRecord {
             obligation_id: "obligation:resolved".into(),
@@ -149,6 +149,7 @@ fn b06_continuity_lifecycle_and_cross_volume_recall_are_deterministic() {
             lifecycle: "RESOLVED".into(),
             source_event_id: None,
             resume_condition: json!({"kind":"AFTER_CHAPTER","value":1}),
+            participant_entities: Vec::new(),
         },
         ObligationRecord {
             obligation_id: "obligation:abandoned".into(),
@@ -157,6 +158,7 @@ fn b06_continuity_lifecycle_and_cross_volume_recall_are_deterministic() {
             lifecycle: "ABANDONED".into(),
             source_event_id: None,
             resume_condition: json!({"kind":"AFTER_CHAPTER","value":1}),
+            participant_entities: Vec::new(),
         },
     ];
     let evidence = vec![EvidenceRecord {
@@ -284,6 +286,9 @@ impl ReadCapabilityAdapter for EchoAdapter {
 
 #[test]
 fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "H01", "2026-08-29T00:00:00Z").unwrap();
     let scope =
         resolve_project_scope("p1", 7, "A 何时知道 B 的身份", "DIAGNOSE", "PROJECT").unwrap();
     let plan = plan_support(&scope, "A 何时知道 B 的身份", "2026-08-28T00:00:00Z").unwrap();
@@ -367,14 +372,29 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
         Vec::new(),
     );
     assert_eq!(insufficient.support_status, SupportStatus::INSUFFICIENT);
+    let state = populated_state();
+    let mut conflicting_knowledge = state.knowledge[0].clone();
+    conflicting_knowledge.from_chapter_id = Some("chapter:12".into());
+    let evidence = EvidenceRecord {
+        evidence_id: "evidence:identity".into(),
+        fact_id: None,
+        relation_id: None,
+        event_id: Some(state.events[0].event_id.clone()),
+        final_chapter_id: "chapter:11".into(),
+        source_artifact_id: "artifact:evidence".into(),
+        version: 1,
+        evidence_type: "EVENT".into(),
+        quote: Some("identity".into()),
+        range_start: Some(1),
+        range_end: Some(2),
+    };
     assert_eq!(
         diagnose_knowledge_event(
             &scope,
             "world time conflict",
-            Some("knowledge:a"),
-            Some("event:identity"),
-            Some("artifact:evidence"),
-            true,
+            &conflicting_knowledge,
+            Some(&state.events[0]),
+            Some(&evidence)
         )
         .support_status,
         SupportStatus::CONFLICTING
@@ -385,10 +405,11 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
             "projection drift",
             "projection:p1",
             "authority:p1",
-            true
+            1,
+            2
         )
         .diagnosis_type,
-        "diagnose_projection_authority"
+        "PROJECTION_DRIFT"
     );
     let checkpoint = SupportCheckpoint {
         checkpoint_id: "checkpoint:1".into(),
@@ -419,7 +440,35 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     )
     .unwrap();
     assert!(replanned.steps.len() <= 7);
-    println!("H01_RESULT scope=PASS registry=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 status=PASS");
+    let adapter = RepositoryReadAdapter {
+        connection: &connection,
+        project_id: "p1",
+    };
+    for spec in registry.specs.values() {
+        let input =
+            json!({"entityIds":[],"references":[],"chapterId":"chapter:1","projectRevision":7});
+        let call = CapabilityCallEnvelope {
+            call_id: format!("parity:{}", spec.capability_id),
+            capability_id: spec.capability_id.clone(),
+            capability_version: spec.version.clone(),
+            spec_digest: spec.spec_digest.clone(),
+            mode: "DIAGNOSE".into(),
+            project_id: "p1".into(),
+            project_revision: 7,
+            input_digest: sha256_canonical(&input).unwrap(),
+            input,
+            requested_bounds: RequestedBounds {
+                max_results: 1,
+                max_tokens: 4096,
+            },
+        };
+        BoundedCapabilityExecutor {
+            registry: registry.clone(),
+        }
+        .execute(&adapter, &call)
+        .unwrap();
+    }
+    println!("H01_RESULT scope=PASS registry=PASS registry_adapter_parity=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 status=PASS");
 }
 
 #[test]
@@ -476,6 +525,16 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     connection.execute("INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,created_at,updated_at) VALUES ('knowledge:a','p1','entity:a','fact:identity','KNOWS','CHAPTER',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,story_time,event_ordinal,payload_json,created_at) VALUES ('event:identity','p1','chapter:1','IDENTITY_REVEALED','entity:a','2020-01-01T00:00:00Z',1,'{}',?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:identity','p1','event:identity','chapter:1','artifact:evidence',1,'EVENT','B revealed identity',1,20,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000},"futureReservations":[{"reservationId":"reservation:1","description":"later","prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"B"}]});
+    let book_plan_hash = sha256_canonical(&book_plan).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:book','p1','BookPlan','PROJECT','p1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&book_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book',1,?1,?2)", [&book_plan.to_string(), &book_plan_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','BookPlan','PROJECT','p1','plan:book',1,?1)", [&book_plan_hash]).unwrap();
+    let volume_plan = json!({"payloadSchema":"volume-plan.r1","capacityBudget":{"minChapters":1,"preferredChapters":5,"maxChapters":10},"tasks":[]});
+    let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:volume','p1','VolumePlan','VOLUME','volume:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume',1,?1,?2)", [&volume_plan.to_string(), &volume_plan_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:1','plan:volume',1,?1)", [&volume_plan_hash]).unwrap();
     drop(connection);
     let state = KernelState::new(paths);
     let request = json!({"projectId":"p1","scope":"PROJECT","entityIds":["entity:a"],"chapterId":"chapter:1","currentChapter":1,"currentVolumeId":"volume:1"});
@@ -483,11 +542,39 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     assert_eq!(state_projection["projectId"], "p1");
     let context_projection = query_context_manifest_impl(&state, request.clone()).unwrap();
     assert_eq!(context_projection["payloadSchema"], "context-manifest.r1");
+    assert_eq!(
+        context_projection["goalContractRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        context_projection["futureReservationRefs"],
+        json!(["reservation:1"])
+    );
+    let progress_projection = query_volume_progress_impl(
+        &state,
+        json!({"projectId":"p1","scope":"VOLUME","volumeId":"volume:1","currentChapter":3}),
+    )
+    .unwrap();
+    assert_eq!(progress_projection["remainingChapterCapacity"], 7);
+    assert_eq!(
+        progress_projection["routePlanRef"]["artifactId"],
+        "plan:volume"
+    );
     let stale_projection = query_plan_stale_impl(&state, json!({"projectId":"p1","compiledFromProjectRevision":0,"compiledFromStateDigest":context_projection["compiledFromStateDigest"],"currentStateDigest":"f".repeat(64),"entityIds":["entity:a"],"chapterId":"chapter:1"})).unwrap();
     assert_eq!(stale_projection["status"], "VALID");
     let support = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1"})).unwrap();
     assert_eq!(support["receipt"]["projectId"], "p1");
     assert_eq!(support["finding"]["supportStatus"], "SUPPORTED");
+    let call_count = support["calls"].as_array().unwrap().len();
+    let ledger_count = support["evidenceLedger"].as_array().unwrap().len();
+    assert_eq!(call_count, ledger_count);
+    assert_eq!(support["calls"][2]["result"].as_array().unwrap().len(), 1);
+    assert_eq!(support["calls"][2]["result"][0]["rangeStart"], 1);
+    let missing_evidence = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:missing"],"chapterId":"chapter:1"})).unwrap();
+    assert_eq!(missing_evidence["finding"]["supportStatus"], "INSUFFICIENT");
     let checkpoint_id = support["receipt"]["checkpointRef"].as_str().unwrap();
     let loaded = state
         .manager
@@ -505,5 +592,56 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         })
         .unwrap();
     assert!(loaded.is_some());
-    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS support_receipt=PASS durable_checkpoint=PASS read_only=PASS status=PASS");
+    let writer = state
+        .manager
+        .open("p1", "", "2026-08-28T00:00:00Z")
+        .unwrap();
+    writer
+        .execute(
+            "UPDATE project_meta SET revision=revision+1 WHERE project_id='p1'",
+            [],
+        )
+        .unwrap();
+    drop(writer);
+    let stale_resume = support_checkpoint_resume_impl(
+        &state,
+        json!({"projectId":"p1","checkpointId":checkpoint_id}),
+    )
+    .unwrap();
+    assert_eq!(stale_resume["status"], "CHECKPOINT_STALE");
+    assert!(stale_resume["affectedQuery"].is_object());
+    assert!(stale_resume["replan"]["priorPlanDigest"].is_string());
+    assert!(stale_resume["replan"]["newPlanDigest"].is_string());
+    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS support_receipt=PASS durable_checkpoint=PASS read_only=PASS ledger_entries={} evidence_hits={} missing_evidence=INSUFFICIENT checkpoint_replan=PASS status=PASS", ledger_count, support["calls"][2]["result"].as_array().unwrap().len());
+}
+
+#[test]
+fn b06_bounded_queries_report_true_truncation_for_populated_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("p1", "Bounds", "2026-08-29T00:00:00Z")
+        .unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:a','p1','A','CHARACTER',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    for index in 0..101 {
+        connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,'p1','entity:a','noise','{}','C',?2,?2)", libsql_rusqlite::params![format!("fact:{index}"), "2026-08-29T00:00:00Z"]).unwrap();
+    }
+    let ids = ["entity:a"];
+    let (facts, facts_truncated) = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::current_canon_bounded(&connection, "p1", &ids, 100).unwrap();
+    assert_eq!(facts.len(), 100);
+    assert!(facts_truncated);
+    connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:1','p1',1,'Book','ACTIVE',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:1','p1','book:1',1,'Volume','PRODUCING',1,1,1000,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:1','p1','volume:1',1,'Chapter','NORMAL','COMMITTED',1,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    let hash = "a".repeat(64);
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:1','p1','ReviewReport','CHAPTER','chapter:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&hash, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:1',1,'{}',?1)", [&hash]).unwrap();
+    for index in 0..101 {
+        connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES (?1,'p1','chapter:1','artifact:1',1,'TEST',?2)", libsql_rusqlite::params![format!("evidence:{index}"), "2026-08-29T00:00:00Z"]).unwrap();
+    }
+    let refs = ["artifact:1"];
+    let (evidence, evidence_truncated) = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::evidence_for_refs_bounded(&connection, "p1", &refs, 100).unwrap();
+    assert_eq!(evidence.len(), 100);
+    assert!(evidence_truncated);
+    println!("B06_BOUNDED_RESULT facts=100 facts_truncated=true evidence=100 evidence_truncated=true status=PASS");
 }

@@ -1,4 +1,5 @@
 use crate::hash::sha256_canonical;
+use crate::repositories::narrative::{CanonEventRecord, EvidenceRecord, KnowledgeRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -224,6 +225,9 @@ impl BoundedCapabilityExecutor {
         }
         let (result, source_refs, truncated) =
             adapter.invoke(&call.capability_id, &call.input, &call.requested_bounds)?;
+        if result.to_string().len() > call.requested_bounds.max_tokens {
+            return Err("CAPABILITY_RESULT_EXCEEDS_MAX_TOKENS".into());
+        }
         let result_digest = sha256_canonical(&result).map_err(|e| e.to_string())?;
         Ok(CapabilityResultEnvelope {
             call_id: call.call_id.clone(),
@@ -384,27 +388,44 @@ pub fn diagnose_canon_evidence(
 pub fn diagnose_knowledge_event(
     scope: &ProjectScope,
     claim: &str,
-    knowledge_ref: Option<&str>,
-    event_ref: Option<&str>,
-    evidence_ref: Option<&str>,
-    world_time_conflict: bool,
+    knowledge: &KnowledgeRecord,
+    establishing_event: Option<&CanonEventRecord>,
+    evidence: Option<&EvidenceRecord>,
 ) -> Finding {
-    let source_refs = [knowledge_ref, event_ref, evidence_ref]
-        .into_iter()
-        .flatten()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    let conflicting_refs = if world_time_conflict {
-        source_refs.clone()
-    } else {
-        Vec::new()
-    };
+    let mut source_refs = vec![knowledge.knowledge_id.clone()];
+    if let Some(event) = establishing_event {
+        source_refs.push(event.event_id.clone());
+    }
+    if let Some(item) = evidence {
+        source_refs.push(item.evidence_id.clone());
+    }
+    let time_conflict = establishing_event.is_some_and(|event| {
+        knowledge
+            .from_chapter_id
+            .as_deref()
+            .is_some_and(|chapter| chapter != event.chapter_id)
+    });
+    let missing_chain = establishing_event.is_none() || evidence.is_none();
     grounded_finding(
         scope,
-        "diagnose_knowledge_event",
+        if time_conflict {
+            "DATA_INCONSISTENCY"
+        } else if missing_chain {
+            "EVIDENCE_GAP"
+        } else {
+            "diagnose_knowledge_event"
+        },
         claim,
-        source_refs,
-        conflicting_refs,
+        if missing_chain {
+            Vec::new()
+        } else {
+            source_refs.clone()
+        },
+        if time_conflict {
+            source_refs
+        } else {
+            Vec::new()
+        },
     )
 }
 
@@ -452,17 +473,23 @@ pub fn diagnose_projection_authority(
     claim: &str,
     projection_ref: &str,
     authority_ref: &str,
-    drift: bool,
+    projection_revision: i64,
+    authority_revision: i64,
 ) -> Finding {
+    let refs = vec![projection_ref.into(), authority_ref.into()];
     grounded_finding(
         scope,
-        "diagnose_projection_authority",
-        claim,
-        vec![projection_ref.into(), authority_ref.into()],
-        if drift {
-            vec![projection_ref.into(), authority_ref.into()]
+        if projection_revision == authority_revision {
+            "NO_ISSUE"
         } else {
+            "PROJECTION_DRIFT"
+        },
+        claim,
+        refs.clone(),
+        if projection_revision == authority_revision {
             Vec::new()
+        } else {
+            refs
         },
     )
 }
