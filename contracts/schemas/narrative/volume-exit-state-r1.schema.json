@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/volume-exit-state.r1.schema.json", "title":"VolumeExitStateR1", "type":"object",
+  "properties":{"payloadSchema":{"const":"volume-exit-state.r1"},"volumeId":{"type":"string","minLength":1},"closedAt":{"type":"string","format":"date-time","pattern":"Z$"},"stateDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"},"remainingTaskIds":{"type":"array","items":{"type":"string"}},"unresolvedThreadRefs":{"type":"array","items":{"type":"string"}},"nextVolumeEligibility":{"type":"string","enum":["ELIGIBLE","BLOCKED"]},"handoffEvidenceRefs":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/EvidenceRef"}}},
+  "required":["payloadSchema","volumeId","closedAt","stateDigest","remainingTaskIds","unresolvedThreadRefs","nextVolumeEligibility","handoffEvidenceRefs"],"additionalProperties":false
+}

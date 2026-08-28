@@ -2,6 +2,174 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalConstraint {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MacroDirection {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FutureReservation {
+    pub reservation_id: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_for_volume_no: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_for_volume_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before_volume_no: Option<i64>,
+    pub prerequisites: Vec<String>,
+    pub may_foreshadow: bool,
+    pub may_reveal: bool,
+    pub authority_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeIntentSeed {
+    pub seed_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Condition {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TaskStatus {
+    #[serde(rename = "NOT_STARTED")]
+    NotStarted,
+    #[serde(rename = "ACTIVE")]
+    Active,
+    #[serde(rename = "SATISFIED")]
+    Satisfied,
+    #[serde(rename = "BLOCKED")]
+    Blocked,
+    #[serde(rename = "INVALIDATED")]
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeTask {
+    pub task_id: String,
+    pub class: String,
+    pub objective: String,
+    pub depends_on_task_ids: Vec<String>,
+    pub continuity_thread_refs: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub completion_predicate: Condition,
+    pub estimated_chapter_cost: VolumeTaskEstimatedChapterCost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_pressure: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_pressure: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeTaskEstimatedChapterCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    pub preferred: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceRef {
+    pub kind: String,
+    pub ref_: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvidenceRef {
+    pub artifact_id: String,
+    pub version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OmittedSource {
+    pub source_ref: SourceRef,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HorizonSlot {
+    pub slot_no: i64,
+    pub objective: String,
+    pub tentative: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContinuityThreadProjection {
+    pub thread_id: String,
+    pub status: String,
+    pub thread_class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
+    pub authority_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeProgressProjection {
+    pub volume_id: String,
+    pub active_task_ids: Vec<String>,
+    pub blocked_task_ids: Vec<String>,
+    pub remaining_chapter_capacity: i64,
+    pub planning_pressure: VolumeProgressProjectionPlanningPressure,
+    pub generated_revision: i64,
+}
+
+pub type VolumeProgressProjectionPlanningPressure =
+    std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskProgress {
+    pub task_id: String,
+    pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_advanced_chapter_id: Option<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
+    pub remaining_conditions: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<TaskProgressMetric>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskProgressMetric {
+    pub current: i64,
+    pub target: i64,
+}
+
 pub type OpaqueId = String;
 
 pub type Rfc3339Utc = String;
@@ -418,6 +586,177 @@ pub struct ReaderDesireDelta {
 }
 
 pub type ReaderDesireDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
+
+pub type NarrativeDefinitions = serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookPlanR1 {
+    pub payload_schema: serde_json::Value,
+    pub planning_maturity: String,
+    pub story_promise: String,
+    pub protagonist_macro_direction: String,
+    pub ending_boundary: String,
+    pub must_achieve: Vec<GoalConstraint>,
+    pub must_not_break: Vec<GoalConstraint>,
+    pub relationship_macro_directions: Vec<MacroDirection>,
+    pub major_mystery_goals: Vec<MacroDirection>,
+    pub future_reservations: Vec<FutureReservation>,
+    pub volume_intent_seeds: Vec<VolumeIntentSeed>,
+    pub global_length_budget: BookPlanR1GlobalLengthBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookPlanR1GlobalLengthBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_words: Option<i64>,
+    pub preferred_words: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_words: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeIntentR1 {
+    pub payload_schema: serde_json::Value,
+    pub volume_function: String,
+    pub entry_conditions: Vec<Condition>,
+    pub must_achieve: Vec<GoalConstraint>,
+    pub must_not_break: Vec<GoalConstraint>,
+    pub required_exit_conditions: Vec<Condition>,
+    pub future_reservation_refs: Vec<String>,
+    pub cross_volume_responsibility_refs: Vec<String>,
+    pub target_chapter_range: VolumeIntentR1TargetChapterRange,
+    pub target_word_range: VolumeIntentR1TargetWordRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeIntentR1TargetChapterRange {
+    pub min: i64,
+    pub preferred: i64,
+    pub max: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeIntentR1TargetWordRange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    pub preferred: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumePlanR1 {
+    pub payload_schema: serde_json::Value,
+    pub volume_intent_ref: ArtifactRef,
+    pub route_version: i64,
+    pub tasks: Vec<VolumeTask>,
+    pub route_invariants: Vec<String>,
+    pub required_exit_conditions: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub climax_reservation: Option<VolumePlanR1ClimaxReservation>,
+    pub capacity_budget: VolumePlanR1CapacityBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumePlanR1ClimaxReservation {
+    pub task_id: String,
+    pub min_remaining_capacity: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumePlanR1CapacityBudget {
+    pub min_chapters: i64,
+    pub preferred_chapters: i64,
+    pub max_chapters: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextManifestR1 {
+    pub payload_schema: serde_json::Value,
+    pub execution_mode: String,
+    pub compiled_from_project_revision: i64,
+    pub compiled_from_state_digest: String,
+    pub goal_contract_refs: Vec<ArtifactRef>,
+    pub active_volume_task_refs: Vec<String>,
+    pub continuity_thread_refs: Vec<String>,
+    pub future_reservation_refs: Vec<String>,
+    pub narrative_state_sources: Vec<SourceRef>,
+    pub selected_evidence: Vec<EvidenceRef>,
+    pub hard_source_count: i64,
+    pub omitted_soft_sources: Vec<OmittedSource>,
+    pub budget: ContextManifestR1Budget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextManifestR1Budget {
+    pub hard_tokens: i64,
+    pub soft_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR1 {
+    pub payload_schema: serde_json::Value,
+    pub chapter_id: String,
+    pub compiled_from_project_revision: i64,
+    pub compiled_from_state_digest: String,
+    pub context_manifest_ref: ArtifactRef,
+    pub chapter_goal: String,
+    pub active_task_refs: Vec<String>,
+    pub continuity_actions: Vec<ChapterPlanR1ContinuityActionsItem>,
+    pub required_state_outcomes: Vec<Condition>,
+    pub forbidden_transitions: Vec<Condition>,
+    pub knowledge_boundaries: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub scene_execution: Vec<serde_json::Value>,
+    pub horizon_preview: Vec<HorizonSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR1ContinuityActionsItem {
+    pub thread_ref: String,
+    pub disposition: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterExitStateR1 {
+    pub payload_schema: serde_json::Value,
+    pub chapter_id: String,
+    pub closed_at: String,
+    pub state_digest: String,
+    pub active_thread_refs: Vec<String>,
+    pub task_states: Vec<TaskProgress>,
+    pub canon_event_refs: Vec<String>,
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeExitStateR1 {
+    pub payload_schema: serde_json::Value,
+    pub volume_id: String,
+    pub closed_at: String,
+    pub state_digest: String,
+    pub remaining_task_ids: Vec<String>,
+    pub unresolved_thread_refs: Vec<String>,
+    pub next_volume_eligibility: String,
+    pub handoff_evidence_refs: Vec<EvidenceRef>,
+}
 
 pub type SharedDefinitions = serde_json::Value;
 

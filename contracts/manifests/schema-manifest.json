@@ -3,6 +3,51 @@
   "dialect": "https://json-schema.org/draft/2020-12/schema",
   "schemas": [
     {
+      "name": "narrative-definitions",
+      "path": "schemas/narrative/narrative-definitions.schema.json",
+      "version": "r1.narrative-definitions.v1"
+    },
+    {
+      "name": "book-plan-r1",
+      "path": "schemas/narrative/book-plan-r1.schema.json",
+      "version": "r1.book-plan.v1"
+    },
+    {
+      "name": "volume-intent-r1",
+      "path": "schemas/narrative/volume-intent-r1.schema.json",
+      "version": "r1.volume-intent.v1"
+    },
+    {
+      "name": "volume-plan-r1",
+      "path": "schemas/narrative/volume-plan-r1.schema.json",
+      "version": "r1.volume-plan.v1"
+    },
+    {
+      "name": "context-manifest-r1",
+      "path": "schemas/narrative/context-manifest-r1.schema.json",
+      "version": "r1.context-manifest.v1"
+    },
+    {
+      "name": "chapter-plan-r1",
+      "path": "schemas/narrative/chapter-plan-r1.schema.json",
+      "version": "r1.chapter-plan.v1"
+    },
+    {
+      "name": "chapter-exit-state-r1",
+      "path": "schemas/narrative/chapter-exit-state-r1.schema.json",
+      "version": "r1.chapter-exit-state.v1"
+    },
+    {
+      "name": "volume-exit-state-r1",
+      "path": "schemas/narrative/volume-exit-state-r1.schema.json",
+      "version": "r1.volume-exit-state.v1"
+    },
+    {
+      "name": "task-progress",
+      "path": "schemas/narrative/task-progress.schema.json",
+      "version": "r1.task-progress.v1"
+    },
+    {
       "name": "shared-definitions",
       "path": "schemas/shared/definitions.schema.json",
       "version": "m0a.shared.v1"

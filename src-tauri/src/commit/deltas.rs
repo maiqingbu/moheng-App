@@ -127,7 +127,12 @@ fn apply_canon(
             "SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id = ?1 AND event_id = ?2)",
             libsql_rusqlite::params![project_id, event_id],
         )?;
-        connection.execute("INSERT INTO canon_events(event_id, project_id, chapter_id, event_type, subject_id, object_json, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(event_id) DO UPDATE SET chapter_id=excluded.chapter_id, event_type=excluded.event_type, subject_id=excluded.subject_id, object_json=excluded.object_json, payload_json=excluded.payload_json", libsql_rusqlite::params![event_id, project_id, chapter_id, event_type, delta.subject_id, object_json, map_json(payload)?, now])?;
+        let story_time = payload_string(payload, "storyTime");
+        let story_time_end = payload_string(payload, "storyTimeEnd");
+        let event_ordinal = payload_i64(payload, "eventOrdinal").unwrap_or(0);
+        let source_artifact_id = payload_string(payload, "sourceArtifactId");
+        let source_version = payload_i64(payload, "sourceVersion");
+        connection.execute("INSERT INTO canon_events(event_id, project_id, chapter_id, event_type, subject_id, object_json, story_time, event_ordinal, story_time_end, source_artifact_id, source_version, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(event_id) DO UPDATE SET chapter_id=excluded.chapter_id, event_type=excluded.event_type, subject_id=excluded.subject_id, object_json=excluded.object_json, story_time=excluded.story_time, event_ordinal=excluded.event_ordinal, story_time_end=excluded.story_time_end, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, payload_json=excluded.payload_json", libsql_rusqlite::params![event_id, project_id, chapter_id, event_type, delta.subject_id, object_json, story_time, event_ordinal, story_time_end, source_artifact_id, source_version, map_json(payload)?, now])?;
         inserted += i64::from(!event_existed);
     }
     Ok(inserted)
@@ -202,6 +207,10 @@ fn apply_state(
         return Err(invalid("state delta requires stateType"));
     }
     let project_id = delta_project(connection)?;
+    let value_json = serde_json::to_value(delta.value_json.clone().unwrap_or_default())?;
+    if delta.state_type == "volume.task.progress" {
+        crate::narrative::validate_task_progress(&value_json).map_err(invalid)?;
+    }
     let existed = row_exists(
         connection,
         "SELECT EXISTS(SELECT 1 FROM state_deltas WHERE project_id = ?1 AND state_id = ?2)",

@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod commands;
 pub mod commit;
 pub mod generated;
+pub mod narrative;
 pub mod project_db;
 pub mod repositories;
 pub mod stable_id;

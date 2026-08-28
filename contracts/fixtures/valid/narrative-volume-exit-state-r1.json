@@ -1,0 +1,1 @@
+{"payloadSchema":"volume-exit-state.r1","volumeId":"volume:1","closedAt":"2026-08-28T00:00:00Z","stateDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","remainingTaskIds":[],"unresolvedThreadRefs":[],"nextVolumeEligibility":"ELIGIBLE","handoffEvidenceRefs":[]}

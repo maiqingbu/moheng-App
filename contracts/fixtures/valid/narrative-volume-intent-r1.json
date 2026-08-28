@@ -1,0 +1,1 @@
+{"payloadSchema":"volume-intent.r1","volumeFunction":"function","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":10,"max":20},"targetWordRange":{"preferred":30000}}

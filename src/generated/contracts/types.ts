@@ -1,5 +1,199 @@
 /* DO NOT EDIT - generated from contracts/schemas. */
 
+export interface GoalConstraint {
+  "id": string
+  "description": string
+}
+
+export interface MacroDirection {
+  "id": string
+  "description": string
+}
+
+export interface FutureReservation {
+  "reservationId": string
+  "description": string
+  "reservedForVolumeNo"?: number | null
+  "reservedForVolumeId"?: string | null
+  "notBeforeVolumeNo"?: number | null
+  "prerequisites": Array<string>
+  "mayForeshadow": boolean
+  "mayReveal": boolean
+  "authorityLevel": "A" | "B"
+}
+
+export interface VolumeIntentSeed {
+  "seedId": string
+  "description": string
+}
+
+export interface Condition {
+  "kind": string
+  "value"?: unknown
+}
+
+export type TaskStatus = "NOT_STARTED" | "ACTIVE" | "SATISFIED" | "BLOCKED" | "INVALIDATED"
+
+export interface VolumeTask {
+  "taskId": string
+  "class": "REQUIRED" | "OPTIONAL" | "FLEXIBLE" | "CLIMAX" | "RESERVED"
+  "objective": string
+  "dependsOnTaskIds": Array<string>
+  "continuityThreadRefs": Array<string>
+  "reservationRefs": Array<string>
+  "completionPredicate": Condition
+  "estimatedChapterCost": { "min"?: number | null; "preferred": number; "max"?: number | null }
+  "earliestPressure"?: number | null
+  "latestPressure"?: number | null
+}
+
+export interface SourceRef {
+  "kind": string
+  "ref": string
+}
+
+export interface EvidenceRef {
+  "artifactId": string
+  "version": number
+  "rangeStart"?: number | null
+  "rangeEnd"?: number | null
+  "quote"?: string | null
+}
+
+export interface OmittedSource {
+  "sourceRef": SourceRef
+  "reason": string
+}
+
+export interface HorizonSlot {
+  "slotNo": number
+  "objective": string
+  "tentative": unknown
+}
+
+export interface ContinuityThreadProjection {
+  "threadId": string
+  "status": "OPEN" | "SUSPENDED" | "RESOLVED" | "ABANDONED"
+  "threadClass": string
+  "sourceEventId"?: string | null
+  "evidenceRefs": Array<EvidenceRef>
+  "authorityLevel": "A" | "B" | "C"
+}
+
+export interface VolumeProgressProjection {
+  "volumeId": string
+  "activeTaskIds": Array<string>
+  "blockedTaskIds": Array<string>
+  "remainingChapterCapacity": number
+  "planningPressure": {  }
+  "generatedRevision": number
+}
+
+export interface TaskProgress {
+  "taskId": string
+  "status": TaskStatus
+  "lastAdvancedChapterId"?: string | null
+  "evidenceRefs": Array<EvidenceRef>
+  "remainingConditions": Array<Condition>
+  "metric"?: { "current": number; "target": number } | null
+}
+
+export type NarrativeDefinitions = unknown
+
+export interface BookPlanR1 {
+  "payloadSchema": unknown
+  "planningMaturity": "SEED" | "APPROVED"
+  "storyPromise": string
+  "protagonistMacroDirection": string
+  "endingBoundary": string
+  "mustAchieve": Array<GoalConstraint>
+  "mustNotBreak": Array<GoalConstraint>
+  "relationshipMacroDirections": Array<MacroDirection>
+  "majorMysteryGoals": Array<MacroDirection>
+  "futureReservations": Array<FutureReservation>
+  "volumeIntentSeeds": Array<VolumeIntentSeed>
+  "globalLengthBudget": { "minWords"?: number | null; "preferredWords": number; "maxWords"?: number | null }
+}
+
+export interface VolumeIntentR1 {
+  "payloadSchema": unknown
+  "volumeFunction": string
+  "entryConditions": Array<Condition>
+  "mustAchieve": Array<GoalConstraint>
+  "mustNotBreak": Array<GoalConstraint>
+  "requiredExitConditions": Array<Condition>
+  "futureReservationRefs": Array<string>
+  "crossVolumeResponsibilityRefs": Array<string>
+  "targetChapterRange": { "min": number; "preferred": number; "max": number }
+  "targetWordRange": { "min"?: number | null; "preferred": number; "max"?: number | null }
+}
+
+export interface VolumePlanR1 {
+  "payloadSchema": unknown
+  "volumeIntentRef": ArtifactRef
+  "routeVersion": number
+  "tasks": Array<VolumeTask>
+  "routeInvariants": Array<string>
+  "requiredExitConditions": Array<Condition>
+  "climaxReservation"?: { "taskId": string; "minRemainingCapacity": number } | null
+  "capacityBudget": { "minChapters": number; "preferredChapters": number; "maxChapters": number }
+}
+
+export interface ContextManifestR1 {
+  "payloadSchema": unknown
+  "executionMode": "OPENING_BOOTSTRAP" | "LONG_FORM"
+  "compiledFromProjectRevision": number
+  "compiledFromStateDigest": string
+  "goalContractRefs": Array<ArtifactRef>
+  "activeVolumeTaskRefs": Array<string>
+  "continuityThreadRefs": Array<string>
+  "futureReservationRefs": Array<string>
+  "narrativeStateSources": Array<SourceRef>
+  "selectedEvidence": Array<EvidenceRef>
+  "hardSourceCount": number
+  "omittedSoftSources": Array<OmittedSource>
+  "budget": { "hardTokens": number; "softTokens": number; "totalTokens": number }
+}
+
+export interface ChapterPlanR1 {
+  "payloadSchema": unknown
+  "chapterId": string
+  "compiledFromProjectRevision": number
+  "compiledFromStateDigest": string
+  "contextManifestRef": ArtifactRef
+  "chapterGoal": string
+  "activeTaskRefs": Array<string>
+  "continuityActions": Array<{ "threadRef": string; "disposition": "ADVANCE" | "RESOLVE" | "DEFER_WITH_BRIDGE" | "NO_LONGER_APPLICABLE_CHANGE_REQUEST"; "bridge"?: string | null }>
+  "requiredStateOutcomes": Array<Condition>
+  "forbiddenTransitions": Array<Condition>
+  "knowledgeBoundaries": Array<string>
+  "reservationRefs": Array<string>
+  "sceneExecution": Array<unknown>
+  "horizonPreview": Array<HorizonSlot>
+}
+
+export interface ChapterExitStateR1 {
+  "payloadSchema": unknown
+  "chapterId": string
+  "closedAt": string
+  "stateDigest": string
+  "activeThreadRefs": Array<string>
+  "taskStates": Array<TaskProgress>
+  "canonEventRefs": Array<string>
+  "evidenceRefs": Array<EvidenceRef>
+}
+
+export interface VolumeExitStateR1 {
+  "payloadSchema": unknown
+  "volumeId": string
+  "closedAt": string
+  "stateDigest": string
+  "remainingTaskIds": Array<string>
+  "unresolvedThreadRefs": Array<string>
+  "nextVolumeEligibility": "ELIGIBLE" | "BLOCKED"
+  "handoffEvidenceRefs": Array<EvidenceRef>
+}
+
 export type OpaqueId = string
 
 export type Rfc3339Utc = string

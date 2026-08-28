@@ -572,3 +572,20 @@ export interface FrontendPort {
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
   testProvider(settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
 }
+
+// R1 Narrative DTOs are generated from the shared contract schemas. They are
+// projections/contracts only; authoritative state remains in Rust/SQLite.
+export type {
+  BookPlanR1,
+  ChapterExitStateR1,
+  ChapterPlanR1,
+  ContextManifestR1,
+  ContinuityThreadProjection,
+  TaskProgress,
+  TaskStatus,
+  VolumeIntentR1,
+  VolumePlanR1,
+  VolumeProgressProjection,
+  VolumeTask,
+  VolumeExitStateR1,
+} from '../generated/contracts'

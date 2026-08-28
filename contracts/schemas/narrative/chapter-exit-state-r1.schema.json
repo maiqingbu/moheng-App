@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/chapter-exit-state.r1.schema.json", "title":"ChapterExitStateR1", "type":"object",
+  "properties":{"payloadSchema":{"const":"chapter-exit-state.r1"},"chapterId":{"type":"string","minLength":1},"closedAt":{"type":"string","format":"date-time","pattern":"Z$"},"stateDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"},"activeThreadRefs":{"type":"array","items":{"type":"string"}},"taskStates":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/TaskProgress"}},"canonEventRefs":{"type":"array","items":{"type":"string"}},"evidenceRefs":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/EvidenceRef"}}},
+  "required":["payloadSchema","chapterId","closedAt","stateDigest","activeThreadRefs","taskStates","canonEventRefs","evidenceRefs"],"additionalProperties":false
+}

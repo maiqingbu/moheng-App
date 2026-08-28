@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/task-progress.schema.json", "title":"TaskProgress", "type":"object",
+  "properties":{"taskId":{"type":"string","minLength":1},"status":{"$ref":"narrative-definitions.schema.json#/$defs/TaskStatus"},"lastAdvancedChapterId":{"type":["string","null"]},"evidenceRefs":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/EvidenceRef"}},"remainingConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}},"metric":{"type":["object","null"],"properties":{"current":{"type":"integer","minimum":0},"target":{"type":"integer","minimum":1}},"required":["current","target"],"additionalProperties":false}},
+  "required":["taskId","status","evidenceRefs","remainingConditions"], "additionalProperties":false
+}

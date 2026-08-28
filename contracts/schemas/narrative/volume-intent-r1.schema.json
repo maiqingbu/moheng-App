@@ -1,0 +1,11 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema", "$id":"m0a://schemas/narrative/volume-intent.r1.schema.json", "title":"VolumeIntentR1", "type":"object",
+  "properties":{
+    "payloadSchema":{"const":"volume-intent.r1"}, "volumeFunction":{"type":"string","minLength":1},
+    "entryConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}}, "mustAchieve":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/GoalConstraint"}}, "mustNotBreak":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/GoalConstraint"}}, "requiredExitConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}},
+    "futureReservationRefs":{"type":"array","items":{"type":"string"}}, "crossVolumeResponsibilityRefs":{"type":"array","items":{"type":"string"}},
+    "targetChapterRange":{"type":"object","properties":{"min":{"type":"integer","minimum":1},"preferred":{"type":"integer","minimum":1},"max":{"type":"integer","minimum":1}},"required":["min","preferred","max"],"additionalProperties":false},
+    "targetWordRange":{"type":"object","properties":{"min":{"type":["integer","null"],"minimum":1},"preferred":{"type":"integer","minimum":1},"max":{"type":["integer","null"],"minimum":1}},"required":["preferred"],"additionalProperties":false}
+  },
+  "required":["payloadSchema","volumeFunction","entryConditions","mustAchieve","mustNotBreak","requiredExitConditions","futureReservationRefs","crossVolumeResponsibilityRefs","targetChapterRange","targetWordRange"], "additionalProperties":false
+}
