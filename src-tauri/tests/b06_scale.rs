@@ -112,7 +112,7 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
                 })
                 .unwrap();
                 hard_source_max = hard_source_max.max(context.hard_source_count);
-            Ok::<(), ai_novel_production_system_core::project_db::ManagerError>(())
+                Ok::<(), ai_novel_production_system_core::project_db::ManagerError>(())
             })
             .unwrap();
         durations.push(started.elapsed().as_secs_f64() * 1000.0);

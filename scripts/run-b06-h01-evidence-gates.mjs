@@ -32,6 +32,10 @@ for (const [name, command, file] of commands) {
   logs.set(file, content); writeFileSync(resolve(evidence, file), content)
   results.push({ name, command, exitCode, status: exitCode === 0 ? 'PASS' : 'FAIL', blocking: true, log: file })
 }
+for (const file of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
+  try { execFileSync('git', ['restore', '--source', before.commit, '--', file], { cwd: root, stdio: 'ignore' }) }
+  catch { results.push({ name: 'frozen_b01_evidence', command: 'git restore B01 evidence', exitCode: 1, status: 'FAIL', blocking: true, log: 'gate-results.json' }) }
+}
 const targeted = logs.get('b06_h01_targeted.log') ?? ''
 const architecture = logs.get('b06_h01_architecture.log') ?? ''
 const marker = (pattern, log = targeted) => pattern.test(log)

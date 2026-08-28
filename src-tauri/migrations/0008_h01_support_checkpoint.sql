@@ -17,3 +17,6 @@ CREATE TABLE IF NOT EXISTS support_checkpoints (
 
 CREATE INDEX IF NOT EXISTS idx_support_checkpoints_session
   ON support_checkpoints(project_id, session_id, created_at DESC);
+
+INSERT OR IGNORE INTO copy_policy_registry(table_name, copy_policy)
+  VALUES ('support_checkpoints', 'COPY_CLEAR');
