@@ -2351,6 +2351,20 @@ fn execute_planning_command(
         {
             return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
         }
+        let model_run_id = request
+            .pointer("/payload/modelRunId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "PLANNING_MODEL_RUN_REQUIRED".to_string())?;
+        if !crate::repositories::narrative::NarrativeRepository::completed_planning_model_run_exists(
+            &handle,
+            project_id,
+            model_run_id,
+            &context_ref.artifact_id,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return Err("PLANNING_MODEL_RUN_INVALID".into());
+        }
         crate::planning::validate_current_chapter_plan(
             &payload,
             chapter_id,
@@ -2367,7 +2381,11 @@ fn execute_planning_command(
     )
     .map_err(|e| e.to_string())?;
     let hash = sha256_canonical(&payload).map_err(|e| e.to_string())?;
-    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
+    let model_run_id = request
+        .pointer("/payload/modelRunId")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
     let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
     let receipt =
         CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;

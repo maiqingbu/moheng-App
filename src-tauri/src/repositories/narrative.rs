@@ -787,6 +787,21 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn completed_planning_model_run_exists(
+        connection: &Connection,
+        project_id: &str,
+        model_run_id: &str,
+        context_manifest_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM model_runs WHERE project_id=?1 AND model_run_id=?2 AND capability='PLAN_STRATEGY' AND status='COMPLETED' AND context_manifest_ref=?3)",
+                libsql_rusqlite::params![project_id, model_run_id, context_manifest_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn latest_artifact_payload(
         connection: &Connection,
         project_id: &str,

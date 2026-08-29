@@ -160,6 +160,8 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     let manifest = query_context_manifest_impl(&state, json!({"projectId":"p3","volumeId":volume_id,"chapterId":chapter_id,"scope":"CHAPTER","entityIds":[],"references":[]})).unwrap();
     let context_hash = sha256_canonical(&manifest).unwrap();
     let context_artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":"context:p3:chapter","projectId":"p3","artifactType":"ContextManifest","scope":{"level":"CHAPTER","chapterId":chapter_id},"version":1,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":manifest,"payloadHash":context_hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":"command:context:p3"},"createdAt":"2026-08-30T00:00:02Z"})).unwrap();
+    let model_run_id =
+        StableIdentityFactory::from_command(StableIdKind::ModelRun, "command:model:p3").unwrap();
     let connection = state
         .manager
         .open("p3", "", "2026-08-30T00:00:02Z")
@@ -190,11 +192,12 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
         .unwrap(),
     )
     .unwrap();
+    connection.execute("INSERT INTO model_runs(model_run_id,project_id,context_manifest_ref,provider,model,idempotency_key,capability,status,created_at,updated_at) VALUES (?1,'p3',?2,'fixture','fixture','planning:p3','PLAN_STRATEGY','COMPLETED',?3,?3)", libsql_rusqlite::params![model_run_id, context_artifact.artifact_id, "2026-08-30T00:00:02Z"]).unwrap();
     drop(connection);
     let plan = json!({"payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":2,"compiledFromStateDigest":manifest["compiledFromStateDigest"],"contextManifestRef":{"artifactId":context_artifact.artifact_id,"version":1,"payloadHash":context_hash},"chapterGoal":"advance","activeTaskRefs":["task:required"],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[{"slotNo":1,"objective":"one","tentative":true},{"slotNo":2,"objective":"two","tentative":true},{"slotNo":3,"objective":"three","tentative":true}]});
     let result = execute_command_impl(
         &state,
-        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:p3","idempotencyKey":"key:chapter:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:03Z","payload":{"chapterId":chapter_id,"routeTaskIds":["task:caller-must-not-authorize"],"plan":plan}}),
+        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:p3","idempotencyKey":"key:chapter:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:03Z","payload":{"chapterId":chapter_id,"modelRunId":model_run_id,"routeTaskIds":["task:caller-must-not-authorize"],"plan":plan}}),
     );
     assert!(result.is_ok(), "{result:?}");
     let connection = state
