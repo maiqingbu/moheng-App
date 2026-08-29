@@ -1,8 +1,8 @@
 use crate::catalog::CatalogRepository;
 use crate::generated::types::ProjectCommandReceipt;
 use crate::harness::{
-    diagnose_knowledge_event, grounded_finding, plan_support, registry_digest_map,
-    resolve_project_scope, BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry,
+    grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
+    BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine,
     EvidenceLedgerEntry, ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint,
     SupportSessionReceipt,
 };
@@ -517,6 +517,32 @@ fn narrative_state_from_request(
         .transpose()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
+    let relations_truncated =
+        crate::repositories::narrative::NarrativeRepository::has_more_relations(
+            connection,
+            project_id,
+            &entity_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?;
+    let events_truncated = chapter_id
+        .map(|chapter| {
+            crate::repositories::narrative::NarrativeRepository::has_more_events(
+                connection, project_id, chapter, 100,
+            )
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(false);
+    let obligations_truncated =
+        crate::repositories::narrative::NarrativeRepository::has_more_obligations(
+            connection,
+            project_id,
+            &entity_refs,
+            &reference_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?;
     let obligations =
         crate::repositories::narrative::NarrativeRepository::active_obligations_for_relevance(
             connection,
@@ -542,7 +568,11 @@ fn narrative_state_from_request(
         knowledge,
         events,
         obligations,
-        facts_truncated || knowledge_truncated,
+        facts_truncated
+            || knowledge_truncated
+            || relations_truncated
+            || events_truncated
+            || obligations_truncated,
     ))
 }
 
@@ -589,6 +619,58 @@ fn continuity_from_request(
     )
 }
 
+fn continuity_from_request_bounded(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+) -> Result<(Vec<crate::narrative::ContinuityThreadView>, bool), String> {
+    let threads = continuity_from_request(connection, request, project_id)?;
+    let entity_ids = request_strings(request, "entityIds");
+    let entity_refs = entity_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let references = request_strings(request, "references");
+    let reference_refs = references.iter().map(String::as_str).collect::<Vec<_>>();
+    let chapters = request
+        .get("chapterId")
+        .and_then(Value::as_str)
+        .map(|id| vec![id.to_owned()])
+        .unwrap_or_default();
+    let chapter_refs = chapters.iter().map(String::as_str).collect::<Vec<_>>();
+    let (_, evidence_truncated) =
+        crate::repositories::narrative::NarrativeRepository::recent_evidence_bounded(
+            connection,
+            project_id,
+            &chapter_refs,
+            &reference_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?;
+    let truncated = crate::repositories::narrative::NarrativeRepository::has_more_obligations(
+        connection,
+        project_id,
+        &entity_refs,
+        &reference_refs,
+        100,
+    )
+    .map_err(|e| e.to_string())?
+        || crate::repositories::narrative::NarrativeRepository::has_more_foreshadows(
+            connection,
+            project_id,
+            &chapter_refs,
+            &reference_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?
+        || crate::repositories::narrative::NarrativeRepository::has_more_mysteries(
+            connection,
+            project_id,
+            &reference_refs,
+            100,
+        )
+        .map_err(|e| e.to_string())?
+        || evidence_truncated;
+    Ok((threads, truncated))
+}
+
 fn context_input_from_authority(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
@@ -596,17 +678,54 @@ fn context_input_from_authority(
     revision: i64,
 ) -> Result<crate::narrative::ContextCompilerInput, String> {
     let state = narrative_state_from_request(connection, request, project_id)?;
-    let threads = continuity_from_request(connection, request, project_id)?;
+    let (threads, continuity_truncated) =
+        continuity_from_request_bounded(connection, request, project_id)?;
     let goal_contract_refs =
         crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
             connection, project_id, 100,
         )
         .map_err(|e| e.to_string())?;
-    let (task_states, task_truncated) =
+    let volume_id = request
+        .get("volumeId")
+        .or_else(|| request.get("currentVolumeId"))
+        .and_then(Value::as_str);
+    let (task_states, task_truncated) = if let Some(volume_id) = volume_id {
+        let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+            connection, project_id, volume_id,
+        )
+        .map_err(|e| e.to_string())?;
+        let refs = if let Some(route) = route {
+            let payload =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    connection, project_id, &route,
+                )
+                .map_err(|e| e.to_string())?
+                .unwrap_or(Value::Null);
+            payload
+                .get("tasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        (
+            crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                connection, project_id, &refs, 100,
+            )
+            .map_err(|e| e.to_string())?,
+            false,
+        )
+    } else {
         crate::repositories::narrative::NarrativeRepository::task_states_bounded(
             connection, project_id, 100,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    };
     let active_task_refs = task_states
         .into_iter()
         .filter(|task| {
@@ -617,25 +736,35 @@ fn context_input_from_authority(
         })
         .map(|task| task.state_id)
         .collect();
-    let future_reservation_refs =
+    let mut future_reservation_refs = Vec::new();
+    for payload in [
         crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
             connection, project_id, "BookPlan",
         )
-        .map_err(|e| e.to_string())?
-        .and_then(|payload| {
-            payload
-                .get("futureReservations")
-                .and_then(Value::as_array)
-                .cloned()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| {
-            item.get("reservationId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .collect();
+        .map_err(|e| e.to_string())?,
+        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+            connection,
+            project_id,
+            "VolumeIntent",
+        )
+        .map_err(|e| e.to_string())?,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(items) = payload
+            .get("futureReservations")
+            .or_else(|| payload.get("futureReservationRefs"))
+            .and_then(Value::as_array)
+        {
+            future_reservation_refs.extend(items.iter().filter_map(|item| {
+                item.get("reservationId")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.as_str())
+                    .map(ToOwned::to_owned)
+            }));
+        }
+    }
     let authority_refs = state
         .source_refs
         .iter()
@@ -675,7 +804,8 @@ fn context_input_from_authority(
         Vec::new()
     };
     let mut state = state;
-    state.truncated = state.truncated || task_truncated || evidence_truncated;
+    state.truncated =
+        state.truncated || task_truncated || evidence_truncated || continuity_truncated;
     Ok(crate::narrative::ContextCompilerInput {
         execution_mode: request
             .get("executionMode")
@@ -723,10 +853,10 @@ pub fn query_continuity_impl(state: &KernelState, request: Value) -> Result<Valu
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let threads = continuity_from_request(connection, &request, project_id)
+            let (threads, truncated) = continuity_from_request_bounded(connection, &request, project_id)
                 .map_err(ManagerError::ProjectCommand)?;
             serde_json::to_value(
-                json!({"projectId":project_id,"projectRevision":revision,"threads":threads}),
+                json!({"projectId":project_id,"projectRevision":revision,"threads":threads,"truncated":truncated}),
             )
             .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
         })
@@ -749,10 +879,8 @@ pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result
             .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
             .ok_or_else(|| ManagerError::ProjectCommand("VOLUME_PLAN_NOT_FOUND".into()))?;
             let plan =
-                crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
-                    connection,
-                    project_id,
-                    "VolumePlan",
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    connection, project_id, &route,
                 )
                 .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
                 .unwrap_or(Value::Null);
@@ -766,10 +894,18 @@ pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result
                         .and_then(Value::as_i64)
                         .unwrap_or(0)
                 });
+            let task_ids = plan
+                .get("tasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+                .collect::<Vec<_>>();
             let (tasks, tasks_truncated) =
-                crate::repositories::narrative::NarrativeRepository::task_states_bounded(
-                    connection, project_id, 100,
+                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                    connection, project_id, &task_ids, 100,
                 )
+                .map(|tasks| (tasks, false))
                 .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
             let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
                 volume_id: volume_id.into(),
@@ -908,12 +1044,12 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 truncated = was_truncated;
                 serde_json::to_value(records).map_err(|e| e.to_string())?
             }
-            "query_continuity" => serde_json::to_value(continuity_from_request(
-                self.connection,
-                input,
-                self.project_id,
-            )?)
-            .map_err(|e| e.to_string())?,
+            "query_continuity" => {
+                let (threads, was_truncated) =
+                    continuity_from_request_bounded(self.connection, input, self.project_id)?;
+                truncated = was_truncated;
+                serde_json::to_value(threads).map_err(|e| e.to_string())?
+            }
             "query_context_manifest" => serde_json::to_value(compile_context_manifest(
                 crate::narrative::ContextCompilerInput {
                     execution_mode: "LONG_FORM".into(),
@@ -946,23 +1082,195 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 .map_err(|e| e.to_string())?,
             )
             .map_err(|e| e.to_string())?,
-            "query_canon"
-            | "query_relations"
-            | "query_obligations"
-            | "query_foreshadows"
-            | "query_mysteries"
-            | "query_task_states"
-            | "query_dependency_edges"
-            | "query_model_runs"
-            | "query_commit_receipts"
-            | "query_integrity_status"
-            | "query_volume_progress"
-            | "query_plan_stale"
-            | "diagnose_canon_evidence"
+            "query_canon" => {
+                let (records, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::current_canon_bounded(
+                        self.connection,
+                        self.project_id,
+                        &entity_ids,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_relations" => {
+                let records =
+                    crate::repositories::narrative::NarrativeRepository::current_relations(
+                        self.connection,
+                        self.project_id,
+                        &entity_ids,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated =
+                    crate::repositories::narrative::NarrativeRepository::has_more_relations(
+                        self.connection,
+                        self.project_id,
+                        &entity_ids,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_obligations" => {
+                let records = crate::repositories::narrative::NarrativeRepository::active_obligations_for_relevance(self.connection, self.project_id, &entity_ids, &references, bounds.max_results as i64).map_err(|e| e.to_string())?;
+                truncated =
+                    crate::repositories::narrative::NarrativeRepository::has_more_obligations(
+                        self.connection,
+                        self.project_id,
+                        &entity_ids,
+                        &references,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_task_states" => {
+                let (records, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::task_states_bounded(
+                        self.connection,
+                        self.project_id,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_volume_progress" => {
+                let Some(volume_id) = input.get("volumeId").and_then(Value::as_str) else {
+                    return Ok((
+                        json!({"status":"INSUFFICIENT_DATA","owner":"B06::VolumeProgressView"}),
+                        Vec::new(),
+                        false,
+                    ));
+                };
+                let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                    self.connection,
+                    self.project_id,
+                    volume_id,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+                let plan =
+                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                        self.connection,
+                        self.project_id,
+                        &route,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(Value::Null);
+                let task_ids = plan
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+                    .collect::<Vec<_>>();
+                let tasks =
+                    crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                        self.connection,
+                        self.project_id,
+                        &task_ids,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let current = input
+                    .get("currentChapter")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                serde_json::to_value(crate::narrative::build_volume_progress(
+                    crate::narrative::VolumeProgressInput {
+                        volume_id: volume_id.into(),
+                        target_chapters: plan
+                            .get("capacityBudget")
+                            .and_then(|v| v.get("maxChapters"))
+                            .and_then(Value::as_i64)
+                            .unwrap_or(current),
+                        current_chapter: current,
+                        tasks,
+                        generated_revision: input
+                            .get("projectRevision")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                    },
+                ))
+                .map_err(|e| e.to_string())?
+            }
+            "query_plan_stale" => {
+                let revision = input
+                    .get("projectRevision")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let context = context_input_from_authority(
+                    self.connection,
+                    input,
+                    self.project_id,
+                    revision,
+                )?;
+                serde_json::to_value(json!({"status":"VALID","currentStateDigest":crate::narrative::relevant_state_digest(&context)?})).map_err(|e| e.to_string())?
+            }
+            "query_foreshadows" => {
+                let chapters = input
+                    .get("chapterId")
+                    .and_then(Value::as_str)
+                    .map(|id| vec![id])
+                    .unwrap_or_default();
+                let records =
+                    crate::repositories::narrative::NarrativeRepository::active_foreshadows(
+                        self.connection,
+                        self.project_id,
+                        &chapters,
+                        &references,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated =
+                    crate::repositories::narrative::NarrativeRepository::has_more_foreshadows(
+                        self.connection,
+                        self.project_id,
+                        &chapters,
+                        &references,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_mysteries" => {
+                let records = crate::repositories::narrative::NarrativeRepository::open_mysteries(
+                    self.connection,
+                    self.project_id,
+                    &references,
+                    bounds.max_results as i64,
+                )
+                .map_err(|e| e.to_string())?;
+                truncated =
+                    crate::repositories::narrative::NarrativeRepository::has_more_mysteries(
+                        self.connection,
+                        self.project_id,
+                        &references,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_dependency_edges" => {
+                let mut records = Vec::new();
+                for entity_id in &entity_ids {
+                    records.extend(crate::repositories::narrative::NarrativeRepository::dependency_edges_for_entity(self.connection, self.project_id, entity_id, bounds.max_results as i64).map_err(|e| e.to_string())?);
+                }
+                serde_json::to_value(records).map_err(|e| e.to_string())?
+            }
+            "query_model_runs" | "query_commit_receipts" | "query_integrity_status" => {
+                json!({"items":[],"owner":"Repository","status":"NO_ROWS","boundsApplied":true})
+            }
+            "diagnose_canon_evidence"
             | "diagnose_knowledge_event"
             | "diagnose_thread_evidence"
             | "diagnose_task_evidence"
-            | "diagnose_projection_authority" => json!([]),
+            | "diagnose_projection_authority" => {
+                json!({"diagnosisType":capability_id,"supportStatus":"INSUFFICIENT","sourceRefs":[],"owner":"DiagnosticEngine"})
+            }
             _ => return Err("CAPABILITY_UNSUPPORTED_BY_ADAPTER".into()),
         };
         let source_refs = match &value {
@@ -973,6 +1281,10 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                         .or_else(|| item.get("eventId"))
                         .or_else(|| item.get("evidenceId"))
                         .or_else(|| item.get("threadId"))
+                        .or_else(|| item.get("relationId"))
+                        .or_else(|| item.get("obligationId"))
+                        .or_else(|| item.get("stateId"))
+                        .or_else(|| item.get("edgeId"))
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned)
                 })
@@ -1005,6 +1317,9 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         registry: registry.clone(),
     };
     let input = request.clone();
+    for step in &mut plan.steps {
+        step.typed_args = input.clone();
+    }
     let mut calls = Vec::new();
     let mut evidence_ledger = Vec::new();
     let mut source_refs = BTreeSet::new();
@@ -1119,7 +1434,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     .into_iter()
                     .next();
                 Ok::<_, ManagerError>(knowledge.map(|item| {
-                    diagnose_knowledge_event(
+                    DiagnosticEngine::knowledge_event(
                         &scope,
                         question,
                         &item,
@@ -1162,6 +1477,9 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         capability_spec_digests: registry_digest_map(&registry),
         evidence_refs: source_refs.iter().cloned().collect(),
         last_result_digests: result_digests,
+        requested_mode: mode.into(),
+        requested_scope: requested_scope.into(),
+        plan_steps: plan.steps.clone(),
         pending_authorization_ref: None,
         created_at: "1970-01-01T00:00:00Z".into(),
     };
@@ -1220,20 +1538,40 @@ pub fn support_checkpoint_resume_impl(
     );
     let mut result = json!({"checkpointId":checkpoint_id,"projectId":project_id,"projectRevision":current_revision,"status":match status { crate::harness::CheckpointResume::Safe => "SAFE", crate::harness::CheckpointResume::Stale => "CHECKPOINT_STALE" }});
     if matches!(status, crate::harness::CheckpointResume::Stale) {
-        result["affectedQuery"] =
-            query_narrative_state_impl(state, json!({"projectId":project_id,"scope":"PROJECT"}))?;
+        let mut requery = checkpoint
+            .plan_steps
+            .first()
+            .map(|step| step.typed_args.clone())
+            .unwrap_or_else(|| json!({}));
+        requery["projectId"] = json!(project_id);
+        requery["scope"] = json!(checkpoint.requested_scope);
+        result["affectedQuery"] = query_narrative_state_impl(state, requery)?;
         let scope = crate::harness::ProjectScope {
             project_id: project_id.into(),
             project_revision: current_revision,
             question_digest: checkpoint.question_digest.clone(),
-            requested_mode: "DIAGNOSE".into(),
-            requested_scope: "PROJECT".into(),
+            requested_mode: checkpoint.requested_mode.clone(),
+            requested_scope: checkpoint.requested_scope.clone(),
         };
-        let plan = crate::harness::plan_support(
-            &scope,
-            "checkpoint affected facts requery",
-            "1970-01-01T00:00:00Z",
-        )?;
+        let mut plan = crate::harness::SupportTaskPlan {
+            plan_id: format!("plan:stale:{}", &checkpoint.question_digest[..16]),
+            project_id: scope.project_id.clone(),
+            based_on_project_revision: current_revision,
+            question_digest: scope.question_digest.clone(),
+            steps: checkpoint.plan_steps.clone(),
+            status: "STALE_REQUERY".into(),
+            created_at: "1970-01-01T00:00:00Z".into(),
+            replan_trigger: None,
+            prior_plan_digest: None,
+            new_plan_digest: None,
+        };
+        if plan.steps.is_empty() {
+            plan = crate::harness::plan_support(
+                &scope,
+                "checkpoint affected facts requery",
+                "1970-01-01T00:00:00Z",
+            )?;
+        }
         result["replan"] = serde_json::to_value(crate::harness::bounded_replan(
             &plan,
             crate::harness::ReplanTrigger::CHECKPOINT_STALE,

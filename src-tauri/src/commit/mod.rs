@@ -362,6 +362,15 @@ impl CommitService {
             "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.projectionVersion', 'm0e.fts.v1', ?2) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
             libsql_rusqlite::params![bundle.project_id, committed_at],
         )?;
+        let indexed_source_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM search_documents WHERE project_id=?1 AND (doc_id LIKE 'chapter:%' OR doc_id LIKE 'artifact:%')",
+            [&bundle.project_id],
+            |row| row.get(0),
+        )?;
+        connection.execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.indexedSourceCount', ?2, ?3) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
+            libsql_rusqlite::params![bundle.project_id, indexed_source_count.to_string(), committed_at],
+        )?;
         let refs: Vec<ArtifactRef> = bundle
             .artifacts
             .iter()

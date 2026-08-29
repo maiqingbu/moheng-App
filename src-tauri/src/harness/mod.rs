@@ -399,16 +399,26 @@ pub fn diagnose_knowledge_event(
     if let Some(item) = evidence {
         source_refs.push(item.evidence_id.clone());
     }
-    let time_conflict = establishing_event.is_some_and(|event| {
-        knowledge
-            .from_chapter_id
-            .as_deref()
-            .is_some_and(|chapter| chapter != event.chapter_id)
+    let evidence_matches_event = evidence.is_some_and(|item| {
+        establishing_event
+            .is_some_and(|event| item.event_id.as_deref() == Some(event.event_id.as_str()))
     });
+    let evidence_matches_fact = evidence.is_none_or(|item| {
+        item.fact_id
+            .as_deref()
+            .is_none_or(|fact| knowledge.fact_id.as_deref() == Some(fact))
+    });
+    let time_conflict = knowledge
+        .from_story_time
+        .as_ref()
+        .zip(establishing_event.and_then(|event| event.story_time.as_ref()))
+        .is_some_and(|(knowledge_time, event_time)| knowledge_time < event_time);
     let missing_chain = establishing_event.is_none() || evidence.is_none();
+    let conflicting_chain =
+        !missing_chain && (!evidence_matches_event || !evidence_matches_fact || time_conflict);
     grounded_finding(
         scope,
-        if time_conflict {
+        if conflicting_chain {
             "DATA_INCONSISTENCY"
         } else if missing_chain {
             "EVIDENCE_GAP"
@@ -416,12 +426,12 @@ pub fn diagnose_knowledge_event(
             "diagnose_knowledge_event"
         },
         claim,
-        if missing_chain {
+        if missing_chain || conflicting_chain {
             Vec::new()
         } else {
             source_refs.clone()
         },
-        if time_conflict {
+        if conflicting_chain {
             source_refs
         } else {
             Vec::new()
@@ -494,6 +504,38 @@ pub fn diagnose_projection_authority(
     )
 }
 
+pub struct DiagnosticEngine;
+
+impl DiagnosticEngine {
+    pub fn knowledge_event(
+        scope: &ProjectScope,
+        claim: &str,
+        knowledge: &KnowledgeRecord,
+        event: Option<&CanonEventRecord>,
+        evidence: Option<&EvidenceRecord>,
+    ) -> Finding {
+        diagnose_knowledge_event(scope, claim, knowledge, event, evidence)
+    }
+
+    pub fn projection_authority(
+        scope: &ProjectScope,
+        claim: &str,
+        projection_ref: &str,
+        authority_ref: &str,
+        projection_revision: i64,
+        authority_revision: i64,
+    ) -> Finding {
+        diagnose_projection_authority(
+            scope,
+            claim,
+            projection_ref,
+            authority_ref,
+            projection_revision,
+            authority_revision,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceLedgerEntry {
@@ -526,6 +568,9 @@ pub struct SupportCheckpoint {
     pub capability_spec_digests: BTreeMap<String, String>,
     pub evidence_refs: Vec<String>,
     pub last_result_digests: Vec<String>,
+    pub requested_mode: String,
+    pub requested_scope: String,
+    pub plan_steps: Vec<SupportTaskStep>,
     pub pending_authorization_ref: Option<String>,
     pub created_at: String,
 }

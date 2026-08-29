@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS support_checkpoints (
   capability_spec_digests_json TEXT NOT NULL DEFAULT '{}',
   evidence_refs_json TEXT NOT NULL DEFAULT '[]',
   last_result_digests_json TEXT NOT NULL DEFAULT '[]',
+  requested_mode TEXT NOT NULL DEFAULT 'DIAGNOSE',
+  requested_scope TEXT NOT NULL DEFAULT 'PROJECT',
+  plan_steps_json TEXT NOT NULL DEFAULT '[]',
   pending_authorization_ref TEXT,
   created_at TEXT NOT NULL
 );

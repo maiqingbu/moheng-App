@@ -53,6 +53,7 @@ fn populated_state() -> CurrentNarrativeStateView {
             epistemic_state: "KNOWS".into(),
             visibility_scope: Some("CHAPTER".into()),
             from_chapter_id: Some("chapter:11".into()),
+            from_story_time: None,
         }],
         vec![CanonEventRecord {
             event_id: "event:identity".into(),
@@ -289,6 +290,9 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p1", "H01", "2026-08-29T00:00:00Z").unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:a','p1','A','CHARACTER',?1,?1),('entity:b','p1','B','CHARACTER',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:known','p1','entity:a','status','{}','B',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_relations(relation_id,project_id,subject_id,predicate,object_id,authority_level,created_at,updated_at) VALUES ('relation:known','p1','entity:a','trusts','entity:b','B',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
     let scope =
         resolve_project_scope("p1", 7, "A 何时知道 B 的身份", "DIAGNOSE", "PROJECT").unwrap();
     let plan = plan_support(&scope, "A 何时知道 B 的身份", "2026-08-28T00:00:00Z").unwrap();
@@ -373,8 +377,8 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     );
     assert_eq!(insufficient.support_status, SupportStatus::INSUFFICIENT);
     let state = populated_state();
-    let mut conflicting_knowledge = state.knowledge[0].clone();
-    conflicting_knowledge.from_chapter_id = Some("chapter:12".into());
+    let mut legal_later_chapter = state.knowledge[0].clone();
+    legal_later_chapter.from_chapter_id = Some("chapter:12".into());
     let evidence = EvidenceRecord {
         evidence_id: "evidence:identity".into(),
         fact_id: None,
@@ -391,10 +395,36 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     assert_eq!(
         diagnose_knowledge_event(
             &scope,
-            "world time conflict",
-            &conflicting_knowledge,
+            "legal narrative order",
+            &legal_later_chapter,
             Some(&state.events[0]),
             Some(&evidence)
+        )
+        .support_status,
+        SupportStatus::SUPPORTED
+    );
+    let mut time_conflicting = state.knowledge[0].clone();
+    time_conflicting.from_story_time = Some("1998-01-01T00:00:00Z".into());
+    assert_eq!(
+        diagnose_knowledge_event(
+            &scope,
+            "world time conflict",
+            &time_conflicting,
+            Some(&state.events[0]),
+            Some(&evidence)
+        )
+        .support_status,
+        SupportStatus::CONFLICTING
+    );
+    let mut wrong_event_evidence = evidence.clone();
+    wrong_event_evidence.event_id = Some("event:other".into());
+    assert_eq!(
+        diagnose_knowledge_event(
+            &scope,
+            "wrong evidence",
+            &state.knowledge[0],
+            Some(&state.events[0]),
+            Some(&wrong_event_evidence)
         )
         .support_status,
         SupportStatus::CONFLICTING
@@ -422,6 +452,9 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
         capability_spec_digests: registry_digest_map(&registry),
         evidence_refs: vec!["artifact:evidence".into()],
         last_result_digests: vec![result.result_digest],
+        requested_mode: "DIAGNOSE".into(),
+        requested_scope: "PROJECT".into(),
+        plan_steps: plan.steps.clone(),
         pending_authorization_ref: None,
         created_at: "2026-08-28T00:00:00Z".into(),
     };
@@ -445,8 +478,7 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
         project_id: "p1",
     };
     for spec in registry.specs.values() {
-        let input =
-            json!({"entityIds":[],"references":[],"chapterId":"chapter:1","projectRevision":7});
+        let input = json!({"entityIds":["entity:a"],"references":[],"chapterId":"chapter:1","projectRevision":7});
         let call = CapabilityCallEnvelope {
             call_id: format!("parity:{}", spec.capability_id),
             capability_id: spec.capability_id.clone(),
@@ -462,13 +494,18 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
                 max_tokens: 4096,
             },
         };
-        BoundedCapabilityExecutor {
+        let result = BoundedCapabilityExecutor {
             registry: registry.clone(),
         }
         .execute(&adapter, &call)
         .unwrap();
+        if spec.capability_id == "query_canon" || spec.capability_id == "query_relations" {
+            assert!(!result.result.as_array().unwrap().is_empty());
+            assert!(!result.source_refs.is_empty());
+        }
     }
-    println!("H01_RESULT scope=PASS registry=PASS registry_adapter_parity=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 status=PASS");
+    let capability_count = registry.specs.len();
+    println!("H01_RESULT scope=PASS registry=PASS registry_adapter_parity=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 capability_count={} narrative_time=PASS wrong_event=PASS legal_chapter=PASS world_time_conflict=PASS status=PASS", capability_count);
 }
 
 #[test]
@@ -537,7 +574,7 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:1','plan:volume',1,?1)", [&volume_plan_hash]).unwrap();
     drop(connection);
     let state = KernelState::new(paths);
-    let request = json!({"projectId":"p1","scope":"PROJECT","entityIds":["entity:a"],"chapterId":"chapter:1","currentChapter":1,"currentVolumeId":"volume:1"});
+    let request = json!({"projectId":"p1","scope":"PROJECT","entityIds":["entity:a"],"chapterId":"chapter:1","currentChapter":1,"currentVolumeId":"volume:1","includeSoftSources":true});
     let state_projection = query_narrative_state_impl(&state, request.clone()).unwrap();
     assert_eq!(state_projection["projectId"], "p1");
     let context_projection = query_context_manifest_impl(&state, request.clone()).unwrap();
@@ -553,6 +590,26 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         context_projection["futureReservationRefs"],
         json!(["reservation:1"])
     );
+    assert_eq!(
+        context_projection["omittedSoftSources"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let context_goal_refs = context_projection["goalContractRefs"]
+        .as_array()
+        .unwrap()
+        .len();
+    let context_future_reservations = context_projection["futureReservationRefs"]
+        .as_array()
+        .unwrap()
+        .len();
+    let context_selected_evidence = context_projection["selectedEvidence"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(context_selected_evidence, 1);
     let progress_projection = query_volume_progress_impl(
         &state,
         json!({"projectId":"p1","scope":"VOLUME","volumeId":"volume:1","currentChapter":3}),
@@ -563,6 +620,12 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         progress_projection["routePlanRef"]["artifactId"],
         "plan:volume"
     );
+    let volume_route = progress_projection["routePlanRef"]["artifactId"]
+        .as_str()
+        .is_some();
+    let volume_capacity = progress_projection["remainingChapterCapacity"]
+        .as_i64()
+        .is_some();
     let stale_projection = query_plan_stale_impl(&state, json!({"projectId":"p1","compiledFromProjectRevision":0,"compiledFromStateDigest":context_projection["compiledFromStateDigest"],"currentStateDigest":"f".repeat(64),"entityIds":["entity:a"],"chapterId":"chapter:1"})).unwrap();
     assert_eq!(stale_projection["status"], "VALID");
     let support = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1"})).unwrap();
@@ -612,7 +675,10 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     assert!(stale_resume["affectedQuery"].is_object());
     assert!(stale_resume["replan"]["priorPlanDigest"].is_string());
     assert!(stale_resume["replan"]["newPlanDigest"].is_string());
-    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS support_receipt=PASS durable_checkpoint=PASS read_only=PASS ledger_entries={} evidence_hits={} missing_evidence=INSUFFICIENT checkpoint_replan=PASS status=PASS", ledger_count, support["calls"][2]["result"].as_array().unwrap().len());
+    let soft_sources_omitted = context_projection["omittedSoftSources"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty());
+    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS context_goal_refs={} context_future_reservations={} context_selected_evidence={} volume_route={} volume_capacity={} soft_sources_omitted={} support_receipt=PASS durable_checkpoint=PASS read_only=PASS ledger_entries={} evidence_hits={} missing_evidence=INSUFFICIENT checkpoint_replan=PASS status=PASS", context_goal_refs, context_future_reservations, context_selected_evidence, volume_route, volume_capacity, soft_sources_omitted, ledger_count, support["calls"][2]["result"].as_array().unwrap().len());
 }
 
 #[test]

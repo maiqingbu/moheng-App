@@ -30,6 +30,8 @@ pub struct KnowledgeRecord {
     pub epistemic_state: String,
     pub visibility_scope: Option<String>,
     pub from_chapter_id: Option<String>,
+    #[serde(default)]
+    pub from_story_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,6 +206,16 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn has_more_relations(
+        connection: &Connection,
+        project_id: &str,
+        entity_ids: &[&str],
+        limit: i64,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let ids = Self::ids_json(entity_ids)?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_relations WHERE project_id=?1 AND (subject_id IN (SELECT value FROM json_each(?2)) OR object_id IN (SELECT value FROM json_each(?2))) LIMIT 1 OFFSET ?3)", libsql_rusqlite::params![project_id, ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+    }
+
     pub fn canon_evidence_by_ref(
         connection: &Connection,
         project_id: &str,
@@ -260,6 +272,7 @@ impl NarrativeRepository {
                     epistemic_state: row.get(3)?,
                     visibility_scope: row.get(4)?,
                     from_chapter_id: row.get(5)?,
+                    from_story_time: None,
                 })
             },
         )?;
@@ -289,6 +302,15 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn has_more_events(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+        limit: i64,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id=?1 AND chapter_id=?2 LIMIT 1 OFFSET ?3)", libsql_rusqlite::params![project_id, chapter_id, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn active_obligations_for_relevance(
@@ -321,6 +343,18 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn has_more_obligations(
+        connection: &Connection,
+        project_id: &str,
+        entity_ids: &[&str],
+        references: &[&str],
+        limit: i64,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let entity_ids = Self::ids_json(entity_ids)?;
+        let references = Self::ids_json(references)?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+    }
+
     pub fn active_foreshadows(
         connection: &Connection,
         project_id: &str,
@@ -347,6 +381,18 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn has_more_foreshadows(
+        connection: &Connection,
+        project_id: &str,
+        chapter_refs: &[&str],
+        responsibility_refs: &[&str],
+        limit: i64,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let chapters = Self::ids_json(chapter_refs)?;
+        let refs = Self::ids_json(responsibility_refs)?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') AND (plant_chapter_id IN (SELECT value FROM json_each(?2)) OR recover_window_end_chapter IN (SELECT value FROM json_each(?2)) OR foreshadow_id IN (SELECT value FROM json_each(?3)) OR secret_payload_ref IN (SELECT value FROM json_each(?3))) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, chapters, refs, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+    }
+
     pub fn open_mysteries(
         connection: &Connection,
         project_id: &str,
@@ -367,6 +413,16 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn has_more_mysteries(
+        connection: &Connection,
+        project_id: &str,
+        references: &[&str],
+        limit: i64,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let refs = Self::ids_json(references)?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM mystery_states WHERE project_id=?1 AND status IN ('OPEN','PROGRESSING') AND (mystery_id IN (SELECT value FROM json_each(?2)) OR core_fact_id IN (SELECT value FROM json_each(?2))) LIMIT 1 OFFSET ?3)", libsql_rusqlite::params![project_id, refs, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn task_states_by_ids(
@@ -528,5 +584,13 @@ impl NarrativeRepository {
         artifact_type: &str,
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
         connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 ORDER BY h.scope_key LIMIT 1", libsql_rusqlite::params![project_id, artifact_type], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
+    }
+
+    pub fn artifact_payload_by_ref(
+        connection: &Connection,
+        project_id: &str,
+        reference: &ArtifactRef,
+    ) -> Result<Option<Value>, NarrativeRepositoryError> {
+        connection.query_row("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4", libsql_rusqlite::params![project_id, reference.artifact_id, reference.version, reference.payload_hash], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
     }
 }
