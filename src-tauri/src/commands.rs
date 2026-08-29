@@ -2258,6 +2258,30 @@ fn execute_planning_command(
         if !volume_exists {
             return Err("VOLUME_NOT_FOUND".into());
         }
+        if !crate::repositories::narrative::NarrativeRepository::approved_book_plan_exists(
+            &handle, project_id,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return Err("BOOK_PLAN_APPROVED_REQUIRED".into());
+        }
+    }
+    if artifact_type == "BookPlan" {
+        let canon_refs = string_array(request.pointer("/payload/openingCanonRefs"));
+        let evidence_refs = string_array(request.pointer("/payload/signingEvidenceRefs"));
+        if canon_refs.len() < 3 || canon_refs.iter().any(|reference| {
+            !crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(
+                &handle, project_id, reference,
+            )
+            .unwrap_or(false)
+        }) || evidence_refs.iter().any(|reference| {
+            !crate::repositories::narrative::NarrativeRepository::signing_evidence_reference_exists(
+                &handle, project_id, reference,
+            )
+            .unwrap_or(false)
+        }) {
+            return Err("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE".into());
+        }
     }
     if artifact_type == "VolumePlan" {
         let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(

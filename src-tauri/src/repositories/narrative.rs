@@ -802,6 +802,47 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn approved_book_plan_exists(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan' AND json_extract(p.payload_json, '$.planningMaturity')='APPROVED')",
+                [project_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn opening_canon_reference_exists(
+        connection: &Connection,
+        project_id: &str,
+        reference: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_facts WHERE project_id=?1 AND fact_id=?2) OR EXISTS(SELECT 1 FROM canon_relations WHERE project_id=?1 AND relation_id=?2) OR EXISTS(SELECT 1 FROM canon_events WHERE project_id=?1 AND event_id=?2)",
+                libsql_rusqlite::params![project_id, reference],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn signing_evidence_reference_exists(
+        connection: &Connection,
+        project_id: &str,
+        reference: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1 AND artifact_id=?2) OR EXISTS(SELECT 1 FROM canon_evidence WHERE project_id=?1 AND evidence_id=?2)",
+                libsql_rusqlite::params![project_id, reference],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn latest_artifact_payload(
         connection: &Connection,
         project_id: &str,

@@ -24,6 +24,18 @@ fn b07_volume_intent_and_route_query_use_commit_bundle_authority() {
         .manager
         .create("p1", "B07", "2026-08-30T00:00:00Z")
         .unwrap();
+    for index in 1..=3 {
+        connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,'p1',?2,'CHARACTER',?3,?3)", libsql_rusqlite::params![format!("entity:book:{index}"), format!("Entity {index}"), "2026-08-30T00:00:00Z"]).unwrap();
+        connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,'p1',?2,'opening','{}','A',?3,?3)", libsql_rusqlite::params![format!("fact:{index}"), format!("entity:book:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
+    }
+    let signing_hash = "c".repeat(64);
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:signing','p1','SimulatedSigningReceipt','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", signing_hash, "2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:signing',1,'{}',?1)", [&signing_hash]).unwrap();
+    let approved_book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
+    let approved_hash = sha256_canonical(&approved_book_plan).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:bookplan:p1','p1','BookPlan','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", approved_hash, "2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:bookplan:p1',1,?1,?2)", libsql_rusqlite::params![approved_book_plan.to_string(), approved_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','BookPlan','PROJECT',?1,'plan:bookplan:p1',1,?2)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", approved_hash]).unwrap();
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "command:volume").unwrap();
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:1','p1',1,'Book','ACTIVE',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
@@ -118,9 +130,24 @@ fn b07_bookplan_approval_commits_new_approved_version() {
         .manager
         .create("p2", "B07 book", "2026-08-30T00:00:00Z")
         .unwrap();
+    for index in 1..=3 {
+        connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,'p2',?2,'CHARACTER',?3,?3)", libsql_rusqlite::params![format!("entity:p2:{index}"), format!("Entity {index}"), "2026-08-30T00:00:00Z"]).unwrap();
+        connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,'p2',?2,'opening','{}','A',?3,?3)", libsql_rusqlite::params![format!("fact:p2:{index}"), format!("entity:p2:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
+    }
+    let signing_hash = "d".repeat(64);
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:p2:signing','p2','SimulatedSigningReceipt','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", signing_hash, "2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:p2:signing',1,'{}',?1)", [&signing_hash]).unwrap();
     drop(connection);
     let seed = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[{"id":"goal:1","description":"goal"}],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
-    let result = execute_command_impl(&state, json!({"type":"planning_finalize_book_plan","commandId":"command:book","idempotencyKey":"key:book","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:1","fact:2","fact:3"],"signingEvidenceRefs":["artifact:signing"]}})).unwrap();
+    let rejected = execute_command_impl(
+        &state,
+        json!({"type":"planning_finalize_book_plan","commandId":"command:book:bad","idempotencyKey":"key:book:bad","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:missing:1","fact:missing:2","fact:missing:3"],"signingEvidenceRefs":["artifact:missing"]}}),
+    );
+    assert_eq!(
+        rejected.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    let result = execute_command_impl(&state, json!({"type":"planning_finalize_book_plan","commandId":"command:book","idempotencyKey":"key:book","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}})).unwrap();
     assert_eq!(result["finalStatus"], "committed");
     let connection = state
         .manager
@@ -146,6 +173,11 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:3','p3',1,'Book','ACTIVE',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,'p3','book:3',1,'Volume','PLANNING',1,1,1000,?2,?2)", libsql_rusqlite::params![volume_id, "2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p3',?2,1,'Chapter','NORMAL','PLANNED',0,?3,?3)", libsql_rusqlite::params![chapter_id, volume_id, "2026-08-30T00:00:00Z"]).unwrap();
+    let approved_book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
+    let approved_hash = sha256_canonical(&approved_book_plan).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:bookplan:p3','p3','BookPlan','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", approved_hash, "2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:bookplan:p3',1,?1,?2)", libsql_rusqlite::params![approved_book_plan.to_string(), approved_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p3','BookPlan','PROJECT',?1,'plan:bookplan:p3',1,?2)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", approved_hash]).unwrap();
     drop(connection);
     let intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"opening","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000}});
     execute_command_impl(&state, json!({"type":"planning_create_volume_intent","commandId":"command:intent:p3","idempotencyKey":"key:intent:p3","projectId":"p3","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"volumeId":volume_id,"plan":intent}})).unwrap();
