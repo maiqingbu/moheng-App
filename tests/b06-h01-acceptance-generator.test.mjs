@@ -9,7 +9,7 @@ test('joint acceptance fails when any B06/H01 required gate is absent', () => {
   const results = passingResults(); results.gates = results.gates.filter(gate => gate.name !== 'b06_context_manifest')
   assert.equal(evaluateAcceptance({ gateResults: results }).status, 'FAIL')
 })
-for (const gateName of ['b06_current_state', 'b06_continuity', 'b06_resume_condition', 'b06_context_manifest', 'b06_state_digest', 'b06_bounded_retrieval', 'b06_frontend_projection', 'b06_bounded_truncation', 'b06_compiler_performance', 'b06_scale_topology', 'h01_project_scope', 'h01_capability_registry', 'h01_sql_negative', 'h01_diagnostics', 'h01_checkpoint_resume', 'h01_checkpoint_stale', 'h01_bounded_replan', 'h01_grounded_evidence', 'h01_read_only_boundary', 'b05_regression']) {
+for (const gateName of ['b06_current_state', 'b06_continuity', 'b06_resume_condition', 'b06_context_manifest', 'b06_state_digest', 'b06_bounded_retrieval', 'b06_frontend_projection', 'b06_bounded_truncation', 'b06_compiler_performance', 'b06_scale_topology', 'h01_project_scope', 'h01_capability_registry', 'h01_sql_negative', 'h01_diagnostics', 'h01_bounds_semantics', 'h01_checkpoint_resume', 'h01_checkpoint_stale', 'h01_bounded_replan', 'h01_grounded_evidence', 'h01_read_only_boundary', 'b05_regression']) {
   test(`joint acceptance fails when ${gateName} fails`, () => {
     const results = passingResults(); results.gates.find(gate => gate.name === gateName).status = 'FAIL'
     assert.equal(evaluateAcceptance({ gateResults: results }).status, 'FAIL')

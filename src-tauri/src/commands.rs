@@ -680,15 +680,20 @@ fn context_input_from_authority(
     let state = narrative_state_from_request(connection, request, project_id)?;
     let (threads, continuity_truncated) =
         continuity_from_request_bounded(connection, request, project_id)?;
-    let goal_contract_refs =
-        crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
-            connection, project_id, 100,
-        )
-        .map_err(|e| e.to_string())?;
     let volume_id = request
         .get("volumeId")
         .or_else(|| request.get("currentVolumeId"))
         .and_then(Value::as_str);
+    let goal_contract_refs = if let Some(volume_id) = volume_id {
+        crate::repositories::narrative::NarrativeRepository::goal_contract_refs_for_volume(
+            connection, project_id, volume_id, 100,
+        )
+    } else {
+        crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
+            connection, project_id, 100,
+        )
+    }
+    .map_err(|e| e.to_string())?;
     let (task_states, task_truncated) = if let Some(volume_id) = volume_id {
         let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
             connection, project_id, volume_id,
@@ -737,17 +742,23 @@ fn context_input_from_authority(
         .map(|task| task.state_id)
         .collect();
     let mut future_reservation_refs = Vec::new();
+    let volume_intent = if let Some(volume_id) = volume_id {
+        crate::repositories::narrative::NarrativeRepository::artifact_payload(
+            connection,
+            project_id,
+            "VolumeIntent",
+            volume_id,
+        )
+        .map_err(|e| e.to_string())?
+    } else {
+        None
+    };
     for payload in [
         crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
             connection, project_id, "BookPlan",
         )
         .map_err(|e| e.to_string())?,
-        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
-            connection,
-            project_id,
-            "VolumeIntent",
-        )
-        .map_err(|e| e.to_string())?,
+        volume_intent,
     ]
     .into_iter()
     .flatten()
@@ -863,9 +874,58 @@ pub fn query_continuity_impl(state: &KernelState, request: Value) -> Result<Valu
         .map_err(|e| e.to_string())
 }
 
+pub fn volume_progress_from_authority(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+    revision: i64,
+) -> Result<Value, String> {
+    let volume_id = required_string(request, "volumeId")?;
+    let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+        connection, project_id, volume_id,
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+    let plan = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection, project_id, &route,
+    )
+    .map_err(|e| e.to_string())?
+    .unwrap_or(Value::Null);
+    let current_chapter = request
+        .get("currentChapter")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let target_chapters = plan
+        .get("capacityBudget")
+        .and_then(|budget| budget.get("maxChapters"))
+        .and_then(Value::as_i64)
+        .unwrap_or(current_chapter);
+    let task_ids = plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let tasks = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+        connection, project_id, &task_ids, 100,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
+        volume_id: volume_id.into(),
+        target_chapters,
+        current_chapter,
+        tasks,
+        generated_revision: revision,
+    }))
+    .map_err(|e| e.to_string())?;
+    result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
+    result["truncated"] = json!(false);
+    Ok(result)
+}
+
 pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
-    let volume_id = required_string(&request, "volumeId")?;
     let revision = state
         .manager
         .project_revision(project_id)
@@ -873,55 +933,8 @@ pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
-                connection, project_id, volume_id,
-            )
-            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
-            .ok_or_else(|| ManagerError::ProjectCommand("VOLUME_PLAN_NOT_FOUND".into()))?;
-            let plan =
-                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    connection, project_id, &route,
-                )
-                .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
-                .unwrap_or(Value::Null);
-            let target_chapters = plan
-                .get("capacityBudget")
-                .and_then(|budget| budget.get("maxChapters"))
-                .and_then(Value::as_i64)
-                .unwrap_or_else(|| {
-                    request
-                        .get("currentChapter")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0)
-                });
-            let task_ids = plan
-                .get("tasks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item.get("taskId").and_then(Value::as_str))
-                .collect::<Vec<_>>();
-            let (tasks, tasks_truncated) =
-                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-                    connection, project_id, &task_ids, 100,
-                )
-                .map(|tasks| (tasks, false))
-                .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
-            let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
-                volume_id: volume_id.into(),
-                target_chapters,
-                current_chapter: request
-                    .get("currentChapter")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                tasks,
-                generated_revision: revision,
-            }))
-            .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
-            result["routePlanRef"] = serde_json::to_value(route)
-                .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
-            result["truncated"] = json!(tasks_truncated);
-            Ok(result)
+            volume_progress_from_authority(connection, &request, project_id, revision)
+                .map_err(ManagerError::ProjectCommand)
         })
         .map_err(|e| e.to_string())
 }
@@ -987,6 +1000,30 @@ pub struct RepositoryReadAdapter<'a> {
     pub connection: &'a libsql_rusqlite::Connection,
     pub project_id: &'a str,
 }
+
+fn adapter_scope(
+    input: &Value,
+    project_id: &str,
+    capability_id: &str,
+) -> Result<crate::harness::ProjectScope, String> {
+    resolve_project_scope(
+        project_id,
+        input
+            .get("projectRevision")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        input
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or(capability_id),
+        "DIAGNOSE",
+        input
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or("PROJECT"),
+    )
+}
+
 impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
     fn invoke(
         &self,
@@ -1021,16 +1058,16 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                     .get("chapterId")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "CAPABILITY_INPUT_INVALID:chapterId".to_string())?;
-                serde_json::to_value(
-                    crate::repositories::narrative::NarrativeRepository::canon_events(
+                let (records, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::canon_events_bounded(
                         self.connection,
                         self.project_id,
                         chapter,
                         bounds.max_results as i64,
                     )
-                    .map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                serde_json::to_value(records).map_err(|e| e.to_string())?
             }
             "query_evidence" => {
                 let (records, was_truncated) =
@@ -1050,29 +1087,19 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 truncated = was_truncated;
                 serde_json::to_value(threads).map_err(|e| e.to_string())?
             }
-            "query_context_manifest" => serde_json::to_value(compile_context_manifest(
-                crate::narrative::ContextCompilerInput {
-                    execution_mode: "LONG_FORM".into(),
-                    project_revision: input
-                        .get("projectRevision")
-                        .and_then(Value::as_i64)
-                        .unwrap_or(0),
-                    goal_contract_refs: Vec::new(),
-                    state: narrative_state_from_request(self.connection, input, self.project_id)?,
-                    continuity_threads: continuity_from_request(
+            "query_context_manifest" => {
+                serde_json::to_value(compile_context_manifest(context_input_from_authority(
+                    self.connection,
+                    input,
+                    self.project_id,
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
                         self.connection,
-                        input,
                         self.project_id,
-                    )?,
-                    active_task_refs: Vec::new(),
-                    future_reservation_refs: Vec::new(),
-                    selected_evidence: Vec::new(),
-                    omitted_soft_sources: Vec::new(),
-                    hard_tokens: 1024,
-                    soft_tokens: 0,
-                },
-            )?)
-            .map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?,
+                )?)?)
+                .map_err(|e| e.to_string())?
+            }
             "query_project_meta" => serde_json::to_value(
                 crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
                     self.connection,
@@ -1138,77 +1165,61 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 serde_json::to_value(records).map_err(|e| e.to_string())?
             }
             "query_volume_progress" => {
-                let Some(volume_id) = input.get("volumeId").and_then(Value::as_str) else {
+                if input.get("volumeId").and_then(Value::as_str).is_none() {
                     return Ok((
                         json!({"status":"INSUFFICIENT_DATA","owner":"B06::VolumeProgressView"}),
                         Vec::new(),
                         false,
                     ));
-                };
-                let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                }
+                volume_progress_from_authority(
                     self.connection,
+                    input,
                     self.project_id,
-                    volume_id,
-                )
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
-                let plan =
-                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
                         self.connection,
                         self.project_id,
-                        &route,
                     )
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or(Value::Null);
-                let task_ids = plan
-                    .get("tasks")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| item.get("taskId").and_then(Value::as_str))
-                    .collect::<Vec<_>>();
-                let tasks =
-                    crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-                        self.connection,
-                        self.project_id,
-                        &task_ids,
-                        bounds.max_results as i64,
-                    )
-                    .map_err(|e| e.to_string())?;
-                let current = input
-                    .get("currentChapter")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                serde_json::to_value(crate::narrative::build_volume_progress(
-                    crate::narrative::VolumeProgressInput {
-                        volume_id: volume_id.into(),
-                        target_chapters: plan
-                            .get("capacityBudget")
-                            .and_then(|v| v.get("maxChapters"))
-                            .and_then(Value::as_i64)
-                            .unwrap_or(current),
-                        current_chapter: current,
-                        tasks,
-                        generated_revision: input
-                            .get("projectRevision")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(0),
-                    },
-                ))
-                .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?,
+                )?
             }
             "query_plan_stale" => {
-                let revision = input
-                    .get("projectRevision")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                let current_revision =
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|e| e.to_string())?;
                 let context = context_input_from_authority(
                     self.connection,
                     input,
                     self.project_id,
-                    revision,
+                    current_revision,
                 )?;
-                serde_json::to_value(json!({"status":"VALID","currentStateDigest":crate::narrative::relevant_state_digest(&context)?})).map_err(|e| e.to_string())?
+                let current_digest = crate::narrative::relevant_state_digest(&context)?;
+                let compiled_revision = input
+                    .get("compiledFromProjectRevision")
+                    .or_else(|| input.get("projectRevision"))
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        "CAPABILITY_INPUT_INVALID:compiledFromProjectRevision".to_string()
+                    })?;
+                let Some(compiled_digest) =
+                    input.get("compiledFromStateDigest").and_then(Value::as_str)
+                else {
+                    return Ok((
+                        json!({"status":"INSUFFICIENT_DATA","currentStateDigest":current_digest,"owner":"B06::PlanStale"}),
+                        Vec::new(),
+                        false,
+                    ));
+                };
+                let status = evaluate_plan_stale(
+                    compiled_revision,
+                    compiled_digest,
+                    current_revision,
+                    &current_digest,
+                );
+                serde_json::to_value(json!({"status":match status { PlanStaleStatus::Valid => "VALID", PlanStaleStatus::PlanStale => "PLAN_STALE" },"currentStateDigest":current_digest,"owner":"B06::PlanStale"})).map_err(|e| e.to_string())?
             }
             "query_foreshadows" => {
                 let chapters = input
@@ -1255,21 +1266,154 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 serde_json::to_value(records).map_err(|e| e.to_string())?
             }
             "query_dependency_edges" => {
-                let mut records = Vec::new();
-                for entity_id in &entity_ids {
-                    records.extend(crate::repositories::narrative::NarrativeRepository::dependency_edges_for_entity(self.connection, self.project_id, entity_id, bounds.max_results as i64).map_err(|e| e.to_string())?);
-                }
+                let (records, was_truncated) = crate::repositories::narrative::NarrativeRepository::dependency_edges_for_entities_bounded(self.connection, self.project_id, &entity_ids, bounds.max_results as i64).map_err(|e| e.to_string())?;
+                truncated = was_truncated;
                 serde_json::to_value(records).map_err(|e| e.to_string())?
             }
-            "query_model_runs" | "query_commit_receipts" | "query_integrity_status" => {
-                json!({"items":[],"owner":"Repository","status":"NO_ROWS","boundsApplied":true})
+            "query_model_runs" => {
+                let (items, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::model_runs_bounded(
+                        self.connection,
+                        self.project_id,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                let status = if items.is_empty() { "NO_ROWS" } else { "PASS" };
+                json!({"items":items,"owner":"Repository","status":status})
             }
-            "diagnose_canon_evidence"
-            | "diagnose_knowledge_event"
-            | "diagnose_thread_evidence"
-            | "diagnose_task_evidence"
-            | "diagnose_projection_authority" => {
-                json!({"diagnosisType":capability_id,"supportStatus":"INSUFFICIENT","sourceRefs":[],"owner":"DiagnosticEngine"})
+            "query_commit_receipts" => {
+                let (items, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::commit_receipts_bounded(
+                        self.connection,
+                        self.project_id,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                let status = if items.is_empty() { "NO_ROWS" } else { "PASS" };
+                json!({"items":items,"owner":"Repository","status":status})
+            }
+            "query_integrity_status" => {
+                let (items, was_truncated) =
+                    crate::repositories::narrative::NarrativeRepository::integrity_status_bounded(
+                        self.connection,
+                        self.project_id,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?;
+                truncated = was_truncated;
+                let status = if items.is_empty() { "NO_ROWS" } else { "PASS" };
+                json!({"items":items,"owner":"IntegrityService","status":status})
+            }
+            "diagnose_canon_evidence" => {
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                let refs = references
+                    .iter()
+                    .map(|reference| (*reference).to_owned())
+                    .collect();
+                serde_json::to_value(DiagnosticEngine::canon_evidence(
+                    &scope,
+                    input
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or(capability_id),
+                    refs,
+                ))
+                .map_err(|e| e.to_string())?
+            }
+            "diagnose_knowledge_event" => {
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                let knowledge =
+                    crate::repositories::narrative::NarrativeRepository::knowledge_for_entities(
+                        self.connection,
+                        self.project_id,
+                        &entity_ids,
+                        bounds.max_results as i64,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .next();
+                let finding = if let Some(knowledge) = knowledge {
+                    let chain = crate::repositories::narrative::NarrativeRepository::establishing_event_for_knowledge(self.connection, self.project_id, &knowledge).map_err(|e| e.to_string())?.filter(|(_, evidence)| references.is_empty() || references.iter().any(|reference| Some(*reference) == evidence.event_id.as_deref() || Some(*reference) == evidence.fact_id.as_deref() || Some(*reference) == Some(evidence.evidence_id.as_str()) || Some(*reference) == Some(evidence.source_artifact_id.as_str())));
+                    let (event, evidence) = chain
+                        .map(|(event, evidence)| (Some(event), Some(evidence)))
+                        .unwrap_or((None, None));
+                    DiagnosticEngine::knowledge_event(
+                        &scope,
+                        input
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or(capability_id),
+                        &knowledge,
+                        event.as_ref(),
+                        evidence.as_ref(),
+                    )
+                } else {
+                    crate::harness::grounded_finding(
+                        &scope,
+                        "EVIDENCE_GAP",
+                        input
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or(capability_id),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                };
+                serde_json::to_value(finding).map_err(|e| e.to_string())?
+            }
+            "diagnose_thread_evidence" => {
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                serde_json::to_value(DiagnosticEngine::thread_evidence(
+                    &scope,
+                    input
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or(capability_id),
+                    references.first().copied(),
+                    references.get(1).copied(),
+                    references.get(2).copied(),
+                ))
+                .map_err(|e| e.to_string())?
+            }
+            "diagnose_task_evidence" => {
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                serde_json::to_value(DiagnosticEngine::task_evidence(
+                    &scope,
+                    input
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or(capability_id),
+                    entity_ids.first().copied(),
+                    references.first().copied(),
+                ))
+                .map_err(|e| e.to_string())?
+            }
+            "diagnose_projection_authority" => {
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                let current_revision =
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+                let projection_revision = input
+                    .get("projectionRevision")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(current_revision);
+                serde_json::to_value(DiagnosticEngine::projection_authority(
+                    &scope,
+                    input
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or(capability_id),
+                    "projection",
+                    "authority",
+                    projection_revision,
+                    current_revision,
+                ))
+                .map_err(|e| e.to_string())?
             }
             _ => return Err("CAPABILITY_UNSUPPORTED_BY_ADAPTER".into()),
         };
@@ -1287,6 +1431,25 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                         .or_else(|| item.get("edgeId"))
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned)
+                })
+                .collect(),
+            Value::Object(object) => object
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| {
+                    [
+                        "modelRunId",
+                        "receiptId",
+                        "integrityRunId",
+                        "factId",
+                        "eventId",
+                        "evidenceId",
+                        "findingId",
+                    ]
+                    .into_iter()
+                    .find_map(|key| item.get(key).and_then(Value::as_str).map(ToOwned::to_owned))
                 })
                 .collect(),
             _ => Vec::new(),
@@ -1356,7 +1519,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     input: call_input,
                     requested_bounds: RequestedBounds {
                         max_results: 100,
-                        max_tokens: 4096,
+                        max_serialized_bytes: 4096,
                     },
                 };
                 let result = executor
@@ -1409,17 +1572,6 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
                     .into_iter()
                     .next();
-                let event = request
-                    .get("chapterId")
-                    .and_then(Value::as_str)
-                    .map(|chapter| {
-                        crate::repositories::narrative::NarrativeRepository::canon_events(
-                            connection, project_id, chapter, 1,
-                        )
-                    })
-                    .transpose()
-                    .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?
-                    .and_then(|mut events| events.pop());
                 let references = request_strings(&request, "references");
                 let reference_refs = references.iter().map(String::as_str).collect::<Vec<_>>();
                 let evidence =
@@ -1433,15 +1585,38 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     .0
                     .into_iter()
                     .next();
-                Ok::<_, ManagerError>(knowledge.map(|item| {
-                    DiagnosticEngine::knowledge_event(
+                let finding = if let Some(item) = knowledge {
+                    let exact_chain = crate::repositories::narrative::NarrativeRepository::establishing_event_for_knowledge(
+                        connection,
+                        project_id,
+                        &item,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    let (event, exact_evidence) = exact_chain
+                        .filter(|(_, evidence)| {
+                            references.is_empty()
+                                || references.iter().any(|reference| {
+                                    Some(reference.as_str()) == evidence.event_id.as_deref()
+                                        || Some(reference.as_str()) == evidence.fact_id.as_deref()
+                                        || Some(reference.as_str())
+                                            == Some(evidence.evidence_id.as_str())
+                                        || Some(reference.as_str())
+                                            == Some(evidence.source_artifact_id.as_str())
+                                })
+                        })
+                        .map(|(event, evidence)| (Some(event), Some(evidence)))
+                        .unwrap_or((None, evidence));
+                    Some(DiagnosticEngine::knowledge_event(
                         &scope,
                         question,
                         &item,
                         event.as_ref(),
-                        evidence.as_ref(),
-                    )
-                }))
+                        exact_evidence.as_ref(),
+                    ))
+                } else {
+                    None
+                };
+                Ok::<_, ManagerError>(finding)
             })
             .map_err(|e| e.to_string())?
     } else {

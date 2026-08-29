@@ -121,6 +121,19 @@ impl NarrativeRepository {
         Ok(serde_json::to_string(ids)?)
     }
 
+    pub fn project_revision(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<i64, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn goal_contract_refs(
         connection: &Connection,
         project_id: &str,
@@ -129,6 +142,26 @@ impl NarrativeRepository {
         let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type IN ('StoryConstitution','BookPlan','MainContract','VolumeIntent') ORDER BY artifact_type, scope_key LIMIT ?2")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, Self::limit(limit)],
+            |row| {
+                Ok(ArtifactRef {
+                    artifact_id: row.get(0)?,
+                    version: row.get(1)?,
+                    payload_hash: row.get(2)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn goal_contract_refs_for_volume(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ArtifactRef>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND (artifact_type IN ('StoryConstitution','BookPlan','MainContract') OR (artifact_type='VolumeIntent' AND scope_key=?2)) ORDER BY artifact_type, scope_key LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, volume_id, Self::limit(limit)],
             |row| {
                 Ok(ArtifactRef {
                     artifact_id: row.get(0)?,
@@ -259,7 +292,7 @@ impl NarrativeRepository {
         entity_ids: &[&str],
         limit: i64,
     ) -> Result<(Vec<KnowledgeRecord>, bool), NarrativeRepositoryError> {
-        let mut statement = connection.prepare("SELECT knowledge_id, knower_id, fact_id, epistemic_state, visibility_scope, from_chapter_id FROM canon_knowledge WHERE project_id=?1 AND knower_id IN (SELECT value FROM json_each(?2)) ORDER BY knowledge_id LIMIT ?3")?;
+        let mut statement = connection.prepare("SELECT k.knowledge_id, k.knower_id, k.fact_id, k.epistemic_state, k.visibility_scope, k.from_chapter_id, COALESCE((SELECT tp.story_time FROM canon_timepoints tp WHERE tp.project_id=k.project_id AND tp.chapter_id=k.from_chapter_id), (SELECT e.story_time FROM canon_evidence ce JOIN canon_events e ON e.project_id=ce.project_id AND e.event_id=ce.event_id WHERE ce.project_id=k.project_id AND ce.fact_id=k.fact_id ORDER BY e.event_ordinal, e.event_id, ce.evidence_id LIMIT 1)) FROM canon_knowledge k WHERE k.project_id=?1 AND k.knower_id IN (SELECT value FROM json_each(?2)) ORDER BY k.knowledge_id LIMIT ?3")?;
         let ids = serde_json::to_string(entity_ids)?;
         let bound = Self::limit(limit);
         let rows = statement.query_map(
@@ -272,7 +305,7 @@ impl NarrativeRepository {
                     epistemic_state: row.get(3)?,
                     visibility_scope: row.get(4)?,
                     from_chapter_id: row.get(5)?,
-                    from_story_time: None,
+                    from_story_time: row.get(6)?,
                 })
             },
         )?;
@@ -302,6 +335,103 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn canon_events_bounded(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<CanonEventRecord>, bool), NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let mut statement = connection.prepare("SELECT event_id, chapter_id, event_type, story_time, event_ordinal FROM canon_events WHERE project_id=?1 AND chapter_id=?2 ORDER BY event_ordinal, event_id LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, chapter_id, bound + 1],
+            |row| {
+                Ok(CanonEventRecord {
+                    event_id: row.get(0)?,
+                    chapter_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    story_time: row.get(3)?,
+                    event_ordinal: row.get(4)?,
+                })
+            },
+        )?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = records.len() as i64 > bound;
+        records.truncate(bound as usize);
+        Ok((records, truncated))
+    }
+
+    pub fn establishing_event_for_knowledge(
+        connection: &Connection,
+        project_id: &str,
+        knowledge: &KnowledgeRecord,
+    ) -> Result<Option<(CanonEventRecord, EvidenceRecord)>, NarrativeRepositoryError> {
+        let Some(fact_id) = knowledge.fact_id.as_deref() else {
+            return Ok(None);
+        };
+        connection.query_row("SELECT e.event_id, e.chapter_id, e.event_type, e.story_time, e.event_ordinal, ce.evidence_id, ce.fact_id, ce.relation_id, ce.event_id, ce.final_chapter_id, ce.source_artifact_id, ce.source_version, ce.evidence_type, ce.quote, ce.range_start, ce.range_end FROM canon_evidence ce JOIN canon_events e ON e.project_id=ce.project_id AND e.event_id=ce.event_id WHERE ce.project_id=?1 AND ce.fact_id=?2 ORDER BY e.event_ordinal, e.event_id, ce.evidence_id LIMIT 1", libsql_rusqlite::params![project_id, fact_id], |row| {
+            Ok((CanonEventRecord { event_id: row.get(0)?, chapter_id: row.get(1)?, event_type: row.get(2)?, story_time: row.get(3)?, event_ordinal: row.get(4)? }, EvidenceRecord { evidence_id: row.get(5)?, fact_id: row.get(6)?, relation_id: row.get(7)?, event_id: row.get(8)?, final_chapter_id: row.get(9)?, source_artifact_id: row.get(10)?, version: row.get(11)?, evidence_type: row.get(12)?, quote: row.get(13)?, range_start: row.get(14)?, range_end: row.get(15)? }))
+        }).optional().map_err(Into::into)
+    }
+
+    pub fn dependency_edges_for_entities_bounded(
+        connection: &Connection,
+        project_id: &str,
+        entity_ids: &[&str],
+        limit: i64,
+    ) -> Result<(Vec<Value>, bool), NarrativeRepositoryError> {
+        let ids = Self::ids_json(entity_ids)?;
+        let bound = Self::limit(limit);
+        let mut statement = connection.prepare("SELECT edge_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash FROM dependency_edges WHERE project_id=?1 AND entity_id IN (SELECT value FROM json_each(?2)) ORDER BY edge_id LIMIT ?3")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids, bound + 1], |row| Ok(serde_json::json!({"edgeId":row.get::<_,String>(0)?,"sourceRef":row.get::<_,String>(1)?,"targetRef":row.get::<_,String>(2)?,"dependencyType":row.get::<_,String>(3)?,"scope":row.get::<_,String>(4)?,"impactClass":row.get::<_,String>(5)?,"sourceHash":row.get::<_,String>(6)?})))?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = records.len() as i64 > bound;
+        records.truncate(bound as usize);
+        Ok((records, truncated))
+    }
+
+    pub fn model_runs_bounded(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<Value>, bool), NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let mut statement = connection.prepare("SELECT model_run_id, provider, model, capability, status, predicted_cost_cents, reserved_cost_cents FROM model_runs WHERE project_id=?1 ORDER BY updated_at DESC, model_run_id LIMIT ?2")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| Ok(serde_json::json!({"modelRunId":row.get::<_,String>(0)?,"provider":row.get::<_,String>(1)?,"model":row.get::<_,String>(2)?,"capability":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?,"predictedCostCents":row.get::<_,i64>(5)?,"reservedCostCents":row.get::<_,i64>(6)?})))?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = records.len() as i64 > bound;
+        records.truncate(bound as usize);
+        Ok((records, truncated))
+    }
+
+    pub fn commit_receipts_bounded(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<Value>, bool), NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let mut statement = connection.prepare("SELECT receipt_id, commit_id, command_id, idempotency_key, before_revision, after_revision, bundle_digest, receipt_digest, committed_at FROM commit_receipts WHERE project_id=?1 ORDER BY committed_at DESC, receipt_id LIMIT ?2")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| Ok(serde_json::json!({"receiptId":row.get::<_,String>(0)?,"commitId":row.get::<_,String>(1)?,"commandId":row.get::<_,String>(2)?,"idempotencyKey":row.get::<_,String>(3)?,"beforeRevision":row.get::<_,i64>(4)?,"afterRevision":row.get::<_,i64>(5)?,"bundleDigest":row.get::<_,String>(6)?,"receiptDigest":row.get::<_,String>(7)?,"committedAt":row.get::<_,String>(8)?})))?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = records.len() as i64 > bound;
+        records.truncate(bound as usize);
+        Ok((records, truncated))
+    }
+
+    pub fn integrity_status_bounded(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<Value>, bool), NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let mut statement = connection.prepare("SELECT integrity_run_id, status, failure_count, report_json, created_at FROM integrity_runs WHERE project_id=?1 ORDER BY created_at DESC, integrity_run_id LIMIT ?2")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| Ok(serde_json::json!({"integrityRunId":row.get::<_,String>(0)?,"status":row.get::<_,String>(1)?,"failureCount":row.get::<_,i64>(2)?,"report":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Null),"createdAt":row.get::<_,String>(4)?})))?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = records.len() as i64 > bound;
+        records.truncate(bound as usize);
+        Ok((records, truncated))
     }
 
     pub fn has_more_events(

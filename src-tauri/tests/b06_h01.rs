@@ -6,8 +6,9 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::harness::{
     bounded_replan, can_expose_write_capability, check_checkpoint_resume, diagnose_knowledge_event,
     diagnose_projection_authority, grounded_finding, plan_support, registry_digest_map,
-    resolve_project_scope, BoundedCapabilityExecutor, CapabilityCallEnvelope, CheckpointResume,
-    ReadCapabilityAdapter, ReplanTrigger, RequestedBounds, SupportCheckpoint, SupportStatus,
+    resolve_project_scope, BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry,
+    CheckpointResume, ReadCapabilityAdapter, ReplanTrigger, RequestedBounds, SupportCheckpoint,
+    SupportStatus,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
@@ -290,6 +291,10 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p1", "H01", "2026-08-29T00:00:00Z").unwrap();
+    connection.execute("INSERT INTO model_runs(model_run_id,project_id,provider,model,idempotency_key,capability,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES ('model-run:h01','p1','fixture','fixture','h01-run','diagnose',1,1,'COMPLETED',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO commands(project_id,command_id,idempotency_key,request_digest,status,created_at) VALUES ('p1','command:h01','idempotency:h01',?1,'COMMITTED',?2)", libsql_rusqlite::params!["a".repeat(64), "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO commit_receipts(receipt_id,project_id,commit_id,command_id,idempotency_key,before_revision,after_revision,bundle_digest,receipt_json,receipt_digest,committed_at) VALUES ('receipt:h01','p1','commit:h01','command:h01','idempotency:h01',0,1,?1,'{}',?1,?2)", libsql_rusqlite::params!["b".repeat(64), "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO integrity_runs(integrity_run_id,project_id,status,failure_count,report_json,created_at) VALUES ('integrity:h01','p1','PASS',0,'{}',?1)", ["2026-08-29T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:a','p1','A','CHARACTER',?1,?1),('entity:b','p1','B','CHARACTER',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:known','p1','entity:a','status','{}','B',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_relations(relation_id,project_id,subject_id,predicate,object_id,authority_level,created_at,updated_at) VALUES ('relation:known','p1','entity:a','trusts','entity:b','B',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
@@ -319,7 +324,7 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
         input,
         requested_bounds: RequestedBounds {
             max_results: 10,
-            max_tokens: 100,
+            max_serialized_bytes: 100,
         },
     };
     let result = BoundedCapabilityExecutor {
@@ -491,7 +496,7 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
             input,
             requested_bounds: RequestedBounds {
                 max_results: 1,
-                max_tokens: 4096,
+                max_serialized_bytes: 4096,
             },
         };
         let result = BoundedCapabilityExecutor {
@@ -503,9 +508,53 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
             assert!(!result.result.as_array().unwrap().is_empty());
             assert!(!result.source_refs.is_empty());
         }
+        if spec.capability_id == "query_model_runs"
+            || spec.capability_id == "query_commit_receipts"
+            || spec.capability_id == "query_integrity_status"
+        {
+            assert_eq!(result.result["status"], "PASS");
+            assert_eq!(result.result["items"].as_array().unwrap().len(), 1);
+        }
+        if spec.capability_id == "query_context_manifest" {
+            assert!(result.result["compiledFromStateDigest"].is_string());
+        }
+        if spec.capability_id == "query_plan_stale" {
+            connection
+                .execute(
+                    "UPDATE project_meta SET revision=1 WHERE project_id='p1'",
+                    [],
+                )
+                .unwrap();
+            let stale_input = json!({"projectId":"p1","projectRevision":0,"compiledFromProjectRevision":0,"compiledFromStateDigest":"f".repeat(64),"entityIds":["entity:a"],"chapterId":"chapter:1"});
+            let stale_call = CapabilityCallEnvelope {
+                call_id: "parity:stale".into(),
+                capability_id: spec.capability_id.clone(),
+                capability_version: spec.version.clone(),
+                spec_digest: spec.spec_digest.clone(),
+                mode: "DIAGNOSE".into(),
+                project_id: "p1".into(),
+                project_revision: 0,
+                input_digest: sha256_canonical(&stale_input).unwrap(),
+                input: stale_input,
+                requested_bounds: RequestedBounds {
+                    max_results: 1,
+                    max_serialized_bytes: 4096,
+                },
+            };
+            let stale_result = BoundedCapabilityExecutor {
+                registry: registry.clone(),
+            }
+            .execute(&adapter, &stale_call)
+            .unwrap();
+            assert_eq!(stale_result.result["status"], "PLAN_STALE");
+        }
+        if spec.capability_id.starts_with("diagnose_") {
+            assert!(result.result["diagnosisType"].is_string());
+            assert!(result.result["supportStatus"].is_string());
+        }
     }
     let capability_count = registry.specs.len();
-    println!("H01_RESULT scope=PASS registry=PASS registry_adapter_parity=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 capability_count={} narrative_time=PASS wrong_event=PASS legal_chapter=PASS world_time_conflict=PASS status=PASS", capability_count);
+    println!("H01_RESULT scope=PASS registry=PASS registry_adapter_parity=PASS executor=PASS sql_negative=PASS write_capability=0 diagnostics=PASS evidence_ledger=PASS checkpoint_safe=PASS checkpoint_stale=PASS bounded_replan=PASS bounded_query=PASS session_receipt=PASS max_steps=7 capability_count={} populated_model_runs=1 populated_commit_receipts=1 populated_integrity_status=1 context_owner=PASS stale_owner=PLAN_STALE diagnostics_typed=PASS narrative_time=PASS wrong_event=PASS legal_chapter=PASS world_time_conflict=PASS status=PASS", capability_count);
 }
 
 #[test]
@@ -554,15 +603,19 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         .unwrap();
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:1','p1',1,'Book','ACTIVE',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:1','p1','book:1',1,'Volume','PRODUCING',1,1,1000,?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:2','p1','book:1',2,'Volume 2','PLANNING',2,2,3000,?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:1','p1','volume:1',1,'Chapter','NORMAL','COMMITTED',10,?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:2','p1','volume:2',2,'Chapter 2','NORMAL','PLANNED',0,?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:a','p1','A','CHARACTER',?1,?1),('entity:b','p1','B','CHARACTER',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:evidence','p1','ReviewReport','CHAPTER','chapter:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:evidence',1,'{}',?1)", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]).unwrap();
     connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:identity','p1','entity:b','identity','{\"name\":\"B\"}','B',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,created_at,updated_at) VALUES ('knowledge:a','p1','entity:a','fact:identity','KNOWS','CHAPTER',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id,created_at,updated_at) VALUES ('knowledge:a','p1','entity:a','fact:identity','KNOWS','CHAPTER','chapter:1',?1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,story_time,event_ordinal,payload_json,created_at) VALUES ('event:identity','p1','chapter:1','IDENTITY_REVEALED','entity:a','2020-01-01T00:00:00Z',1,'{}',?1)", ["2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:identity','p1','event:identity','chapter:1','artifact:evidence',1,'EVENT','B revealed identity',1,20,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000},"futureReservations":[{"reservationId":"reservation:1","description":"later","prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"B"}]});
+    connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,story_time,event_ordinal,payload_json,created_at) VALUES ('event:noise','p1','chapter:1','BACKGROUND','entity:a','1990-01-01T00:00:00Z',0,'{}',?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_timepoints(timepoint_id,project_id,chapter_id,story_time,ordering,created_at) VALUES ('timepoint:1','p1','chapter:1','2020-01-01T00:00:00Z',1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:identity','p1','fact:identity','event:identity','chapter:1','artifact:evidence',1,'EVENT','B revealed identity',1,20,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000},"futureReservations":[{"reservationId":"reservation:book","description":"later","prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"B"}]});
     let book_plan_hash = sha256_canonical(&book_plan).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:book','p1','BookPlan','PROJECT','p1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&book_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book',1,?1,?2)", [&book_plan.to_string(), &book_plan_hash]).unwrap();
@@ -572,6 +625,23 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:volume','p1','VolumePlan','VOLUME','volume:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume',1,?1,?2)", [&volume_plan.to_string(), &volume_plan_hash]).unwrap();
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:1','plan:volume',1,?1)", [&volume_plan_hash]).unwrap();
+    let volume_intent_v1 = json!({"futureReservations":[{"reservationId":"reservation:v1"}]});
+    let volume_intent_v1_hash = sha256_canonical(&volume_intent_v1).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('intent:volume:1','p1','VolumeIntent','VOLUME','volume:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_intent_v1_hash, "2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('intent:volume:1',1,?1,?2)", [&volume_intent_v1.to_string(), &volume_intent_v1_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumeIntent','VOLUME','volume:1','intent:volume:1',1,?1)", [&volume_intent_v1_hash]).unwrap();
+    let task_v2 = json!({"status":"ACTIVE"}).to_string();
+    connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:v2','p1','volume.task.progress',?1,'chapter:2','{}',?2,?2)", [&task_v2, "2026-08-28T00:00:00Z"]).unwrap();
+    let volume_plan_v2 = json!({"payloadSchema":"volume-plan.r1","capacityBudget":{"minChapters":2,"preferredChapters":20,"maxChapters":30},"tasks":[{"taskId":"task:v2"}]});
+    let volume_plan_v2_hash = sha256_canonical(&volume_plan_v2).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:volume:2','p1','VolumePlan','VOLUME','volume:2',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_plan_v2_hash, "2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume:2',1,?1,?2)", [&volume_plan_v2.to_string(), &volume_plan_v2_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:2','plan:volume:2',1,?1)", [&volume_plan_v2_hash]).unwrap();
+    let volume_intent_v2 = json!({"futureReservations":[{"reservationId":"reservation:v2"}]});
+    let volume_intent_v2_hash = sha256_canonical(&volume_intent_v2).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('intent:volume:2','p1','VolumeIntent','VOLUME','volume:2',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_intent_v2_hash, "2026-08-28T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('intent:volume:2',1,?1,?2)", [&volume_intent_v2.to_string(), &volume_intent_v2_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumeIntent','VOLUME','volume:2','intent:volume:2',1,?1)", [&volume_intent_v2_hash]).unwrap();
     drop(connection);
     let state = KernelState::new(paths);
     let request = json!({"projectId":"p1","scope":"PROJECT","entityIds":["entity:a"],"chapterId":"chapter:1","currentChapter":1,"currentVolumeId":"volume:1","includeSoftSources":true});
@@ -584,11 +654,11 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
     assert_eq!(
         context_projection["futureReservationRefs"],
-        json!(["reservation:1"])
+        json!(["reservation:book", "reservation:v1"])
     );
     assert_eq!(
         context_projection["omittedSoftSources"]
@@ -610,6 +680,21 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         .unwrap()
         .len();
     assert_eq!(context_selected_evidence, 1);
+    let context_v2 = query_context_manifest_impl(
+        &state,
+        json!({"projectId":"p1","scope":"VOLUME","entityIds":["entity:a"],"chapterId":"chapter:2","currentChapter":2,"currentVolumeId":"volume:2"}),
+    )
+    .unwrap();
+    assert_eq!(
+        context_v2["futureReservationRefs"],
+        json!(["reservation:book", "reservation:v2"])
+    );
+    assert_eq!(context_v2["activeVolumeTaskRefs"], json!(["task:v2"]));
+    assert!(!context_v2["futureReservationRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item == "reservation:v1"));
     let progress_projection = query_volume_progress_impl(
         &state,
         json!({"projectId":"p1","scope":"VOLUME","volumeId":"volume:1","currentChapter":3}),
@@ -638,6 +723,20 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     assert_eq!(support["calls"][2]["result"][0]["rangeStart"], 1);
     let missing_evidence = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:missing"],"chapterId":"chapter:1"})).unwrap();
     assert_eq!(missing_evidence["finding"]["supportStatus"], "INSUFFICIENT");
+    let time_writer = state
+        .manager
+        .open("p1", "", "2026-08-28T00:00:00Z")
+        .unwrap();
+    time_writer.execute("UPDATE canon_timepoints SET story_time='1998-01-01T00:00:00Z' WHERE project_id='p1' AND chapter_id='chapter:1'", []).unwrap();
+    drop(time_writer);
+    let production_time_conflict = support_session_impl(&state, json!({"projectId":"p1","question":"A 在世界时间之前知道 B 的身份吗","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1"})).unwrap();
+    assert_eq!(
+        production_time_conflict["finding"]["supportStatus"],
+        "CONFLICTING"
+    );
+    let time_conflict_pass =
+        production_time_conflict["finding"]["diagnosisType"] == "DATA_INCONSISTENCY";
+    assert!(time_conflict_pass);
     let checkpoint_id = support["receipt"]["checkpointRef"].as_str().unwrap();
     let loaded = state
         .manager
@@ -678,7 +777,7 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     let soft_sources_omitted = context_projection["omittedSoftSources"]
         .as_array()
         .is_some_and(|items| !items.is_empty());
-    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS context_goal_refs={} context_future_reservations={} context_selected_evidence={} volume_route={} volume_capacity={} soft_sources_omitted={} support_receipt=PASS durable_checkpoint=PASS read_only=PASS ledger_entries={} evidence_hits={} missing_evidence=INSUFFICIENT checkpoint_replan=PASS status=PASS", context_goal_refs, context_future_reservations, context_selected_evidence, volume_route, volume_capacity, soft_sources_omitted, ledger_count, support["calls"][2]["result"].as_array().unwrap().len());
+    println!("B06_H01_INTEGRATION_RESULT tauri=PASS repository=PASS context=PASS context_goal_refs={} context_future_reservations={} context_selected_evidence={} volume_route={} volume_capacity={} soft_sources_omitted={} volume_intent_isolation=PASS volume_task_isolation=PASS production_world_time_conflict={} multi_event_exact_evidence=PASS support_receipt=PASS durable_checkpoint=PASS read_only=PASS ledger_entries={} evidence_hits={} missing_evidence=INSUFFICIENT checkpoint_replan=PASS status=PASS", context_goal_refs, context_future_reservations, context_selected_evidence, volume_route, volume_capacity, soft_sources_omitted, time_conflict_pass, ledger_count, support["calls"][2]["result"].as_array().unwrap().len());
 }
 
 #[test]
@@ -710,4 +809,65 @@ fn b06_bounded_queries_report_true_truncation_for_populated_results() {
     assert_eq!(evidence.len(), 100);
     assert!(evidence_truncated);
     println!("B06_BOUNDED_RESULT facts=100 facts_truncated=true evidence=100 evidence_truncated=true status=PASS");
+}
+
+#[test]
+fn h01_adapter_reports_event_truncation_and_global_dependency_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("p1", "H01 bounds", "2026-08-29T00:00:00Z")
+        .unwrap();
+    connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:bounds','p1',1,'Bounds','ACTIVE',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:bounds','p1','book:bounds',1,'Bounds','PRODUCING',1,101,1000,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:bounds','p1','volume:bounds',1,'Bounds','NORMAL','PLANNED',0,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:bounds:a','p1','A','CHARACTER',?1,?1),('entity:bounds:b','p1','B','CHARACTER',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    for index in 0..101 {
+        connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,story_time,event_ordinal,payload_json,created_at) VALUES (?1,'p1','chapter:bounds','EVENT','entity:bounds:a',?2,?3,'{}',?2)", libsql_rusqlite::params![format!("event:bounds:{index}"), "2026-08-29T00:00:00Z", index]).unwrap();
+    }
+    for index in 0..100 {
+        for entity_id in ["entity:bounds:a", "entity:bounds:b"] {
+            connection.execute("INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,entity_id,created_by,created_at) VALUES (?1,'p1',?2,'target','STATE_INPUT','PROJECT','SOFT',?3,?4,'H01_TEST',?5)", libsql_rusqlite::params![format!("edge:bounds:{entity_id}:{index}"), format!("state:{entity_id}:{index}"), "0".repeat(64), entity_id, "2026-08-29T00:00:00Z"]).unwrap();
+        }
+    }
+    let registry = CapabilityRegistry::read_only_r1();
+    let adapter = RepositoryReadAdapter {
+        connection: &connection,
+        project_id: "p1",
+    };
+    let call = |capability_id: &str, input: Value| {
+        let spec = registry.specs.get(capability_id).unwrap();
+        BoundedCapabilityExecutor {
+            registry: registry.clone(),
+        }
+        .execute(
+            &adapter,
+            &CapabilityCallEnvelope {
+                call_id: format!("bounds:{capability_id}"),
+                capability_id: capability_id.into(),
+                capability_version: spec.version.clone(),
+                spec_digest: spec.spec_digest.clone(),
+                mode: "DIAGNOSE".into(),
+                project_id: "p1".into(),
+                project_revision: 0,
+                input_digest: sha256_canonical(&input).unwrap(),
+                input,
+                requested_bounds: RequestedBounds {
+                    max_results: 100,
+                    max_serialized_bytes: 65_536,
+                },
+            },
+        )
+        .unwrap()
+    };
+    let events = call("query_events", json!({"chapterId":"chapter:bounds"}));
+    assert_eq!(events.result.as_array().unwrap().len(), 100);
+    assert!(events.truncated);
+    let edges = call(
+        "query_dependency_edges",
+        json!({"entityIds":["entity:bounds:a","entity:bounds:b"]}),
+    );
+    assert_eq!(edges.result.as_array().unwrap().len(), 100);
+    assert!(edges.truncated);
+    println!("H01_BOUNDS_RESULT events=100 events_truncated=true dependency_edges=100 dependency_truncated=true global_max_results=100 status=PASS");
 }

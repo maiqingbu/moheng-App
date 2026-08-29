@@ -95,7 +95,7 @@ impl CapabilityRegistry {
         for id in ids {
             let mut hard_bounds = BTreeMap::new();
             hard_bounds.insert("maxResults".into(), 100);
-            hard_bounds.insert("maxTokens".into(), 4096);
+            hard_bounds.insert("maxSerializedBytes".into(), 65_536);
             let digest = sha256_canonical(&json!({"capabilityId":id,"version":"1.0.0","modes":["INSPECT","DIAGNOSE"],"stage":READ_ONLY_STAGE,"owner":"Rust","readOrWrite":"READ","inputContract":"typed-json","outputContract":"bounded-result","hardBounds":hard_bounds})).unwrap();
             specs.insert(
                 id.into(),
@@ -151,7 +151,7 @@ impl CapabilityRegistry {
 #[serde(rename_all = "camelCase")]
 pub struct RequestedBounds {
     pub max_results: usize,
-    pub max_tokens: usize,
+    pub max_serialized_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,15 +218,19 @@ impl BoundedCapabilityExecutor {
         }
         if call.requested_bounds.max_results
             > *spec.hard_bounds.get("maxResults").unwrap_or(&0) as usize
-            || call.requested_bounds.max_tokens
-                > *spec.hard_bounds.get("maxTokens").unwrap_or(&0) as usize
+            || call.requested_bounds.max_serialized_bytes
+                > *spec.hard_bounds.get("maxSerializedBytes").unwrap_or(&0) as usize
         {
             return Err("CAPABILITY_BOUNDS_ESCALATION".into());
         }
         let (result, source_refs, truncated) =
             adapter.invoke(&call.capability_id, &call.input, &call.requested_bounds)?;
-        if result.to_string().len() > call.requested_bounds.max_tokens {
-            return Err("CAPABILITY_RESULT_EXCEEDS_MAX_TOKENS".into());
+        if serde_json::to_vec(&result)
+            .map_err(|e| e.to_string())?
+            .len()
+            > call.requested_bounds.max_serialized_bytes
+        {
+            return Err("CAPABILITY_RESULT_EXCEEDS_MAX_SERIALIZED_BYTES".into());
         }
         let result_digest = sha256_canonical(&result).map_err(|e| e.to_string())?;
         Ok(CapabilityResultEnvelope {
@@ -507,6 +511,14 @@ pub fn diagnose_projection_authority(
 pub struct DiagnosticEngine;
 
 impl DiagnosticEngine {
+    pub fn canon_evidence(
+        scope: &ProjectScope,
+        claim: &str,
+        evidence_refs: Vec<String>,
+    ) -> Finding {
+        diagnose_canon_evidence(scope, claim, evidence_refs)
+    }
+
     pub fn knowledge_event(
         scope: &ProjectScope,
         claim: &str,
@@ -533,6 +545,25 @@ impl DiagnosticEngine {
             projection_revision,
             authority_revision,
         )
+    }
+
+    pub fn thread_evidence(
+        scope: &ProjectScope,
+        claim: &str,
+        thread_ref: Option<&str>,
+        authority_ref: Option<&str>,
+        evidence_ref: Option<&str>,
+    ) -> Finding {
+        diagnose_thread_evidence(scope, claim, thread_ref, authority_ref, evidence_ref)
+    }
+
+    pub fn task_evidence(
+        scope: &ProjectScope,
+        claim: &str,
+        task_ref: Option<&str>,
+        evidence_ref: Option<&str>,
+    ) -> Finding {
+        diagnose_task_evidence(scope, claim, task_ref, evidence_ref)
     }
 }
 

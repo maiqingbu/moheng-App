@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 const root = resolve(decodeURIComponent(new URL('..', import.meta.url).pathname))
 export const REQUIRED_BLOCKING_GATES = [
   'b06_scale_topology',
+  'h01_bounds_semantics',
   'contracts', 'node_tests', 'frontend_vitest', 'typecheck', 'build', 'architecture', 'b06_h01_architecture', 'module_boundary', 'm0a', 'b05_regression', 'b06_h01_targeted', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'cargo_all_targets', 'migration_0008',
   'b06_current_state', 'b06_narrative_time', 'b06_continuity', 'b06_resume_condition', 'b06_cross_volume_promise', 'b06_volume_progress', 'b06_context_manifest', 'b06_state_digest', 'b06_bounded_retrieval', 'b06_frontend_projection', 'b06_deterministic_digest', 'b06_bounded_truncation', 'b06_compiler_performance', 'h01_project_scope', 'h01_capability_registry', 'h01_support_planner', 'h01_executor', 'h01_sql_negative', 'h01_read_only_boundary', 'h01_diagnostics', 'h01_evidence_ledger', 'h01_checkpoint_resume', 'h01_checkpoint_stale', 'h01_checkpoint_replan', 'h01_bounded_replan', 'h01_session_receipt', 'h01_grounded_evidence', 'h01_bounded_query', 'source_binding',
 ]
