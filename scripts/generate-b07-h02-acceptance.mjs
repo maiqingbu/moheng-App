@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
@@ -26,7 +27,7 @@ export function generateAcceptance(evidenceDir = process.env.B07_H02_EVIDENCE_DI
   return acceptance
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const result = generateAcceptance()
   console.log(`B07_H02 acceptance generated: ${result.status}`)
   if (result.status !== 'PASS') process.exitCode = 1
