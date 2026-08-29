@@ -447,6 +447,7 @@ export class BrowserDemoPort implements FrontendPort {
   async queryVolumeProgress(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_volume_progress') }
   async queryContextManifest(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_context_manifest') }
   async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }
+  async queryPlanRoute(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_route') }
   async supportSession(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_session') }
   async supportCheckpointResume(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_checkpoint_resume') }
 

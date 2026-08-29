@@ -113,6 +113,17 @@ pub struct CanonEventRecord {
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
+    fn volume_scope_key(volume_id: &str) -> Result<String, NarrativeRepositoryError> {
+        let bytes = crate::hash::canonical_bytes(
+            &serde_json::json!({"level":"VOLUME","volumeId":volume_id}),
+        )?;
+        String::from_utf8(bytes).map_err(|error| {
+            NarrativeRepositoryError::Json(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })
+    }
     fn limit(limit: i64) -> i64 {
         limit.clamp(1, 100)
     }
@@ -159,9 +170,10 @@ impl NarrativeRepository {
         volume_id: &str,
         limit: i64,
     ) -> Result<Vec<ArtifactRef>, NarrativeRepositoryError> {
-        let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND (artifact_type IN ('StoryConstitution','BookPlan','MainContract') OR (artifact_type='VolumeIntent' AND scope_key=?2)) ORDER BY artifact_type, scope_key LIMIT ?3")?;
+        let canonical_scope = Self::volume_scope_key(volume_id)?;
+        let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND (artifact_type IN ('StoryConstitution','BookPlan','MainContract') OR (artifact_type='VolumeIntent' AND scope_key IN (?2, ?3))) ORDER BY artifact_type, scope_key LIMIT ?4")?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, volume_id, Self::limit(limit)],
+            libsql_rusqlite::params![project_id, canonical_scope, volume_id, Self::limit(limit)],
             |row| {
                 Ok(ArtifactRef {
                     artifact_id: row.get(0)?,
@@ -686,7 +698,12 @@ impl NarrativeRepository {
         artifact_type: &str,
         scope_key: &str,
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
-        connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 AND h.scope_key=?3", libsql_rusqlite::params![project_id, artifact_type, scope_key], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
+        let canonical_scope = if artifact_type == "VolumeIntent" || artifact_type == "VolumePlan" {
+            Self::volume_scope_key(scope_key)?
+        } else {
+            scope_key.to_string()
+        };
+        connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 AND h.scope_key IN (?3, ?4) ORDER BY CASE WHEN h.scope_key=?3 THEN 0 ELSE 1 END LIMIT 1", libsql_rusqlite::params![project_id, artifact_type, canonical_scope, scope_key], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
     }
 
     pub fn dependency_edges_for_entity(
@@ -705,7 +722,69 @@ impl NarrativeRepository {
         project_id: &str,
         volume_id: &str,
     ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
-        connection.query_row("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumePlan' AND scope_key=?2", libsql_rusqlite::params![project_id, volume_id], |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? })).optional().map_err(Into::into)
+        let canonical_scope = Self::volume_scope_key(volume_id)?;
+        connection.query_row("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumePlan' AND scope_key IN (?2, ?3) ORDER BY CASE WHEN scope_key=?2 THEN 0 ELSE 1 END LIMIT 1", libsql_rusqlite::params![project_id, canonical_scope, volume_id], |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? })).optional().map_err(Into::into)
+    }
+
+    pub fn canonical_head_ref(
+        connection: &Connection,
+        project_id: &str,
+        artifact_type: &str,
+        scope_key: &str,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        let canonical_scope = if artifact_type == "VolumeIntent" || artifact_type == "VolumePlan" {
+            Self::volume_scope_key(scope_key)?
+        } else {
+            scope_key.to_string()
+        };
+        connection.query_row(
+            "SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type=?2 AND scope_key IN (?3, ?4) ORDER BY CASE WHEN scope_key=?3 THEN 0 ELSE 1 END LIMIT 1",
+            libsql_rusqlite::params![project_id, artifact_type, canonical_scope, scope_key],
+            |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? }),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn chapter_volume_id(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn volume_exists(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM volumes WHERE project_id=?1 AND volume_id=?2)",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn next_artifact_version(
+        connection: &Connection,
+        project_id: &str,
+        artifact_id: &str,
+    ) -> Result<i64, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(version),0)+1 FROM artifacts WHERE project_id=?1 AND artifact_id=?2",
+                libsql_rusqlite::params![project_id, artifact_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn latest_artifact_payload(

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub const READ_ONLY_STAGE: &str = "H01_READ_DIAGNOSE";
+pub const H02_READ_ONLY_STAGE: &str = "H02_PLANNING_DIAGNOSE";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +86,8 @@ impl CapabilityRegistry {
             "query_volume_progress",
             "query_context_manifest",
             "query_plan_stale",
+            "query_plan_route",
+            "diagnose_planning_constraints",
             "diagnose_canon_evidence",
             "diagnose_knowledge_event",
             "diagnose_thread_evidence",
@@ -96,7 +99,12 @@ impl CapabilityRegistry {
             let mut hard_bounds = BTreeMap::new();
             hard_bounds.insert("maxResults".into(), 100);
             hard_bounds.insert("maxSerializedBytes".into(), 65_536);
-            let digest = sha256_canonical(&json!({"capabilityId":id,"version":"1.0.0","modes":["INSPECT","DIAGNOSE"],"stage":READ_ONLY_STAGE,"owner":"Rust","readOrWrite":"READ","inputContract":"typed-json","outputContract":"bounded-result","hardBounds":hard_bounds})).unwrap();
+            let stage = if matches!(id, "query_plan_route" | "diagnose_planning_constraints") {
+                H02_READ_ONLY_STAGE
+            } else {
+                READ_ONLY_STAGE
+            };
+            let digest = sha256_canonical(&json!({"capabilityId":id,"version":"1.0.0","modes":["INSPECT","DIAGNOSE"],"stage":stage,"owner":"Rust","readOrWrite":"READ","inputContract":"typed-json","outputContract":"bounded-result","hardBounds":hard_bounds})).unwrap();
             specs.insert(
                 id.into(),
                 CapabilitySpec {
@@ -104,7 +112,7 @@ impl CapabilityRegistry {
                     version: "1.0.0".into(),
                     spec_digest: digest,
                     modes: vec!["INSPECT".into(), "DIAGNOSE".into()],
-                    stage: READ_ONLY_STAGE.into(),
+                    stage: stage.into(),
                     owner: "Rust".into(),
                     read_or_write: "READ".into(),
                     input_contract: "typed-json".into(),
@@ -140,7 +148,9 @@ impl CapabilityRegistry {
         if !spec.modes.iter().any(|candidate| candidate == mode) {
             return Err("CAPABILITY_MODE_FORBIDDEN".into());
         }
-        if spec.stage != READ_ONLY_STAGE || spec.read_or_write != "READ" {
+        if !matches!(spec.stage.as_str(), READ_ONLY_STAGE | H02_READ_ONLY_STAGE)
+            || spec.read_or_write != "READ"
+        {
             return Err("CAPABILITY_STAGE_FORBIDDEN".into());
         }
         Ok(spec)
@@ -290,7 +300,21 @@ pub fn plan_support(
     created_at: &str,
 ) -> Result<SupportTaskPlan, String> {
     let lower = question.to_lowercase();
-    let capabilities = if lower.contains("知道") || lower.contains("knowledge") {
+    let capabilities = if [
+        "高潮",
+        "required task",
+        "未完成",
+        "stale",
+        "揭露",
+        "capacity",
+        "planner",
+        "规划",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
+    {
+        vec!["query_plan_route", "diagnose_planning_constraints"]
+    } else if lower.contains("知道") || lower.contains("knowledge") {
         vec!["query_knowledge", "query_events", "query_evidence"]
     } else if lower.contains("承诺") || lower.contains("promise") {
         vec!["query_continuity", "query_events", "query_evidence"]
@@ -696,5 +720,5 @@ pub fn can_expose_write_capability(registry: &CapabilityRegistry) -> bool {
     registry
         .specs
         .values()
-        .any(|spec| spec.read_or_write != "READ" || spec.stage != READ_ONLY_STAGE)
+        .any(|spec| spec.read_or_write != "READ")
 }

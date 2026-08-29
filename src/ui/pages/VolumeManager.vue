@@ -34,8 +34,7 @@ async function build() {
           <div><span class="badge" :class="volume.health === 'risk' ? 'danger' : volume.health === 'attention' ? 'warning' : 'success'">第 {{ volume.number }} 卷 · {{ volume.status === 'LOCKED' ? '待解锁' : volume.status }}</span><h2 class="card-title" style="margin-top:8px">{{ volume.title }}</h2><p class="card-subtitle">{{ volume.goal }}</p></div>
           <button class="btn" @click="router.push(`/projects/${store.currentProjectId}/volumes/${volume.id}`)">进入卷工作区</button>
         </div>
-        <div class="progress"><span :style="{ width: `${volume.progress}%` }" /></div>
-        <div class="muted" style="font-size:11px;margin-top:8px">正式 {{ volume.committedChapters }}/{{ volume.plannedChapters }} 章 · {{ volume.wordCount.toLocaleString() }} / {{ volume.targetWords.toLocaleString() }} 字</div>
+        <div class="muted" style="font-size:11px;margin-top:8px">已提交正文 {{ volume.wordCount.toLocaleString() }} 字；进入卷工作区查看 Task Route、Reality 与动态 Planning Pressure。</div>
       </article>
     </div>
   </div>

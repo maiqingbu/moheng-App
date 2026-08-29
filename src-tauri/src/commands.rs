@@ -1,5 +1,7 @@
 use crate::catalog::CatalogRepository;
+use crate::commit::CommitService;
 use crate::generated::types::ProjectCommandReceipt;
+use crate::generated::types::{ArtifactEnvelope, CommitBundle};
 use crate::harness::{
     grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
     BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine,
@@ -41,6 +43,19 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, String>
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("IPC_INVALID:{field}"))
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
 }
 
 fn stable_project_id(command_id: &str) -> Result<String, String> {
@@ -915,11 +930,65 @@ pub fn volume_progress_from_authority(
         volume_id: volume_id.into(),
         target_chapters,
         current_chapter,
-        tasks,
+        tasks: tasks.clone(),
         generated_revision: revision,
     }))
     .map_err(|e| e.to_string())?;
     result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
+    result["tasks"] = serde_json::to_value(&tasks).map_err(|e| e.to_string())?;
+    let required_remaining = plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            matches!(
+                task.get("class").and_then(Value::as_str),
+                Some("REQUIRED" | "CLIMAX" | "RESERVED")
+            )
+        })
+        .filter(|task| {
+            let task_id = task
+                .get("taskId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            !tasks.iter().any(|state| {
+                state.state_id == task_id
+                    && matches!(
+                        state.value.get("status").and_then(Value::as_str),
+                        Some("SATISFIED")
+                    )
+            })
+        })
+        .count() as i64;
+    let blocked_required = tasks
+        .iter()
+        .filter(|state| state.value.get("status").and_then(Value::as_str) == Some("BLOCKED"))
+        .count() as i64;
+    let exit_gap = plan
+        .get("requiredExitConditions")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len) as i64;
+    let reservation_pressure = plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|task| {
+            task.get("reservationRefs")
+                .and_then(Value::as_array)
+                .is_some_and(|refs| !refs.is_empty())
+        })
+        .count() as i64;
+    result["planningPressure"] = crate::planning::planning_pressure(
+        current_chapter,
+        target_chapters,
+        required_remaining,
+        blocked_required,
+        exit_gap,
+        0,
+        reservation_pressure,
+    );
     result["truncated"] = json!(false);
     Ok(result)
 }
@@ -934,6 +1003,66 @@ pub fn query_volume_progress_impl(state: &KernelState, request: Value) -> Result
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
             volume_progress_from_authority(connection, &request, project_id, revision)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub fn plan_route_from_authority(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+    revision: i64,
+) -> Result<Value, String> {
+    let volume_id = required_string(request, "volumeId")?;
+    let volume_intent_ref =
+        crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+            connection,
+            project_id,
+            "VolumeIntent",
+            volume_id,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "VOLUME_INTENT_NOT_FOUND".to_string())?;
+    let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+        connection, project_id, volume_id,
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+    let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection, project_id, &route_ref,
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+    crate::planning::validate_volume_route(&route)?;
+    let progress = volume_progress_from_authority(connection, request, project_id, revision)?;
+    let bound = request
+        .get("maxResults")
+        .and_then(Value::as_u64)
+        .unwrap_or(100)
+        .clamp(1, 100) as usize;
+    let mut tasks = route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let truncated = tasks.len() > bound;
+    tasks.truncate(bound);
+    Ok(
+        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"owner":"B07::PlanningRoute","truncated":truncated}),
+    )
+}
+
+pub fn query_plan_route_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            plan_route_from_authority(connection, &request, project_id, revision)
                 .map_err(ManagerError::ProjectCommand)
         })
         .map_err(|e| e.to_string())
@@ -1221,6 +1350,71 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 );
                 serde_json::to_value(json!({"status":match status { PlanStaleStatus::Valid => "VALID", PlanStaleStatus::PlanStale => "PLAN_STALE" },"currentStateDigest":current_digest,"owner":"B06::PlanStale"})).map_err(|e| e.to_string())?
             }
+            "query_plan_route" => {
+                if input.get("volumeId").and_then(Value::as_str).is_none() {
+                    return Ok((
+                        json!({"status":"INSUFFICIENT_DATA","owner":"B07::PlanningRoute"}),
+                        Vec::new(),
+                        false,
+                    ));
+                }
+                let mut bounded_input = input.clone();
+                bounded_input["maxResults"] = json!(bounds.max_results);
+                let value = plan_route_from_authority(
+                    self.connection,
+                    &bounded_input,
+                    self.project_id,
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|e| e.to_string())?,
+                )?;
+                truncated = value
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                value
+            }
+            "diagnose_planning_constraints" => {
+                if input.get("volumeId").and_then(Value::as_str).is_none() {
+                    return Ok((
+                        json!({"diagnosisType":"EVIDENCE_GAP","supportStatus":"INSUFFICIENT","status":"INSUFFICIENT_DATA","owner":"H02::PlanningDiagnostics"}),
+                        Vec::new(),
+                        false,
+                    ));
+                }
+                let mut bounded_input = input.clone();
+                bounded_input["maxResults"] = json!(bounds.max_results);
+                let route = plan_route_from_authority(
+                    self.connection,
+                    &bounded_input,
+                    self.project_id,
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|e| e.to_string())?,
+                )?;
+                truncated = route
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let scope = adapter_scope(input, self.project_id, capability_id)?;
+                let blocked_task_ids = route["taskReality"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|task| task["value"]["status"].as_str() == Some("BLOCKED"))
+                    .filter_map(|task| task["stateId"].as_str())
+                    .collect::<Vec<_>>();
+                let scope_note = if truncated {
+                    "仅展示边界内的部分 Route，不能视为全部约束"
+                } else {
+                    "Route 在当前查询边界内完整返回"
+                };
+                json!({"diagnosisType":"PLANNING_CONSTRAINTS","supportStatus":"SUPPORTED","claim":input.get("question").cloned().unwrap_or_else(|| json!(capability_id)),"projectId":scope.project_id,"projectRevision":scope.project_revision,"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"explanation":{"selectedTaskReason":"优先检查当前 Route 中未满足的 Required/Climax/Reserved Task","blockedTaskIds":blocked_task_ids,"capacityReason":route["planningPressure"]["remainingChapterCapacity"],"requiredTasksRemaining":route["planningPressure"]["requiredTasksRemaining"],"reservationRestriction":"由当前 VolumeIntent 与 VolumePlan 的 reservationRefs 决定","scopeNote":scope_note},"provenance":{"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"routeVersion":route["routeVersion"],"planningPressure":route["planningPressure"]},"truncated":route["truncated"],"recommendedNextAction":"INSPECT_ROUTE"})
+            }
             "query_foreshadows" => {
                 let chapters = input
                     .get("chapterId")
@@ -1417,7 +1611,7 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
             }
             _ => return Err("CAPABILITY_UNSUPPORTED_BY_ADAPTER".into()),
         };
-        let source_refs = match &value {
+        let mut source_refs = match &value {
             Value::Array(items) => items
                 .iter()
                 .filter_map(|item| {
@@ -1454,6 +1648,20 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 .collect(),
             _ => Vec::new(),
         };
+        if matches!(
+            capability_id,
+            "query_plan_route" | "diagnose_planning_constraints"
+        ) {
+            for key in ["volumeIntentRef", "volumePlanRef"] {
+                if let Some(reference) = value
+                    .get(key)
+                    .and_then(|item| item.get("artifactId"))
+                    .and_then(Value::as_str)
+                {
+                    source_refs.push(reference.to_owned());
+                }
+            }
+        }
         Ok((value, source_refs, truncated))
     }
 }
@@ -1519,7 +1727,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     input: call_input,
                     requested_bounds: RequestedBounds {
                         max_results: 100,
-                        max_serialized_bytes: 4096,
+                        max_serialized_bytes: 65_536,
                     },
                 };
                 let result = executor
@@ -1556,6 +1764,18 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         })
         .map_err(|e| e.to_string())?;
     let requires_evidence = question.contains("知道") || question.contains("承诺");
+    let planning_question = [
+        "高潮",
+        "required task",
+        "未完成",
+        "stale",
+        "揭露",
+        "capacity",
+        "planner",
+        "规划",
+    ]
+    .iter()
+    .any(|term| question.to_lowercase().contains(term));
     let diagnostic_finding = if question.contains("知道") {
         state
             .manager
@@ -1619,6 +1839,37 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                 Ok::<_, ManagerError>(finding)
             })
             .map_err(|e| e.to_string())?
+    } else if planning_question {
+        calls
+            .iter()
+            .find(|call| call.result.get("diagnosisType").is_some())
+            .map(|call| {
+                let support_status = match call.result.get("supportStatus").and_then(Value::as_str)
+                {
+                    Some("SUPPORTED") => crate::harness::SupportStatus::SUPPORTED,
+                    Some("CONFLICTING") => crate::harness::SupportStatus::CONFLICTING,
+                    Some("INFERRED") => crate::harness::SupportStatus::INFERRED,
+                    _ => crate::harness::SupportStatus::INSUFFICIENT,
+                };
+                crate::harness::Finding {
+                    finding_id: format!("finding:{}", &scope.question_digest[..16]),
+                    diagnosis_type: call.result["diagnosisType"]
+                        .as_str()
+                        .unwrap_or("PLANNING_CONSTRAINTS")
+                        .into(),
+                    project_id: project_id.into(),
+                    project_revision: revision,
+                    claim: call.result["claim"].as_str().unwrap_or(question).into(),
+                    support_status,
+                    source_refs: call.source_refs.clone(),
+                    conflicting_refs: Vec::new(),
+                    impact_scopes: Vec::new(),
+                    recommended_next_action: call.result["recommendedNextAction"]
+                        .as_str()
+                        .unwrap_or("INSPECT_ROUTE")
+                        .into(),
+                }
+            })
     } else {
         None
     };
@@ -1932,6 +2183,197 @@ fn execute_runtime_command(
     Ok(project_command_response(&outcome_receipt(outcome)))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_planning_command(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let mut payload = request
+        .pointer("/payload/plan")
+        .cloned()
+        .ok_or_else(|| "IPC_INVALID:payload.plan".to_string())?;
+    let (artifact_type, scope, scope_key) = match command_type {
+        "planning_finalize_book_plan" => (
+            "BookPlan",
+            json!({"level":"PROJECT"}),
+            project_id.to_string(),
+        ),
+        "planning_create_volume_intent" | "planning_create_volume_plan" => {
+            let volume_id = request
+                .pointer("/payload/volumeId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "IPC_INVALID:payload.volumeId".to_string())?;
+            (
+                if command_type.ends_with("volume_intent") {
+                    "VolumeIntent"
+                } else {
+                    "VolumePlan"
+                },
+                json!({"level":"VOLUME","volumeId":volume_id}),
+                volume_id.to_string(),
+            )
+        }
+        "planning_compile_chapter_plan" => {
+            let chapter_id = request
+                .pointer("/payload/chapterId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "IPC_INVALID:payload.chapterId".to_string())?;
+            (
+                "ChapterPlan",
+                json!({"level":"CHAPTER","chapterId":chapter_id}),
+                chapter_id.to_string(),
+            )
+        }
+        _ => return Err("IPC_UNSUPPORTED_PLANNING_COMMAND".into()),
+    };
+    match artifact_type {
+        "BookPlan" => {
+            let signing = request
+                .pointer("/payload/signingStatus")
+                .and_then(Value::as_str)
+                == Some("PASS");
+            let canon = string_array(request.pointer("/payload/openingCanonRefs"));
+            let evidence = string_array(request.pointer("/payload/signingEvidenceRefs"));
+            payload = crate::planning::approve_book_plan(&payload, signing, &canon, &evidence)?;
+        }
+        "VolumePlan" => crate::planning::validate_volume_route(&payload)?,
+        "ChapterPlan" => {}
+        _ => {}
+    }
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|e| e.to_string())?;
+    if artifact_type == "VolumeIntent" {
+        let volume_exists = crate::repositories::narrative::NarrativeRepository::volume_exists(
+            &handle, project_id, &scope_key,
+        )
+        .map_err(|e| e.to_string())?;
+        if !volume_exists {
+            return Err("VOLUME_NOT_FOUND".into());
+        }
+    }
+    if artifact_type == "VolumePlan" {
+        let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+            &handle,
+            project_id,
+            "VolumeIntent",
+            &scope_key,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "VOLUME_INTENT_NOT_FOUND".to_string())?;
+        crate::planning::validate_volume_route_reference(&payload, &intent)?;
+    }
+    if artifact_type == "ChapterPlan" {
+        let chapter_id = request
+            .pointer("/payload/chapterId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "IPC_INVALID:plan.chapterId".to_string())?;
+        let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+            &handle, project_id, chapter_id,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+        let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+            &handle, project_id, &volume_id,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+        let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            &handle, project_id, &route_ref,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+        let route_task_ids = route
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let triggered_threads = string_array(request.pointer("/payload/triggeredThreadRefs"));
+        let forbidden_reveals = string_array(request.pointer("/payload/forbiddenRevealRefs"));
+        let current_revision =
+            crate::repositories::narrative::NarrativeRepository::project_revision(
+                &handle, project_id,
+            )
+            .map_err(|e| e.to_string())?;
+        let mut authority_request = request.clone();
+        authority_request["volumeId"] = json!(volume_id);
+        authority_request["chapterId"] = json!(chapter_id);
+        let context = context_input_from_authority(
+            &handle,
+            &authority_request,
+            project_id,
+            current_revision,
+        )?;
+        let current_digest = crate::narrative::relevant_state_digest(&context)?;
+        let compiled_revision = payload
+            .get("compiledFromProjectRevision")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "IPC_INVALID:plan.compiledFromProjectRevision".to_string())?;
+        let compiled_digest = payload
+            .get("compiledFromStateDigest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "IPC_INVALID:plan.compiledFromStateDigest".to_string())?;
+        if matches!(
+            evaluate_plan_stale(
+                compiled_revision,
+                compiled_digest,
+                current_revision,
+                &current_digest
+            ),
+            PlanStaleStatus::PlanStale
+        ) {
+            return Err("PLAN_STALE".into());
+        }
+        let context_ref: crate::generated::types::ArtifactRef = serde_json::from_value(
+            payload
+                .get("contextManifestRef")
+                .cloned()
+                .ok_or_else(|| "CONTEXT_MANIFEST_REF_REQUIRED".to_string())?,
+        )
+        .map_err(|e| format!("CONTEXT_MANIFEST_REF_INVALID:{e}"))?;
+        if crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            &handle,
+            project_id,
+            &context_ref,
+        )
+        .map_err(|e| e.to_string())?
+        .is_none()
+        {
+            return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
+        }
+        crate::planning::validate_current_chapter_plan(
+            &payload,
+            chapter_id,
+            &route_task_ids,
+            &triggered_threads,
+            &forbidden_reveals,
+        )?;
+    }
+    let artifact_id = format!("plan:{}:{}", artifact_type.to_lowercase(), scope_key);
+    let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
+        &handle,
+        project_id,
+        &artifact_id,
+    )
+    .map_err(|e| e.to_string())?;
+    let hash = sha256_canonical(&payload).map_err(|e| e.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
+    let receipt =
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;
+    Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner"}))
+}
+
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
     let command_id = required_string(&request, "commandId")?;
@@ -1941,6 +2383,22 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
     let expected_revision = expected_revision(&request)?;
     let digest = request_digest(&request)?;
     match command_type {
+        "planning_finalize_book_plan"
+        | "planning_create_volume_intent"
+        | "planning_create_volume_plan"
+        | "planning_compile_chapter_plan" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_planning_command(
+                state,
+                &request,
+                command_type,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+            )
+        }
         "production_start" | "production_pause" | "production_resume" | "production_cancel" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_runtime_command(
@@ -2348,6 +2806,11 @@ pub fn query_plan_stale(state: State<'_, KernelState>, request: Value) -> Result
 }
 
 #[tauri::command]
+pub fn query_plan_route(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_plan_route_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     support_session_impl(&state, request)
 }
@@ -2407,6 +2870,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_progress,
         query_context_manifest,
         query_plan_stale,
+        query_plan_route,
         support_session,
         support_checkpoint_resume,
         execute_command,

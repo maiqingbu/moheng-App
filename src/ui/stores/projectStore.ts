@@ -11,6 +11,7 @@ import type {
   HistoryProjection,
   MarketStrategyProjection,
   PageResult,
+  PlanningRouteProjection,
   ProductionCenterProjection,
   ProjectOverviewProjection,
   SearchHit,
@@ -47,6 +48,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const production = ref<ProductionCenterProjection | null>(null)
   const volumes = ref<PageResult<VolumeSummary> | null>(null)
   const volumeDetail = ref<VolumeDetailProjection | null>(null)
+  const planningRoute = ref<PlanningRouteProjection | null>(null)
   const decisions = ref<PageResult<DecisionItem> | null>(null)
   const readerVolumes = ref<PageResult<VolumeSummary> | null>(null)
   const chapterLists = ref<Record<string, PageResult<ChapterListItem>>>({})
@@ -80,6 +82,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     production.value = null
     volumes.value = null
     volumeDetail.value = null
+    planningRoute.value = null
     decisions.value = null
     readerVolumes.value = null
     chapterLists.value = {}
@@ -173,6 +176,10 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function loadVolumeDetail(volumeId:string, force=false) {
     if (volumeDetail.value?.volume.id === volumeId && !force) return volumeDetail.value
     return withWorkspace('volume-detail', () => frontendPort.queryVolumeDetail({ ...queryBase(`volume:${volumeId}`, 30), volumeId }), v => { volumeDetail.value=v })
+  }
+  async function loadPlanningRoute(volumeId:string, force=false) {
+    if (planningRoute.value?.volumeId === volumeId && !force) return planningRoute.value
+    return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId }), route => { planningRoute.value = route })
   }
   async function loadDecisions(status:'pending'|'resolved'|'all'='all', force=false) {
     if (decisions.value && !force && status==='all') return decisions.value
@@ -292,11 +299,11 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, production, volumes, volumeDetail, decisions,
+    currentProjectId, overview, marketStrategy, directions, production, volumes, volumeDetail, planningRoute, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadProduction, loadVolumes,
-    loadVolumeDetail, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
+    loadVolumeDetail, loadPlanningRoute, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadCanon, loadHealth, loadHistory, loadSettings, search, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }
