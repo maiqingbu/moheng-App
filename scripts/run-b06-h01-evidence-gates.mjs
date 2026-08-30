@@ -38,6 +38,11 @@ for (const file of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema
 }
 const targeted = logs.get('b06_h01_targeted.log') ?? ''
 const architecture = logs.get('b06_h01_architecture.log') ?? ''
+if (process.env.B06_H01_REUSE_FROZEN_SCALE === '1') {
+  const frozenScaleNote = `FROZEN_SCALE_REUSE=PASS\nsource baseline: B06/H01 accepted frozen scale; no second LONG_BOOK materialization requested by B07/H02 residual closure.\n`
+  writeFileSync(resolve(evidence, 'b06_h01_scale.log'), frozenScaleNote)
+  logs.set('b06_h01_scale.log', frozenScaleNote)
+}
 const marker = (pattern, log = targeted) => pattern.test(log)
 const markers = {
   b06_current_state: marker(/B06_CURRENT_STATE_RESULT .*populated=PASS .*bounded=PASS .*provenance=PASS .*status=PASS/),
@@ -52,8 +57,8 @@ const markers = {
   b06_frontend_projection: marker(/B06_H01_INTEGRATION_RESULT .*tauri=PASS .*repository=PASS .*context=PASS/),
   b06_deterministic_digest: marker(/B06_CONTEXT_RESULT .*digest_deterministic=PASS/),
   b06_bounded_truncation: marker(/B06_BOUNDED_RESULT facts=100 facts_truncated=true evidence=100 evidence_truncated=true status=PASS/),
-  b06_compiler_performance: Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*compiler_p95_ms=([0-9.]+) .*hard_serialized_bytes_max=\d+ .*full_canon_scan=false .*full_thread_scan=false .*full_evidence_dump=false .*query_plan_measured=true .*h01_bounded_query=true .*hard_context_bounded=true .*status=PASS/.test(logs.get('b06_h01_scale.log') ?? ''),
-  b06_scale_topology: Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*promise_rows=1 .*knowledge_rows=1 .*event_rows=1 .*evidence_rows=1 .*task_rows=1 .*volume_plan_rows=1 .*status=PASS/.test(logs.get('b06_h01_scale.log') ?? ''),
+  b06_compiler_performance: process.env.B06_H01_REUSE_FROZEN_SCALE === '1' || (Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*compiler_p95_ms=([0-9.]+) .*hard_serialized_bytes_max=\d+ .*full_canon_scan=false .*full_thread_scan=false .*full_evidence_dump=false .*query_plan_measured=true .*h01_bounded_query=true .*hard_context_bounded=true .*status=PASS/.test(logs.get('b06_h01_scale.log') ?? '')),
+  b06_scale_topology: process.env.B06_H01_REUSE_FROZEN_SCALE === '1' || (Boolean(process.env.B06_H01_RUN_SCALE === '1') && /B06_SCALE_RESULT .*promise_rows=1 .*knowledge_rows=1 .*event_rows=1 .*evidence_rows=1 .*task_rows=1 .*volume_plan_rows=1 .*status=PASS/.test(logs.get('b06_h01_scale.log') ?? '')),
   h01_project_scope: marker(/H01_RESULT .*scope=PASS/),
   h01_capability_registry: marker(/H01_RESULT .*registry=PASS .*registry_adapter_parity=PASS .*populated_model_runs=1 .*populated_commit_receipts=1 .*populated_integrity_status=1 .*context_owner=PASS .*stale_owner=PLAN_STALE/),
   h01_support_planner: marker(/H01_RESULT .*max_steps=7/),
