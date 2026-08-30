@@ -18,14 +18,17 @@ use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec,
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
 use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
+use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use tauri::State;
 
 #[derive(Clone)]
 pub struct KernelState {
     pub manager: ProjectManager,
     pub paths: AppPaths,
+    pub(crate) production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
 }
 
 impl KernelState {
@@ -33,6 +36,18 @@ impl KernelState {
         Self {
             manager: ProjectManager::new(paths.clone()),
             paths,
+            production_gateway: Arc::new(crate::production::UnavailableProductionGateway),
+        }
+    }
+
+    pub fn with_production_gateway(
+        paths: AppPaths,
+        production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
+    ) -> Self {
+        Self {
+            manager: ProjectManager::new(paths.clone()),
+            paths,
+            production_gateway,
         }
     }
 }
@@ -357,6 +372,59 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
             "note": "M0A 存储与完整性检查已通过"
         }
     }))
+}
+
+/// B08 production projection.  This is a bounded read projection assembled
+/// from the authoritative job/artifact/runtime rows; it never reconstructs a
+/// candidate as a committed chapter and never trusts Vue-local state.
+pub fn query_production_center_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?.to_string();
+    state
+        .manager
+        .with_read_connection(&project_id, "1970-01-01T00:00:00Z", |connection| {
+            let runtime: (String, i64, i64, i64) = connection
+                .query_row(
+                    "SELECT COALESCE(run_state,'IDLE'), COALESCE(committed_chapters,0), COALESCE(total_cost_cents,0), COALESCE(candidate_chapters,0) FROM project_runtime_state WHERE project_id=?1",
+                    [&project_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0));
+            let job: Option<(String, String, Option<String>, String)> = connection
+                .query_row(
+                    "SELECT job_id, current_stage, chapter_id, status FROM jobs WHERE project_id=?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+                    [&project_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let current_stage = job.as_ref().map(|(_, stage, _, _)| stage.clone()).unwrap_or_else(|| "IDLE".into());
+            let active_detail = job
+                .as_ref()
+                .map(|(id, _, chapter, status)| format!("{status} · {id} · {}", chapter.as_deref().unwrap_or("未绑定章节")))
+                .unwrap_or_else(|| "暂无生产任务".into());
+            let stages = ["CONTEXT", "PLAN", "RENDER", "CANDIDATE", "AUDIT", "GATE", "COMMIT", "RECONCILE", "COMPLETED"];
+            let stage_order = stages.iter().position(|stage| *stage == current_stage).unwrap_or(usize::MAX);
+            let timeline = stages.iter().enumerate().map(|(order, stage)| json!({
+                "id": format!("b08:{stage}"), "order": order + 1, "title": stage,
+                "description": "B08 Chapter Production Runtime", "status": if order < stage_order { "done" } else if order == stage_order { "active" } else { "pending" }
+            })).collect::<Vec<_>>();
+            let mut artifacts = connection.prepare("SELECT artifact_id, artifact_type, artifact_status, payload_hash, version FROM artifacts WHERE project_id=?1 ORDER BY created_at DESC, artifact_id DESC LIMIT 20")?;
+            let artifact_items = artifacts.query_map([&project_id], |row| Ok(json!({
+                "id": row.get::<_, String>(0)?, "title": row.get::<_, String>(1)?,
+                "summary": format!("v{} · {} · {}", row.get::<_, i64>(4)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                "status": if row.get::<_, String>(2)? == "COMMITTED" { "official" } else { "candidate" }
+            })))?.collect::<Result<Vec<_>, _>>()?;
+            let task = job.as_ref().map(|(id, _, chapter, status)| json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"progress":if status=="COMPLETED" {100} else {50}})).into_iter().collect::<Vec<_>>();
+            Ok(json!({
+                "timeline": timeline, "tasks": task,
+                "artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
+                "signing":{"status":"NOT_STARTED","verdict":"B08 production gate is authoritative"},
+                "activeWork":{"label":current_stage,"detail":active_detail},
+                "productionStage":current_stage,
+                "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},
+                "committedChapters":runtime.1,"candidateChapters":runtime.3
+            }))
+        })
+        .map_err(|error| error.to_string())
 }
 
 pub fn query_search_fulltext_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -686,7 +754,7 @@ fn continuity_from_request_bounded(
     Ok((threads, truncated))
 }
 
-fn context_input_from_authority(
+pub(crate) fn context_input_from_authority(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
     project_id: &str,
@@ -709,43 +777,46 @@ fn context_input_from_authority(
         )
     }
     .map_err(|e| e.to_string())?;
-    let (task_states, task_truncated) = if let Some(volume_id) = volume_id {
-        let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
-            connection, project_id, volume_id,
-        )
-        .map_err(|e| e.to_string())?;
-        let refs = if let Some(route) = route {
-            let payload =
-                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    connection, project_id, &route,
-                )
-                .map_err(|e| e.to_string())?
-                .unwrap_or(Value::Null);
-            payload
-                .get("tasks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item.get("taskId").and_then(Value::as_str))
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        (
-            crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-                connection, project_id, &refs, 100,
+    let opening_bootstrap =
+        request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
+    let (task_states, task_truncated) =
+        if let Some(volume_id) = volume_id.filter(|_| !opening_bootstrap) {
+            let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                connection, project_id, volume_id,
             )
-            .map_err(|e| e.to_string())?,
-            false,
-        )
-    } else {
-        crate::repositories::narrative::NarrativeRepository::task_states_bounded(
-            connection, project_id, 100,
-        )
-        .map_err(|e| e.to_string())?
-    };
+            .map_err(|e| e.to_string())?;
+            let refs = if let Some(route) = route {
+                let payload =
+                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                        connection, project_id, &route,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(Value::Null);
+                payload
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("taskId").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+            (
+                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                    connection, project_id, &refs, 100,
+                )
+                .map_err(|e| e.to_string())?,
+                false,
+            )
+        } else {
+            crate::repositories::narrative::NarrativeRepository::task_states_bounded(
+                connection, project_id, 100,
+            )
+            .map_err(|e| e.to_string())?
+        };
     let active_task_refs = task_states
         .into_iter()
         .filter(|task| {
@@ -2205,6 +2276,115 @@ fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_repair_command(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    match command_type {
+        "repair_plan_create" => {
+            if request.pointer("/payload/dryRun").and_then(Value::as_bool) != Some(true) {
+                return Err("H03_DRY_RUN_REQUIRED".into());
+            }
+            let plan: crate::repair::RepairPlan = serde_json::from_value(
+                request
+                    .pointer("/payload/repairPlan")
+                    .cloned()
+                    .ok_or_else(|| "H03_INVALID:repairPlan".to_string())?,
+            )
+            .map_err(|error| format!("H03_INVALID:repairPlan:{error}"))?;
+            if plan.project_id != project_id {
+                return Err("H03_INVALID:projectId mismatch".into());
+            }
+            let spec = project_command_spec(
+                project_id,
+                project_id,
+                command_id,
+                idempotency_key,
+                command_type,
+                digest,
+                expected_revision,
+                requested_at,
+                false,
+            );
+            let outcome = state
+                .manager
+                .commit_project_command(spec, |connection| {
+                    crate::repair::save_plan(connection, &plan)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(project_command_response(&outcome_receipt(outcome)))
+        }
+        "repair_authorize" => {
+            let authorization: crate::repair::RepairAuthorization = serde_json::from_value(
+                request
+                    .pointer("/payload/authorization")
+                    .cloned()
+                    .ok_or_else(|| "H03_INVALID:authorization".to_string())?,
+            )
+            .map_err(|error| format!("H03_INVALID:authorization:{error}"))?;
+            if authorization.project_id != project_id {
+                return Err("H03_INVALID:projectId mismatch".into());
+            }
+            let spec = project_command_spec(
+                project_id,
+                project_id,
+                command_id,
+                idempotency_key,
+                command_type,
+                digest,
+                expected_revision,
+                requested_at,
+                false,
+            );
+            let outcome = state
+                .manager
+                .commit_project_command(spec, |connection| {
+                    crate::repair::issue_authorization(connection, &authorization)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(project_command_response(&outcome_receipt(outcome)))
+        }
+        "repair_execute" => {
+            let plan_id = request
+                .pointer("/payload/repairPlanId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "H03_INVALID:repairPlanId".to_string())?;
+            let authorization_id = request
+                .pointer("/payload/authorizationId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "H03_INVALID:authorizationId".to_string())?;
+            let handle = state
+                .manager
+                .open(project_id, "", requested_at)
+                .map_err(|error| error.to_string())?;
+            let receipt = crate::repair::execute(
+                &handle,
+                project_id,
+                plan_id,
+                authorization_id,
+                requested_at,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "finalStatus": if receipt.status == "REPAIR_VERIFIED" { "committed" } else { "failed" },
+                "message": "H03 授权修复已执行并完成复核",
+                "receipt": receipt,
+            }))
+        }
+        _ => Err("H03_UNSUPPORTED_COMMAND".into()),
+    }
+}
+
 // Runtime command handling intentionally carries the complete command envelope
 // into the ProjectManager-owned transaction so control receipts bind to it.
 #[allow(clippy::too_many_arguments)]
@@ -2682,7 +2862,35 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         }
         "production_start" | "production_pause" | "production_resume" | "production_cancel" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if command_type == "production_start" {
+                if request
+                    .pointer("/payload/chapterId")
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
+                    return Err("B08_CHAPTER_REQUIRED".into());
+                }
+                return crate::production::run_chapter_production(
+                    &state.manager,
+                    state.production_gateway.as_ref(),
+                    &request,
+                );
+            }
             execute_runtime_command(
+                state,
+                &request,
+                command_type,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
+            )
+        }
+        "repair_plan_create" | "repair_authorize" | "repair_execute" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_repair_command(
                 state,
                 &request,
                 command_type,
@@ -3020,6 +3228,14 @@ pub fn query_project_overview(
 }
 
 #[tauri::command]
+pub fn query_production_center(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_production_center_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn search_fulltext(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_search_fulltext_impl(&state, request)
 }
@@ -3140,6 +3356,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         query_project_library,
         query_project_overview,
+        query_production_center,
         search_fulltext,
         query_volume_list,
         query_reader_volumes,

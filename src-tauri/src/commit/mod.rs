@@ -297,6 +297,46 @@ impl CommitService {
             validate_artifact_scope_bindings(artifact)?;
             ArtifactRepository::insert_candidate(connection, &bundle.project_id, artifact)?;
             connection.execute("UPDATE artifacts SET artifact_status = 'COMMITTED', committed_at = ?1 WHERE artifact_id = ?2 AND version = ?3", libsql_rusqlite::params![committed_at, artifact.artifact_id, artifact.version])?;
+            // B08 owns the only production path that can materialize a final
+            // chapter.  Keep this update in the same CommitBundle transaction
+            // as the FinalChapter row, receipt and heads.  Older M0A--B07
+            // fixtures use generic FinalChapter artifacts without a chapter
+            // payload and therefore intentionally remain untouched here.
+            if matches!(
+                artifact.artifact_type,
+                crate::generated::types::ArtifactType::FinalChapter
+            ) && artifact
+                .payload
+                .get("payloadSchema")
+                .and_then(|value| value.as_str())
+                == Some("final-chapter.r1")
+            {
+                let chapter_id = artifact.scope.chapter_id.as_deref().ok_or_else(|| {
+                    CommitError::ContractInvalid("B08 FinalChapter scope missing chapterId".into())
+                })?;
+                let word_count = artifact
+                    .payload
+                    .get("wordCount")
+                    .and_then(|value| value.as_i64())
+                    .or_else(|| {
+                        artifact
+                            .payload
+                            .get("body")
+                            .and_then(|value| value.as_str())
+                            .map(|body| body.chars().count() as i64)
+                    })
+                    .unwrap_or(0);
+                let updated = connection.execute(
+                    "UPDATE chapters SET final_artifact_id=?1, final_version=?2, status='COMMITTED', word_count=?3, updated_at=?4 WHERE project_id=?5 AND chapter_id=?6",
+                    libsql_rusqlite::params![artifact.artifact_id, artifact.version, word_count, committed_at, bundle.project_id, chapter_id],
+                )?;
+                if updated != 1 {
+                    return Err(CommitError::ContractInvalid(
+                        "B08 FinalChapter chapter row not found".into(),
+                    ));
+                }
+                materialize_b08_evidence(connection, bundle, artifact, chapter_id, committed_at)?;
+            }
         }
         if let Some(heads) = &bundle.head_updates {
             for head in heads {
@@ -545,6 +585,61 @@ impl CommitService {
             })
             .transpose()
     }
+}
+
+fn materialize_b08_evidence(
+    connection: &Connection,
+    bundle: &CommitBundle,
+    final_chapter: &crate::generated::types::ArtifactEnvelope,
+    chapter_id: &str,
+    committed_at: &str,
+) -> Result<(), CommitError> {
+    let Some(records) = final_chapter
+        .payload
+        .get("validatedEvidence")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(());
+    };
+    let body_len = final_chapter
+        .payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(|body| body.chars().count() as i64)
+        .unwrap_or(0);
+    for record in records {
+        let evidence_id = record
+            .get("evidenceId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CommitError::ContractInvalid("B08 evidenceId required".into()))?;
+        let range_start = record.get("rangeStart").and_then(serde_json::Value::as_i64);
+        let range_end = record.get("rangeEnd").and_then(serde_json::Value::as_i64);
+        if !matches!((range_start, range_end), (Some(start), Some(end)) if start >= 0 && start <= end && end <= body_len)
+        {
+            return Err(CommitError::ContractInvalid(
+                "B08 exact evidence range invalid".into(),
+            ));
+        }
+        connection.execute(
+            "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,relation_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            libsql_rusqlite::params![
+                evidence_id,
+                bundle.project_id,
+                record.get("factId").and_then(serde_json::Value::as_str),
+                record.get("relationId").and_then(serde_json::Value::as_str),
+                record.get("eventId").and_then(serde_json::Value::as_str),
+                chapter_id,
+                final_chapter.artifact_id,
+                final_chapter.version,
+                record.get("evidenceType").and_then(serde_json::Value::as_str).unwrap_or("ACTUAL_NARRATIVE"),
+                record.get("quote").and_then(serde_json::Value::as_str),
+                range_start,
+                range_end,
+                committed_at,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn read_head_changes(

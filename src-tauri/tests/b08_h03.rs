@@ -1,9 +1,9 @@
 use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::hash::sha256_canonical;
-use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse,
 };
+use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
     operation_digest, RepairAuthorization, RepairOperation, RepairPlan,
 };
@@ -34,7 +34,11 @@ impl ProductionModelGateway for RecordingGateway {
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
                 "sceneExecution":[],
-                "horizonPreview":[]
+                "horizonPreview":[
+                    {"slotNo":1,"objective":"推进当前行动","tentative":true},
+                    {"slotNo":2,"objective":"观察行动后果","tentative":true},
+                    {"slotNo":3,"objective":"准备下一冲突","tentative":true}
+                ]
             }),
             "RENDER_CHAPTER" => json!({"body":"林舟推开石门，实际只推进了任务，没有完成它。"}),
             "AUDIT_EXTRACT" => json!({
@@ -47,17 +51,17 @@ impl ProductionModelGateway for RecordingGateway {
                     "authorityLevel":"C",
                     "eventType":"ACTION",
                     "storyTime":"2026-01-01T00:00:00Z",
-                    "evidence":{"start":0,"end":7,"quote":"林舟推开石门"}
+                    "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                 }],
                 "knowledgeCandidates":[],
                 "continuityCandidates":[],
                 "taskProgressCandidates":[{
                     "taskId":"task:actual",
                     "status":"ACTIVE",
-                    "evidence":{"start":0,"end":7,"quote":"林舟推开石门"}
+                    "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                 }],
                 "revealedReservationRefs":[],
-                "evidenceRanges":[{"start":0,"end":7,"quote":"林舟推开石门"}]
+                "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}]
             }),
             other => return Err(format!("unexpected capability: {other}")),
         };
@@ -76,7 +80,7 @@ fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
     connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'Chapter 1','NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![chapter_id, project_id, volume_id, NOW]).unwrap();
     connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:actual:linzhou',?1,'林舟','CHARACTER',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
     connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:actual:seed',?1,'entity:actual:linzhou','location','{\"place\":\"stone-door\"}','A',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
-    connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"NOT_STARTED\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
+    connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
 
     let policy_payload = json!({"payloadSchema":"gate-policy.r1","policyId":"b08-default","rules":["candidate-audit","chapter-final"]});
     let policy_hash = sha256_canonical(&policy_payload).unwrap();
@@ -127,7 +131,7 @@ fn b08_production_commits_final_and_never_promotes_candidate() {
                 |row| row.get(0)
             )
             .unwrap(),
-        2
+        3
     );
     assert_eq!(
         connection
@@ -161,7 +165,12 @@ fn b08_production_start_without_chapter_fails_closed_instead_of_using_legacy_fal
         AppPaths::new(temp.path()),
         Arc::new(RecordingGateway),
     );
-    drop(state.manager.create("p-b08-no-chapter", "B08", NOW).unwrap());
+    drop(
+        state
+            .manager
+            .create("p-b08-no-chapter", "B08", NOW)
+            .unwrap(),
+    );
     let error = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:no-chapter","idempotencyKey":"key:b08:no-chapter",
         "projectId":"p-b08-no-chapter","expectedRevision":0,"requestedAt":NOW,"payload":{}
