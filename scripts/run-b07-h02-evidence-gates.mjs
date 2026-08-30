@@ -37,8 +37,9 @@ const cargoAll = run('cargo_all_targets', 'cargo', ['test', '--all-targets'], re
 const architecture = run('architecture', 'node', ['scripts/verify-b07-h02-architecture.mjs'])
 const acceptanceTests = run('acceptance_generator_tests', 'node', ['--test', 'tests/b07-h02-acceptance-generator.test.mjs'])
 const semanticInjections = run('semantic_injections', 'node', ['--test', 'tests/b07-h02-semantic-injection.test.mjs'])
+const semanticNegative = run('semantic_negative', 'cargo', ['test', '--test', 'b07_h02_semantic_negative', '--', '--nocapture'], resolve(root, 'src-tauri'))
 const moduleBoundary = run('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'])
-const nonScaleReady = [b07, b06, fmt, check, clippy, frontend, nodeFull, build, contracts, vitest, ui, b05, b06Acceptance, b06Architecture, m0a, architecture, acceptanceTests, semanticInjections, moduleBoundary].every(result => result.status === 'PASS')
+const nonScaleReady = [b07, b06, fmt, check, clippy, frontend, nodeFull, build, contracts, vitest, ui, b05, b06Acceptance, b06Architecture, m0a, architecture, acceptanceTests, semanticInjections, semanticNegative, moduleBoundary].every(result => result.status === 'PASS')
 const acceptedScaleCommit = 'bebf2e373db77aa07c0f3b28d188bfae91f3fdae'
 const scalePaths = ['src-tauri/tests/b07_scale.rs', 'src-tauri/src/commands.rs']
 const scalePathsUnchanged = scalePaths.every(path => {
@@ -79,7 +80,8 @@ const gates = {
   h02_plan_route: { status: marker(b07.output, /B07_ROUTE_RESULT .*h02_query=PASS/), source: 'b07_targeted.log' },
   h02_constraints: { status: marker(b07.output, /H02_SESSION_RESULT .*finding=SUPPORTED.*receipt=PASS/), source: 'b07_targeted.log' },
   h02_diagnostic_provenance: { status: marker(b07.output, /H02_DIAGNOSTIC_RESULT .*stale_owner=PASS.*reservation_provenance=PASS.*thread_provenance=PASS.*status=PASS/), source: 'b07_targeted.log' },
-  semantic_injections: { status: semanticInjections.status === 'PASS' && /semantic injection suite is tied to production authority guards/.test(semanticInjections.output) && marker(b07.output, /B07_SEMANTIC_NEGATIVE_RESULT .*planned_opening=PASS.*missing_final_ref=PASS.*candidate_final=PASS.*late_chapters=PASS.*late_canon_evidence=PASS.*no_evidence=PASS.*actual_command_path=PASS.*status=PASS/), source: 'semantic_injections.log+b07_targeted.log' },
+  semantic_negative: { status: semanticNegative.status === 'PASS' && /B07_SEMANTIC_NEGATIVE_TEST_RESULT .*planned_golden_three_rejected=PASS.*production_command=PASS.*status=PASS/.test(semanticNegative.output), source: 'semantic_negative.log' },
+  semantic_injections: { status: semanticInjections.status === 'PASS' && semanticNegative.status === 'PASS' && /semantic injection suite is tied to production authority guards/.test(semanticInjections.output) && marker(b07.output, /B07_SEMANTIC_NEGATIVE_RESULT .*planned_opening=PASS.*missing_final_ref=PASS.*candidate_final=PASS.*late_chapters=PASS.*late_canon_evidence=PASS.*no_evidence=PASS.*actual_command_path=PASS.*status=PASS/) && /B07_SEMANTIC_NEGATIVE_TEST_RESULT .*status=PASS/.test(semanticNegative.output), source: 'semantic_injections.log+semantic_negative.log+b07_targeted.log' },
   h02_question_fixtures: { status: marker(b07.output, /H02_QUESTIONS_RESULT .*q1=PASS.*q2=PASS.*q3=PASS.*q4=PASS.*q5=PASS.*q6=PASS.*q7=PASS.*real_support=PASS.*status=PASS/), source: 'b07_targeted.log' },
   b07_signing_authority: { status: marker(b07.output, /B07_SIGN_RESULT .*no_receipt=PASS.*wrong_verdict=PASS.*fake_artifact=PASS.*actual_pass=PASS.*opening_bound=PASS/), source: 'b07_targeted.log' },
   b07_volume_intent_contract: { status: marker(b07.output, /B07_INTENT_RESULT .*malformed_rejected=PASS.*valid_commit=PASS/), source: 'b07_targeted.log' },
