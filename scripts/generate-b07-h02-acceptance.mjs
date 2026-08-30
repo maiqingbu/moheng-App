@@ -6,7 +6,7 @@ export const REQUIRED_BLOCKING_GATES = [
   'b07_bookplan_maturity', 'b07_signing_authority', 'b07_volume_intent_contract', 'b07_volume_route',
   'b07_chapter_plan_gates', 'b07_plan_stale', 'b07_plan_reality_separation', 'b07_frontend_route',
   'h02_registry', 'h02_plan_route', 'h02_constraints', 'h02_diagnostic_provenance', 'h02_question_fixtures', 'h02_truncation',
-  'h02_read_only', 'semantic_injections', 'b06_h01_regression', 'architecture', 'module_boundary', 'source_binding', 'package_smoke',
+  'h02_read_only', 'semantic_negative', 'semantic_injections', 'b06_h01_regression', 'architecture', 'module_boundary', 'source_binding', 'package_smoke',
   'node_full', 'frontend_build', 'contracts', 'vitest_full', 'b05_regression', 'b06_h01_acceptance',
   'b06_h01_architecture', 'm0a', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'b07_h02_scale',
 ]
