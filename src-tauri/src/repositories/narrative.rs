@@ -905,7 +905,7 @@ impl NarrativeRepository {
         context_manifest_id: &str,
     ) -> Result<bool, NarrativeRepositoryError> {
         let count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='PLAN_STRATEGY' AND status='COMPLETED' AND context_manifest_ref=?2",
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='PLAN_STRATEGY' AND context_manifest_ref=?2",
             libsql_rusqlite::params![project_id, context_manifest_id],
             |row| row.get(0),
         )?;
