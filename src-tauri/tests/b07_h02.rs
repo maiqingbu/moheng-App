@@ -196,6 +196,61 @@ fn b07_bookplan_approval_commits_new_approved_version() {
         rejected.unwrap_err(),
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
+    let planned_opening = execute_command_impl(
+        &state,
+        json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:planned","idempotencyKey":"key:book:g3:planned","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
+    );
+    assert_eq!(
+        planned_opening.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    let connection = state
+        .manager
+        .open("p2", "", "2026-08-30T00:00:00Z")
+        .unwrap();
+    connection.execute("UPDATE chapters SET status='COMMITTED' WHERE project_id='p2' AND chapter_no IN (1,2,3)", []).unwrap();
+    drop(connection);
+    let no_final_artifact = execute_command_impl(
+        &state,
+        json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:no-final","idempotencyKey":"key:book:g3:no-final","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
+    );
+    assert_eq!(
+        no_final_artifact.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    let connection = state
+        .manager
+        .open("p2", "", "2026-08-30T00:00:00Z")
+        .unwrap();
+    for index in 1..=3 {
+        let artifact_id = format!("artifact:p2:final:{index}");
+        let payload =
+            json!({"chapterId":format!("chapter:p2:{index}"),"body":format!("opening {index}")});
+        let payload_hash = sha256_canonical(&payload).unwrap();
+        connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES (?1,'p2','FinalChapter','CHAPTER',?2,1,'m0a.artifact.v1','CANDIDATE',?3,'{}',?4)", libsql_rusqlite::params![artifact_id, format!("{{\"level\":\"CHAPTER\",\"chapterId\":\"chapter:p2:{index}\"}}"), payload_hash, "2026-08-30T00:00:00Z"]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash]).unwrap();
+        connection
+            .execute(
+                "UPDATE chapters SET final_artifact_id=?1,final_version=1 WHERE chapter_id=?2",
+                libsql_rusqlite::params![artifact_id, format!("chapter:p2:{index}")],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let candidate_final = execute_command_impl(
+        &state,
+        json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:candidate","idempotencyKey":"key:book:g3:candidate","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
+    );
+    assert_eq!(
+        candidate_final.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    let connection = state
+        .manager
+        .open("p2", "", "2026-08-30T00:00:00Z")
+        .unwrap();
+    connection.execute("UPDATE artifacts SET artifact_status='COMMITTED' WHERE project_id='p2' AND artifact_type='FinalChapter'", []).unwrap();
+    drop(connection);
     for (suffix, receipt) in [
         ("latechap", "artifact:p2:latechap"),
         ("latecanon", "artifact:p2:latecanon"),

@@ -1008,7 +1008,7 @@ impl NarrativeRepository {
             .filter_map(|chapter_id| {
                 connection
                     .query_row(
-                        "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                        "SELECT c.chapter_no FROM chapters c JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE c.project_id=?1 AND c.chapter_id=?2 AND c.status='COMMITTED' AND c.final_artifact_id IS NOT NULL AND c.final_version IS NOT NULL",
                         libsql_rusqlite::params![project_id, chapter_id],
                         |row| row.get::<_, i64>(0),
                     )
@@ -1029,6 +1029,7 @@ impl NarrativeRepository {
                     )
                     .unwrap_or(false)
             });
+        let opening_chapter_json = serde_json::to_string(&opening_chapter_refs)?;
         let receipt_canon_refs = payload
             .get("openingCanonRefs")
             .and_then(Value::as_array)
@@ -1044,8 +1045,8 @@ impl NarrativeRepository {
                     && opening_canon_refs.iter().all(|reference| {
                         connection
                             .query_row(
-                                "SELECT EXISTS(SELECT 1 FROM canon_evidence e WHERE e.project_id=?1 AND (e.evidence_id=?2 OR e.fact_id=?2 OR e.relation_id=?2 OR e.event_id=?2) AND e.final_chapter_id IN (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no IN (1,2,3)))",
-                                libsql_rusqlite::params![project_id, reference],
+                                "SELECT EXISTS(SELECT 1 FROM canon_evidence e WHERE e.project_id=?1 AND (e.evidence_id=?2 OR e.fact_id=?2 OR e.relation_id=?2 OR e.event_id=?2) AND e.final_chapter_id IN (SELECT value FROM json_each(?3)))",
+                                libsql_rusqlite::params![project_id, reference, opening_chapter_json],
                                 |row| row.get(0),
                             )
                             .unwrap_or(false)
