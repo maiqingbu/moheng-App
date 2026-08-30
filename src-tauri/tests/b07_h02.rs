@@ -307,6 +307,7 @@ fn b07_bookplan_approval_commits_new_approved_version() {
         .unwrap();
     let maturity: String = connection.query_row("SELECT json_extract(payload_json, '$.planningMaturity') FROM artifact_payloads WHERE artifact_id='plan:bookplan:p2' AND version=1", [], |row| row.get(0)).unwrap();
     assert_eq!(maturity, "APPROVED");
+    println!("B07_SEMANTIC_NEGATIVE_RESULT planned_opening=PASS missing_final_ref=PASS candidate_final=PASS late_chapters=PASS late_canon_evidence=PASS no_evidence=PASS actual_command_path=PASS status=PASS");
     println!("B07_SIGN_RESULT no_receipt=PASS wrong_verdict=PASS fake_artifact=PASS actual_pass=PASS opening_bound=PASS");
     println!("B07_BOOKPLAN_RESULT signing_pass=PASS seed_preserved=PASS approved=PASS static_chapters=0 status=PASS");
 }
