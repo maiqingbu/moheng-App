@@ -343,6 +343,52 @@ export interface ProductionCenterProjection {
     projectTotal: number
     budgetRemaining: number
   }
+  productionStage?: 'CONTEXT' | 'PLAN' | 'RENDER' | 'CANDIDATE' | 'AUDIT' | 'GATE' | 'COMMIT' | 'RECONCILE' | 'COMPLETED' | 'IDLE'
+  committedChapters?: number
+  candidateChapters?: number
+  nextChapter?: {
+    id: string
+    number: number
+    title: string
+    volumeId: string
+    executionMode: 'OPENING_BOOTSTRAP' | 'LONG_FORM'
+  } | null
+  chapterPlan?: {
+    ref: { artifactId: string; version: number; payloadHash: string }
+    chapterGoal?: string
+    contextManifestRef?: { artifactId: string; version: number; payloadHash: string }
+    activeTaskRefs: string[]
+    continuityActions: Array<{ threadRef: string; disposition: string; bridge?: string }>
+    compiledFromProjectRevision?: number
+    compiledFromStateDigest?: string
+  } | null
+  triggeredContinuity?: Array<{ threadRef: string; disposition: string; bridge?: string }>
+  gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED'; reason: string }
+  stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
+  modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
+  candidateRef?: { artifactId: string; version: number; payloadHash: string } | null
+  finalChapterRef?: { artifactId: string; version: number; payloadHash: string } | null
+  reconciliation?: 'NO_ACTION' | 'RECOMPILE_NEXT_CHAPTER' | 'RECOMPILE_ROLLING_WINDOW' | 'REPLAN_VOLUME_ROUTE' | 'CHANGE_REQUEST' | null
+  repair?: RepairWorkflowProjection | null
+}
+
+export interface RepairWorkflowProjection {
+  repairPlanId: string
+  basedOnProjectRevision: number
+  diagnosis: unknown
+  findingRefs: string[]
+  targetAuthorityOwner: string
+  proposedOperations: Array<{ operation: string; target: string; params: unknown; postconditions: unknown }>
+  affectedArtifacts: string[]
+  affectedScopes: string[]
+  riskLevel: string
+  requiresBackup: boolean
+  expectedPostconditions: unknown[]
+  operationDigest: string
+  status: 'PROPOSED' | 'AUTHORIZED' | 'REPAIR_VERIFIED' | 'REPAIR_VERIFICATION_FAILED' | 'REPAIR_VERIFICATION_INCOMPLETE'
+  authorizationId?: string | null
+  consumedAt?: string | null
+  executionReceipt?: { receiptRef: string; status: string; postconditions: unknown[] } | null
 }
 
 export interface CanonCharacter { id: string; name: string; role: string; status: string; location: string; note: string }
@@ -555,6 +601,9 @@ export type CommandType =
   | 'production_pause'
   | 'production_resume'
   | 'production_cancel'
+  | 'repair_plan_create'
+  | 'repair_authorize'
+  | 'repair_execute'
   | 'volume_plan_build'
   | 'volume_production_start'
   | 'volume_production_pause'

@@ -189,12 +189,18 @@ fn apply_knowledge(
     now: &str,
 ) -> Result<i64, super::CommitError> {
     let project_id = delta_project(connection)?;
+    let payload = delta
+        .payload_json
+        .as_ref()
+        .map(|value| value as &BTreeMap<String, Value>);
+    let source_artifact_id = payload_string(payload, "sourceArtifactId");
+    let source_version = payload_i64(payload, "sourceVersion");
     let existed = row_exists(
         connection,
         "SELECT EXISTS(SELECT 1 FROM canon_knowledge WHERE project_id = ?1 AND knowledge_id = ?2)",
         libsql_rusqlite::params![project_id, delta.knowledge_id],
     )?;
-    connection.execute("INSERT INTO canon_knowledge(knowledge_id, project_id, knower_id, fact_id, epistemic_state, visibility_scope, from_chapter_id, until_chapter_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9) ON CONFLICT(knowledge_id) DO UPDATE SET knower_id=excluded.knower_id, fact_id=excluded.fact_id, epistemic_state=excluded.epistemic_state, visibility_scope=excluded.visibility_scope, from_chapter_id=excluded.from_chapter_id, until_chapter_id=excluded.until_chapter_id, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.knowledge_id, project_id, delta.knower_id, delta.fact_id, delta.epistemic_state, delta.visibility_scope, delta.from_chapter_id, delta.until_chapter_id, now])?;
+    connection.execute("INSERT INTO canon_knowledge(knowledge_id, project_id, knower_id, fact_id, epistemic_state, visibility_scope, from_chapter_id, until_chapter_id, source_artifact_id, source_version, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11) ON CONFLICT(knowledge_id) DO UPDATE SET knower_id=excluded.knower_id, fact_id=excluded.fact_id, epistemic_state=excluded.epistemic_state, visibility_scope=excluded.visibility_scope, from_chapter_id=excluded.from_chapter_id, until_chapter_id=excluded.until_chapter_id, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.knowledge_id, project_id, delta.knower_id, delta.fact_id, delta.epistemic_state, delta.visibility_scope, delta.from_chapter_id, delta.until_chapter_id, source_artifact_id, source_version, now])?;
     Ok(i64::from(!existed))
 }
 

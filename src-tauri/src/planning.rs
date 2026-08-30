@@ -1,10 +1,14 @@
 //! B07 deterministic planning authority.  It validates plan payloads against
 //! existing R1 contracts and never mutates Canon, Knowledge, task reality, or
 //! continuity lifecycle.
+use crate::commit::CommitService;
 use crate::generated::types::ArtifactRef;
+use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt};
 use crate::generated::validators::{
     validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
 };
+use crate::hash::sha256_canonical;
+use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -285,6 +289,72 @@ pub fn classify_plan_reality(
     } else {
         "NO_ACTION"
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recompile_chapter_plan_owner(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    plan: &Value,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+) -> Result<CommitReceipt, String> {
+    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
+        return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
+    }
+    if plan
+        .get("compiledFromProjectRevision")
+        .and_then(Value::as_i64)
+        != Some(expected_revision + 1)
+    {
+        return Err("CHAPTER_PLAN_RECOMPILE_REVISION_MISMATCH".into());
+    }
+    let context_ref: ArtifactRef = serde_json::from_value(
+        plan.get("contextManifestRef")
+            .cloned()
+            .ok_or_else(|| "CONTEXT_MANIFEST_REF_REQUIRED".to_string())?,
+    )
+    .map_err(|error| format!("CONTEXT_MANIFEST_REF_INVALID:{error}"))?;
+    if crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection,
+        project_id,
+        &context_ref,
+    )
+    .map_err(|error| error.to_string())?
+    .is_none()
+    {
+        return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
+    }
+    let artifact_id = format!("plan:chapterplan:{chapter_id}");
+    let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
+        connection,
+        project_id,
+        &artifact_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let hash = sha256_canonical(plan).map_err(|error| error.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,"projectId":project_id,"artifactType":"ChapterPlan",
+        "scope":{"level":"CHAPTER","chapterId":chapter_id},"version":version,
+        "schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":plan,
+        "payloadHash":hash,"dependencyRefs":[context_ref],
+        "provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"contextManifestRef":context_ref.artifact_id},
+        "createdAt":now
+    }))
+    .map_err(|error| error.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),"projectId":project_id,"commandId":command_id,
+        "idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1","createdAt":now,"artifacts":[artifact],
+        "headUpdates":[{"artifactType":"ChapterPlan","scope":{"level":"CHAPTER","chapterId":chapter_id},
+            "artifactId":artifact_id,"version":version,"payloadHash":hash}]
+    }))
+    .map_err(|error| error.to_string())?;
+    CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ const B05_NARRATIVE_MIGRATION: &str =
     include_str!("../../migrations/0007_b05_narrative_foundation.sql");
 const H01_SUPPORT_MIGRATION: &str =
     include_str!("../../migrations/0008_h01_support_checkpoint.sql");
+const H03_REPAIR_MIGRATION: &str = include_str!("../../migrations/0009_h03_repair_workflow.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     if !read_only {
@@ -176,6 +177,11 @@ pub fn migrate_project(
         if needs_h01_migration {
             connection.execute_batch(H01_SUPPORT_MIGRATION)?;
         }
+        // H03 is deliberately support-only and replay-safe.  It is applied on
+        // every open but is not added to the frozen Narrative migration
+        // history: B01--H01 compatibility treats v8 as the last schema
+        // version, while these tables carry no narrative authority.
+        connection.execute_batch(H03_REPAIR_MIGRATION)?;
         // Additive B04 query-coverage index. It is replay-safe and intentionally
         // does not alter any frozen migration SQL/history.
         connection.execute_batch(

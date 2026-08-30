@@ -61,6 +61,21 @@ pub struct SearchService;
 const FTS_PROJECTION_VERSION: &str = "m0e.fts.v1";
 
 impl SearchService {
+    /// Bounded owner hook used by H03 when a support repair needs the runtime
+    /// projection timestamp refreshed.  H03 does not write authority tables;
+    /// this owner remains the only code allowed to touch this projection.
+    pub fn refresh_runtime_projection(
+        connection: &Connection,
+        project_id: &str,
+        now: &str,
+    ) -> Result<(), OpsError> {
+        connection.execute(
+            "UPDATE project_runtime_state SET updated_at=?1 WHERE project_id=?2",
+            libsql_rusqlite::params![now, project_id],
+        )?;
+        Ok(())
+    }
+
     pub fn projection_health(connection: &Connection, project_id: &str) -> Result<bool, OpsError> {
         let table_exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_documents_fts')",

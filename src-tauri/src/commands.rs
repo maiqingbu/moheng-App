@@ -414,12 +414,108 @@ pub fn query_production_center_impl(state: &KernelState, request: Value) -> Resu
                 "status": if row.get::<_, String>(2)? == "COMMITTED" { "official" } else { "candidate" }
             })))?.collect::<Result<Vec<_>, _>>()?;
             let task = job.as_ref().map(|(id, _, chapter, status)| json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"progress":if status=="COMPLETED" {100} else {50}})).into_iter().collect::<Vec<_>>();
+            let next_chapter: Option<(String, i64, String, String)> = connection.query_row(
+                "SELECT c.chapter_id,c.chapter_no,c.title,c.volume_id FROM chapters c WHERE c.project_id=?1 AND c.status!='COMMITTED' ORDER BY c.chapter_no,c.chapter_id LIMIT 1",
+                [&project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()?;
+            let active_chapter_id = job.as_ref().and_then(|(_,_,chapter,_)| chapter.clone())
+                .or_else(|| next_chapter.as_ref().map(|row| row.0.clone()));
+            let plan_row: Option<(String,i64,String,String)> = active_chapter_id.as_ref().and_then(|chapter_id| {
+                connection.query_row(
+                    "SELECT h.artifact_id,h.version,h.payload_hash,p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
+                    libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+                ).optional().ok().flatten()
+            });
+            let plan_projection = plan_row.as_ref().and_then(|(id,version,hash,raw)| {
+                serde_json::from_str::<Value>(raw).ok().map(|payload| json!({
+                    "ref":{"artifactId":id,"version":version,"payloadHash":hash},
+                    "chapterGoal":payload.get("chapterGoal"),
+                    "contextManifestRef":payload.get("contextManifestRef"),
+                    "activeTaskRefs":payload.get("activeTaskRefs").cloned().unwrap_or_else(|| json!([])),
+                    "continuityActions":payload.get("continuityActions").cloned().unwrap_or_else(|| json!([])),
+                    "compiledFromProjectRevision":payload.get("compiledFromProjectRevision"),
+                    "compiledFromStateDigest":payload.get("compiledFromStateDigest")
+                }))
+            });
+            let current_revision: i64 = connection.query_row(
+                "SELECT revision FROM project_meta WHERE project_id=?1", [&project_id], |row| row.get(0)
+            )?;
+            let stale_status = plan_projection.as_ref().map(|plan| {
+                if plan.get("compiledFromProjectRevision").and_then(Value::as_i64).is_some_and(|revision| revision > current_revision) {
+                    "PLAN_STALE"
+                } else { "VALID_OR_REQUIRES_RELEVANT_RECHECK" }
+            }).unwrap_or("NO_PLAN");
+            let candidate_ref: Option<Value> = active_chapter_id.as_ref().and_then(|chapter_id| connection.query_row(
+                "SELECT json_object('artifactId',a.artifact_id,'version',a.version,'payloadHash',a.payload_hash) FROM artifacts a WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' AND a.scope_level='CHAPTER' AND a.scope_key=?2 ORDER BY a.created_at DESC,a.version DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                |row| row.get::<_,String>(0),
+            ).optional().ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()));
+            let final_ref: Option<Value> = active_chapter_id.as_ref().and_then(|chapter_id| connection.query_row(
+                "SELECT json_object('artifactId',h.artifact_id,'version',h.version,'payloadHash',h.payload_hash) FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='FinalChapter' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
+                libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                |row| row.get::<_,String>(0),
+            ).optional().ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()));
+            let model_runs = if let Some((job_id,_,_,_)) = &job {
+                let mut statement = connection.prepare("SELECT model_run_id,capability,provider,model,status FROM model_runs WHERE project_id=?1 AND job_id=?2 AND capability IN ('PLAN_STRATEGY','RENDER_CHAPTER','AUDIT_EXTRACT') ORDER BY created_at,model_run_id")?;
+                let rows = statement.query_map(libsql_rusqlite::params![project_id,job_id], |row| Ok(json!({
+                    "modelRunId":row.get::<_,String>(0)?,"capability":row.get::<_,String>(1)?,
+                    "provider":row.get::<_,String>(2)?,"model":row.get::<_,String>(3)?,"status":row.get::<_,String>(4)?
+                })))?.collect::<Result<Vec<_>,_>>()?;
+                rows
+            } else { Vec::new() };
+            let latest_receipt: Option<String> = active_chapter_id.as_ref().and_then(|chapter_id| connection.query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
+                libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                |row| row.get(0),
+            ).optional().ok().flatten());
+            let reconciliation = latest_receipt.as_deref().and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|value| value.get("reconciliation").cloned()).unwrap_or(Value::Null);
+            let repair: Option<Value> = connection.query_row(
+                "SELECT rp.repair_plan_id,rp.based_on_project_revision,rp.diagnosis_json,rp.finding_refs_json,rp.target_authority_owner,rp.proposed_operations_json,rp.affected_artifacts_json,rp.affected_scopes_json,rp.risk_level,rp.requires_backup,rp.expected_postconditions_json,rp.operation_digest,rp.status,ra.authorization_id,ra.consumed_at,rr.receipt_ref,rr.status,rr.postconditions_json FROM repair_plans rp LEFT JOIN repair_authorizations ra ON ra.project_id=rp.project_id AND ra.repair_plan_id=rp.repair_plan_id LEFT JOIN repair_execution_receipts rr ON rr.project_id=rp.project_id AND rr.repair_plan_id=rp.repair_plan_id WHERE rp.project_id=?1 ORDER BY rp.created_at DESC,ra.issued_at DESC LIMIT 1",
+                [&project_id],
+                |row| {
+                    let receipt_ref = row.get::<_,Option<String>>(15)?;
+                    let receipt_status = row.get::<_,Option<String>>(16)?;
+                    let receipt_postconditions = row.get::<_,Option<String>>(17)?;
+                    let execution_receipt = receipt_ref.map(|receipt_ref| json!({
+                        "receiptRef":receipt_ref,
+                        "status":receipt_status.unwrap_or_default(),
+                        "postconditions":serde_json::from_str::<Value>(&receipt_postconditions.unwrap_or_else(|| "[]".into())).unwrap_or_else(|_| json!([]))
+                    }));
+                    Ok(json!({
+                    "repairPlanId":row.get::<_,String>(0)?,"basedOnProjectRevision":row.get::<_,i64>(1)?,
+                    "diagnosis":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),
+                    "findingRefs":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or_else(|_| json!([])),
+                    "targetAuthorityOwner":row.get::<_,String>(4)?,
+                    "proposedOperations":serde_json::from_str::<Value>(&row.get::<_,String>(5)?).unwrap_or_else(|_| json!([])),
+                    "affectedArtifacts":serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or_else(|_| json!([])),
+                    "affectedScopes":serde_json::from_str::<Value>(&row.get::<_,String>(7)?).unwrap_or_else(|_| json!([])),
+                    "riskLevel":row.get::<_,String>(8)?,"requiresBackup":row.get::<_,i64>(9)? != 0,
+                    "expectedPostconditions":serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or_else(|_| json!([])),
+                    "operationDigest":row.get::<_,String>(11)?,"status":row.get::<_,String>(12)?,
+                    "authorizationId":row.get::<_,Option<String>>(13)?,"consumedAt":row.get::<_,Option<String>>(14)?,
+                    "executionReceipt":execution_receipt
+                }))},
+            ).optional()?;
+            let next_chapter_projection = next_chapter.map(|(id,number,title,volume_id)| json!({
+                "id":id,"number":number,"title":title,"volumeId":volume_id,
+                "executionMode":if plan_projection.is_some() {"LONG_FORM"} else {"OPENING_BOOTSTRAP"}
+            }));
             Ok(json!({
                 "timeline": timeline, "tasks": task,
                 "artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
                 "signing":{"status":"NOT_STARTED","verdict":"B08 production gate is authoritative"},
                 "activeWork":{"label":current_stage,"detail":active_detail},
                 "productionStage":current_stage,
+                "nextChapter":next_chapter_projection,
+                "chapterPlan":plan_projection,
+                "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
+                "gate":{"status":if final_ref.is_some() {"PASS"} else if stale_status=="PLAN_STALE" {"BLOCKED"} else {"PENDING"},"reason":if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED"} else {""}},
+                "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},
+                "modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,
+                "reconciliation":reconciliation,"repair":repair,
                 "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},
                 "committedChapters":runtime.1,"candidateChapters":runtime.3
             }))
@@ -2276,6 +2372,214 @@ fn runtime_job_spec(request: &Value, command_id: &str) -> Result<JobSpec, String
     })
 }
 
+struct KernelRepairOwner<'a> {
+    connection: &'a libsql_rusqlite::Connection,
+    project_id: &'a str,
+    now: &'a str,
+}
+
+impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
+    fn execute(
+        &self,
+        operation: &crate::repair::RepairOperation,
+    ) -> Result<crate::repair::OwnerExecution, String> {
+        match operation.operation.as_str() {
+            "refresh_runtime_projection" => {
+                SearchService::refresh_runtime_projection(
+                    self.connection,
+                    self.project_id,
+                    self.now,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B06::RuntimeProjectionOwner".into(),
+                    owner_receipt_ref: None,
+                })
+            }
+            "rebuild_projection" => {
+                SearchService::ensure_projection(self.connection, self.project_id, self.now)
+                    .map_err(|error| error.to_string())?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B04::ProjectionOwner".into(),
+                    owner_receipt_ref: None,
+                })
+            }
+            "rebuild_fts" => {
+                SearchService::rebuild(self.connection, self.project_id, self.now)
+                    .map_err(|error| error.to_string())?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B04::FTSMaintenanceOwner".into(),
+                    owner_receipt_ref: None,
+                })
+            }
+            "recompile_chapter_plan" => {
+                let chapter_id = operation
+                    .params
+                    .get("chapterId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_RECOMPILE_CHAPTER_REQUIRED".to_string())?;
+                let plan = operation
+                    .params
+                    .get("plan")
+                    .ok_or_else(|| "H03_RECOMPILE_PLAN_REQUIRED".to_string())?;
+                let revision: i64 = self
+                    .connection
+                    .query_row(
+                        "SELECT revision FROM project_meta WHERE project_id=?1",
+                        [self.project_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let command_id = format!(
+                    "h03:recompile:{}",
+                    &sha256_canonical(
+                        &json!({"projectId":self.project_id,"chapterId":chapter_id,"plan":plan})
+                    )
+                    .map_err(|error| error.to_string())?[..24]
+                );
+                let receipt = crate::planning::recompile_chapter_plan_owner(
+                    self.connection,
+                    self.project_id,
+                    chapter_id,
+                    plan,
+                    &command_id,
+                    &format!("{command_id}:idempotency"),
+                    revision,
+                    self.now,
+                )?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B07::PlanningOwner".into(),
+                    owner_receipt_ref: Some(receipt.receipt_id),
+                })
+            }
+            "backup_restore_maintenance" => {
+                let backup_path = operation
+                    .params
+                    .get("backupPath")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_BACKUP_PATH_REQUIRED".to_string())?;
+                let manifest = crate::repositories::ops::BackupService::create_snapshot(
+                    self.connection,
+                    std::path::Path::new(backup_path),
+                    self.project_id,
+                    self.now,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::repositories::ops::BackupService::persist_manifest(
+                    self.connection,
+                    &manifest,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B04::BackupService".into(),
+                    owner_receipt_ref: Some(manifest.backup_id),
+                })
+            }
+            "replan_volume_route" => Err("H03_CAPABILITY_UNAVAILABLE_BEFORE_B09".into()),
+            "execute_change_request" => Err("H03_CHANGE_REQUEST_PROPOSAL_ONLY".into()),
+            _ => Err("H03_OWNER_OPERATION_UNKNOWN".into()),
+        }
+    }
+
+    fn verify(&self, operation: &crate::repair::RepairOperation) -> Result<Value, String> {
+        match operation.operation.as_str() {
+            "refresh_runtime_projection" => {
+                let updated_at: String = self
+                    .connection
+                    .query_row(
+                        "SELECT updated_at FROM project_runtime_state WHERE project_id=?1",
+                        [self.project_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(
+                    json!({"operation":operation.operation,"status":if updated_at == self.now {"PASS"} else {"FAIL"},"observedUpdatedAt":updated_at}),
+                )
+            }
+            "rebuild_projection" | "rebuild_fts" => {
+                let healthy = SearchService::projection_health(self.connection, self.project_id)
+                    .map_err(|error| error.to_string())?;
+                Ok(
+                    json!({"operation":operation.operation,"status":if healthy {"PASS"} else {"FAIL"},"projectionHealthy":healthy}),
+                )
+            }
+            "recompile_chapter_plan" => {
+                let chapter_id = operation
+                    .params
+                    .get("chapterId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_RECOMPILE_CHAPTER_REQUIRED".to_string())?;
+                let expected = operation
+                    .params
+                    .get("plan")
+                    .ok_or_else(|| "H03_RECOMPILE_PLAN_REQUIRED".to_string())?;
+                let raw: String = self.connection.query_row(
+                    "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2 AND json_extract(a.provenance_json,'$.createdBy')='B07::PlanningOwner'",
+                    libsql_rusqlite::params![self.project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                    |row| row.get(0),
+                ).map_err(|error| error.to_string())?;
+                let actual: Value =
+                    serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                let revision: i64 = self
+                    .connection
+                    .query_row(
+                        "SELECT revision FROM project_meta WHERE project_id=?1",
+                        [self.project_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                let volume_id =
+                    crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+                        self.connection,
+                        self.project_id,
+                        chapter_id,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+                let authority = json!({
+                    "projectId":self.project_id,"chapterId":chapter_id,"volumeId":volume_id,
+                    "executionMode":"LONG_FORM","entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
+                    "references":operation.params.get("references").cloned().unwrap_or_else(|| json!([]))
+                });
+                let input = context_input_from_authority(
+                    self.connection,
+                    &authority,
+                    self.project_id,
+                    revision,
+                )?;
+                let current_digest = crate::narrative::relevant_state_digest(&input)?;
+                let stale = crate::narrative::evaluate_plan_stale(
+                    actual
+                        .get("compiledFromProjectRevision")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(-1),
+                    actual
+                        .get("compiledFromStateDigest")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    revision,
+                    &current_digest,
+                );
+                Ok(
+                    json!({"operation":operation.operation,"status":if actual == *expected && matches!(stale, PlanStaleStatus::Valid) {"PASS"} else {"FAIL"},"owner":"B07::PlanningOwner","stale":if matches!(stale, PlanStaleStatus::Valid) {"VALID"} else {"PLAN_STALE"}}),
+                )
+            }
+            "backup_restore_maintenance" => {
+                let backup_path = operation
+                    .params
+                    .get("backupPath")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_BACKUP_PATH_REQUIRED".to_string())?;
+                let exists = std::path::Path::new(backup_path).is_file();
+                Ok(
+                    json!({"operation":operation.operation,"status":if exists {"PASS"} else {"FAIL"},"backupReadable":exists}),
+                )
+            }
+            _ => Err("H03_POSTCONDITION_UNAVAILABLE".into()),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_repair_command(
     state: &KernelState,
@@ -2367,8 +2671,14 @@ fn execute_repair_command(
                 .manager
                 .open(project_id, "", requested_at)
                 .map_err(|error| error.to_string())?;
+            let owner = KernelRepairOwner {
+                connection: &handle,
+                project_id,
+                now: requested_at,
+            };
             let receipt = crate::repair::execute(
                 &handle,
+                &owner,
                 project_id,
                 plan_id,
                 authorization_id,
@@ -2376,6 +2686,8 @@ fn execute_repair_command(
             )
             .map_err(|error| error.to_string())?;
             Ok(json!({
+                "commandId":command_id,
+                "projectId":project_id,
                 "finalStatus": if receipt.status == "REPAIR_VERIFIED" { "committed" } else { "failed" },
                 "message": "H03 授权修复已执行并完成复核",
                 "receipt": receipt,

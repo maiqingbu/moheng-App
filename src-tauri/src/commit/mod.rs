@@ -594,20 +594,19 @@ fn materialize_b08_evidence(
     chapter_id: &str,
     committed_at: &str,
 ) -> Result<(), CommitError> {
-    let Some(records) = final_chapter
+    let records = final_chapter
         .payload
         .get("validatedEvidence")
         .and_then(serde_json::Value::as_array)
-    else {
-        return Ok(());
-    };
+        .cloned()
+        .unwrap_or_default();
     let body_len = final_chapter
         .payload
         .get("body")
         .and_then(serde_json::Value::as_str)
         .map(|body| body.chars().count() as i64)
         .unwrap_or(0);
-    for record in records {
+    for record in &records {
         let evidence_id = record
             .get("evidenceId")
             .and_then(serde_json::Value::as_str)
@@ -636,6 +635,40 @@ fn materialize_b08_evidence(
                 range_start,
                 range_end,
                 committed_at,
+            ],
+        )?;
+    }
+    for record in final_chapter
+        .payload
+        .get("validatedObligationEvidence")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let evidence_id = record
+            .get("evidenceId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CommitError::ContractInvalid("B08 obligation evidenceId required".into())
+            })?;
+        let obligation_id = record
+            .get("obligationId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CommitError::ContractInvalid("B08 obligationId required".into()))?;
+        let range_start = record.get("rangeStart").and_then(serde_json::Value::as_i64);
+        let range_end = record.get("rangeEnd").and_then(serde_json::Value::as_i64);
+        if !matches!((range_start, range_end), (Some(start), Some(end)) if start >= 0 && start <= end && end <= body_len)
+        {
+            return Err(CommitError::ContractInvalid(
+                "B08 obligation evidence range invalid".into(),
+            ));
+        }
+        connection.execute(
+            "INSERT INTO obligation_evidence(evidence_id,project_id,obligation_id,evidence_type,artifact_id,version,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            libsql_rusqlite::params![
+                evidence_id,bundle.project_id,obligation_id,
+                record.get("evidenceType").and_then(serde_json::Value::as_str).unwrap_or("PROGRESS"),
+                final_chapter.artifact_id,final_chapter.version,committed_at
             ],
         )?;
     }

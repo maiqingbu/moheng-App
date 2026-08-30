@@ -1,4 +1,5 @@
 use crate::harness::SupportCheckpoint;
+use crate::repair::{ExecutionReceipt, RepairAuthorization, RepairOperation, RepairPlan};
 use libsql_rusqlite::{Connection, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
@@ -7,6 +8,171 @@ pub enum SupportRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+pub fn save_repair_plan(
+    connection: &Connection,
+    plan: &RepairPlan,
+) -> Result<(), SupportRepositoryError> {
+    if let Some(existing_digest) = connection
+        .query_row(
+            "SELECT operation_digest FROM repair_plans WHERE project_id=?1 AND repair_plan_id=?2",
+            libsql_rusqlite::params![plan.project_id, plan.repair_plan_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        if existing_digest != plan.operation_digest {
+            return Err(SupportRepositoryError::Json(serde_json::Error::io(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "repair plan id already exists with different digest",
+                ),
+            )));
+        }
+        return Ok(());
+    }
+    connection.execute(
+        "INSERT INTO repair_plans(repair_plan_id,project_id,based_on_project_revision,diagnosis_json,finding_refs_json,target_authority_owner,proposed_operations_json,affected_artifacts_json,affected_scopes_json,risk_level,requires_backup,expected_postconditions_json,operation_digest,status,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'PROPOSED',?14)",
+        libsql_rusqlite::params![
+            plan.repair_plan_id,
+            plan.project_id,
+            plan.based_on_project_revision,
+            serde_json::to_string(&plan.diagnosis)?,
+            serde_json::to_string(&plan.finding_refs)?,
+            plan.target_authority_owner,
+            serde_json::to_string(&plan.proposed_operations)?,
+            serde_json::to_string(&plan.affected_artifacts)?,
+            serde_json::to_string(&plan.affected_scopes)?,
+            plan.risk_level,
+            plan.requires_backup as i64,
+            serde_json::to_string(&plan.expected_postconditions)?,
+            plan.operation_digest,
+            plan.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn load_repair_plan(
+    connection: &Connection,
+    project_id: &str,
+    repair_plan_id: &str,
+) -> Result<Option<RepairPlan>, SupportRepositoryError> {
+    let row = connection
+        .query_row(
+            "SELECT repair_plan_id,project_id,based_on_project_revision,diagnosis_json,finding_refs_json,target_authority_owner,proposed_operations_json,affected_artifacts_json,affected_scopes_json,risk_level,requires_backup,expected_postconditions_json,operation_digest,created_at FROM repair_plans WHERE project_id=?1 AND repair_plan_id=?2",
+            libsql_rusqlite::params![project_id, repair_plan_id],
+            |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?, row.get::<_, i64>(10)?, row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?, row.get::<_, String>(13)?
+            )),
+        )
+        .optional()?;
+    row.map(|row| {
+        Ok(RepairPlan {
+            repair_plan_id: row.0,
+            project_id: row.1,
+            based_on_project_revision: row.2,
+            diagnosis: serde_json::from_str(&row.3)?,
+            finding_refs: serde_json::from_str(&row.4)?,
+            target_authority_owner: row.5,
+            proposed_operations: serde_json::from_str::<Vec<RepairOperation>>(&row.6)?,
+            affected_artifacts: serde_json::from_str(&row.7)?,
+            affected_scopes: serde_json::from_str(&row.8)?,
+            risk_level: row.9,
+            requires_backup: row.10 != 0,
+            expected_postconditions: serde_json::from_str(&row.11)?,
+            operation_digest: row.12,
+            created_at: row.13,
+        })
+    })
+    .transpose()
+}
+
+pub fn save_repair_authorization(
+    connection: &Connection,
+    authorization: &RepairAuthorization,
+) -> Result<(), SupportRepositoryError> {
+    connection.execute(
+        "INSERT INTO repair_authorizations(authorization_id,project_id,repair_plan_id,based_on_project_revision,operation_digest,approved_by_user,issued_at,consumed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        libsql_rusqlite::params![authorization.authorization_id, authorization.project_id, authorization.repair_plan_id, authorization.based_on_project_revision, authorization.operation_digest, authorization.approved_by_user as i64, authorization.issued_at, authorization.consumed_at],
+    )?;
+    connection.execute(
+        "UPDATE repair_plans SET status='AUTHORIZED' WHERE project_id=?1 AND repair_plan_id=?2",
+        libsql_rusqlite::params![authorization.project_id, authorization.repair_plan_id],
+    )?;
+    Ok(())
+}
+
+pub fn load_repair_authorization(
+    connection: &Connection,
+    project_id: &str,
+    authorization_id: &str,
+) -> Result<Option<RepairAuthorization>, SupportRepositoryError> {
+    connection.query_row(
+        "SELECT authorization_id,project_id,repair_plan_id,based_on_project_revision,operation_digest,approved_by_user,issued_at,consumed_at FROM repair_authorizations WHERE project_id=?1 AND authorization_id=?2",
+        libsql_rusqlite::params![project_id, authorization_id],
+        |row| Ok(RepairAuthorization {
+            authorization_id: row.get(0)?, project_id: row.get(1)?, repair_plan_id: row.get(2)?,
+            based_on_project_revision: row.get(3)?, operation_digest: row.get(4)?,
+            approved_by_user: row.get::<_, i64>(5)? != 0, issued_at: row.get(6)?, consumed_at: row.get(7)?,
+        }),
+    ).optional().map_err(Into::into)
+}
+
+pub fn claim_repair_authorization(
+    connection: &Connection,
+    project_id: &str,
+    authorization_id: &str,
+    expected_revision: i64,
+    expected_digest: &str,
+    now: &str,
+) -> Result<bool, SupportRepositoryError> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let revision: i64 = connection.query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if revision != expected_revision {
+            return Ok(false);
+        }
+        let updated = connection.execute(
+            "UPDATE repair_authorizations SET consumed_at=?1 WHERE project_id=?2 AND authorization_id=?3 AND based_on_project_revision=?4 AND operation_digest=?5 AND approved_by_user=1 AND consumed_at IS NULL",
+            libsql_rusqlite::params![now, project_id, authorization_id, expected_revision, expected_digest],
+        )?;
+        Ok(updated == 1)
+    })();
+    match result {
+        Ok(value) => {
+            connection.execute_batch("COMMIT")?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+pub fn save_repair_execution_receipt(
+    connection: &Connection,
+    receipt: &ExecutionReceipt,
+) -> Result<(), SupportRepositoryError> {
+    connection.execute(
+        "INSERT INTO repair_execution_receipts(receipt_ref,repair_plan_id,authorization_id,project_id,before_revision,after_revision,operation_digest,owner,owner_receipt_ref,executed_at,status,postconditions_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        libsql_rusqlite::params![receipt.receipt_ref, receipt.repair_plan_id, receipt.authorization_id, receipt.project_id, receipt.before_revision, receipt.after_revision, receipt.operation_digest, receipt.owner, receipt.owner_receipt_ref, receipt.executed_at, receipt.status, serde_json::to_string(&receipt.postconditions)?],
+    )?;
+    connection.execute(
+        "UPDATE repair_plans SET status=?1 WHERE project_id=?2 AND repair_plan_id=?3",
+        libsql_rusqlite::params![receipt.status, receipt.project_id, receipt.repair_plan_id],
+    )?;
+    Ok(())
 }
 
 pub fn save_checkpoint(

@@ -34,6 +34,23 @@ const STAGES: &[&str] = &[
     "COMPLETED",
 ];
 
+type ObligationAuthorityRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+);
+type ForeshadowAuthorityRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
     pub output: Value,
@@ -57,6 +74,14 @@ impl ProductionModelResponse {
 }
 
 pub trait ProductionModelGateway: Send + Sync {
+    fn provider(&self) -> &str {
+        "configured-production-gateway"
+    }
+
+    fn model(&self, capability: &str) -> String {
+        format!("production:{capability}")
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
 }
 
@@ -188,6 +213,9 @@ fn authority_request(
         "scope": "CHAPTER",
         "entityIds": request.pointer("/payload/entityIds").cloned().unwrap_or_else(|| json!([])),
         "references": request.pointer("/payload/references").cloned().unwrap_or_else(|| json!([])),
+        "presentEntityIds": request.pointer("/payload/presentEntityIds").cloned().unwrap_or_else(|| json!([])),
+        "acquiredFactIds": request.pointer("/payload/acquiredFactIds").cloned().unwrap_or_else(|| json!([])),
+        "satisfiedTaskIds": request.pointer("/payload/satisfiedTaskIds").cloned().unwrap_or_else(|| json!([])),
         "includeSoftSources": false
     })
 }
@@ -306,6 +334,25 @@ fn update_stage(
     Ok(())
 }
 
+fn block_for_recompile(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    job_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE jobs SET status='BLOCKED',current_stage='RECONCILE',error_code='PLAN_STALE',updated_at=?1 WHERE project_id=?2 AND job_id=?3",
+            libsql_rusqlite::params![now, project_id, job_id],
+        )
+        .map_err(|error| error.to_string())?;
+    DurableJobService::release_lease(connection, project_id, job_id, now)
+        .map_err(|error| error.to_string())?;
+    DurableJobService::set_runtime_state(connection, project_id, "PAUSED", Some("PLAN_STALE"), now)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 /// Execute one formal B08 chapter production run.  The function returns a
 /// blocked result when no committed GatePolicy is available; it never silently
 /// commits a candidate as final content.
@@ -340,6 +387,8 @@ pub fn run_chapter_production(
         .map_err(|error| error.to_string())?
     {
         return Ok(json!({
+            "commandId":command_id,
+            "projectId":project_id,
             "finalStatus":"committed",
             "message":"B08 章节生产幂等重放",
             "stage":"COMPLETED",
@@ -488,8 +537,8 @@ pub fn run_chapter_production(
             model_run_id: planning_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: "configured-production-gateway".into(),
-            model: "planning-owner".into(),
+            provider: gateway.provider().into(),
+            model: gateway.model("PLAN_STRATEGY"),
             idempotency_key: format!("{idempotency_key}:plan"),
             capability: "PLAN_STRATEGY".into(),
             prompt_ref: None,
@@ -587,7 +636,7 @@ pub fn run_chapter_production(
         let context_payload = load_artifact_payload(connection, &project_id, &context_ref)?;
         (context_ref, context_payload, plan_ref, plan_payload)
     };
-    validate_plan_is_current(
+    if let Err(error) = validate_plan_is_current(
         connection,
         request,
         &project_id,
@@ -595,7 +644,12 @@ pub fn run_chapter_production(
         &volume_id,
         execution_mode,
         &plan_payload,
-    )?;
+    ) {
+        if error.starts_with("PLAN_STALE") {
+            block_for_recompile(connection, &project_id, &job_id, &now)?;
+        }
+        return Err(error);
+    }
     let state_digest = current_authority_digest(
         connection,
         request,
@@ -611,8 +665,8 @@ pub fn run_chapter_production(
         model_run_id: render_run_id.clone(),
         job_id: Some(job_id.clone()),
         step_id: None,
-        provider: "local-deterministic".into(),
-        model: "b08-renderer".into(),
+        provider: gateway.provider().into(),
+        model: gateway.model("RENDER_CHAPTER"),
         idempotency_key: format!("{idempotency_key}:render"),
         capability: "RENDER_CHAPTER".into(),
         prompt_ref: None,
@@ -647,7 +701,7 @@ pub fn run_chapter_production(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":"local-deterministic"}
+        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":gateway.provider(),"model":gateway.model("RENDER_CHAPTER")}
     });
     let mut candidate = artifact(
         &project_id,
@@ -667,8 +721,8 @@ pub fn run_chapter_production(
         model_run_id: audit_run_id.clone(),
         job_id: Some(job_id.clone()),
         step_id: None,
-        provider: "local-deterministic".into(),
-        model: "b08-auditor".into(),
+        provider: gateway.provider().into(),
+        model: gateway.model("AUDIT_EXTRACT"),
         idempotency_key: format!("{idempotency_key}:audit"),
         capability: "AUDIT_EXTRACT".into(),
         prompt_ref: None,
@@ -707,7 +761,7 @@ pub fn run_chapter_production(
     )?;
     audit.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
     update_stage(connection, &project_id, &job_id, "GATE", &now)?;
-    validate_plan_is_current(
+    if let Err(error) = validate_plan_is_current(
         connection,
         request,
         &project_id,
@@ -715,7 +769,81 @@ pub fn run_chapter_production(
         &volume_id,
         execution_mode,
         &plan_payload,
-    )?;
+    ) {
+        if error.starts_with("PLAN_STALE") {
+            block_for_recompile(connection, &project_id, &job_id, &now)?;
+        }
+        return Err(error);
+    }
+    let mut obligation_delta = Vec::new();
+    let mut foreshadow_delta = Vec::new();
+    let mut obligation_evidence_records = Vec::new();
+    for (index, item) in extraction.continuity_candidates.iter().enumerate() {
+        let authority_id = item
+            .thread_ref
+            .strip_prefix("thread:")
+            .unwrap_or(&item.thread_ref);
+        let obligation: Option<ObligationAuthorityRow> = connection.query_row(
+            "SELECT obligation_type,scope,authority_level,description,must_resolve_before_chapter,prerequisites_json,decision_ref FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+            libsql_rusqlite::params![project_id,authority_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        if let Some((
+            obligation_type,
+            scope,
+            authority_level,
+            description,
+            must_resolve,
+            prerequisites,
+            decision_ref,
+        )) = obligation
+        {
+            let lifecycle = match item.disposition.as_str() {
+                "RESOLVE" | "RESOLVED" => "RESOLVED",
+                "ADVANCE" | "PROGRESSING" => "PROGRESSING",
+                _ => return Err("B08_THREAD_DISPOSITION_INVALID".into()),
+            };
+            obligation_delta.push(json!({
+                "obligationId":authority_id,"scope":scope,"obligationType":obligation_type,
+                "authorityLevel":authority_level,"lifecycle":lifecycle,"description":description,
+                "mustResolveBeforeChapter":must_resolve,
+                "prerequisites":serde_json::from_str::<Value>(&prerequisites).unwrap_or_else(|_| json!([])),
+                "decisionRef":decision_ref,
+                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1}
+            }));
+            obligation_evidence_records.push(json!({
+                "evidenceId":format!("obligation-evidence:{}:{}",final_id,index+1),
+                "obligationId":authority_id,
+                "evidenceType":if lifecycle == "RESOLVED" {"COMPLETION"} else {"PROGRESS"},
+                "quote":item.evidence.quote,"rangeStart":item.evidence.start,"rangeEnd":item.evidence.end
+            }));
+            continue;
+        }
+        let foreshadow: Option<ForeshadowAuthorityRow> = connection.query_row(
+            "SELECT intent,status,plant_chapter_id,recover_window_end_chapter,secret_payload_ref FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2",
+            libsql_rusqlite::params![project_id,authority_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        if let Some((
+            intent,
+            _status,
+            plant_chapter_id,
+            recover_window_end_chapter,
+            secret_payload_ref,
+        )) = foreshadow
+        {
+            foreshadow_delta.push(json!({
+                "foreshadowId":authority_id,"intent":intent,
+                "status":if matches!(item.disposition.as_str(),"RESOLVE"|"RESOLVED") {"RECOVERED"} else {"REINFORCED"},
+                "plantChapterId":plant_chapter_id,"recoverWindowEndChapter":recover_window_end_chapter,
+                "secretPayloadRef":secret_payload_ref,
+                "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,
+                    "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}}
+            }));
+            continue;
+        }
+        return Err("B08_THREAD_AUTHORITY_NOT_FOUND".into());
+    }
     let evidence_records = extraction
         .canon_candidates
         .iter()
@@ -732,7 +860,7 @@ pub fn run_chapter_production(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":reference(&candidate),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":reference(&candidate),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -860,6 +988,8 @@ pub fn run_chapter_production(
         "artifacts":bundle_artifacts,"headUpdates":heads,
         "canonDelta":canon_delta,
         "knowledgeDelta":knowledge_delta,
+        "obligationDelta":obligation_delta,
+        "foreshadowDelta":foreshadow_delta,
         "stateDelta":state_delta,
         "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":plan_ref.payload_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
@@ -874,7 +1004,7 @@ pub fn run_chapter_production(
         .map_err(|error| error.to_string())?;
     update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(
-        json!({"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"receipt":receipt}),
+        json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"receipt":receipt}),
     )
 }
 
