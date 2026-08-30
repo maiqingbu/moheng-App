@@ -11,7 +11,8 @@ const dirtyBefore = spawnSync('git', ['status', '--porcelain'], { cwd: root, enc
 const generatedRegressionArtifacts = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']
 
 function run(name, command, args, cwd = root) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8' })
+  const env = name === 'b06_h01_acceptance' ? { ...process.env, B06_H01_RUN_SCALE: '1' } : process.env
+  const result = spawnSync(command, args, { cwd, encoding: 'utf8', env })
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
   writeFileSync(resolve(evidence, `${name}.log`), output)
   return { name, status: result.status === 0 ? 'PASS' : 'FAIL', exitCode: result.status ?? 1, output }
