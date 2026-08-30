@@ -158,6 +158,34 @@ fn b07_bookplan_approval_commits_new_approved_version() {
     let signing_hash = sha256_canonical(&signing_payload).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:p2:signing','p2','SimulatedSigningReceipt','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", signing_hash, "2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:p2:signing',1,?1,?2)", libsql_rusqlite::params![signing_payload.to_string(), signing_hash]).unwrap();
+    for index in 1..=3 {
+        connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,'p2',?2,?3,'artifact:p2:signing',1,'OPENING','opening evidence',1,10,?4)", libsql_rusqlite::params![format!("evidence:p2:{index}"), format!("fact:p2:{index}"), format!("chapter:p2:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
+    }
+    for index in 50..=52 {
+        connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p2','volume:p2',?2,?3,'NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![format!("chapter:p2:{index}"), index, format!("Chapter {index}"), "2026-08-30T00:00:00Z"]).unwrap();
+    }
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:p2:4','p2','volume:p2',4,'Chapter 4','NORMAL','PLANNED',0,?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:p2:later','p2','entity:p2:1','later','{}','A',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:p2:no-evidence','p2','entity:p2:1','later','{}','A',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:p2:later','p2','fact:p2:later','chapter:p2:4','artifact:p2:signing',1,'LATER','later evidence',1,10,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
+    for (artifact_id, payload) in [
+        (
+            "artifact:p2:latechap",
+            json!({"status":"PASS","openingChapterRefs":["chapter:p2:50","chapter:p2:51","chapter:p2:52"],"openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"]}),
+        ),
+        (
+            "artifact:p2:latecanon",
+            json!({"status":"PASS","openingChapterRefs":["chapter:p2:1","chapter:p2:2","chapter:p2:3"],"openingCanonRefs":["fact:p2:later"]}),
+        ),
+        (
+            "artifact:p2:noevidence",
+            json!({"status":"PASS","openingChapterRefs":["chapter:p2:1","chapter:p2:2","chapter:p2:3"],"openingCanonRefs":["fact:p2:no-evidence"]}),
+        ),
+    ] {
+        let payload_hash = sha256_canonical(&payload).unwrap();
+        connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES (?1,'p2','SimulatedSigningReceipt','PROJECT',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4)", libsql_rusqlite::params![artifact_id, "{\"level\":\"PROJECT\"}", payload_hash, "2026-08-30T00:00:00Z"]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash]).unwrap();
+    }
     drop(connection);
     let seed = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[{"id":"goal:1","description":"goal"}],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
     let rejected = execute_command_impl(
@@ -168,6 +196,20 @@ fn b07_bookplan_approval_commits_new_approved_version() {
         rejected.unwrap_err(),
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
+    for (suffix, receipt) in [
+        ("latechap", "artifact:p2:latechap"),
+        ("latecanon", "artifact:p2:latecanon"),
+        ("noevidence", "artifact:p2:noevidence"),
+    ] {
+        let result = execute_command_impl(
+            &state,
+            json!({"type":"planning_finalize_book_plan","commandId":format!("command:book:g3:{suffix}"),"idempotencyKey":format!("key:book:g3:{suffix}"),"projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":if suffix == "latecanon" { vec!["fact:p2:later"] } else if suffix == "noevidence" { vec!["fact:p2:no-evidence"] } else { vec!["fact:p2:1","fact:p2:2","fact:p2:3"] },"signingEvidenceRefs":[receipt]}}),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+        );
+    }
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
@@ -421,6 +463,39 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     assert!(stale_result.result["provenance"]["futureReservations"].is_array());
     println!("H02_DIAGNOSTIC_RESULT stale_owner=PASS reservation_provenance=PASS thread_provenance=PASS status=PASS");
     drop(connection);
+    let questions = [
+        "为什么这一卷还没接近高潮？",
+        "哪些 Required Task 还没完成？",
+        "为什么这个 ChapterPlan stale？",
+        "为什么这个秘密现在不能揭露？",
+        "哪些跨卷承诺正在约束下一章？",
+        "这一卷还有多少 Capacity？",
+        "Planner 为什么选择当前 Task？",
+    ];
+    for question in questions {
+        let session = support_session_impl(
+            &state,
+            json!({"projectId":"p3","volumeId":volume_id,"currentChapter":1,"scope":"VOLUME","question":question,"mode":"DIAGNOSE","entityIds":[],"references":[]}),
+        )
+        .unwrap();
+        assert_eq!(session["plan"]["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(session["finding"]["diagnosisType"], "PLANNING_CONSTRAINTS");
+        assert!(session["receipt"]["checkpointRef"].is_string());
+        let diagnostic = &session["calls"][1]["result"];
+        assert!(diagnostic["provenance"]["volumePlanRef"]["artifactId"].is_string());
+        assert!(diagnostic["provenance"]["taskReality"].is_array());
+        if question.contains("秘密") {
+            assert!(diagnostic["provenance"]["futureReservations"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()));
+        }
+        if question.contains("承诺") {
+            assert!(diagnostic["provenance"]["continuityThreads"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()));
+        }
+    }
+    println!("H02_QUESTIONS_RESULT q1=PASS q2=PASS q3=PASS q4=PASS q5=PASS q6=PASS q7=PASS real_support=PASS receipt=PASS status=PASS");
     let stale = execute_command_impl(
         &state,
         json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:stale:p3","idempotencyKey":"key:chapter:stale:p3","projectId":"p3","expectedRevision":4,"requestedAt":"2026-08-30T00:00:05Z","payload":{"chapterId":chapter_id,"plan":plan}}),

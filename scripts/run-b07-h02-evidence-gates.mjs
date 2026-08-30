@@ -66,6 +66,7 @@ const gates = {
   h02_plan_route: { status: marker(b07.output, /B07_ROUTE_RESULT .*h02_query=PASS/), source: 'b07_targeted.log' },
   h02_constraints: { status: marker(b07.output, /H02_SESSION_RESULT .*finding=SUPPORTED.*receipt=PASS/), source: 'b07_targeted.log' },
   h02_diagnostic_provenance: { status: marker(b07.output, /H02_DIAGNOSTIC_RESULT .*stale_owner=PASS.*reservation_provenance=PASS.*thread_provenance=PASS.*status=PASS/), source: 'b07_targeted.log' },
+  h02_question_fixtures: { status: marker(b07.output, /H02_QUESTIONS_RESULT .*q1=PASS.*q2=PASS.*q3=PASS.*q4=PASS.*q5=PASS.*q6=PASS.*q7=PASS.*real_support=PASS.*status=PASS/), source: 'b07_targeted.log' },
   b07_signing_authority: { status: marker(b07.output, /B07_SIGN_RESULT .*no_receipt=PASS.*wrong_verdict=PASS.*fake_artifact=PASS.*actual_pass=PASS.*opening_bound=PASS/), source: 'b07_targeted.log' },
   b07_volume_intent_contract: { status: marker(b07.output, /B07_INTENT_RESULT .*malformed_rejected=PASS.*valid_commit=PASS/), source: 'b07_targeted.log' },
   h02_truncation: { status: marker(b07.output, /B07_ROUTE_RESULT .*truncation=PASS/) && marker(b07.output, /H02_SESSION_RESULT .*status=PASS/), source: 'b07_targeted.log' },

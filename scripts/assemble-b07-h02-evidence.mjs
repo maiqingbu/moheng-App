@@ -44,6 +44,7 @@ put('H02', 'basis.json', meta('basis', 'PASS', { h00R11: true, creativeSkillsRun
 put('H02', 'capability_registry.json', meta('capability_registry', gates.gates.h02_registry.status, { newCapabilities: ['query_plan_route', 'diagnose_planning_constraints'], h01Preserved: true }))
 put('H02', 'query_plan_route.json', meta('query_plan_route', gates.gates.h02_plan_route.status, { realOwner: 'B07::PlanningRoute', bounded: true }))
 put('H02', 'planning_constraints.json', meta('planning_constraints', gates.gates.h02_constraints.status, { realSession: true, finding: 'SUPPORTED' }))
+put('H02', 'question_fixtures.json', meta('question_fixtures', gates.gates.h02_question_fixtures.status, { questions: ['为什么这一卷还没接近高潮？', '哪些 Required Task 还没完成？', '为什么这个 ChapterPlan stale？', '为什么这个秘密现在不能揭露？', '哪些跨卷承诺正在约束下一章？', '这一卷还有多少 Capacity？', 'Planner 为什么选择当前 Task？'], marker: b07(/H02_QUESTIONS_RESULT[^\n]+/) }))
 put('H02', 'stale_explanation.json', meta('stale_explanation', gates.gates.h02_diagnostic_provenance.status, { source: 'current ChapterPlan + compiled/current state digest', failClosed: true, marker: b07(/H02_DIAGNOSTIC_RESULT[^\n]+/) }))
 put('H02', 'reservation_thread_explanation.json', meta('reservation_thread_explanation', gates.gates.h02_diagnostic_provenance.status, { readOnly: true, reservationProvenance: true, threadProvenance: true, marker: b07(/H02_DIAGNOSTIC_RESULT[^\n]+/) }))
 put('H02', 'read_only_boundary.json', meta('read_only_boundary', gates.gates.h02_read_only.status, { writeCapabilityCount: 0 }))

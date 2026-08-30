@@ -306,8 +306,12 @@ pub fn plan_support(
         "未完成",
         "stale",
         "揭露",
+        "秘密",
         "capacity",
+        "容量",
         "planner",
+        "承诺",
+        "任务",
         "规划",
     ]
     .iter()

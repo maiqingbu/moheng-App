@@ -1907,8 +1907,12 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         "未完成",
         "stale",
         "揭露",
+        "秘密",
         "capacity",
+        "容量",
         "planner",
+        "承诺",
+        "任务",
         "规划",
     ]
     .iter()

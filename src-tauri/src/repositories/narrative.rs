@@ -1003,7 +1003,23 @@ impl NarrativeRepository {
             .and_then(Value::as_array)
             .map(|refs| refs.iter().filter_map(Value::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
-        let opening_chapters = opening_chapter_refs.len() >= 3
+        let mut opening_numbers = opening_chapter_refs
+            .iter()
+            .filter_map(|chapter_id| {
+                connection
+                    .query_row(
+                        "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                        libsql_rusqlite::params![project_id, chapter_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        opening_numbers.sort_unstable();
+        let opening_chapters = opening_chapter_refs.len() == 3
+            && opening_numbers == [1, 2, 3]
             && opening_chapter_refs.iter().all(|chapter_id| {
                 connection
                     .query_row(
@@ -1017,9 +1033,23 @@ impl NarrativeRepository {
             .get("openingCanonRefs")
             .and_then(Value::as_array)
             .map(|refs| {
-                opening_canon_refs
+                let mut receipt_refs = refs.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                receipt_refs.sort_unstable();
+                let mut requested_refs = opening_canon_refs
                     .iter()
-                    .all(|reference| refs.iter().any(|item| item.as_str() == Some(reference)))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                requested_refs.sort_unstable();
+                receipt_refs == requested_refs
+                    && opening_canon_refs.iter().all(|reference| {
+                        connection
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM canon_evidence e WHERE e.project_id=?1 AND (e.evidence_id=?2 OR e.fact_id=?2 OR e.relation_id=?2 OR e.event_id=?2) AND e.final_chapter_id IN (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no IN (1,2,3)))",
+                                libsql_rusqlite::params![project_id, reference],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(false)
+                    })
             })
             .unwrap_or(false);
         Ok(verdict_pass && opening_chapters && receipt_canon_refs)
