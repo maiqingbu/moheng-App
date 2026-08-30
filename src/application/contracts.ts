@@ -431,6 +431,10 @@ export interface PlanningRouteProjection {
   tasks: Array<Record<string, unknown>>
   taskReality: Array<Record<string, unknown>>
   planningPressure: Record<string, unknown>
+  continuityThreads?: Array<Record<string, unknown>>
+  futureReservations?: Array<Record<string, unknown>>
+  currentChapterPlan?: { artifactId: string; version: number; payloadHash: string } | null
+  horizonPreview?: Array<Record<string, unknown>>
   truncated: boolean
 }
 
@@ -543,6 +547,10 @@ export type CommandType =
   | 'pitch_select'
   | 'book_plan_create'
   | 'book_plan_revise'
+  | 'planning_finalize_book_plan'
+  | 'planning_create_volume_intent'
+  | 'planning_create_volume_plan'
+  | 'planning_compile_chapter_plan'
   | 'production_start'
   | 'production_pause'
   | 'production_resume'

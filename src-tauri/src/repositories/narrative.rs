@@ -124,6 +124,17 @@ impl NarrativeRepository {
             )))
         })
     }
+    fn chapter_scope_key(chapter_id: &str) -> Result<String, NarrativeRepositoryError> {
+        let bytes = crate::hash::canonical_bytes(
+            &serde_json::json!({"level":"CHAPTER","chapterId":chapter_id}),
+        )?;
+        String::from_utf8(bytes).map_err(|error| {
+            NarrativeRepositoryError::Json(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })
+    }
     fn limit(limit: i64) -> i64 {
         limit.clamp(1, 100)
     }
@@ -464,7 +475,7 @@ impl NarrativeRepository {
     ) -> Result<Vec<ObligationRecord>, NarrativeRepositoryError> {
         let entity_ids = Self::ids_json(entity_ids)?;
         let references = Self::ids_json(references)?;
-        let mut statement = connection.prepare("SELECT o.obligation_id, o.obligation_type, o.authority_level, o.lifecycle, o.source_event_id, o.resume_condition_json, (SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL) FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges AS d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) ORDER BY o.updated_at DESC, o.obligation_id LIMIT ?4")?;
+        let mut statement = connection.prepare("SELECT o.obligation_id, o.obligation_type, o.authority_level, o.lifecycle, o.source_event_id, o.resume_condition_json, (SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL) FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges AS d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) ORDER BY o.updated_at DESC, o.obligation_id LIMIT ?4")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)],
             |row| {
@@ -494,7 +505,7 @@ impl NarrativeRepository {
     ) -> Result<bool, NarrativeRepositoryError> {
         let entity_ids = Self::ids_json(entity_ids)?;
         let references = Self::ids_json(references)?;
-        connection.query_row("SELECT EXISTS(SELECT 1 FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn active_foreshadows(
@@ -700,6 +711,8 @@ impl NarrativeRepository {
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
         let canonical_scope = if artifact_type == "VolumeIntent" || artifact_type == "VolumePlan" {
             Self::volume_scope_key(scope_key)?
+        } else if artifact_type == "ChapterPlan" {
+            Self::chapter_scope_key(scope_key)?
         } else {
             scope_key.to_string()
         };
@@ -734,6 +747,8 @@ impl NarrativeRepository {
     ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
         let canonical_scope = if artifact_type == "VolumeIntent" || artifact_type == "VolumePlan" {
             Self::volume_scope_key(scope_key)?
+        } else if artifact_type == "ChapterPlan" {
+            Self::chapter_scope_key(scope_key)?
         } else {
             scope_key.to_string()
         };
@@ -773,6 +788,52 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn volume_number(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<i64>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT volume_no FROM volumes WHERE project_id=?1 AND volume_id=?2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn volume_target_chapters(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<i64>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT MAX(chapter_end - chapter_start + 1, 1) FROM volumes WHERE project_id=?1 AND volume_id=?2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn chapter_id_for_number(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_no: i64,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=?3",
+                libsql_rusqlite::params![project_id, volume_id, chapter_no],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn next_artifact_version(
         connection: &Connection,
         project_id: &str,
@@ -800,6 +861,55 @@ impl NarrativeRepository {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn planning_model_run_binds_plan(
+        connection: &Connection,
+        project_id: &str,
+        model_run_id: &str,
+        context_manifest_id: &str,
+        plan: &Value,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let parsed_json: Option<String> = connection
+            .query_row(
+                "SELECT p.parsed_json FROM model_parse_results p JOIN model_runs r ON r.model_run_id=p.model_run_id AND r.project_id=p.project_id WHERE p.project_id=?1 AND p.model_run_id=?2 AND p.status='OK' AND r.capability='PLAN_STRATEGY' AND r.status='COMPLETED' AND r.context_manifest_ref=?3",
+                libsql_rusqlite::params![project_id, model_run_id, context_manifest_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(parsed_json) = parsed_json else {
+            return Ok(false);
+        };
+        let parsed: Value = serde_json::from_str(&parsed_json)?;
+        let plan_digest = crate::hash::sha256_canonical(plan).map_err(|error| {
+            NarrativeRepositoryError::Json(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
+        let output_digest = parsed
+            .get("outputDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                parsed
+                    .get("plan")
+                    .and_then(|value| crate::hash::sha256_canonical(value).ok())
+            });
+        Ok(output_digest.as_deref() == Some(plan_digest.as_str()))
+    }
+
+    pub fn exactly_one_primary_planning_call(
+        connection: &Connection,
+        project_id: &str,
+        context_manifest_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='PLAN_STRATEGY' AND status='COMPLETED' AND context_manifest_ref=?2",
+            libsql_rusqlite::params![project_id, context_manifest_id],
+            |row| row.get(0),
+        )?;
+        Ok(count == 1)
     }
 
     pub fn approved_book_plan_exists(
@@ -841,6 +951,78 @@ impl NarrativeRepository {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn signing_receipt_passes(
+        connection: &Connection,
+        project_id: &str,
+        receipt_id: &str,
+        opening_canon_refs: &[String],
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let signing_status: Option<String> = connection
+            .query_row(
+                "SELECT signing_status FROM project_runtime_state WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if signing_status.as_deref() != Some("PASS") {
+            return Ok(false);
+        }
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED'",
+                libsql_rusqlite::params![project_id, receipt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(false);
+        };
+        let payload: Value = serde_json::from_str(&payload)?;
+        let stored_hash: Option<String> = connection
+            .query_row(
+                "SELECT a.payload_hash FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version AND p.payload_hash=a.payload_hash WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED'",
+                libsql_rusqlite::params![project_id, receipt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let payload_hash = crate::hash::sha256_canonical(&payload).map_err(|error| {
+            NarrativeRepositoryError::Json(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
+        if stored_hash.as_deref() != Some(payload_hash.as_str()) {
+            return Ok(false);
+        }
+        let verdict_pass = payload.get("status").and_then(Value::as_str) == Some("PASS")
+            || payload.get("verdict").and_then(Value::as_str) == Some("PASS");
+        let opening_chapter_refs = payload
+            .get("openingChapterRefs")
+            .and_then(Value::as_array)
+            .map(|refs| refs.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let opening_chapters = opening_chapter_refs.len() >= 3
+            && opening_chapter_refs.iter().all(|chapter_id| {
+                connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_id=?2)",
+                        libsql_rusqlite::params![project_id, chapter_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false)
+            });
+        let receipt_canon_refs = payload
+            .get("openingCanonRefs")
+            .and_then(Value::as_array)
+            .map(|refs| {
+                opening_canon_refs
+                    .iter()
+                    .all(|reference| refs.iter().any(|item| item.as_str() == Some(reference)))
+            })
+            .unwrap_or(false);
+        Ok(verdict_pass && opening_chapters && receipt_canon_refs)
     }
 
     pub fn latest_artifact_payload(

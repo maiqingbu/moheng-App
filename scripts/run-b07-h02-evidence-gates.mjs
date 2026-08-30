@@ -22,31 +22,57 @@ const fmt = run('cargo_fmt', 'cargo', ['fmt', '--all', '--', '--check'], resolve
 const check = run('cargo_check', 'cargo', ['check', '--all-targets'], resolve(root, 'src-tauri'))
 const clippy = run('cargo_clippy', 'cargo', ['clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'], resolve(root, 'src-tauri'))
 const frontend = run('frontend', 'npm', ['run', 'typecheck'])
+const nodeFull = run('node_full', 'npm', ['test'])
+const build = run('frontend_build', 'npm', ['run', 'build'])
+const contracts = run('contracts', 'npm', ['run', 'verify:contracts'])
+const vitest = run('vitest_full', 'npm', ['run', 'test:store'])
 const ui = run('ui_b07_h02', 'npx', ['vitest', 'run', 'tests/store/b07-h02-frontend.test.ts'])
+const b05 = run('b05_regression', 'npm', ['run', 'verify:b05'])
+const b06Acceptance = run('b06_h01_acceptance', 'npm', ['run', 'verify:b06-h01'])
+const b06Architecture = run('b06_h01_architecture', 'node', ['scripts/verify-b06-h01-architecture.mjs'])
+const m0a = run('m0a', 'node', ['scripts/verify-m0a-evidence.mjs'])
+const cargoAll = run('cargo_all_targets', 'cargo', ['test', '--all-targets'], resolve(root, 'src-tauri'))
 const architecture = run('architecture', 'node', ['scripts/verify-b07-h02-architecture.mjs'])
 const acceptanceTests = run('acceptance_generator_tests', 'node', ['--test', 'tests/b07-h02-acceptance-generator.test.mjs'])
+const moduleBoundary = run('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'])
+const nonScaleReady = [b07, b06, fmt, check, clippy, frontend, nodeFull, build, contracts, vitest, ui, b05, b06Acceptance, b06Architecture, m0a, architecture, acceptanceTests, moduleBoundary].every(result => result.status === 'PASS')
+const scale = nonScaleReady ? run('b07_h02_scale', 'cargo', ['test', '--test', 'b07_scale', '--', '--ignored', '--nocapture'], resolve(root, 'src-tauri')) : { name: 'b07_h02_scale', status: 'FAIL', exitCode: 1, output: 'SKIPPED: non-scale gates are not PASS' }
+if (!nonScaleReady) writeFileSync(resolve(evidence, 'b07_h02_scale.log'), scale.output)
 
 const marker = (text, pattern) => pattern.test(text)
 const gates = {
   b07_bookplan_maturity: { status: marker(b07.output, /B07_BOOKPLAN_RESULT .*signing_pass=PASS.*approved=PASS.*status=PASS/), source: 'b07_targeted.log' },
   b07_volume_route: { status: marker(b07.output, /B07_ROUTE_RESULT .*volume_scope=PASS.*task_reality=PASS.*status=PASS/), source: 'b07_targeted.log' },
-  b07_chapter_plan_gates: { status: marker(b07.output, /B07_CHAPTER_RESULT .*current_only=PASS.*context_bound=PASS.*status=PASS/), source: 'b07_targeted.log' },
+  b07_chapter_plan_gates: { status: marker(b07.output, /B07_CHAPTER_RESULT .*current_only=PASS.*context_bound=PASS.*reservation_gate=PASS.*task_dependency=PASS.*continuity_authority=PASS.*model_output_bound=PASS.*status=PASS/), source: 'b07_targeted.log' },
   b07_plan_stale: { status: marker(b07.output, /B07_CHAPTER_RESULT .*stale_precommit=PASS/), source: 'b07_targeted.log' },
   b07_plan_reality_separation: { status: marker(b07.output, /B07_CHAPTER_RESULT .*canon_unchanged=PASS/), source: 'b07_targeted.log' },
   b07_frontend_route: { status: ui.status === 'PASS' && marker(ui.output, /3 passed/), source: 'ui_b07_h02.log' },
   h02_registry: { status: b07.status === 'PASS' && marker(b07.output, /H02_CHECKPOINT_RESULT .*status=PASS/), source: 'b07_targeted.log' },
   h02_plan_route: { status: marker(b07.output, /B07_ROUTE_RESULT .*h02_query=PASS/), source: 'b07_targeted.log' },
   h02_constraints: { status: marker(b07.output, /H02_SESSION_RESULT .*finding=SUPPORTED.*receipt=PASS/), source: 'b07_targeted.log' },
+  h02_diagnostic_provenance: { status: marker(b07.output, /H02_DIAGNOSTIC_RESULT .*stale_owner=PASS.*reservation_provenance=PASS.*thread_provenance=PASS.*status=PASS/), source: 'b07_targeted.log' },
+  b07_signing_authority: { status: marker(b07.output, /B07_SIGN_RESULT .*no_receipt=PASS.*wrong_verdict=PASS.*fake_artifact=PASS.*actual_pass=PASS.*opening_bound=PASS/), source: 'b07_targeted.log' },
+  b07_volume_intent_contract: { status: marker(b07.output, /B07_INTENT_RESULT .*malformed_rejected=PASS.*valid_commit=PASS/), source: 'b07_targeted.log' },
   h02_truncation: { status: marker(b07.output, /B07_ROUTE_RESULT .*truncation=PASS/) && marker(b07.output, /H02_SESSION_RESULT .*status=PASS/), source: 'b07_targeted.log' },
   h02_read_only: { status: architecture.status === 'PASS' && marker(architecture.output, /h02_write_capability_count=0/), source: 'architecture.log' },
   b06_h01_regression: { status: b06.status === 'PASS' && marker(b06.output, /test result: ok/), source: 'b06_h01_regression.log' },
   architecture: { status: architecture.status === 'PASS', source: 'architecture.log' },
-  module_boundary: { status: run('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs']).status === 'PASS', source: 'module_boundary.log' },
+  module_boundary: { status: moduleBoundary.status === 'PASS', source: 'module_boundary.log' },
   source_binding: { status: false, source: 'gate-results.json' },
   package_smoke: { status: process.env.B07_H02_PACKAGE_SMOKE === 'PASS', source: 'package-smoke.json' },
   cargo_fmt: { status: fmt.status === 'PASS', source: 'cargo_fmt.log' },
   cargo_check: { status: check.status === 'PASS', source: 'cargo_check.log' },
   cargo_clippy: { status: clippy.status === 'PASS', source: 'cargo_clippy.log' },
+  node_full: { status: nodeFull.status === 'PASS', source: 'node_full.log' },
+  frontend_build: { status: build.status === 'PASS', source: 'frontend_build.log' },
+  contracts: { status: contracts.status === 'PASS', source: 'contracts.log' },
+  vitest_full: { status: vitest.status === 'PASS', source: 'vitest_full.log' },
+  b05_regression: { status: b05.status === 'PASS', source: 'b05_regression.log' },
+  b06_h01_acceptance: { status: b06Acceptance.status === 'PASS', source: 'b06_h01_acceptance.log' },
+  b06_h01_architecture: { status: b06Architecture.status === 'PASS', source: 'b06_h01_architecture.log' },
+  m0a: { status: m0a.status === 'PASS', source: 'm0a.log' },
+  cargo_all_targets: { status: cargoAll.status === 'PASS', source: 'cargo_all_targets.log' },
+  b07_h02_scale: { status: scale.status === 'PASS', source: 'b07_h02_scale.log' },
 }
 
 const afterCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()

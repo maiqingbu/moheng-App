@@ -70,6 +70,125 @@ pub fn validate_volume_route_reference(plan: &Value, intent: &ArtifactRef) -> Re
     Ok(())
 }
 
+pub fn validate_volume_intent(plan: &Value) -> Result<(), String> {
+    crate::generated::validators::validate_volume_intent_r1(plan)
+        .map_err(|error| format!("VOLUME_INTENT_CONTRACT:{error}"))
+}
+
+pub fn validate_task_reality(
+    chapter_plan: &Value,
+    route_plan: &Value,
+    task_states: &[(&str, &str)],
+) -> Result<(), String> {
+    let tasks = route_plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or("VOLUME_PLAN_TASKS_REQUIRED")?;
+    let states = task_states
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for task_ref in chapter_plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let task = tasks
+            .iter()
+            .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
+            .ok_or("TASK_SCOPE_VIOLATION")?;
+        if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
+            return Err("TASK_SCOPE_VIOLATION".into());
+        }
+        match states.get(task_ref).copied() {
+            Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
+            Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
+            _ => {}
+        }
+        for dependency in task
+            .get("dependsOnTaskIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if states.get(dependency).copied() != Some("SATISFIED") {
+                return Err("TASK_DEPENDENCY_UNMET".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_reservation_actions(
+    plan: &Value,
+    reservations: &[Value],
+    current_volume_no: i64,
+) -> Result<(), String> {
+    let reservation_map = reservations
+        .iter()
+        .filter_map(|item| {
+            item.get("reservationId")
+                .and_then(Value::as_str)
+                .map(|id| (id, item))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for reference in plan
+        .get("reservationRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !reservation_map.contains_key(reference) {
+            return Err("FUTURE_RESERVATION_VIOLATION".into());
+        }
+    }
+    for intent in plan
+        .get("sceneExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let action = intent
+            .get("action")
+            .or_else(|| intent.get("intent"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let reference = intent
+            .get("reservationRef")
+            .and_then(Value::as_str)
+            .or_else(|| intent.get("reservationId").and_then(Value::as_str));
+        let Some(reference) = reference else { continue };
+        let Some(reservation) = reservation_map.get(reference) else {
+            return Err("FUTURE_RESERVATION_VIOLATION".into());
+        };
+        let before_reserved_volume = reservation
+            .get("reservedForVolumeNo")
+            .and_then(Value::as_i64)
+            .is_some_and(|volume| current_volume_no < volume);
+        let before_not_before = reservation
+            .get("notBeforeVolumeNo")
+            .and_then(Value::as_i64)
+            .is_some_and(|volume| current_volume_no < volume);
+        let allowed = match action {
+            "FORESHADOW" => reservation.get("mayForeshadow").and_then(Value::as_bool) == Some(true),
+            "REVEAL" => {
+                reservation.get("mayReveal").and_then(Value::as_bool) == Some(true)
+                    && !before_reserved_volume
+                    && !before_not_before
+            }
+            _ => true,
+        };
+        if !allowed {
+            return Err("FUTURE_RESERVATION_VIOLATION".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn planning_pressure(
     current_chapter: i64,
     max_chapters: i64,
@@ -94,7 +213,6 @@ pub fn validate_current_chapter_plan(
     current_chapter_id: &str,
     route_task_ids: &[String],
     triggered_threads: &[String],
-    forbidden_reveals: &[String],
 ) -> Result<(), String> {
     validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(current_chapter_id) {
@@ -147,15 +265,6 @@ pub fn validate_current_chapter_plan(
             return Err("CONTINUITY_BRIDGE_REQUIRED".into());
         }
     }
-    let mut reveals = plan
-        .get("forbiddenTransitions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("value").and_then(Value::as_str));
-    if reveals.any(|reveal| forbidden_reveals.iter().any(|reserved| reserved == reveal)) {
-        return Err("FUTURE_RESERVATION_VIOLATION".into());
-    }
     Ok(())
 }
 
@@ -189,26 +298,23 @@ mod tests {
     #[test]
     fn chapter_plan_rejects_reserved_reveal_and_out_of_route_task() {
         let mut plan = chapter_plan();
-        plan["forbiddenTransitions"] = json!([{ "kind":"reveal", "value":"secret:v5" }]);
+        plan["sceneExecution"] = json!([{ "action":"REVEAL", "reservationRef":"secret:v5" }]);
         assert_eq!(
-            validate_current_chapter_plan(
+            validate_reservation_actions(
                 &plan,
-                "chapter:1",
-                &["task:required".into()],
-                &["thread:promise".into()],
-                &["secret:v5".into()]
+                &[json!({"reservationId":"secret:v5","mayForeshadow":true,"mayReveal":false})],
+                3
             ),
             Err("FUTURE_RESERVATION_VIOLATION".into())
         );
-        plan["forbiddenTransitions"] = json!([]);
+        plan["sceneExecution"] = json!([]);
         plan["activeTaskRefs"] = json!(["task:future"]);
         assert_eq!(
             validate_current_chapter_plan(
                 &plan,
                 "chapter:1",
                 &["task:required".into()],
-                &["thread:promise".into()],
-                &[]
+                &["thread:promise".into()]
             ),
             Err("TASK_SCOPE_VIOLATION".into())
         );
@@ -223,8 +329,7 @@ mod tests {
                 &plan,
                 "chapter:1",
                 &["task:required".into()],
-                &["thread:promise".into()],
-                &[]
+                &["thread:promise".into()]
             ),
             Err("CONTINUITY_BRIDGE_REQUIRED".into())
         );
@@ -234,8 +339,7 @@ mod tests {
             &plan,
             "chapter:1",
             &["task:required".into()],
-            &["thread:promise".into()],
-            &[]
+            &["thread:promise".into()]
         )
         .is_err());
     }
@@ -285,6 +389,39 @@ mod tests {
         assert_eq!(
             classify_plan_reality(false, false, false, true),
             "CHANGE_REQUEST"
+        );
+    }
+
+    #[test]
+    fn task_reality_rejects_unmet_dependency_blocked_invalidated_and_reserved() {
+        let chapter = json!({"activeTaskRefs":["task:b"]});
+        let route = json!({"tasks":[{"taskId":"task:a","class":"REQUIRED","dependsOnTaskIds":[],"objective":"a"},{"taskId":"task:b","class":"REQUIRED","dependsOnTaskIds":["task:a"],"objective":"b"}]});
+        assert_eq!(
+            validate_task_reality(
+                &chapter,
+                &route,
+                &[("task:a", "ACTIVE"), ("task:b", "ACTIVE")]
+            ),
+            Err("TASK_DEPENDENCY_UNMET".into())
+        );
+        assert!(validate_task_reality(
+            &chapter,
+            &route,
+            &[("task:a", "SATISFIED"), ("task:b", "ACTIVE")]
+        )
+        .is_ok());
+        assert_eq!(
+            validate_task_reality(
+                &chapter,
+                &route,
+                &[("task:a", "SATISFIED"), ("task:b", "INVALIDATED")]
+            ),
+            Err("TASK_SCOPE_VIOLATION".into())
+        );
+        let reserved_route = json!({"tasks":[{"taskId":"task:b","class":"RESERVED","dependsOnTaskIds":[],"objective":"reserved"}]});
+        assert_eq!(
+            validate_task_reality(&chapter, &reserved_route, &[("task:b", "ACTIVE")]),
+            Err("TASK_SCOPE_VIOLATION".into())
         );
     }
 }

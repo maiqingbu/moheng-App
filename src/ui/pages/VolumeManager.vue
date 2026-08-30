@@ -12,7 +12,10 @@ const state = computed(() => store.commandState('volume-build'))
 const signingPassed = computed(() => store.project?.signingStatus === 'PASS')
 onMounted(() => void store.loadVolumes())
 async function build() {
-  await store.runCommand('volume-build', { type: 'volume_plan_build' })
+  const current = items.value.find(volume => volume.status !== 'CLOSED') ?? items.value[0]
+  if (!current) return
+  await store.runCommand('volume-build', { type: 'planning_create_volume_intent', payload: { volumeId: current.id } })
+  await store.runCommand('volume-build', { type: 'planning_create_volume_plan', payload: { volumeId: current.id } })
   await store.loadVolumes(true)
 }
 </script>

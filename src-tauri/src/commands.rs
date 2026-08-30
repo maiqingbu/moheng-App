@@ -1036,6 +1036,78 @@ pub fn plan_route_from_authority(
     .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
     crate::planning::validate_volume_route(&route)?;
     let progress = volume_progress_from_authority(connection, request, project_id, revision)?;
+    let intent_payload = crate::repositories::narrative::NarrativeRepository::artifact_payload(
+        connection,
+        project_id,
+        "VolumeIntent",
+        volume_id,
+    )
+    .map_err(|e| e.to_string())?
+    .unwrap_or_else(|| json!({}));
+    let book_payload =
+        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+            connection, project_id, "BookPlan",
+        )
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| json!({}));
+    let mut future_reservations = book_payload
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let intent_refs = intent_payload
+        .get("futureReservationRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    future_reservations.retain(|reservation| {
+        reservation
+            .get("reservationId")
+            .and_then(Value::as_str)
+            .is_none_or(|id| intent_refs.is_empty() || intent_refs.contains(id))
+    });
+    let continuity_threads = continuity_from_request_bounded(connection, request, project_id)
+        .map_err(|e| e.to_string())?
+        .0
+        .into_iter()
+        .filter(|thread| matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED"))
+        .map(|thread| serde_json::to_value(thread).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let current_chapter_plan = request
+        .get("currentChapter")
+        .and_then(Value::as_i64)
+        .filter(|chapter| *chapter > 0)
+        .and_then(|chapter_no| {
+            crate::repositories::narrative::NarrativeRepository::chapter_id_for_number(
+                connection, project_id, volume_id, chapter_no,
+            )
+            .ok()
+            .flatten()
+        })
+        .map(|chapter_id| {
+            crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+                connection,
+                project_id,
+                "ChapterPlan",
+                &chapter_id,
+            )
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    let horizon_preview = current_chapter_plan
+        .as_ref()
+        .and_then(|reference| {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection, project_id, reference,
+            )
+            .ok()
+            .flatten()
+        })
+        .and_then(|payload| payload.get("horizonPreview").cloned())
+        .unwrap_or_else(|| json!([]));
     let bound = request
         .get("maxResults")
         .and_then(Value::as_u64)
@@ -1049,7 +1121,7 @@ pub fn plan_route_from_authority(
     let truncated = tasks.len() > bound;
     tasks.truncate(bound);
     Ok(
-        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"owner":"B07::PlanningRoute","truncated":truncated}),
+        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"continuityThreads":continuity_threads,"futureReservations":future_reservations,"currentChapterPlan":current_chapter_plan,"horizonPreview":horizon_preview,"owner":"B07::PlanningRoute","truncated":truncated}),
     )
 }
 
@@ -1413,7 +1485,72 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 } else {
                     "Route 在当前查询边界内完整返回"
                 };
-                json!({"diagnosisType":"PLANNING_CONSTRAINTS","supportStatus":"SUPPORTED","claim":input.get("question").cloned().unwrap_or_else(|| json!(capability_id)),"projectId":scope.project_id,"projectRevision":scope.project_revision,"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"explanation":{"selectedTaskReason":"优先检查当前 Route 中未满足的 Required/Climax/Reserved Task","blockedTaskIds":blocked_task_ids,"capacityReason":route["planningPressure"]["remainingChapterCapacity"],"requiredTasksRemaining":route["planningPressure"]["requiredTasksRemaining"],"reservationRestriction":"由当前 VolumeIntent 与 VolumePlan 的 reservationRefs 决定","scopeNote":scope_note},"provenance":{"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"routeVersion":route["routeVersion"],"planningPressure":route["planningPressure"]},"truncated":route["truncated"],"recommendedNextAction":"INSPECT_ROUTE"})
+                let goal_contract_refs = crate::repositories::narrative::NarrativeRepository::goal_contract_refs_for_volume(
+                    self.connection,
+                    self.project_id,
+                    input.get("volumeId").and_then(Value::as_str).unwrap_or_default(),
+                    bounds.max_results as i64,
+                )
+                .map_err(|e| e.to_string())?;
+                let chapter_plan_ref = route
+                    .get("currentChapterPlan")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let chapter_plan_payload = chapter_plan_ref
+                    .as_object()
+                    .and_then(|_| serde_json::from_value::<crate::generated::types::ArtifactRef>(chapter_plan_ref.clone()).ok())
+                    .and_then(|reference| crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(self.connection, self.project_id, &reference).ok().flatten());
+                let stale = if let Some(plan) = chapter_plan_payload.as_ref() {
+                    let current_revision =
+                        crate::repositories::narrative::NarrativeRepository::project_revision(
+                            self.connection,
+                            self.project_id,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let context = context_input_from_authority(
+                        self.connection,
+                        input,
+                        self.project_id,
+                        current_revision,
+                    )?;
+                    let current_digest = crate::narrative::relevant_state_digest(&context)?;
+                    plan.get("compiledFromProjectRevision").and_then(Value::as_i64)
+                        .zip(plan.get("compiledFromStateDigest").and_then(Value::as_str))
+                        .map(|(compiled_revision, compiled_digest)| json!({"status":match evaluate_plan_stale(compiled_revision, compiled_digest, current_revision, &current_digest) { PlanStaleStatus::Valid => "VALID", PlanStaleStatus::PlanStale => "PLAN_STALE" },"compiledFromProjectRevision":compiled_revision,"compiledFromStateDigest":compiled_digest,"currentProjectRevision":current_revision,"currentStateDigest":current_digest}))
+                        .unwrap_or_else(|| json!({"status":"INSUFFICIENT_DATA"}))
+                } else {
+                    json!({"status":"INSUFFICIENT_DATA"})
+                };
+                let asks_stale =
+                    input
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .is_some_and(|question| {
+                            question.to_lowercase().contains("stale")
+                                || question.contains("过期")
+                                || question.contains("陈旧")
+                        });
+                let support_status = if stale["status"] == "PLAN_STALE" {
+                    "CONFLICTING"
+                } else if stale["status"] == "INSUFFICIENT_DATA" && asks_stale {
+                    "INSUFFICIENT"
+                } else {
+                    "SUPPORTED"
+                };
+                let claim = if stale["status"] == "PLAN_STALE" {
+                    "当前 ChapterPlan 的 compiled state digest 与权威当前状态不一致"
+                } else {
+                    "当前规划约束由权威 Route、Task Reality、Continuity 与 Reservation 共同决定"
+                };
+                let continuity_threads = route
+                    .get("continuityThreads")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                let reservations = route
+                    .get("futureReservations")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                json!({"diagnosisType":"PLANNING_CONSTRAINTS","supportStatus":support_status,"claim":claim,"projectId":scope.project_id,"projectRevision":scope.project_revision,"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"explanation":{"selectedTaskReason":"依据当前 Route 的 Task Reality 与依赖关系选择 Required/Climax/Reserved Task","blockedTaskIds":blocked_task_ids,"capacityReason":route["planningPressure"]["remainingChapterCapacity"],"requiredTasksRemaining":route["planningPressure"]["requiredTasksRemaining"],"reservationRestriction":"仅允许 Reservation Authority 当前卷已授权的 foreshadow/reveal 行为","continuityRestriction":"当前 Open/Suspended Thread 必须在 ChapterPlan 中给出 disposition；DEFER_WITH_BRIDGE 必须提供 bridge","scopeNote":scope_note,"stale":stale},"goalContractRefs":goal_contract_refs,"continuityThreads":continuity_threads,"futureReservations":reservations,"currentChapterPlan":chapter_plan_ref,"provenance":{"goalContractRefs":goal_contract_refs,"volumeIntentRef":route["volumeIntentRef"],"volumePlanRef":route["volumePlanRef"],"routeVersion":route["routeVersion"],"planningPressure":route["planningPressure"],"taskReality":route["taskReality"],"continuityThreads":continuity_threads,"futureReservations":reservations,"chapterPlanRef":chapter_plan_ref,"stale":stale},"truncated":route["truncated"],"recommendedNextAction":if stale["status"] == "PLAN_STALE" { "RECOMPILE_NEXT_CHAPTER" } else { "INSPECT_ROUTE" }})
             }
             "query_foreshadows" => {
                 let chapters = input
@@ -2197,7 +2334,7 @@ fn execute_planning_command(
     let mut payload = request
         .pointer("/payload/plan")
         .cloned()
-        .ok_or_else(|| "IPC_INVALID:payload.plan".to_string())?;
+        .unwrap_or(Value::Null);
     let (artifact_type, scope, scope_key) = match command_type {
         "planning_finalize_book_plan" => (
             "BookPlan",
@@ -2233,16 +2370,8 @@ fn execute_planning_command(
         _ => return Err("IPC_UNSUPPORTED_PLANNING_COMMAND".into()),
     };
     match artifact_type {
-        "BookPlan" => {
-            let signing = request
-                .pointer("/payload/signingStatus")
-                .and_then(Value::as_str)
-                == Some("PASS");
-            let canon = string_array(request.pointer("/payload/openingCanonRefs"));
-            let evidence = string_array(request.pointer("/payload/signingEvidenceRefs"));
-            payload = crate::planning::approve_book_plan(&payload, signing, &canon, &evidence)?;
-        }
-        "VolumePlan" => crate::planning::validate_volume_route(&payload)?,
+        "BookPlan" => {}
+        "VolumeIntent" | "VolumePlan" => {}
         "ChapterPlan" => {}
         _ => {}
     }
@@ -2265,23 +2394,39 @@ fn execute_planning_command(
         {
             return Err("BOOK_PLAN_APPROVED_REQUIRED".into());
         }
+        if payload.is_null() {
+            let target_chapters =
+                crate::repositories::narrative::NarrativeRepository::volume_target_chapters(
+                    &handle, project_id, &scope_key,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+            payload = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"current volume route","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":target_chapters,"max":target_chapters},"targetWordRange":{"preferred":target_chapters.saturating_mul(1000)}});
+        }
+        crate::planning::validate_volume_intent(&payload)?;
     }
     if artifact_type == "BookPlan" {
         let canon_refs = string_array(request.pointer("/payload/openingCanonRefs"));
         let evidence_refs = string_array(request.pointer("/payload/signingEvidenceRefs"));
-        if canon_refs.len() < 3 || canon_refs.iter().any(|reference| {
-            !crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(
-                &handle, project_id, reference,
+        let canon_reachable = canon_refs.iter().try_fold(true, |reachable, reference| {
+            Ok::<_, String>(reachable && crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(&handle, project_id, reference).map_err(|e| e.to_string())?)
+        })?;
+        let receipt_passes = evidence_refs.iter().try_fold(false, |passed, reference| {
+            Ok::<_, String>(
+                passed
+                    || crate::repositories::narrative::NarrativeRepository::signing_receipt_passes(
+                        &handle,
+                        project_id,
+                        reference,
+                        &canon_refs,
+                    )
+                    .map_err(|e| e.to_string())?,
             )
-            .unwrap_or(false)
-        }) || evidence_refs.iter().any(|reference| {
-            !crate::repositories::narrative::NarrativeRepository::signing_evidence_reference_exists(
-                &handle, project_id, reference,
-            )
-            .unwrap_or(false)
-        }) {
+        })?;
+        if canon_refs.len() < 3 || !canon_reachable || !receipt_passes {
             return Err("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE".into());
         }
+        payload = crate::planning::approve_book_plan(&payload, true, &canon_refs, &evidence_refs)?;
     }
     if artifact_type == "VolumePlan" {
         let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
@@ -2292,6 +2437,20 @@ fn execute_planning_command(
         )
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "VOLUME_INTENT_NOT_FOUND".to_string())?;
+        if payload.is_null() {
+            let intent_payload =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    &handle, project_id, &intent,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "VOLUME_INTENT_PAYLOAD_NOT_FOUND".to_string())?;
+            let target_chapters = intent_payload
+                .pointer("/targetChapterRange/max")
+                .and_then(Value::as_i64)
+                .unwrap_or(1);
+            payload = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":intent,"routeVersion":1,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":target_chapters,"maxChapters":target_chapters}});
+        }
+        crate::planning::validate_volume_route(&payload)?;
         crate::planning::validate_volume_route_reference(&payload, &intent)?;
     }
     if artifact_type == "ChapterPlan" {
@@ -2322,8 +2481,6 @@ fn execute_planning_command(
             .filter_map(|task| task.get("taskId").and_then(Value::as_str))
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
-        let triggered_threads = string_array(request.pointer("/payload/triggeredThreadRefs"));
-        let forbidden_reveals = string_array(request.pointer("/payload/forbiddenRevealRefs"));
         let current_revision =
             crate::repositories::narrative::NarrativeRepository::project_revision(
                 &handle, project_id,
@@ -2338,6 +2495,35 @@ fn execute_planning_command(
             project_id,
             current_revision,
         )?;
+        let triggered_threads = context
+            .continuity_threads
+            .iter()
+            .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>();
+        let route_states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+            &handle,
+            project_id,
+            &route_task_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            100,
+        )
+        .map_err(|e| e.to_string())?;
+        let task_states = route_states
+            .iter()
+            .map(|state| {
+                (
+                    state.state_id.as_str(),
+                    state
+                        .value
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("NOT_STARTED"),
+                )
+            })
+            .collect::<Vec<_>>();
         let current_digest = crate::narrative::relevant_state_digest(&context)?;
         let compiled_revision = payload
             .get("compiledFromProjectRevision")
@@ -2389,13 +2575,62 @@ fn execute_planning_command(
         {
             return Err("PLANNING_MODEL_RUN_INVALID".into());
         }
+        if !crate::repositories::narrative::NarrativeRepository::exactly_one_primary_planning_call(
+            &handle,
+            project_id,
+            &context_ref.artifact_id,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return Err("PLANNING_PRIMARY_CALL_COUNT_INVALID".into());
+        }
+        if !crate::repositories::narrative::NarrativeRepository::planning_model_run_binds_plan(
+            &handle,
+            project_id,
+            model_run_id,
+            &context_ref.artifact_id,
+            &payload,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return Err("PLANNING_MODEL_OUTPUT_MISMATCH".into());
+        }
         crate::planning::validate_current_chapter_plan(
             &payload,
             chapter_id,
             &route_task_ids,
             &triggered_threads,
-            &forbidden_reveals,
         )?;
+        crate::planning::validate_task_reality(&payload, &route, &task_states)?;
+        let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(
+            &handle, project_id, &volume_id,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+        let reservations = [
+            crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+                &handle, project_id, "BookPlan",
+            )
+            .map_err(|e| e.to_string())?,
+            crate::repositories::narrative::NarrativeRepository::artifact_payload(
+                &handle,
+                project_id,
+                "VolumeIntent",
+                &volume_id,
+            )
+            .map_err(|e| e.to_string())?,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|payload| {
+            payload
+                .get("futureReservations")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+        crate::planning::validate_reservation_actions(&payload, &reservations, current_volume_no)?;
     }
     let artifact_id = format!("plan:{}:{}", artifact_type.to_lowercase(), scope_key);
     let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
