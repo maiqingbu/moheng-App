@@ -8,6 +8,7 @@ mkdirSync(evidence, { recursive: true })
 
 const beforeCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()
 const dirtyBefore = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).stdout.trim().length > 0
+const generatedRegressionArtifacts = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']
 
 function run(name, command, args, cwd = root) {
   const result = spawnSync(command, args, { cwd, encoding: 'utf8' })
@@ -38,6 +39,19 @@ const moduleBoundary = run('module_boundary', 'node', ['scripts/verify-module-bo
 const nonScaleReady = [b07, b06, fmt, check, clippy, frontend, nodeFull, build, contracts, vitest, ui, b05, b06Acceptance, b06Architecture, m0a, architecture, acceptanceTests, moduleBoundary].every(result => result.status === 'PASS')
 const scale = nonScaleReady ? run('b07_h02_scale', 'cargo', ['test', '--test', 'b07_scale', '--', '--ignored', '--nocapture'], resolve(root, 'src-tauri')) : { name: 'b07_h02_scale', status: 'FAIL', exitCode: 1, output: 'SKIPPED: non-scale gates are not PASS' }
 if (!nonScaleReady) writeFileSync(resolve(evidence, 'b07_h02_scale.log'), scale.output)
+
+// B01's live-schema evidence test intentionally regenerates two frozen files.
+// Restore only these explicit generated outputs so a clean release run remains
+// source-bound; no source or unrelated user file is touched.
+if (!dirtyBefore) {
+  for (const path of generatedRegressionArtifacts) {
+    const changed = spawnSync('git', ['diff', '--quiet', '--', path], { cwd: root }).status !== 0
+    if (changed) {
+      const baseline = spawnSync('git', ['show', `${beforeCommit}:${path}`], { cwd: root, encoding: 'buffer' })
+      if (baseline.status === 0) writeFileSync(resolve(root, path), baseline.stdout)
+    }
+  }
+}
 
 const marker = (text, pattern) => pattern.test(text)
 const gates = {
