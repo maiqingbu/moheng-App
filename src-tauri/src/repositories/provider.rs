@@ -92,7 +92,7 @@ impl ProviderSettingsRepository {
         })?;
         for row in rows {
             let (key, raw) = row?;
-            let parsed = serde_json::from_str(&raw).unwrap_or_else(|_| Value::String(raw));
+            let parsed = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
             value[key] = parsed;
         }
         Ok(value)

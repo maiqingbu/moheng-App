@@ -3064,6 +3064,7 @@ fn execute_planning_command(
     Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner"}))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_provider_settings(
     state: &KernelState,
     request: &Value,
