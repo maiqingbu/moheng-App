@@ -37,7 +37,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 prompt: "bounded".into(),
                 timeout_ms: 1000,
             },
-            "secret-is-ephemeral",
+            "fixture-token-ephemeral",
         )
         .unwrap();
     assert_eq!(response.usage.total_tokens, 18);
@@ -52,7 +52,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 prompt: String::new(),
                 timeout_ms: 1000,
             },
-            "bad-secret",
+            "invalid-fixture-token",
         )
         .unwrap_err();
     assert_eq!(error.kind, ProviderErrorKind::Authentication);
@@ -61,7 +61,9 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
 #[test]
 fn p01_configured_gateway_requires_secret_and_never_returns_it() {
     let secret_store = MemorySecretStore::new();
-    secret_store.put("fixture", "secret-not-output").unwrap();
+    secret_store
+        .put("fixture", "fixture-token-not-output")
+        .unwrap();
     let gateway = ConfiguredProductionGateway::new(
         ProviderConfig {
             provider_id: "fixture".into(),
@@ -81,7 +83,10 @@ fn p01_configured_gateway_requires_secret_and_never_returns_it() {
         .invoke("TEST_PROVIDER", &json!({"prompt":"ping"}))
         .unwrap();
     assert_eq!(response.output["ok"], true);
-    assert!(!response.output.to_string().contains("secret-not-output"));
+    assert!(!response
+        .output
+        .to_string()
+        .contains("fixture-token-not-output"));
 }
 
 #[test]
@@ -105,7 +110,7 @@ fn p01_provider_settings_are_non_secret_and_budget_gate_precedes_invocation() {
             prompt: String::new(),
             timeout_ms: settings.timeout_ms,
         },
-        "secret",
+        "fixture-token",
         true,
     );
     assert_eq!(result.unwrap_err().kind, ProviderErrorKind::BudgetExceeded);
@@ -123,12 +128,12 @@ fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_erro
         "model":"fixture-model",
         "endpoint":"http://127.0.0.1:1",
         "enabled":true,
-        "apiKey":"secret-must-not-persist"
+        "apiKey":"fixture-token-must-not-persist"
     });
     let saved = ProviderSettingsRepository::write_global(&paths, &input).unwrap();
     assert!(saved.get("apiKey").is_none());
     let raw = std::fs::read_to_string(paths.root().join("provider-settings.json")).unwrap();
-    assert!(!raw.contains("secret-must-not-persist"));
+    assert!(!raw.contains("fixture-token-must-not-persist"));
     assert_eq!(
         ProviderSettingsRepository::read_global(&paths).unwrap()["providerId"],
         "fixture"
@@ -142,7 +147,7 @@ fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_erro
                 prompt: "ping".into(),
                 timeout_ms: 500,
             },
-            "secret",
+            "fixture-token",
         )
         .unwrap_err();
     assert!(matches!(
@@ -183,7 +188,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
             },
-            "ephemeral-secret",
+            "fixture-token-ephemeral",
         )
         .unwrap();
     assert_eq!(response.output["ok"], true);
@@ -199,7 +204,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
             },
-            "ephemeral-secret",
+            "fixture-token-ephemeral",
         )
         .unwrap_err();
     assert_eq!(auth_error.kind, ProviderErrorKind::Authentication);
@@ -213,7 +218,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 prompt: "ping".into(),
                 timeout_ms: 500,
             },
-            "ephemeral-secret",
+            "fixture-token-ephemeral",
         )
         .unwrap_err();
     assert_eq!(timeout_error.kind, ProviderErrorKind::Timeout);
