@@ -2422,14 +2422,25 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .params
                     .get("plan")
                     .ok_or_else(|| "H03_RECOMPILE_PLAN_REQUIRED".to_string())?;
-                let revision: i64 = self
-                    .connection
-                    .query_row(
-                        "SELECT revision FROM project_meta WHERE project_id=?1",
-                        [self.project_id],
-                        |row| row.get(0),
+                let revision =
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
                     )
                     .map_err(|error| error.to_string())?;
+                let volume_id =
+                    crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+                        self.connection,
+                        self.project_id,
+                        chapter_id,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+                let authority_request = json!({
+                    "projectId":self.project_id,"chapterId":chapter_id,"volumeId":volume_id,
+                    "executionMode":"LONG_FORM","entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
+                    "references":operation.params.get("references").cloned().unwrap_or_else(|| json!([]))
+                });
                 let command_id = format!(
                     "h03:recompile:{}",
                     &sha256_canonical(
@@ -2442,6 +2453,8 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     self.project_id,
                     chapter_id,
                     plan,
+                    &authority_request,
+                    "LONG_FORM",
                     &command_id,
                     &format!("{command_id}:idempotency"),
                     revision,
@@ -3133,6 +3146,38 @@ fn execute_planning_command(
         })
         .collect::<Vec<_>>();
         crate::planning::validate_reservation_actions(&payload, &reservations, current_volume_no)?;
+    }
+    if artifact_type == "ChapterPlan" {
+        let chapter_id = request
+            .pointer("/payload/chapterId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "IPC_INVALID:payload.chapterId".to_string())?;
+        let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+            &handle, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+        let mut owner_request = request.clone();
+        owner_request["volumeId"] = json!(volume_id);
+        owner_request["executionMode"] = json!("LONG_FORM");
+        let receipt = crate::planning::recompile_chapter_plan_owner(
+            &handle,
+            project_id,
+            chapter_id,
+            &payload,
+            &owner_request,
+            "LONG_FORM",
+            command_id,
+            idempotency_key,
+            expected_revision.ok_or_else(|| "IPC_INVALID:expectedRevision".to_string())?,
+            requested_at,
+            request
+                .pointer("/payload/modelRunId")
+                .and_then(Value::as_str),
+        )?;
+        return Ok(
+            json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner"}),
+        );
     }
     let artifact_id = format!("plan:{}:{}", artifact_type.to_lowercase(), scope_key);
     let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(

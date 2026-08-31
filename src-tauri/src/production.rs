@@ -192,14 +192,11 @@ fn load_artifact_payload(
     project_id: &str,
     reference: &ArtifactRef,
 ) -> Result<Value, String> {
-    let raw: String = connection
-        .query_row(
-            "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version AND p.payload_hash=a.payload_hash WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4 AND a.artifact_status='COMMITTED'",
-            libsql_rusqlite::params![project_id, reference.artifact_id, reference.version, reference.payload_hash],
-            |row| row.get(0),
-        )
-        .map_err(|_| "B08_BOUND_ARTIFACT_NOT_FOUND".to_string())?;
-    serde_json::from_str(&raw).map_err(|error| format!("B08_BOUND_ARTIFACT_INVALID:{error}"))
+    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection, project_id, reference,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "B08_BOUND_ARTIFACT_NOT_FOUND".to_string())
 }
 
 fn authority_request(
@@ -251,13 +248,10 @@ fn validate_plan_is_current(
     execution_mode: &str,
     plan: &Value,
 ) -> Result<(), String> {
-    let revision: i64 = connection
-        .query_row(
-            "SELECT revision FROM project_meta WHERE project_id=?1",
-            [project_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
+    let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+        connection, project_id,
+    )
+    .map_err(|error| error.to_string())?;
     let digest = current_authority_digest(
         connection,
         request,
@@ -329,13 +323,8 @@ fn update_stage(
     if !STAGES.contains(&stage) {
         return Err(format!("B08_INVALID_STAGE:{stage}"));
     }
-    connection
-        .execute(
-            "UPDATE jobs SET current_stage=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4",
-            libsql_rusqlite::params![stage, now, project_id, job_id],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    DurableJobService::update_stage(connection, project_id, job_id, stage, now)
+        .map_err(|error| error.to_string())
 }
 
 fn block_for_recompile(
@@ -344,17 +333,8 @@ fn block_for_recompile(
     job_id: &str,
     now: &str,
 ) -> Result<(), String> {
-    connection
-        .execute(
-            "UPDATE jobs SET status='BLOCKED',current_stage='RECONCILE',error_code='PLAN_STALE',updated_at=?1 WHERE project_id=?2 AND job_id=?3",
-            libsql_rusqlite::params![now, project_id, job_id],
-        )
-        .map_err(|error| error.to_string())?;
-    DurableJobService::release_lease(connection, project_id, job_id, now)
-        .map_err(|error| error.to_string())?;
-    DurableJobService::set_runtime_state(connection, project_id, "PAUSED", Some("PLAN_STALE"), now)
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    DurableJobService::block_for_plan_stale(connection, project_id, job_id, now)
+        .map_err(|error| error.to_string())
 }
 
 /// Execute one formal B08 chapter production run.  The function returns a
@@ -400,28 +380,27 @@ pub fn run_chapter_production(
             "receipt":previous
         }));
     }
-    let chapter_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_id=?2)",
-            libsql_rusqlite::params![project_id, chapter_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    if !chapter_exists {
+    let chapter_volume = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection,
+        &project_id,
+        &chapter_id,
+    )
+    .map_err(|error| error.to_string())?;
+    if chapter_volume.is_none() {
         return Err("B08_CHAPTER_NOT_FOUND".into());
     }
     let policy = request
         .pointer("/payload/gatePolicyRef")
         .cloned()
         .or_else(|| {
-            connection
-                .query_row(
-                    "SELECT json_object('artifactId',artifact_id,'version',version,'payloadHash',payload_hash) FROM canonical_heads WHERE project_id=?1 AND artifact_type='GatePolicy' LIMIT 1",
-                    [&project_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                connection,
+                &project_id,
+                "GatePolicy",
+            )
+            .ok()
+            .flatten()
+            .and_then(|reference| serde_json::to_value(reference).ok())
         })
         .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
     let policy_ref: ArtifactRef =
@@ -452,20 +431,13 @@ pub fn run_chapter_production(
     .map_err(|error| error.to_string())?;
 
     update_stage(connection, &project_id, &job_id, "CONTEXT", &now)?;
-    let mut current_revision: i64 = connection
-        .query_row(
-            "SELECT revision FROM project_meta WHERE project_id=?1",
-            [&project_id],
-            |row| row.get(0),
+    let mut current_revision =
+        crate::repositories::narrative::NarrativeRepository::project_revision(
+            connection,
+            &project_id,
         )
         .map_err(|error| error.to_string())?;
-    let volume_id: String = connection
-        .query_row(
-            "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
-            libsql_rusqlite::params![project_id, chapter_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| "B08_CHAPTER_NOT_FOUND".to_string())?;
+    let volume_id = chapter_volume.ok_or_else(|| "B08_CHAPTER_NOT_FOUND".to_string())?;
     let context_id = StableIdentityFactory::from_command(
         StableIdKind::Artifact,
         &format!("{command_id}:context"),
@@ -603,6 +575,14 @@ pub fn run_chapter_production(
             &project_id,
             &chapter_id,
             &plan_payload,
+            &authority_request(
+                request,
+                &project_id,
+                &chapter_id,
+                &volume_id,
+                execution_mode,
+            ),
+            execution_mode,
             &planning_command_id,
             &format!("{idempotency_key}:planning-owner"),
             current_revision,
@@ -617,13 +597,14 @@ pub fn run_chapter_production(
         current_revision = planning_receipt.after_revision;
         (context_ref, context_payload, plan_ref, plan_payload)
     } else {
-        let plan_ref: ArtifactRef = connection
-                .query_row(
-                    "SELECT h.artifact_id,h.version,h.payload_hash FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
-                    libsql_rusqlite::params![project_id, chapter_scope(&chapter_id).to_string()],
-                    |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? }),
-                )
-                .map_err(|_| "B08_LONG_FORM_CHAPTER_PLAN_REQUIRED".to_string())?;
+        let plan_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+            connection,
+            &project_id,
+            "ChapterPlan",
+            &chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B08_LONG_FORM_CHAPTER_PLAN_REQUIRED".to_string())?;
         let plan_payload = load_artifact_payload(connection, &project_id, &plan_ref)?;
         let context_ref: ArtifactRef = serde_json::from_value(
             plan_payload
@@ -1244,20 +1225,19 @@ fn validate_actual_extraction(
         .collect::<BTreeSet<_>>();
     for candidate in &audit.knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
-        let knower_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM canon_entities WHERE project_id=?1 AND entity_id=?2)",
-                libsql_rusqlite::params![project_id, candidate.knower_id],
-                |row| row.get(0),
+        let knower_exists =
+            crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
+                connection,
+                project_id,
+                &candidate.knower_id,
             )
             .map_err(|error| error.to_string())?;
-        let fact_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM canon_facts WHERE project_id=?1 AND fact_id=?2)",
-                libsql_rusqlite::params![project_id, candidate.fact_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
+        let fact_exists = crate::repositories::narrative::NarrativeRepository::canon_fact_exists(
+            connection,
+            project_id,
+            &candidate.fact_id,
+        )
+        .map_err(|error| error.to_string())?;
         if !knower_exists || (!fact_exists && !pending_facts.contains(candidate.fact_id.as_str())) {
             return Err("B08_KNOWLEDGE_AUTHORITY_NOT_FOUND".into());
         }

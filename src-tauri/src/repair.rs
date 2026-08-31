@@ -189,13 +189,11 @@ pub fn issue_authorization(
         &authorization.repair_plan_id,
     )?
     .ok_or_else(|| RepairError::Invalid("repair plan not found".into()))?;
-    let revision: i64 = connection
-        .query_row(
-            "SELECT revision FROM project_meta WHERE project_id=?1",
-            [&authorization.project_id],
-            |row| row.get(0),
-        )
-        .map_err(support::SupportRepositoryError::Sqlite)?;
+    let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+        connection,
+        &authorization.project_id,
+    )
+    .map_err(|error| RepairError::Invalid(error.to_string()))?;
     if plan.operation_digest != authorization.operation_digest
         || plan.based_on_project_revision != authorization.based_on_project_revision
         || revision != authorization.based_on_project_revision
@@ -317,13 +315,10 @@ pub fn execute(
     } else {
         "REPAIR_VERIFICATION_FAILED"
     };
-    let after_revision: i64 = connection
-        .query_row(
-            "SELECT revision FROM project_meta WHERE project_id=?1",
-            [project_id],
-            |row| row.get(0),
-        )
-        .map_err(support::SupportRepositoryError::Sqlite)?;
+    let after_revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+        connection, project_id,
+    )
+    .map_err(|error| RepairError::Invalid(error.to_string()))?;
     let receipt = ExecutionReceipt {
         receipt_ref: format!("repair-receipt:{authorization_id}"),
         repair_plan_id: repair_plan_id.into(),

@@ -1110,4 +1110,39 @@ impl NarrativeRepository {
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
         connection.query_row("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4", libsql_rusqlite::params![project_id, reference.artifact_id, reference.version, reference.payload_hash], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
     }
+
+    pub fn canonical_project_head_ref(
+        connection: &Connection,
+        project_id: &str,
+        artifact_type: &str,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type=?2 ORDER BY scope_key LIMIT 1",
+                libsql_rusqlite::params![project_id, artifact_type],
+                |row| {
+                    Ok(ArtifactRef {
+                        artifact_id: row.get(0)?,
+                        version: row.get(1)?,
+                        payload_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn canon_fact_exists(
+        connection: &Connection,
+        project_id: &str,
+        fact_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_facts WHERE project_id=?1 AND fact_id=?2)",
+                libsql_rusqlite::params![project_id, fact_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
 }

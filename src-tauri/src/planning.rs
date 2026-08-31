@@ -297,6 +297,8 @@ pub fn recompile_chapter_plan_owner(
     project_id: &str,
     chapter_id: &str,
     plan: &Value,
+    authority_request: &Value,
+    execution_mode: &str,
     command_id: &str,
     idempotency_key: &str,
     expected_revision: i64,
@@ -330,6 +332,118 @@ pub fn recompile_chapter_plan_owner(
     {
         return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
     }
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let context = crate::commands::context_input_from_authority(
+        connection,
+        authority_request,
+        project_id,
+        expected_revision,
+    )?;
+    let current_digest = crate::narrative::relevant_state_digest(&context)?;
+    if matches!(
+        crate::narrative::evaluate_plan_stale(
+            plan.get("compiledFromProjectRevision")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| "CHAPTER_PLAN_REVISION_REQUIRED".to_string())?,
+            plan.get("compiledFromStateDigest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "CHAPTER_PLAN_STATE_DIGEST_REQUIRED".to_string())?,
+            expected_revision,
+            &current_digest,
+        ),
+        crate::narrative::PlanStaleStatus::PlanStale
+    ) {
+        return Err("PLAN_STALE".into());
+    }
+    let triggered_threads = context
+        .continuity_threads
+        .iter()
+        .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    let (route_task_ids, route_payload) = if execution_mode == "LONG_FORM" {
+        let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+            connection, project_id, &volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+        let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            connection, project_id, &route_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+        let task_ids = route
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        (task_ids, Some(route))
+    } else {
+        (context.active_task_refs.clone(), None)
+    };
+    validate_current_chapter_plan(plan, chapter_id, &route_task_ids, &triggered_threads)?;
+    if let Some(route) = route_payload.as_ref() {
+        let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+            connection,
+            project_id,
+            &route_task_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            100,
+        )
+        .map_err(|error| error.to_string())?;
+        let states = states
+            .iter()
+            .map(|state| {
+                (
+                    state.state_id.as_str(),
+                    state
+                        .value
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("NOT_STARTED"),
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_task_reality(plan, route, &states)?;
+    }
+    let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(
+        connection, project_id, &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    let reservations = [
+        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+            connection, project_id, "BookPlan",
+        )
+        .map_err(|error| error.to_string())?,
+        crate::repositories::narrative::NarrativeRepository::artifact_payload(
+            connection,
+            project_id,
+            "VolumeIntent",
+            &volume_id,
+        )
+        .map_err(|error| error.to_string())?,
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|payload| {
+        payload
+            .get("futureReservations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    })
+    .collect::<Vec<_>>();
+    validate_reservation_actions(plan, &reservations, current_volume_no)?;
     let artifact_id = format!("plan:chapterplan:{chapter_id}");
     let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
         connection,

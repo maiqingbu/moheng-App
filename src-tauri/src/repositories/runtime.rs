@@ -124,6 +124,34 @@ fn days_in_month(year: i32, month: i32) -> i32 {
 }
 
 impl DurableJobService {
+    pub fn update_stage(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        stage: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET current_stage=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4",
+            libsql_rusqlite::params![stage, now, project_id, job_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn block_for_plan_stale(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET status='BLOCKED',current_stage='RECONCILE',error_code='PLAN_STALE',updated_at=?1 WHERE project_id=?2 AND job_id=?3",
+            libsql_rusqlite::params![now, project_id, job_id],
+        )?;
+        Self::release_lease(connection, project_id, job_id, now)?;
+        Self::set_runtime_state(connection, project_id, "PAUSED", Some("PLAN_STALE"), now)?;
+        Ok(())
+    }
     pub fn start_job(
         connection: &Connection,
         spec: &JobSpec,

@@ -302,6 +302,15 @@ fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
     chapter_id
 }
 
+fn seed_future_reservation_authority(connection: &Connection, project_id: &str) {
+    let payload = json!({"planningMaturity":"APPROVED","futureReservations":[{"reservationId":"reservation:future:1","mayForeshadow":true,"mayReveal":false,"reservedForVolumeNo":2,"notBeforeVolumeNo":2}]});
+    let hash = sha256_canonical(&payload).unwrap();
+    let scope = json!({"level":"PROJECT"}).to_string();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:book:reservation',?1,'BookPlan','PROJECT',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, scope, hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book:reservation',1,?1,?2)", libsql_rusqlite::params![payload.to_string(), hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'BookPlan','PROJECT',?2,'plan:book:reservation',1,?3)", libsql_rusqlite::params![project_id, json!({"level":"PROJECT"}).to_string(), hash]).unwrap();
+}
+
 #[test]
 fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let temp = tempfile::tempdir().unwrap();
@@ -690,6 +699,7 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         .create(project_id, "B08 actual reveal", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    seed_future_reservation_authority(&connection, project_id);
     drop(connection);
     let result = execute_command_impl(
         &state,
@@ -1286,11 +1296,23 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
     let state = KernelState::new(AppPaths::new(temp.path()));
     let connection = state.manager.create("p-h03-recompile", "H03", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, "p-h03-recompile");
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let route = json!({"payloadSchema":"volume-plan.r1","routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let route_hash = sha256_canonical(&route).unwrap();
+    let route_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:volume:h03','p-h03-recompile','VolumePlan','VOLUME',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3,?3)", libsql_rusqlite::params![route_scope, route_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume:h03',1,?1,?2)", libsql_rusqlite::params![route.to_string(), route_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p-h03-recompile','VolumePlan','VOLUME',?1,'plan:volume:h03',1,?2)", libsql_rusqlite::params![json!({"level":"VOLUME","volumeId":volume_id}).to_string(), route_hash]).unwrap();
     drop(connection);
-    let context = query_context_manifest_impl(&state, json!({
-        "projectId":"p-h03-recompile","chapterId":chapter_id,"volumeId":StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap(),
-        "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]
-    })).unwrap();
+    let context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":"p-h03-recompile","chapterId":chapter_id,"volumeId":volume_id,
+            "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]
+        }),
+    )
+    .unwrap();
     let context_id = "context:h03:recompile";
     let context_hash = sha256_canonical(&context).unwrap();
     let connection = state.manager.open("p-h03-recompile", "H03", NOW).unwrap();
