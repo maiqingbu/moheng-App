@@ -101,8 +101,18 @@ pub enum RepairError {
 }
 
 pub fn operation_digest(operations: &[RepairOperation]) -> Result<String, RepairError> {
-    sha256_canonical(&serde_json::to_value(operations)?)
-        .map_err(|error| RepairError::Invalid(error.to_string()))
+    operation_digest_with_postconditions(operations, &[])
+}
+
+pub fn operation_digest_with_postconditions(
+    operations: &[RepairOperation],
+    expected_postconditions: &[Value],
+) -> Result<String, RepairError> {
+    sha256_canonical(&json!({
+        "operations": operations,
+        "expectedPostconditions": expected_postconditions,
+    }))
+    .map_err(|error| RepairError::Invalid(error.to_string()))
 }
 
 pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
@@ -112,7 +122,11 @@ pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
     if plan.based_on_project_revision < 0 || plan.proposed_operations.is_empty() {
         return Err(RepairError::Invalid("plan revision or operations".into()));
     }
-    if operation_digest(&plan.proposed_operations)? != plan.operation_digest {
+    if operation_digest_with_postconditions(
+        &plan.proposed_operations,
+        &plan.expected_postconditions,
+    )? != plan.operation_digest
+    {
         return Err(RepairError::Invalid("operationDigest mismatch".into()));
     }
     for operation in &plan.proposed_operations {
@@ -131,6 +145,11 @@ pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
                 operation.operation
             )));
         }
+    }
+    if plan.expected_postconditions.len() != plan.proposed_operations.len() {
+        return Err(RepairError::Invalid(
+            "every operation requires exactly one expectedPostcondition".into(),
+        ));
     }
     Ok(())
 }
@@ -248,9 +267,17 @@ pub fn execute(
         }
     }
     if postconditions.is_empty() {
-        for operation in &plan.proposed_operations {
+        for (operation, expected) in plan
+            .proposed_operations
+            .iter()
+            .zip(plan.expected_postconditions.iter())
+        {
             match owner.verify(operation) {
-                Ok(value) => postconditions.push(value),
+                Ok(mut value) => {
+                    value["expectedPostcondition"] = expected.clone();
+                    value["typedRequery"] = Value::Bool(true);
+                    postconditions.push(value)
+                }
                 Err(error) => postconditions.push(json!({
                     "operation":operation.operation,
                     "status":"REPAIR_VERIFICATION_INCOMPLETE",
