@@ -8,6 +8,7 @@ const production = read('src-tauri/src/production.rs')
 const repair = read('src-tauri/src/repair.rs')
 const support = read('src-tauri/src/repositories/support.rs')
 const commands = read('src-tauri/src/commands.rs')
+const planning = read('src-tauri/src/planning.rs')
 const ui = read('src/ui/pages/ProductionCenter.vue')
 const productionDispatchStart = commands.indexOf('if command_type == "production_start"')
 const productionOwnerReturn = commands.indexOf('return crate::production::run_chapter_production', productionDispatchStart)
@@ -17,7 +18,7 @@ const checks = {
   singleProductionRoot: commands.includes('return crate::production::run_chapter_production') && commands.includes('B08_CHAPTER_REQUIRED'),
   noLegacyProductionSuccess: productionDispatchStart >= 0 && productionOwnerReturn > productionDispatchStart && runtimeControlCall > productionOwnerReturn,
   b06ContextOwner: production.includes('context_input_from_authority') && production.includes('B06::ContextCompilerOwner'),
-  b07PlanningOwner: production.includes('B07::PlanningOwner') && commands.includes('recompile_chapter_plan_owner'),
+  b07PlanningOwner: planning.includes('B07::PlanningOwner') && commands.includes('recompile_chapter_plan_owner'),
   injectedTransport: production.includes('ProductionModelGateway') && !production.includes('LocalProductionTransport') && !production.includes('rendererBody'),
   actualAuditGate: production.includes('AUDIT_EXTRACT') && production.includes('validate_actual_extraction'),
   realityDelta: production.includes('canonDelta') && production.includes('knowledgeDelta') && production.includes('stateDelta') && production.includes('obligationDelta'),
