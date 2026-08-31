@@ -194,6 +194,21 @@ impl ProductionModelGateway for AuditVariantGateway {
         let mut response = RecordingGateway.invoke(capability, input)?;
         if capability == "AUDIT_EXTRACT" {
             match self.variant {
+                "actual-reveal-after-foreshadow" => {
+                    response.output["revealedReservationRefs"] = json!(["reservation:future:1"])
+                }
+                "canon-semantic-conflict" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:other-location",
+                        "subjectId":"entity:actual:linzhou",
+                        "predicate":"location",
+                        "objectJson":{"place":"other-city"},
+                        "authorityLevel":"C",
+                        "eventType":"ACTION",
+                        "storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }])
+                }
                 "reservation" => {
                     response.output["revealedReservationRefs"] =
                         json!(["reservation:not-authorized"])
@@ -209,6 +224,11 @@ impl ProductionModelGateway for AuditVariantGateway {
                 "change" => response.output["changeRequested"] = json!(true),
                 _ => {}
             }
+        }
+        if capability == "PLAN_STRATEGY" && self.variant == "actual-reveal-after-foreshadow" {
+            response.output["reservationRefs"] = json!(["reservation:future:1"]);
+            response.output["sceneExecution"] =
+                json!([{ "action":"FORESHADOW", "reservationRef":"reservation:future:1" }]);
         }
         Ok(response)
     }
@@ -653,6 +673,60 @@ fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
             assert_eq!(Some(reconciliation.as_str()), expected_reconciliation);
         }
     }
+}
+
+#[test]
+fn plan_foreshadow_actual_reveal_is_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-actual-reveal";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "actual-reveal-after-foreshadow",
+        }),
+    );
+    let connection = state.manager.create(project_id, "B08 actual reveal", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:actual-reveal",
+            "idempotencyKey":"key:b08:actual-reveal","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    assert_eq!(result.unwrap_err(), "B08_RESERVATION_VIOLATION");
+    let connection = state.manager.open(project_id, "B08 actual reveal", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-canon-semantic-conflict";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "canon-semantic-conflict",
+        }),
+    );
+    let connection = state.manager.create(project_id, "B08 canon conflict", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:canon-semantic-conflict",
+            "idempotencyKey":"key:b08:canon-semantic-conflict","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    assert_eq!(result.unwrap_err(), "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED");
+    let connection = state.manager.open(project_id, "B08 canon conflict", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
 
 #[test]
