@@ -15,8 +15,9 @@ use crate::narrative::{
 };
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
+use crate::provider::ProviderAdapter;
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
-use crate::runtime::{pending_decision_count, DurableJobService, JobSpec};
+use crate::runtime::{pending_decision_count, DurableJobService, JobSpec, SecretStore};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -34,8 +35,10 @@ impl KernelState {
     pub fn new(paths: AppPaths) -> Self {
         Self {
             manager: ProjectManager::new(paths.clone()),
-            paths,
-            production_gateway: Arc::new(crate::production::UnavailableProductionGateway),
+            paths: paths.clone(),
+            production_gateway: Arc::new(
+                crate::production::ConfiguredProductionGateway::for_desktop(paths.clone()),
+            ),
         }
     }
 
@@ -3061,6 +3064,71 @@ fn execute_planning_command(
     Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner"}))
 }
 
+fn save_provider_settings(
+    state: &KernelState,
+    request: &Value,
+    project_id: Option<&str>,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    let settings = request
+        .pointer("/payload/settings")
+        .cloned()
+        .ok_or_else(|| "P01_SETTINGS_REQUIRED".to_string())?;
+    let config = provider_config(&settings)?;
+    if let Some(api_key) = settings
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && !value.starts_with('•'))
+    {
+        crate::repositories::runtime::OsKeychainSecretStore::new(
+            "com.moheng.ai-novel-production",
+            "provider-api-key",
+        )
+        .set(&config.provider_id, api_key)
+        .map_err(|error| format!("P01_SECRET_STORE:{error}"))?;
+    }
+    if let Some(project_id) = project_id {
+        let spec = project_command_spec(
+            project_id,
+            project_id,
+            command_id,
+            idempotency_key,
+            "settings_save",
+            digest,
+            expected_revision,
+            requested_at,
+            true,
+        );
+        let outcome = state
+            .manager
+            .commit_project_command(spec, |connection| {
+                crate::repositories::provider::ProviderSettingsRepository::write_project(
+                    connection,
+                    project_id,
+                    &settings,
+                    requested_at,
+                )
+                .map(|_| ())
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(project_command_response(&outcome_receipt(outcome)))
+    } else {
+        let saved = crate::repositories::provider::ProviderSettingsRepository::write_global(
+            &state.paths,
+            &settings,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(
+            json!({"commandId":command_id,"finalStatus":"committed","message":"Provider 设置已保存","settings":saved,"providerId":config.provider_id,"secretReturned":false}),
+        )
+    }
+}
+
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
     let command_id = required_string(&request, "commandId")?;
@@ -3070,6 +3138,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
     let expected_revision = expected_revision(&request)?;
     let digest = request_digest(&request)?;
     match command_type {
+        "settings_save" | "global_settings_save" => {
+            let id = project_id;
+            save_provider_settings(
+                state,
+                &request,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
+            )
+        }
         "planning_finalize_book_plan"
         | "planning_create_volume_intent"
         | "planning_create_volume_plan"
@@ -3552,25 +3633,144 @@ pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<
 }
 
 #[tauri::command]
-pub fn query_global_settings() -> Result<Value, String> {
-    Ok(json!({
-        "provider": "",
-        "model": "",
-        "endpoint": "",
-        "monthlyBudget": 0,
-        "chapterBudget": 0,
-        "pauseBeforeOverrun": true,
-        "privacyMode": "local-first",
-        "sendDraftOnly": true,
-        "exportFormat": "DOCX",
-        "platform": "",
-        "theme": "system"
-    }))
+fn provider_config(settings: &Value) -> Result<crate::provider::ProviderConfig, String> {
+    let provider_id = settings
+        .get("providerId")
+        .and_then(Value::as_str)
+        .or_else(|| settings.get("provider").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "P01_PROVIDER_ID_REQUIRED".to_string())?;
+    let provider_id = if provider_id.eq_ignore_ascii_case("openai compatible") {
+        "openai-compatible"
+    } else {
+        provider_id
+    };
+    let model_id = settings
+        .get("modelId")
+        .and_then(Value::as_str)
+        .or_else(|| settings.get("model").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "P01_MODEL_ID_REQUIRED".to_string())?;
+    let endpoint = settings
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(crate::provider::ProviderConfig {
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+        enabled: settings
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(!endpoint.is_empty()),
+        endpoint,
+        timeout_ms: settings
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(30_000)
+            .clamp(500, 120_000),
+    })
 }
 
 #[tauri::command]
-pub fn test_provider(_settings: Value) -> Result<Value, String> {
-    Err("IPC_UNSUPPORTED:test_provider".into())
+pub fn query_global_settings(state: State<'_, KernelState>) -> Result<Value, String> {
+    let mut settings =
+        crate::repositories::provider::ProviderSettingsRepository::read_global(&state.paths)
+            .map_err(|error| error.to_string())?;
+    apply_provider_status(&mut settings);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn query_project_settings(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let connection = state
+        .manager
+        .open(project_id, "", "1970-01-01T00:00:00Z")
+        .map_err(|error| error.to_string())?;
+    let mut settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &connection,
+        project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    apply_provider_status(&mut settings);
+    Ok(settings)
+}
+
+fn apply_provider_status(settings: &mut Value) {
+    let provider_id = settings
+        .get("providerId")
+        .and_then(Value::as_str)
+        .unwrap_or("openai-compatible");
+    let has_secret = crate::repositories::runtime::OsKeychainSecretStore::new(
+        "com.moheng.ai-novel-production",
+        "provider-api-key",
+    )
+    .get(provider_id)
+    .is_ok();
+    settings["secretStatus"] = json!(if has_secret {
+        "AVAILABLE"
+    } else {
+        "NOT_CONFIGURED"
+    });
+    settings["capabilityStatus"] = json!(if settings.get("enabled").and_then(Value::as_bool)
+        == Some(true)
+        && settings
+            .get("endpoint")
+            .and_then(Value::as_str)
+            .is_some_and(|endpoint| !endpoint.is_empty())
+        && has_secret
+    {
+        "AVAILABLE"
+    } else {
+        "UNAVAILABLE"
+    });
+}
+
+#[tauri::command]
+pub fn test_provider(_state: State<'_, KernelState>, settings: Value) -> Result<Value, String> {
+    let settings = settings.get("settings").cloned().unwrap_or(settings);
+    let config = provider_config(&settings)?;
+    if !config.enabled || config.endpoint.is_empty() {
+        return Err("P01_PROVIDER_NOT_CONFIGURED".into());
+    }
+    let secret = settings
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && !value.starts_with('•'))
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            crate::repositories::runtime::OsKeychainSecretStore::new(
+                "com.moheng.ai-novel-production",
+                "provider-api-key",
+            )
+            .get(&config.provider_id)
+            .ok()
+        })
+        .ok_or_else(|| "P01_AUTHENTICATION_ERROR:provider secret unavailable".to_string())?;
+    let response = crate::provider::OpenAiCompatibleProvider::new(config.endpoint.clone())
+        .invoke(
+            &crate::provider::ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: config.model_id,
+                prompt: "Return JSON {\"ok\":true} without explanation.".into(),
+                timeout_ms: config.timeout_ms,
+            },
+            &secret,
+        )
+        .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))?;
+    Ok(json!({
+        "finalStatus":"committed",
+        "message":"Provider 连接测试成功",
+        "providerId":config.provider_id,
+        "usage":response.usage,
+        "providerRequestId":response.provider_request_id,
+        "secretReturned":false
+    }))
 }
 
 #[tauri::command]
@@ -3599,6 +3799,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         support_checkpoint_resume,
         execute_command,
         query_global_settings,
+        query_project_settings,
         test_provider,
         query_market_opportunities,
     ]

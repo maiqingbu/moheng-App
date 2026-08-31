@@ -13,9 +13,10 @@ use crate::generated::types::{
 };
 use crate::hash::sha256_canonical;
 use crate::project_db::ProjectManager;
+use crate::provider::{OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderRequest};
 use crate::repositories::runtime::{
-    DurableJobService, DurableModelRunner, JobSpec, ModelRunSpec, ModelTransport, TransportFailure,
-    TransportResponse, TransportUsage,
+    DurableJobService, DurableModelRunner, JobSpec, ModelRunSpec, ModelTransport,
+    OsKeychainSecretStore, SecretStore, TransportFailure, TransportResponse, TransportUsage,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -76,6 +77,108 @@ pub struct UnavailableProductionGateway;
 impl ProductionModelGateway for UnavailableProductionGateway {
     fn invoke(&self, _capability: &str, _input: &Value) -> Result<ProductionModelResponse, String> {
         Err("B08_PROVIDER_NOT_CONFIGURED".into())
+    }
+}
+
+pub struct ConfiguredProductionGateway {
+    config: ProviderConfig,
+    adapter: std::sync::Arc<dyn ProviderAdapter>,
+    secret_store: std::sync::Arc<dyn SecretStore>,
+    settings_paths: Option<crate::project_db::paths::AppPaths>,
+}
+
+impl ConfiguredProductionGateway {
+    pub fn new(
+        config: ProviderConfig,
+        adapter: std::sync::Arc<dyn ProviderAdapter>,
+        secret_store: std::sync::Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            config,
+            adapter,
+            secret_store,
+            settings_paths: None,
+        }
+    }
+
+    pub fn for_desktop(paths: crate::project_db::paths::AppPaths) -> Self {
+        let provider_id =
+            std::env::var("MOHENG_PROVIDER_ID").unwrap_or_else(|_| "openai-compatible".into());
+        let model_id =
+            std::env::var("MOHENG_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+        let endpoint = std::env::var("MOHENG_PROVIDER_ENDPOINT").unwrap_or_default();
+        let mut gateway = Self::new(
+            ProviderConfig {
+                provider_id: provider_id.clone(),
+                model_id,
+                endpoint: endpoint.clone(),
+                enabled: !endpoint.is_empty(),
+                timeout_ms: 30_000,
+            },
+            std::sync::Arc::new(OpenAiCompatibleProvider::new(endpoint)),
+            std::sync::Arc::new(OsKeychainSecretStore::new(
+                "com.moheng.ai-novel-production",
+                "provider-api-key",
+            )),
+        );
+        gateway.settings_paths = Some(paths);
+        gateway
+    }
+}
+
+impl ProductionModelGateway for ConfiguredProductionGateway {
+    fn provider(&self) -> &str {
+        &self.config.provider_id
+    }
+
+    fn model(&self, _capability: &str) -> String {
+        self.config.model_id.clone()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let config = self
+            .settings_paths
+            .as_ref()
+            .and_then(|paths| {
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths).ok()
+            })
+            .and_then(|settings| ProviderConfig::from_settings(&settings).ok())
+            .unwrap_or_else(|| self.config.clone());
+        if !config.enabled {
+            return Err("P01_PROVIDER_NOT_CONFIGURED".into());
+        }
+        let secret = self
+            .secret_store
+            .get(&config.provider_id)
+            .map_err(|error| format!("P01_AUTHENTICATION_ERROR:{error}"))?;
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| input.to_string());
+        let request = ProviderRequest {
+            capability: capability.into(),
+            model_id: config.model_id.clone(),
+            prompt,
+            timeout_ms: config.timeout_ms,
+        };
+        let response = if self.settings_paths.is_some() {
+            OpenAiCompatibleProvider::new(config.endpoint).invoke(&request, &secret)
+        } else {
+            self.adapter.invoke(&request, &secret)
+        }
+        .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))?;
+        Ok(ProductionModelResponse {
+            output: response.output,
+            usage: TransportUsage {
+                input_tokens: response.usage.input_tokens,
+                output_tokens: response.usage.output_tokens,
+                cached_tokens: response.usage.cached_tokens,
+                provider_reported_cost_cents: response.usage.provider_reported_cost_cents,
+                latency_ms: 0,
+                provider_request_id: response.provider_request_id,
+            },
+        })
     }
 }
 

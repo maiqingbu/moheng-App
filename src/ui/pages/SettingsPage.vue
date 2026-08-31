@@ -12,8 +12,8 @@ const projectStore=useProjectStore()
 const libraryStore=useProjectLibraryStore()
 const isProjectSettings=computed(()=>route.meta.scope==='project')
 const section=ref('model')
-const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'创作主模型',endpoint:'',monthlyBudget:200,chapterBudget:3,pauseBeforeOverrun:true,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light'})
-const apiKey=ref('••••••••••••••••')
+const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:200,chapterBudget:3,pauseBeforeOverrun:true,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:30000})
+const apiKey=ref('')
 
 onMounted(()=>{ if(isProjectSettings.value) void projectStore.loadSettings(); else void libraryStore.loadGlobalSettings() })
 watchEffect(()=>{
@@ -28,13 +28,16 @@ const backupState=computed(()=>projectStore.commandState('project-backup'))
 const integrityState=computed(()=>projectStore.commandState('project-integrity'))
 
 async function save(){
-  if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings:{...form}}})
-  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings:{...form}}}); libraryStore.globalSettings={...form} }
+  const settings={...form,...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings}})
+  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form} }
+  apiKey.value=''
   applyTheme()
 }
 async function test(){
-  if(isProjectSettings.value) await projectStore.testProvider('provider-test',{...form})
-  else await libraryStore.testProvider('global-provider-test',{...form})
+  const settings={...form,...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  if(isProjectSettings.value) await projectStore.testProvider('provider-test',settings)
+  else await libraryStore.testProvider('global-provider-test',settings)
 }
 async function backup(){ await projectStore.runCommand('project-backup',{type:'backup_create',payload:{kind:'milestone'}}) }
 async function integrity(){ await projectStore.runCommand('project-integrity',{type:'integrity_check_run',payload:{mode:'quick_check'}}) }
@@ -56,7 +59,7 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
       <main>
         <section id="setting-model" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">正式产品由 Rust 受限命令测试连接；应用设置作为默认值，项目设置可以覆盖模型策略。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Endpoint</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Key</span><input v-model="apiKey" class="input" type="password" /><span class="help">正式 Tauri 应用应保存到系统 Keychain，不进入 Pinia 或浏览器存储。</span></label></div>
+          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Endpoint</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Key</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥仅通过 IPC 写入系统 Keychain；不会进入 Pinia、浏览器存储、项目库或回执。留空表示沿用已保存密钥。</span></label></div>
           <div class="actions" style="margin-top:14px"><button class="btn" @click="test">测试模型连接</button></div><CommandFeedback :state="testState" />
         </section>
 

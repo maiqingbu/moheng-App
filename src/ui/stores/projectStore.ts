@@ -16,6 +16,7 @@ import type {
   ProjectOverviewProjection,
   SearchHit,
   SettingsProjection,
+  ProviderSettingsInput,
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -287,7 +288,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     return receipt
   }
 
-  async function testProvider(key:string, nextSettings:SettingsProjection) {
+  async function testProvider(key:string, nextSettings:ProviderSettingsInput) {
     commandStates.value[key]={status:'submitting',message:'正在提交诊断…'}
     const receipt=await frontendPort.testProvider(nextSettings,(status,message)=>{commandStates.value[key]={...commandStates.value[key],status,message}})
     commandStates.value[key]={status:receipt.finalStatus,message:receipt.message,commandId:receipt.commandId}

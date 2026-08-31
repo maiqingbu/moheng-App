@@ -5,7 +5,8 @@ import type {
   CommandStatus,
   MarketOpportunity,
   ProjectLibraryProjection,
-  SettingsProjection
+  SettingsProjection,
+  ProviderSettingsInput
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 
@@ -53,7 +54,7 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     globalSettings.value = await frontendPort.queryGlobalSettings()
   }
 
-  async function testProvider(key: string, settings: SettingsProjection) {
+  async function testProvider(key: string, settings: ProviderSettingsInput) {
     commandStates.value[key] = { status: 'submitting', message: '正在提交诊断…' }
     const receipt = await frontendPort.testProvider(settings, (status, message) => {
       commandStates.value[key] = { ...commandStates.value[key], status, message }

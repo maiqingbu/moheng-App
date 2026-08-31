@@ -26,6 +26,7 @@ import type {
   SupportCheckpointProjection,
   SearchHit,
   SettingsProjection,
+  ProviderSettingsInput,
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -66,7 +67,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection> { return invokeQuery(this.ipc, 'query_plan_route', { request }) }
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection> { return invokeQuery(this.ipc, 'support_checkpoint_resume', { request }) }
-  testProvider(settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
+  testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     onStatus?.('submitting', '正在测试 Provider')
     return invokeQuery<CommandReceipt>(this.ipc, 'test_provider', { settings }).then(receipt => {
       onStatus?.(receipt.finalStatus, receipt.message)

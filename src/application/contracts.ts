@@ -426,6 +426,17 @@ export interface SettingsProjection {
   exportFormat: 'DOCX' | 'Markdown' | 'TXT' | 'EPUB'
   platform: string
   theme: 'light' | 'system' | 'dark'
+  providerId?: string
+  modelId?: string
+  enabled?: boolean
+  timeoutMs?: number
+  secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'
+  capabilityStatus?: 'AVAILABLE' | 'UNAVAILABLE' | 'ERROR'
+}
+
+export interface ProviderSettingsInput extends SettingsProjection {
+  /** Ephemeral IPC input; never part of SettingsProjection or persisted state. */
+  apiKey?: string
 }
 
 export interface ProjectOverviewProjection {
@@ -668,7 +679,7 @@ export interface FrontendPort {
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
-  testProvider(settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
+  testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
 }
 
 // R1 Narrative DTOs are generated from the shared contract schemas. They are

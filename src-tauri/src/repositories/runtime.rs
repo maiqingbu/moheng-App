@@ -1346,7 +1346,7 @@ fn finish_parse(
     })
 }
 
-pub trait SecretStore {
+pub trait SecretStore: Send + Sync {
     fn get(&self, provider: &str) -> Result<String, RuntimeError>;
 }
 
@@ -1449,18 +1449,50 @@ impl OsKeychainSecretStore {
             account: account.into(),
         }
     }
+
+    #[cfg(target_os = "macos")]
+    pub fn set(&self, provider: &str, secret: &str) -> Result<(), RuntimeError> {
+        if secret.trim().is_empty() {
+            return Err(RuntimeError::SecretUnavailable);
+        }
+        let account = format!("{}:{}", self.account, provider);
+        let status = std::process::Command::new("/usr/bin/security")
+            .args([
+                "add-generic-password",
+                "-U",
+                "-s",
+                &self.service,
+                "-a",
+                &account,
+                "-w",
+                secret,
+            ])
+            .status()
+            .map_err(|_| RuntimeError::SecretUnavailable)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(RuntimeError::SecretUnavailable)
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn set(&self, _provider: &str, _secret: &str) -> Result<(), RuntimeError> {
+        Err(RuntimeError::SecretUnavailable)
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl SecretStore for OsKeychainSecretStore {
-    fn get(&self, _provider: &str) -> Result<String, RuntimeError> {
+    fn get(&self, provider: &str) -> Result<String, RuntimeError> {
+        let account = format!("{}:{}", self.account, provider);
         let output = std::process::Command::new("/usr/bin/security")
             .args([
                 "find-generic-password",
                 "-s",
                 &self.service,
                 "-a",
-                &self.account,
+                &account,
                 "-w",
             ])
             .output()
