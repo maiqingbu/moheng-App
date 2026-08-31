@@ -156,6 +156,45 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn canon_entity_exists(
+        connection: &Connection,
+        project_id: &str,
+        entity_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_entities WHERE project_id=?1 AND entity_id=?2)",
+                libsql_rusqlite::params![project_id, entity_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn current_canon_facts_for_semantic_key(
+        connection: &Connection,
+        project_id: &str,
+        subject_id: &str,
+        predicate: &str,
+    ) -> Result<Vec<CanonFactRecord>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id=?2 AND predicate=?3 AND superseded_by IS NULL ORDER BY fact_id",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, subject_id, predicate],
+            |row| {
+                let object_json: String = row.get(3)?;
+                Ok(CanonFactRecord {
+                    fact_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    predicate: row.get(2)?,
+                    object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                    authority_level: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn goal_contract_refs(
         connection: &Connection,
         project_id: &str,

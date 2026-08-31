@@ -1177,30 +1177,38 @@ fn validate_actual_extraction(
         .flatten()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
+    let allowed_reveals = plan
+        .get("sceneExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("action").and_then(Value::as_str) == Some("REVEAL"))
+        .filter_map(|item| item.get("reservationRef").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
 
     for candidate in &audit.canon_candidates {
         exact_quote(body, &candidate.evidence)?;
-        let subject_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM canon_entities WHERE project_id=?1 AND entity_id=?2)",
-                libsql_rusqlite::params![project_id, candidate.subject_id],
-                |row| row.get(0),
+        let subject_exists =
+            crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
+                connection,
+                project_id,
+                &candidate.subject_id,
             )
             .map_err(|error| error.to_string())?;
         if !subject_exists {
             return Err("B08_CANON_SUBJECT_NOT_FOUND".into());
         }
-        let current: Option<String> = connection
-            .query_row(
-                "SELECT object_json FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
-                libsql_rusqlite::params![project_id, candidate.fact_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if current.is_some_and(|value| {
-            serde_json::from_str::<Value>(&value).ok().as_ref() != Some(&candidate.object_json)
-        }) {
+        let current = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key(
+            connection,
+            project_id,
+            &candidate.subject_id,
+            &candidate.predicate,
+        )
+        .map_err(|error| error.to_string())?;
+        if current
+            .iter()
+            .any(|fact| fact.object_json != candidate.object_json)
+        {
             return Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED".into());
         }
     }
@@ -1223,7 +1231,9 @@ fn validate_actual_extraction(
         }
     }
     for reference in &audit.revealed_reservation_refs {
-        if !reservations.contains(reference.as_str()) {
+        if !reservations.contains(reference.as_str())
+            || !allowed_reveals.contains(reference.as_str())
+        {
             return Err("B08_RESERVATION_VIOLATION".into());
         }
     }

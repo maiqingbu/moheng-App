@@ -685,7 +685,10 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
             variant: "actual-reveal-after-foreshadow",
         }),
     );
-    let connection = state.manager.create(project_id, "B08 actual reveal", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B08 actual reveal", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
     let result = execute_command_impl(
@@ -698,7 +701,10 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         }),
     );
     assert_eq!(result.unwrap_err(), "B08_RESERVATION_VIOLATION");
-    let connection = state.manager.open(project_id, "B08 actual reveal", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 actual reveal", NOW)
+        .unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
 
@@ -712,7 +718,10 @@ fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
             variant: "canon-semantic-conflict",
         }),
     );
-    let connection = state.manager.create(project_id, "B08 canon conflict", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B08 canon conflict", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
     let result = execute_command_impl(
@@ -724,8 +733,14 @@ fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
         }),
     );
-    assert_eq!(result.unwrap_err(), "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED");
-    let connection = state.manager.open(project_id, "B08 canon conflict", NOW).unwrap();
+    assert_eq!(
+        result.unwrap_err(),
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
+    );
+    let connection = state
+        .manager
+        .open(project_id, "B08 canon conflict", NOW)
+        .unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
 
