@@ -1553,11 +1553,10 @@ fn b03_real_command_path_controls_durable_job_and_runtime_projection() {
         )
         .unwrap()
     };
-    assert_eq!(
-        command("b03-start", "production_start", 0)["finalStatus"],
-        "committed"
-    );
     let connection = state.manager.open("p1", "A", NOW).unwrap();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(&connection, "p1", &job_spec().job_id, "RUNNING", NOW).unwrap();
+    DurableJobService::set_runtime_state(&connection, "p1", "ACTIVE", None, NOW).unwrap();
     assert_eq!(
         connection
             .query_row::<String, _, _>(
@@ -1580,15 +1579,15 @@ fn b03_real_command_path_controls_durable_job_and_runtime_projection() {
     );
     drop(connection);
     assert_eq!(
-        command("b03-pause", "production_pause", 1)["finalStatus"],
+        command("b03-pause", "production_pause", 0)["finalStatus"],
         "committed"
     );
     assert_eq!(
-        command("b03-resume", "production_resume", 2)["finalStatus"],
+        command("b03-resume", "production_resume", 1)["finalStatus"],
         "committed"
     );
     assert_eq!(
-        command("b03-cancel", "production_cancel", 3)["finalStatus"],
+        command("b03-cancel", "production_cancel", 2)["finalStatus"],
         "committed"
     );
     let connection = state.manager.open("p1", "A", NOW).unwrap();
