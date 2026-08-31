@@ -82,6 +82,10 @@ pub trait ProductionModelGateway: Send + Sync {
         format!("production:{capability}")
     }
 
+    fn fault_injection(&self) -> Option<&str> {
+        None
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
 }
 
@@ -977,6 +981,11 @@ pub fn run_chapter_production(
         exit_artifact,
         receipt_artifact,
     ]);
+    let dependency_source_hash = if gateway.fault_injection() == Some("dependency_source_hash") {
+        "0".repeat(64)
+    } else {
+        plan_ref.payload_hash.clone()
+    };
     let bundle: CommitBundle = serde_json::from_value(json!({
         "commitId":format!("commit:{command_id}"),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,
         "expectedProjectRevision":current_revision,"contractVersion":"m0a.v1","createdAt":now,
@@ -986,7 +995,7 @@ pub fn run_chapter_production(
         "obligationDelta":obligation_delta,
         "foreshadowDelta":foreshadow_delta,
         "stateDelta":state_delta,
-        "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":plan_ref.payload_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
+        "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":dependency_source_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
         "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
@@ -1012,6 +1021,20 @@ pub fn validate_candidate_evidence_range(
         return Err("B08_EVIDENCE_RANGE_INVALID".into());
     }
     Ok(())
+}
+
+pub fn reconciliation_for_actual_state(
+    stale: bool,
+    required_blocked: bool,
+    capacity_exhausted: bool,
+    change_requested: bool,
+) -> &'static str {
+    crate::planning::classify_plan_reality(
+        stale,
+        required_blocked,
+        capacity_exhausted,
+        change_requested,
+    )
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

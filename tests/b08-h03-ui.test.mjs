@@ -4,6 +4,7 @@ import fs from 'node:fs'
 
 const commands = fs.readFileSync(new URL('../src-tauri/src/commands.rs', import.meta.url), 'utf8')
 const production = fs.readFileSync(new URL('../src-tauri/src/production.rs', import.meta.url), 'utf8')
+const planning = fs.readFileSync(new URL('../src-tauri/src/planning.rs', import.meta.url), 'utf8')
 const repair = fs.readFileSync(new URL('../src-tauri/src/repair.rs', import.meta.url), 'utf8')
 const support = fs.readFileSync(new URL('../src-tauri/src/repositories/support.rs', import.meta.url), 'utf8')
 const ui = fs.readFileSync(new URL('../src/ui/pages/ProductionCenter.vue', import.meta.url), 'utf8')
@@ -15,7 +16,7 @@ test('B08 production_start has one fail-closed composition root', () => {
   assert.doesNotMatch(production, /LocalProductionTransport|rendererBody/)
   assert.match(production, /ProductionModelGateway/)
   assert.match(production, /B06::ContextCompilerOwner/)
-  assert.match(production, /B07::PlanningOwner/)
+  assert.match(planning, /B07::PlanningOwner/)
   assert.match(production, /AUDIT_EXTRACT/)
   assert.match(production, /validate_actual_extraction/)
   assert.match(production, /classify_plan_reality/)

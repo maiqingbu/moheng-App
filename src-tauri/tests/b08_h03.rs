@@ -2,12 +2,12 @@ use ai_novel_production_system_core::commands::query_context_manifest_impl;
 use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
-    ProductionModelGateway, ProductionModelResponse,
+    reconciliation_for_actual_state, ProductionModelGateway, ProductionModelResponse,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
-    operation_digest, OwnerExecution, RepairAuthorization, RepairOperation, RepairPlan,
-    TypedRepairOwner,
+    operation_digest_with_postconditions, OwnerExecution, RepairAuthorization, RepairOperation,
+    RepairPlan, TypedRepairOwner,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
@@ -74,6 +74,18 @@ impl ProductionModelGateway for RecordingGateway {
 
 struct MutatingGateway {
     database: PathBuf,
+}
+
+struct CommitFaultGateway;
+
+impl ProductionModelGateway for CommitFaultGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        RecordingGateway.invoke(capability, input)
+    }
+
+    fn fault_injection(&self) -> Option<&str> {
+        Some("dependency_source_hash")
+    }
 }
 
 struct PromiseGateway;
@@ -543,7 +555,9 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
         params: json!({}),
         postconditions: json!({"requires":"runtime projection exists"}),
     }];
-    let digest = operation_digest(&operations).unwrap();
+    let expected_postconditions = vec![json!({"status":"REFRESHED"})];
+    let digest =
+        operation_digest_with_postconditions(&operations, &expected_postconditions).unwrap();
     let plan = RepairPlan {
         repair_plan_id: "repair-plan:h03:1".into(),
         project_id: "p-h03".into(),
@@ -556,7 +570,7 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
         affected_scopes: vec!["PROJECT".into()],
         risk_level: "LOW".into(),
         requires_backup: false,
-        expected_postconditions: vec![json!({"status":"REFRESHED"})],
+        expected_postconditions,
         operation_digest: digest.clone(),
         created_at: NOW.into(),
     };
@@ -592,7 +606,9 @@ fn create_h03_plan(
     revision: i64,
 ) -> String {
     let operations = vec![operation];
-    let digest = operation_digest(&operations).unwrap();
+    let expected_postconditions = vec![json!({"status":"PASS"})];
+    let digest =
+        operation_digest_with_postconditions(&operations, &expected_postconditions).unwrap();
     let plan = RepairPlan {
         repair_plan_id: plan_id.into(),
         project_id: project_id.into(),
@@ -605,7 +621,7 @@ fn create_h03_plan(
         affected_scopes: vec!["PROJECT".into()],
         risk_level: "LOW".into(),
         requires_backup: false,
-        expected_postconditions: vec![json!({"status":"PASS"})],
+        expected_postconditions,
         operation_digest: digest.clone(),
         created_at: NOW.into(),
     };
@@ -951,7 +967,11 @@ fn h03_support_schema_is_fresh_reopen_upgrade_and_copy_safe() {
         params: json!({}),
         postconditions: json!({}),
     };
-    let digest = operation_digest(std::slice::from_ref(&operation)).unwrap();
+    let digest = operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &[json!({"status":"PASS"})],
+    )
+    .unwrap();
     let plan = RepairPlan {
         repair_plan_id: "repair-plan:migration".into(),
         project_id: "p-h03-migration".into(),
@@ -964,7 +984,7 @@ fn h03_support_schema_is_fresh_reopen_upgrade_and_copy_safe() {
         affected_scopes: vec!["PROJECT".into()],
         risk_level: "LOW".into(),
         requires_backup: false,
-        expected_postconditions: vec![],
+        expected_postconditions: vec![json!({"status":"PASS"})],
         operation_digest: digest,
         created_at: NOW.into(),
     };
@@ -989,6 +1009,103 @@ fn h03_support_schema_is_fresh_reopen_upgrade_and_copy_safe() {
             .query_row::<i64, _, _>("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
                 row.get(0)
             })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn h03_expected_postconditions_are_part_of_operation_digest() {
+    let operation = RepairOperation {
+        operation: "refresh_runtime_projection".into(),
+        target: "project:h03".into(),
+        params: json!({}),
+        postconditions: json!({"kind":"runtime_projection_current"}),
+    };
+    let mut plan = RepairPlan {
+        repair_plan_id: "repair-plan:digest".into(),
+        project_id: "p-h03-digest".into(),
+        based_on_project_revision: 0,
+        diagnosis: json!({}),
+        finding_refs: vec![],
+        target_authority_owner: "B06".into(),
+        proposed_operations: vec![operation],
+        affected_artifacts: vec![],
+        affected_scopes: vec!["PROJECT".into()],
+        risk_level: "LOW".into(),
+        requires_backup: false,
+        expected_postconditions: vec![json!({"kind":"runtime_projection_current"})],
+        operation_digest: String::new(),
+        created_at: NOW.into(),
+    };
+    plan.operation_digest = operation_digest_with_postconditions(
+        &plan.proposed_operations,
+        &plan.expected_postconditions,
+    )
+    .unwrap();
+    assert!(ai_novel_production_system_core::repair::validate_plan(&plan).is_ok());
+    plan.expected_postconditions = vec![json!({"kind":"different_query"})];
+    assert!(ai_novel_production_system_core::repair::validate_plan(&plan).is_err());
+}
+
+#[test]
+fn b08_reconciliation_classifies_all_five_authoritative_outcomes() {
+    assert_eq!(
+        reconciliation_for_actual_state(false, false, false, false),
+        "NO_ACTION"
+    );
+    assert_eq!(
+        reconciliation_for_actual_state(true, false, false, false),
+        "RECOMPILE_NEXT_CHAPTER"
+    );
+    assert_eq!(
+        reconciliation_for_actual_state(false, true, false, false),
+        "RECOMPILE_ROLLING_WINDOW"
+    );
+    assert_eq!(
+        reconciliation_for_actual_state(false, false, true, false),
+        "REPLAN_VOLUME_ROUTE"
+    );
+    assert_eq!(
+        reconciliation_for_actual_state(false, false, false, true),
+        "CHANGE_REQUEST"
+    );
+}
+
+#[test]
+fn b08_final_commit_fault_rolls_back_final_chapter_reality_and_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(CommitFaultGateway),
+    );
+    let connection = state
+        .manager
+        .create("p-b08-atomic", "B08 atomic", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b08-atomic");
+    drop(connection);
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:atomic","idempotencyKey":"key:b08:atomic",
+        "projectId":"p-b08-atomic","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+    })).unwrap_err();
+    assert!(error.contains("dependency sourceHash mismatch"));
+    let connection = state
+        .manager
+        .open("p-b08-atomic", "B08 atomic", NOW)
+        .unwrap();
+    for artifact_type in ["FinalChapter", "ChapterExitState", "ProductionReceipt"] {
+        assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08-atomic' AND artifact_type=?1", [artifact_type], |row| row.get(0)).unwrap(), 0);
+    }
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08-atomic' AND fact_id='fact:actual:door-open'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_evidence WHERE project_id='p-b08-atomic'",
+                [],
+                |row| row.get(0)
+            )
             .unwrap(),
         0
     );
