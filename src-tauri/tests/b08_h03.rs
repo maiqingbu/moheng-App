@@ -209,6 +209,30 @@ impl ProductionModelGateway for AuditVariantGateway {
                         "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                     }])
                 }
+                "canon-semantic-same" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:same-location",
+                        "subjectId":"entity:actual:linzhou",
+                        "predicate":"location",
+                        "objectJson":{"place":"stone-door"},
+                        "authorityLevel":"C",
+                        "eventType":"ACTION",
+                        "storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }])
+                }
+                "canon-semantic-disjoint-time" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:future-location",
+                        "subjectId":"entity:actual:linzhou",
+                        "predicate":"location",
+                        "objectJson":{"place":"future-city"},
+                        "authorityLevel":"C",
+                        "eventType":"ACTION",
+                        "storyTime":"2030-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }])
+                }
                 "reservation" => {
                     response.output["revealedReservationRefs"] =
                         json!(["reservation:not-authorized"])
@@ -752,6 +776,85 @@ fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
         .open(project_id, "B08 canon conflict", NOW)
         .unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn canon_same_semantic_fact_with_new_fact_id_is_not_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-canon-semantic-same";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "canon-semantic-same",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B08 canon same", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:canon-semantic-same",
+            "idempotencyKey":"key:b08:canon-semantic-same","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+}
+
+#[test]
+fn canon_semantic_difference_with_disjoint_world_time_is_not_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-canon-semantic-disjoint";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "canon-semantic-disjoint-time",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B08 canon disjoint", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    connection
+        .execute(
+            "UPDATE canon_facts SET story_time_from='2020-01-01T00:00:00Z', story_time_to='2020-01-01T00:00:00Z' WHERE fact_id='fact:actual:seed'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:canon-semantic-disjoint",
+            "idempotencyKey":"key:b08:canon-semantic-disjoint","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open(project_id, "B08 canon disjoint", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<Option<String>, _, _>(
+                "SELECT story_time_from FROM canon_facts WHERE fact_id='fact:actual:future-location'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+            .as_deref(),
+        Some("2030-01-01T00:00:00Z")
+    );
 }
 
 #[test]
@@ -1359,6 +1462,86 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
         .unwrap()
         .starts_with("receipt:"));
     assert_eq!(result["receipt"]["postconditions"][0]["stale"], "VALID");
+}
+
+#[test]
+fn h03_valid_authorization_cannot_bypass_planning_task_scope_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-h03-recompile-negative";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let connection = state
+        .manager
+        .create(project_id, "H03 negative", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let route = json!({"payloadSchema":"volume-plan.r1","routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let route_hash = sha256_canonical(&route).unwrap();
+    let route_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:volume:h03-negative',?1,'VolumePlan','VOLUME',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, route_scope, route_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume:h03-negative',1,?1,?2)", libsql_rusqlite::params![route.to_string(), route_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumePlan','VOLUME',?2,'plan:volume:h03-negative',1,?3)", libsql_rusqlite::params![project_id, json!({"level":"VOLUME","volumeId":volume_id}).to_string(), route_hash]).unwrap();
+    drop(connection);
+    let context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,"chapterId":chapter_id,"volumeId":volume_id,
+            "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]
+        }),
+    )
+    .unwrap();
+    let context_id = "context:h03:negative";
+    let context_hash = sha256_canonical(&context).unwrap();
+    let connection = state.manager.open(project_id, "H03 negative", NOW).unwrap();
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'ContextManifest','CHAPTER',?3,1,'m0a.artifact.v1','COMMITTED',?4,'{\"createdBy\":\"B06::ContextCompilerOwner\"}',?5,?5)", libsql_rusqlite::params![context_id, project_id, scope, context_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![context_id, context.to_string(), context_hash]).unwrap();
+    drop(connection);
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":1,
+        "compiledFromStateDigest":context["compiledFromStateDigest"],
+        "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
+        "chapterGoal":"越权任务","activeTaskRefs":["task:outside-route"],"continuityActions":[],
+        "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
+        "sceneExecution":[],"horizonPreview":[
+            {"slotNo":1,"objective":"继续当前行动","tentative":true},
+            {"slotNo":2,"objective":"检查行动后果","tentative":true},
+            {"slotNo":3,"objective":"准备下一冲突","tentative":true}
+        ]
+    });
+    let plan_id = "repair-plan:h03:task-scope-negative";
+    let auth_id = "repair-auth:h03:task-scope-negative";
+    let digest = create_h03_plan(
+        &state,
+        project_id,
+        plan_id,
+        RepairOperation {
+            operation: "recompile_chapter_plan".into(),
+            target: chapter_id.clone(),
+            params: json!({"chapterId":chapter_id,"plan":plan,"entityIds":["entity:actual:linzhou"]}),
+            postconditions: json!({"kind":"chapter_plan_current"}),
+        },
+        0,
+    );
+    authorize_h03(&state, project_id, plan_id, auth_id, &digest, 0);
+    let result = execute_command_impl(&state, json!({
+        "type":"repair_execute","commandId":"cmd:h03:task-scope-negative","idempotencyKey":"key:h03:task-scope-negative",
+        "projectId":project_id,"requestedAt":NOW,
+        "payload":{"repairPlanId":plan_id,"authorizationId":auth_id}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "failed");
+    assert_eq!(result["receipt"]["status"], "REPAIR_VERIFICATION_FAILED");
+    let connection = state.manager.open(project_id, "H03 negative", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert!(connection
+        .query_row::<Option<String>, _, _>(
+            "SELECT consumed_at FROM repair_authorizations WHERE authorization_id=?1",
+            [auth_id],
+            |row| row.get(0)
+        )
+        .unwrap()
+        .is_some());
 }
 
 #[test]

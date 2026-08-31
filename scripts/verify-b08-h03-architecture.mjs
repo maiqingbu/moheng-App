@@ -9,10 +9,23 @@ const repair = read('src-tauri/src/repair.rs')
 const support = read('src-tauri/src/repositories/support.rs')
 const commands = read('src-tauri/src/commands.rs')
 const planning = read('src-tauri/src/planning.rs')
+const repositoryProduction = read('src-tauri/src/repositories/production.rs')
 const ui = read('src/ui/pages/ProductionCenter.vue')
 const productionDispatchStart = commands.indexOf('if command_type == "production_start"')
 const productionOwnerReturn = commands.indexOf('return crate::production::run_chapter_production', productionDispatchStart)
 const runtimeControlCall = commands.indexOf('execute_runtime_command(', productionOwnerReturn)
+const approvedSqlOwners = new Set(['catalog', 'commit', 'project_db', 'repositories'])
+function rustFiles(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const target = path.join(directory, entry.name)
+    return entry.isDirectory() ? rustFiles(target) : entry.name.endsWith('.rs') ? [target] : []
+  })
+}
+const sqlOutsideOwners = rustFiles(path.join(root, 'src-tauri/src')).filter(file => {
+  const relative = path.relative(path.join(root, 'src-tauri/src'), file)
+  if (approvedSqlOwners.has(relative.split(path.sep)[0])) return false
+  return /\bquery_row\s*\(|\.prepare\s*\(|\bexecute_batch\s*\(|\.execute\s*\(\s*["']/.test(fs.readFileSync(file, 'utf8'))
+})
 
 const checks = {
   singleProductionRoot: commands.includes('return crate::production::run_chapter_production') && commands.includes('B08_CHAPTER_REQUIRED'),
@@ -30,10 +43,11 @@ const checks = {
   h03Requery: repair.includes('owner.verify') && repair.includes('REPAIR_VERIFICATION_INCOMPLETE'),
   explicitAuthorizationUi: ui.includes('明确授权') && ui.includes('approvedByUser: true') && ui.includes('operationDigest'),
   productionCenterR1: ['chapterPlan','triggeredContinuity','modelRuns','candidateRef','finalChapterRef','reconciliation','repair'].every(field => ui.includes(field)),
+  sqlOwnerBoundary: sqlOutsideOwners.length === 0 && repositoryProduction.includes('center_projection'),
   noFutureBatch: !production.includes('B09::') && !repair.includes('H04::'),
 }
 const forbidden = ['NarrativeRuntimeDelta', 'CommitBundleV3'].filter(pattern => `${production}\n${repair}`.includes(pattern))
 const failed = Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name)
-const result = { schema:'b08-h03-architecture-r2', status:failed.length === 0 && forbidden.length === 0 ? 'PASS' : 'FAIL', checks:Object.fromEntries(Object.entries(checks).map(([name,pass]) => [name,pass?'PASS':'FAIL'])), forbidden, failed }
+const result = { schema:'b08-h03-architecture-r2', status:failed.length === 0 && forbidden.length === 0 ? 'PASS' : 'FAIL', checks:Object.fromEntries(Object.entries(checks).map(([name,pass]) => [name,pass?'PASS':'FAIL'])), sqlOutsideOwners, forbidden, failed }
 console.log(JSON.stringify(result, null, 2))
 if (result.status !== 'PASS') process.exit(1)

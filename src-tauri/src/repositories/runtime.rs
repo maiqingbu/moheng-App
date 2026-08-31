@@ -124,6 +124,16 @@ fn days_in_month(year: i32, month: i32) -> i32 {
 }
 
 impl DurableJobService {
+    pub fn runtime_projection_updated_at(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<String, RuntimeError> {
+        Ok(connection.query_row(
+            "SELECT updated_at FROM project_runtime_state WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )?)
+    }
     pub fn update_stage(
         connection: &Connection,
         project_id: &str,

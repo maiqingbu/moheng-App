@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const commands = fs.readFileSync(new URL('../src-tauri/src/commands.rs', import.meta.url), 'utf8')
 const production = fs.readFileSync(new URL('../src-tauri/src/production.rs', import.meta.url), 'utf8')
@@ -32,4 +34,20 @@ test('H03 orchestration has no workflow SQL and UI requires explicit authorizati
   assert.match(ui, /approvedByUser: true/)
   assert.match(ui, /operationDigest/)
   assert.match(ui, /executionReceipt/)
+})
+
+test('R2 alignment keeps persistence SQL inside approved Rust owners', () => {
+  const root = fileURLToPath(new URL('../src-tauri/src/', import.meta.url))
+  const visit = directory => fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const file = path.join(directory, entry.name)
+    return entry.isDirectory() ? visit(file) : entry.name.endsWith('.rs') ? [file] : []
+  })
+  const approved = new Set(['catalog', 'commit', 'project_db', 'repositories'])
+  const violations = visit(root).filter(file => {
+    const relative = path.relative(root, file)
+    if (approved.has(relative.split(path.sep)[0])) return false
+    const source = fs.readFileSync(file, 'utf8')
+    return /\bquery_row\s*\(|\.prepare\s*\(|\bexecute_batch\s*\(|\.execute\s*\(\s*["']/.test(source)
+  })
+  assert.deepEqual(violations, [])
 })

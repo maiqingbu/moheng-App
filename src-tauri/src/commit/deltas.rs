@@ -90,12 +90,14 @@ fn apply_canon(
         Ok(value) => (Some(value.0), Some(value.1)),
         Err(_) => (None, None),
     };
+    let story_time_from = payload_string(payload, "storyTime");
+    let story_time_to = payload_string(payload, "storyTimeEnd").or_else(|| story_time_from.clone());
     let fact_existed = row_exists(
         connection,
         "SELECT EXISTS(SELECT 1 FROM canon_facts WHERE project_id = ?1 AND fact_id = ?2)",
         libsql_rusqlite::params![project_id, delta.fact_id],
     )?;
-    connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, source_artifact_id, source_version, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11) ON CONFLICT(fact_id) DO UPDATE SET subject_id=excluded.subject_id, predicate=excluded.predicate, object_json=excluded.object_json, valid_from_chapter_id=excluded.valid_from_chapter_id, valid_to_chapter_id=excluded.valid_to_chapter_id, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, authority_level=excluded.authority_level, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.fact_id, project_id, subject_id, predicate, object_json, delta.valid_from_chapter_id, delta.valid_to_chapter_id, source_artifact_id, source_version, delta.authority_level.as_ref().map(crate::repositories::artifacts::enum_string).transpose()?.unwrap_or_else(|| "C".into()), now])?;
+    connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13) ON CONFLICT(fact_id) DO UPDATE SET subject_id=excluded.subject_id, predicate=excluded.predicate, object_json=excluded.object_json, valid_from_chapter_id=excluded.valid_from_chapter_id, valid_to_chapter_id=excluded.valid_to_chapter_id, story_time_from=excluded.story_time_from, story_time_to=excluded.story_time_to, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, authority_level=excluded.authority_level, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.fact_id, project_id, subject_id, predicate, object_json, delta.valid_from_chapter_id, delta.valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, delta.authority_level.as_ref().map(crate::repositories::artifacts::enum_string).transpose()?.unwrap_or_else(|| "C".into()), now])?;
     inserted += i64::from(!fact_existed);
     if let Some(relation_id) = &delta.relation_id {
         let object_id = payload_string(payload, "objectId")

@@ -18,7 +18,6 @@ use crate::repositories::runtime::{
     TransportResponse, TransportUsage,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
-use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -33,23 +32,6 @@ const STAGES: &[&str] = &[
     "RECONCILE",
     "COMPLETED",
 ];
-
-type ObligationAuthorityRow = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-);
-type ForeshadowAuthorityRow = (
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
 
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
@@ -726,7 +708,14 @@ pub fn run_chapter_production(
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
     let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_CONTRACT:{error}"))?;
-    validate_actual_extraction(connection, &project_id, &body, &plan_payload, &extraction)?;
+    validate_actual_extraction(
+        connection,
+        &project_id,
+        &chapter_id,
+        &body,
+        &plan_payload,
+        &extraction,
+    )?;
     let mut audit = artifact(
         &project_id,
         audit_id,
@@ -763,32 +752,24 @@ pub fn run_chapter_production(
             .thread_ref
             .strip_prefix("thread:")
             .unwrap_or(&item.thread_ref);
-        let obligation: Option<ObligationAuthorityRow> = connection.query_row(
-            "SELECT obligation_type,scope,authority_level,description,must_resolve_before_chapter,prerequisites_json,decision_ref FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
-            libsql_rusqlite::params![project_id,authority_id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
-        ).optional().map_err(|error| error.to_string())?;
-        if let Some((
-            obligation_type,
-            scope,
-            authority_level,
-            description,
-            must_resolve,
-            prerequisites,
-            decision_ref,
-        )) = obligation
-        {
+        let obligation = crate::repositories::narrative::NarrativeRepository::obligation_authority(
+            connection,
+            &project_id,
+            authority_id,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(obligation) = obligation {
             let lifecycle = match item.disposition.as_str() {
                 "RESOLVE" | "RESOLVED" => "RESOLVED",
                 "ADVANCE" | "PROGRESSING" => "PROGRESSING",
                 _ => return Err("B08_THREAD_DISPOSITION_INVALID".into()),
             };
             obligation_delta.push(json!({
-                "obligationId":authority_id,"scope":scope,"obligationType":obligation_type,
-                "authorityLevel":authority_level,"lifecycle":lifecycle,"description":description,
-                "mustResolveBeforeChapter":must_resolve,
-                "prerequisites":serde_json::from_str::<Value>(&prerequisites).unwrap_or_else(|_| json!([])),
-                "decisionRef":decision_ref,
+                "obligationId":authority_id,"scope":obligation.scope,"obligationType":obligation.obligation_type,
+                "authorityLevel":obligation.authority_level,"lifecycle":lifecycle,"description":obligation.description,
+                "mustResolveBeforeChapter":obligation.must_resolve_before_chapter,
+                "prerequisites":obligation.prerequisites,
+                "decisionRef":obligation.decision_ref,
                 "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1}
             }));
             obligation_evidence_records.push(json!({
@@ -799,24 +780,18 @@ pub fn run_chapter_production(
             }));
             continue;
         }
-        let foreshadow: Option<ForeshadowAuthorityRow> = connection.query_row(
-            "SELECT intent,status,plant_chapter_id,recover_window_end_chapter,secret_payload_ref FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2",
-            libsql_rusqlite::params![project_id,authority_id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-        ).optional().map_err(|error| error.to_string())?;
-        if let Some((
-            intent,
-            _status,
-            plant_chapter_id,
-            recover_window_end_chapter,
-            secret_payload_ref,
-        )) = foreshadow
-        {
+        let foreshadow = crate::repositories::narrative::NarrativeRepository::foreshadow_authority(
+            connection,
+            &project_id,
+            authority_id,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(foreshadow) = foreshadow {
             foreshadow_delta.push(json!({
-                "foreshadowId":authority_id,"intent":intent,
+                "foreshadowId":authority_id,"intent":foreshadow.intent,
                 "status":if matches!(item.disposition.as_str(),"RESOLVE"|"RESOLVED") {"RECOVERED"} else {"REINFORCED"},
-                "plantChapterId":plant_chapter_id,"recoverWindowEndChapter":recover_window_end_chapter,
-                "secretPayloadRef":secret_payload_ref,
+                "plantChapterId":foreshadow.plant_chapter_id,"recoverWindowEndChapter":foreshadow.recover_window_end_chapter,
+                "secretPayloadRef":foreshadow.secret_payload_ref,
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,
                     "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}}
             }));
@@ -1056,6 +1031,10 @@ struct CanonCandidate {
     event_type: Option<String>,
     #[serde(default)]
     story_time: Option<String>,
+    #[serde(default)]
+    valid_from_chapter_id: Option<String>,
+    #[serde(default)]
+    valid_to_chapter_id: Option<String>,
     evidence: EvidenceSpan,
 }
 
@@ -1130,6 +1109,7 @@ fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
 fn validate_actual_extraction(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
+    chapter_id: &str,
     body: &str,
     plan: &Value,
     audit: &AuditExtraction,
@@ -1186,10 +1166,35 @@ fn validate_actual_extraction(
             &candidate.predicate,
         )
         .map_err(|error| error.to_string())?;
-        if current
-            .iter()
-            .any(|fact| fact.object_json != candidate.object_json)
-        {
+        let candidate_from_chapter_no =
+            crate::repositories::narrative::NarrativeRepository::chapter_number(
+                connection,
+                project_id,
+                candidate
+                    .valid_from_chapter_id
+                    .as_deref()
+                    .unwrap_or(chapter_id),
+            )
+            .map_err(|error| error.to_string())?;
+        let candidate_to_chapter_no =
+            crate::repositories::narrative::NarrativeRepository::chapter_number(
+                connection,
+                project_id,
+                candidate
+                    .valid_to_chapter_id
+                    .as_deref()
+                    .unwrap_or(chapter_id),
+            )
+            .map_err(|error| error.to_string())?;
+        if current.iter().any(|fact| {
+            fact.object_json != candidate.object_json
+                && semantic_windows_overlap(
+                    fact,
+                    candidate,
+                    candidate_from_chapter_no,
+                    candidate_to_chapter_no,
+                )
+        }) {
             return Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED".into());
         }
     }
@@ -1252,6 +1257,31 @@ fn validate_actual_extraction(
         }
     }
     Ok(())
+}
+
+fn semantic_windows_overlap(
+    current: &crate::repositories::narrative::SemanticCanonFactRecord,
+    candidate: &CanonCandidate,
+    candidate_from_chapter_no: Option<i64>,
+    candidate_to_chapter_no: Option<i64>,
+) -> bool {
+    let candidate_story = candidate.story_time.as_deref();
+    let story_overlap = candidate_story.is_none_or(|point| {
+        current
+            .story_time_from
+            .as_deref()
+            .is_none_or(|start| start <= point)
+            && current
+                .story_time_to
+                .as_deref()
+                .is_none_or(|end| point <= end)
+    });
+    let chapter_overlap = current
+        .valid_from_chapter_no
+        .is_none_or(|start| candidate_to_chapter_no.is_none_or(|end| start <= end))
+        && candidate_from_chapter_no
+            .is_none_or(|start| current.valid_to_chapter_no.is_none_or(|end| start <= end));
+    story_overlap && chapter_overlap
 }
 
 #[cfg(test)]

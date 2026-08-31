@@ -23,6 +23,19 @@ pub struct CanonFactRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct SemanticCanonFactRecord {
+    pub fact_id: String,
+    pub object_json: Value,
+    pub valid_from_chapter_id: Option<String>,
+    pub valid_to_chapter_id: Option<String>,
+    pub story_time_from: Option<String>,
+    pub story_time_to: Option<String>,
+    pub valid_from_chapter_no: Option<i64>,
+    pub valid_to_chapter_no: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeRecord {
     pub knowledge_id: String,
     pub knower_id: String,
@@ -90,6 +103,28 @@ pub struct ObligationRecord {
     pub source_event_id: Option<String>,
     pub resume_condition: Value,
     pub participant_entities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObligationAuthorityRecord {
+    pub obligation_type: String,
+    pub scope: String,
+    pub authority_level: String,
+    pub description: String,
+    pub must_resolve_before_chapter: Option<String>,
+    pub prerequisites: Value,
+    pub decision_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeshadowAuthorityRecord {
+    pub intent: String,
+    pub status: String,
+    pub plant_chapter_id: Option<String>,
+    pub recover_window_end_chapter: Option<String>,
+    pub secret_payload_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -175,20 +210,23 @@ impl NarrativeRepository {
         project_id: &str,
         subject_id: &str,
         predicate: &str,
-    ) -> Result<Vec<CanonFactRecord>, NarrativeRepositoryError> {
+    ) -> Result<Vec<SemanticCanonFactRecord>, NarrativeRepositoryError> {
         let mut statement = connection.prepare(
-            "SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id=?2 AND predicate=?3 AND superseded_by IS NULL ORDER BY fact_id",
+            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id",
         )?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, subject_id, predicate],
             |row| {
-                let object_json: String = row.get(3)?;
-                Ok(CanonFactRecord {
+                let object_json: String = row.get(1)?;
+                Ok(SemanticCanonFactRecord {
                     fact_id: row.get(0)?,
-                    subject_id: row.get(1)?,
-                    predicate: row.get(2)?,
                     object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
-                    authority_level: row.get(4)?,
+                    valid_from_chapter_id: row.get(2)?,
+                    valid_to_chapter_id: row.get(3)?,
+                    story_time_from: row.get(4)?,
+                    story_time_to: row.get(5)?,
+                    valid_from_chapter_no: row.get(6)?,
+                    valid_to_chapter_no: row.get(7)?,
                 })
             },
         )?;
@@ -873,6 +911,21 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn chapter_number(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<i64>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn next_artifact_version(
         connection: &Connection,
         project_id: &str,
@@ -1144,5 +1197,50 @@ impl NarrativeRepository {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn b07_chapter_plan_payload(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<Value>, NarrativeRepositoryError> {
+        let scope = Self::chapter_scope_key(chapter_id)?;
+        connection.query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2 AND json_extract(a.provenance_json,'$.createdBy')='B07::PlanningOwner'",
+            libsql_rusqlite::params![project_id, scope],
+            |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) },
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn obligation_authority(
+        connection: &Connection,
+        project_id: &str,
+        obligation_id: &str,
+    ) -> Result<Option<ObligationAuthorityRecord>, NarrativeRepositoryError> {
+        connection.query_row(
+            "SELECT obligation_type,scope,authority_level,description,must_resolve_before_chapter,prerequisites_json,decision_ref FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+            libsql_rusqlite::params![project_id, obligation_id],
+            |row| {
+                let prerequisites: String = row.get(5)?;
+                Ok(ObligationAuthorityRecord {
+                    obligation_type: row.get(0)?, scope: row.get(1)?, authority_level: row.get(2)?,
+                    description: row.get(3)?, must_resolve_before_chapter: row.get(4)?,
+                    prerequisites: serde_json::from_str(&prerequisites).unwrap_or_else(|_| Value::Array(vec![])),
+                    decision_ref: row.get(6)?,
+                })
+            },
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn foreshadow_authority(
+        connection: &Connection,
+        project_id: &str,
+        foreshadow_id: &str,
+    ) -> Result<Option<ForeshadowAuthorityRecord>, NarrativeRepositoryError> {
+        connection.query_row(
+            "SELECT intent,status,plant_chapter_id,recover_window_end_chapter,secret_payload_ref FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2",
+            libsql_rusqlite::params![project_id, foreshadow_id],
+            |row| Ok(ForeshadowAuthorityRecord { intent: row.get(0)?, status: row.get(1)?, plant_chapter_id: row.get(2)?, recover_window_end_chapter: row.get(3)?, secret_payload_ref: row.get(4)? }),
+        ).optional().map_err(Into::into)
     }
 }
