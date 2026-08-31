@@ -257,6 +257,7 @@ fn b08_production_commits_final_and_never_promotes_candidate() {
         "COMPLETED"
     );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id='p-b08' AND domain='B08_CHAPTER_PRODUCTION'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b08' AND artifact_type='VolumePlan'", [], |row| row.get(0)).unwrap(), 0);
     assert!(connection.query_row::<i64,_,_>("SELECT json_extract(p.payload_json,'$.hardSourceCount') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ContextManifest'", [], |row| row.get(0)).unwrap() > 0);
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ChapterPlan'", [], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08' AND fact_id='fact:actual:door-open'", [], |row| row.get(0)).unwrap(), 1);
@@ -269,6 +270,76 @@ fn b08_production_commits_final_and_never_promotes_candidate() {
     })).unwrap();
     assert_eq!(replay["replayed"], true);
     println!("B08_PRODUCTION_RESULT opening=PASS candidate_isolation=PASS final_commit=PASS model_provenance=PASS receipt=PASS status=PASS");
+}
+
+#[test]
+fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state.manager.create("p-b08-long", "B08 long", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b08-long");
+    drop(connection);
+    let context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":"p-b08-long","chapterId":chapter_id,"executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],"references":[]
+        }),
+    )
+    .unwrap();
+    let context_id = "context:b08:long";
+    let context_hash = sha256_canonical(&context).unwrap();
+    let plan_id = "plan:chapterplan:long";
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":0,
+        "compiledFromStateDigest":context["compiledFromStateDigest"],
+        "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
+        "chapterGoal":"复用当前正式计划","activeTaskRefs":["task:actual"],"continuityActions":[],
+        "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
+        "sceneExecution":[],"horizonPreview":[
+            {"slotNo":1,"objective":"继续行动","tentative":true},
+            {"slotNo":2,"objective":"检查后果","tentative":true},
+            {"slotNo":3,"objective":"准备冲突","tentative":true}
+        ]
+    });
+    let plan_hash = sha256_canonical(&plan).unwrap();
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    let connection = state.manager.open("p-b08-long", "B08 long", NOW).unwrap();
+    for (artifact_id, artifact_type, payload, hash) in [
+        (
+            context_id,
+            "ContextManifest",
+            context.clone(),
+            context_hash.clone(),
+        ),
+        (plan_id, "ChapterPlan", plan.clone(), plan_hash.clone()),
+    ] {
+        connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,'p-b08-long',?2,'CHAPTER',?3,1,'m0a.artifact.v1','COMMITTED',?4,?5,?6,?6)", libsql_rusqlite::params![artifact_id,artifact_type,scope,hash,json!({"createdBy":if artifact_type=="ChapterPlan" {"B07::PlanningOwner"} else {"B06::ContextCompilerOwner"}}).to_string(),NOW]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
+        connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p-b08-long',?1,'CHAPTER',?2,?3,1,?4)", libsql_rusqlite::params![artifact_type,scope,artifact_id,hash]).unwrap();
+    }
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:long","idempotencyKey":"key:b08:long",
+        "projectId":"p-b08-long","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"]}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open("p-b08-long", "B08 long", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b08-long'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08-long' AND h.artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), context_id);
 }
 
 #[test]
