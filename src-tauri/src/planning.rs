@@ -309,13 +309,6 @@ pub fn recompile_chapter_plan_owner(
     if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
     }
-    if plan
-        .get("compiledFromProjectRevision")
-        .and_then(Value::as_i64)
-        != Some(expected_revision + 1)
-    {
-        return Err("CHAPTER_PLAN_RECOMPILE_REVISION_MISMATCH".into());
-    }
     let context_ref: ArtifactRef = serde_json::from_value(
         plan.get("contextManifestRef")
             .cloned()
