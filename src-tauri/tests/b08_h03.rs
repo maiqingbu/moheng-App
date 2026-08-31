@@ -14,7 +14,9 @@ use libsql_rusqlite::Connection;
 use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const NOW: &str = "2026-08-30T12:00:00Z";
 
@@ -32,7 +34,7 @@ impl ProductionModelGateway for RecordingGateway {
                 "chapterGoal":"推进实际任务",
                 "activeTaskRefs":["task:actual"],
                 "continuityActions":[],
-                "requiredStateOutcomes":[],
+                "requiredStateOutcomes":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
                 "forbiddenTransitions":[],
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
@@ -118,6 +120,14 @@ struct AuditVariantGateway {
 
 struct FailingPostverifyOwner;
 
+struct MismatchedPostverifyOwner;
+
+struct IncompletePostverifyOwner;
+
+struct CountingOwner {
+    calls: Arc<AtomicUsize>,
+}
+
 impl TypedRepairOwner for FailingPostverifyOwner {
     fn execute(&self, _operation: &RepairOperation) -> Result<OwnerExecution, String> {
         Ok(OwnerExecution {
@@ -128,6 +138,54 @@ impl TypedRepairOwner for FailingPostverifyOwner {
 
     fn verify(&self, operation: &RepairOperation) -> Result<Value, String> {
         Ok(json!({"operation":operation.operation,"status":"FAIL","observed":"still stale"}))
+    }
+}
+
+impl TypedRepairOwner for MismatchedPostverifyOwner {
+    fn execute(&self, _operation: &RepairOperation) -> Result<OwnerExecution, String> {
+        Ok(OwnerExecution {
+            owner: "MismatchedTypedOwner".into(),
+            owner_receipt_ref: Some("owner-receipt:mismatch".into()),
+        })
+    }
+
+    fn verify(&self, _operation: &RepairOperation) -> Result<Value, String> {
+        Ok(json!({
+            "kind":"projection_current",
+            "observed":false,
+            "status":"PASS"
+        }))
+    }
+}
+
+impl TypedRepairOwner for IncompletePostverifyOwner {
+    fn execute(&self, _operation: &RepairOperation) -> Result<OwnerExecution, String> {
+        Ok(OwnerExecution {
+            owner: "IncompleteTypedOwner".into(),
+            owner_receipt_ref: Some("owner-receipt:incomplete".into()),
+        })
+    }
+
+    fn verify(&self, _operation: &RepairOperation) -> Result<Value, String> {
+        Err("typed owner query unavailable".into())
+    }
+}
+
+impl TypedRepairOwner for CountingOwner {
+    fn execute(&self, _operation: &RepairOperation) -> Result<OwnerExecution, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OwnerExecution {
+            owner: "CountingTypedOwner".into(),
+            owner_receipt_ref: Some("owner-receipt:race".into()),
+        })
+    }
+
+    fn verify(&self, _operation: &RepairOperation) -> Result<Value, String> {
+        Ok(json!({
+            "kind":"projection_current",
+            "observed":true,
+            "status":"PASS"
+        }))
     }
 }
 
@@ -143,6 +201,12 @@ impl ProductionModelGateway for AuditVariantGateway {
                 "blocked" => {
                     response.output["taskProgressCandidates"][0]["status"] = json!("BLOCKED")
                 }
+                "next" => response.output["nextChapterRecompileRequired"] = json!(true),
+                "rolling" => {
+                    response.output["taskProgressCandidates"][0]["status"] = json!("BLOCKED")
+                }
+                "route" => response.output["capacityExhausted"] = json!(true),
+                "change" => response.output["changeRequested"] = json!(true),
                 _ => {}
             }
         }
@@ -219,7 +283,7 @@ fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
 }
 
 #[test]
-fn b08_production_commits_final_and_never_promotes_candidate() {
+fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
@@ -274,6 +338,8 @@ fn b08_production_commits_final_and_never_promotes_candidate() {
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ChapterPlan'", [], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08' AND fact_id='fact:actual:door-open'", [], |row| row.get(0)).unwrap(), 1);
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id='p-b08' AND state_id='task:actual'", [], |row| row.get(0)).unwrap(), "ACTIVE");
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ProductionReceipt'", [], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ProductionReceipt'", [], |row| row.get(0)).unwrap(), "ACTIVE");
     drop(connection);
     let replay = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:production","idempotencyKey":"key:b08:production",
@@ -293,11 +359,53 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
     );
     let connection = state.manager.create("p-b08-long", "B08 long", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, "p-b08-long");
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let book_plan_id = "plan:book:b08-long";
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+    let book_plan_hash = sha256_canonical(&book_plan).unwrap();
+    let volume_intent_id = "plan:volume-intent:b08-long";
+    let volume_intent = json!({"payloadSchema":"volume-intent.r1","futureReservationRefs":[]});
+    let volume_intent_hash = sha256_canonical(&volume_intent).unwrap();
+    let volume_plan_id = "plan:volume-plan:b08-long";
+    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
+    for (artifact_id, artifact_type, scope_level, scope_key, payload, hash) in [
+        (
+            book_plan_id,
+            "BookPlan",
+            "PROJECT",
+            "{\"level\":\"PROJECT\"}",
+            book_plan,
+            book_plan_hash,
+        ),
+        (
+            volume_intent_id,
+            "VolumeIntent",
+            "VOLUME",
+            volume_id.as_str(),
+            volume_intent,
+            volume_intent_hash,
+        ),
+        (
+            volume_plan_id,
+            "VolumePlan",
+            "VOLUME",
+            volume_id.as_str(),
+            volume_plan,
+            volume_plan_hash.clone(),
+        ),
+    ] {
+        connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,'p-b08-long',?2,?3,?4,1,'m0a.artifact.v1','COMMITTED',?5,'{}',?6,?6)", libsql_rusqlite::params![artifact_id,artifact_type,scope_level,scope_key,hash,NOW]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
+        connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p-b08-long',?1,?2,?3,?4,1,?5)", libsql_rusqlite::params![artifact_type,scope_level,scope_key,artifact_id,hash]).unwrap();
+    }
+    let volume_head_before = (volume_plan_id.to_string(), 1_i64, volume_plan_hash.clone());
     drop(connection);
     let context = query_context_manifest_impl(
         &state,
         json!({
-            "projectId":"p-b08-long","chapterId":chapter_id,"executionMode":"LONG_FORM",
+            "projectId":"p-b08-long","chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
             "entityIds":["entity:actual:linzhou"],"references":[]
         }),
     )
@@ -337,7 +445,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
     let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:long","idempotencyKey":"key:b08:long",
         "projectId":"p-b08-long","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"]}
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"]}
     })).unwrap();
     assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open("p-b08-long", "B08 long", NOW).unwrap();
@@ -352,6 +460,11 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
         2
     );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08-long' AND h.artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), context_id);
+    let volume_head_after: (String,i64,String) = connection.query_row(
+        "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b08-long' AND artifact_type='VolumePlan' AND scope_level='VOLUME' AND scope_key=?1",
+        [&volume_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))
+    ).unwrap();
+    assert_eq!(volume_head_after, volume_head_before);
 }
 
 #[test]
@@ -543,6 +656,53 @@ fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
 }
 
 #[test]
+fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
+    for (suffix, expected) in [
+        ("no-action", "NO_ACTION"),
+        ("next", "RECOMPILE_NEXT_CHAPTER"),
+        ("rolling", "RECOMPILE_ROLLING_WINDOW"),
+        ("route", "REPLAN_VOLUME_ROUTE"),
+        ("change", "CHANGE_REQUEST"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = format!("p-b08-recon-{suffix}");
+        let state = KernelState::with_production_gateway(
+            AppPaths::new(temp.path()),
+            Arc::new(AuditVariantGateway {
+                variant: if suffix == "no-action" {
+                    "none"
+                } else {
+                    suffix
+                },
+            }),
+        );
+        let connection = state
+            .manager
+            .create(&project_id, "B08 reconciliation", NOW)
+            .unwrap();
+        let chapter_id = seed_chapter_and_gate(&connection, &project_id);
+        drop(connection);
+        let result = execute_command_impl(&state, json!({
+            "type":"production_start","commandId":format!("cmd:b08:recon:{suffix}"),
+            "idempotencyKey":format!("key:b08:recon:{suffix}"),"projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        })).unwrap();
+        assert_eq!(result["finalStatus"], "committed");
+        let connection = state
+            .manager
+            .open(&project_id, "B08 reconciliation", NOW)
+            .unwrap();
+        let actual: String = connection.query_row(
+            "SELECT json_extract(p.payload_json,'$.reconciliation') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'",
+            [&project_id], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(actual, expected);
+    }
+    println!("B08_RECONCILIATION_RESULT no_action=PASS recompile_next_chapter=PASS recompile_rolling_window=PASS replan_volume_route=PASS change_request=PASS no_b09_execution=PASS no_b11_execution=PASS status=PASS");
+}
+
+#[test]
 fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::new(AppPaths::new(temp.path()));
@@ -555,7 +715,7 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
         params: json!({}),
         postconditions: json!({"requires":"runtime projection exists"}),
     }];
-    let expected_postconditions = vec![json!({"status":"REFRESHED"})];
+    let expected_postconditions = vec![json!({"kind":"projection_current","expected":true})];
     let digest =
         operation_digest_with_postconditions(&operations, &expected_postconditions).unwrap();
     let plan = RepairPlan {
@@ -605,8 +765,13 @@ fn create_h03_plan(
     operation: RepairOperation,
     revision: i64,
 ) -> String {
+    let is_recompile = operation.operation == "recompile_chapter_plan";
     let operations = vec![operation];
-    let expected_postconditions = vec![json!({"status":"PASS"})];
+    let expected_postconditions = vec![if is_recompile {
+        json!({"kind":"chapter_plan_stale","expected":"VALID"})
+    } else {
+        json!({"kind":"projection_current","expected":true})
+    }];
     let digest =
         operation_digest_with_postconditions(&operations, &expected_postconditions).unwrap();
     let plan = RepairPlan {
@@ -808,6 +973,183 @@ fn h03_postverify_requery_failure_is_receipted_and_not_reported_as_repaired() {
 }
 
 #[test]
+fn h03_expected_vs_observed_postcondition_mismatch_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(
+        state
+            .manager
+            .create("p-h03-mismatch", "H03 mismatch", NOW)
+            .unwrap(),
+    );
+    let plan_id = "repair-plan:h03:mismatch";
+    let auth_id = "repair-auth:h03:mismatch";
+    let digest = create_h03_plan(
+        &state,
+        "p-h03-mismatch",
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: "p-h03-mismatch".into(),
+            params: json!({}),
+            postconditions: json!({"kind":"runtime_projection_current"}),
+        },
+        0,
+    );
+    authorize_h03(&state, "p-h03-mismatch", plan_id, auth_id, &digest, 0);
+    let connection = state
+        .manager
+        .open("p-h03-mismatch", "H03 mismatch", NOW)
+        .unwrap();
+    let receipt = ai_novel_production_system_core::repair::execute(
+        &connection,
+        &MismatchedPostverifyOwner,
+        "p-h03-mismatch",
+        plan_id,
+        auth_id,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(receipt.status, "REPAIR_VERIFICATION_FAILED");
+    assert_eq!(
+        receipt.postconditions[0]["expectedPostcondition"]["expected"],
+        true
+    );
+    assert_eq!(receipt.postconditions[0]["observed"], false);
+    assert_eq!(receipt.postconditions[0]["status"], "FAIL");
+    println!("H03_POSTVERIFY_MISMATCH_RESULT expected=true observed=false status=FAIL");
+}
+
+#[test]
+fn h03_postcondition_query_failure_is_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(
+        state
+            .manager
+            .create("p-h03-incomplete", "H03 incomplete", NOW)
+            .unwrap(),
+    );
+    let plan_id = "repair-plan:h03:incomplete";
+    let auth_id = "repair-auth:h03:incomplete";
+    let digest = create_h03_plan(
+        &state,
+        "p-h03-incomplete",
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: "p-h03-incomplete".into(),
+            params: json!({}),
+            postconditions: json!({"kind":"runtime_projection_current"}),
+        },
+        0,
+    );
+    authorize_h03(&state, "p-h03-incomplete", plan_id, auth_id, &digest, 0);
+    let connection = state
+        .manager
+        .open("p-h03-incomplete", "H03 incomplete", NOW)
+        .unwrap();
+    let receipt = ai_novel_production_system_core::repair::execute(
+        &connection,
+        &IncompletePostverifyOwner,
+        "p-h03-incomplete",
+        plan_id,
+        auth_id,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(receipt.status, "REPAIR_VERIFICATION_INCOMPLETE");
+    assert_eq!(
+        receipt.postconditions[0]["status"],
+        "REPAIR_VERIFICATION_INCOMPLETE"
+    );
+    println!("H03_POSTVERIFY_QUERY_RESULT query=ERROR status=INCOMPLETE");
+}
+
+#[test]
+fn h03_same_authorization_two_workers_exactly_one_executes() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let state = KernelState::new(paths.clone());
+    drop(state.manager.create("p-h03-race", "H03 race", NOW).unwrap());
+    let plan_id = "repair-plan:h03:race";
+    let auth_id = "repair-auth:h03:race";
+    let digest = create_h03_plan(
+        &state,
+        "p-h03-race",
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: "p-h03-race".into(),
+            params: json!({}),
+            postconditions: json!({"kind":"runtime_projection_current"}),
+        },
+        0,
+    );
+    authorize_h03(&state, "p-h03-race", plan_id, auth_id, &digest, 0);
+    let database = paths.project_dir("p-h03-race").unwrap().join("project.db");
+    let barrier = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let barrier = Arc::clone(&barrier);
+        let calls = Arc::clone(&calls);
+        let database = database.clone();
+        workers.push(thread::spawn(move || {
+            let connection =
+                ai_novel_production_system_core::project_db::connection::open_connection(
+                    &database, false,
+                )
+                .unwrap();
+            barrier.wait();
+            ai_novel_production_system_core::repair::execute(
+                &connection,
+                &CountingOwner { calls },
+                "p-h03-race",
+                plan_id,
+                auth_id,
+                NOW,
+            )
+        }));
+    }
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    assert!(results.iter().any(|result| {
+        result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("H03_REPAIR_ALREADY_CONSUMED"))
+    }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let connection = state.manager.open("p-h03-race", "H03 race", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_execution_receipts WHERE authorization_id=?1",
+                [auth_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_authorizations WHERE authorization_id=?1 AND consumed_at IS NOT NULL",
+                [auth_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    println!("H03_AUTH_RACE_RESULT workers=2 successful=1 rejected=1 ownerExecutions=1 activeOwners=1 status=PASS");
+}
+
+#[test]
 fn h03_stage_matrix_rejects_b09_route_and_keeps_change_request_proposal_only() {
     for (suffix, operation, expected) in [
         (
@@ -969,7 +1311,7 @@ fn h03_support_schema_is_fresh_reopen_upgrade_and_copy_safe() {
     };
     let digest = operation_digest_with_postconditions(
         std::slice::from_ref(&operation),
-        &[json!({"status":"PASS"})],
+        &[json!({"kind":"projection_current","expected":true})],
     )
     .unwrap();
     let plan = RepairPlan {
@@ -984,7 +1326,7 @@ fn h03_support_schema_is_fresh_reopen_upgrade_and_copy_safe() {
         affected_scopes: vec!["PROJECT".into()],
         risk_level: "LOW".into(),
         requires_backup: false,
-        expected_postconditions: vec![json!({"status":"PASS"})],
+        expected_postconditions: vec![json!({"kind":"projection_current","expected":true})],
         operation_digest: digest,
         created_at: NOW.into(),
     };
@@ -1034,7 +1376,7 @@ fn h03_expected_postconditions_are_part_of_operation_digest() {
         affected_scopes: vec!["PROJECT".into()],
         risk_level: "LOW".into(),
         requires_backup: false,
-        expected_postconditions: vec![json!({"kind":"runtime_projection_current"})],
+        expected_postconditions: vec![json!({"kind":"projection_current","expected":true})],
         operation_digest: String::new(),
         created_at: NOW.into(),
     };

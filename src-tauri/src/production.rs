@@ -903,12 +903,30 @@ pub fn run_chapter_production(
         .iter()
         .any(|item| item.status == "BLOCKED");
     let reconciliation = crate::planning::classify_plan_reality(
-        false,
+        extraction.next_chapter_recompile_required,
         required_blocked,
         extraction.capacity_exhausted,
         extraction.change_requested,
     );
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":reference(&candidate),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation});
+    let reality = extraction
+        .task_progress_candidates
+        .iter()
+        .map(|item| {
+            let expected = plan_payload
+                .get("requiredStateOutcomes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|condition| {
+                    condition.get("value").and_then(Value::as_str)
+                        == Some(item.task_id.as_str())
+                })
+                .and_then(|condition| condition.get("kind").and_then(Value::as_str))
+                .unwrap_or("UNSPECIFIED");
+            json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}})
+        })
+        .collect::<Vec<_>>();
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":reference(&candidate),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -1111,6 +1129,8 @@ struct AuditExtraction {
     capacity_exhausted: bool,
     #[serde(default)]
     change_requested: bool,
+    #[serde(default)]
+    next_chapter_recompile_required: bool,
 }
 
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {

@@ -2494,14 +2494,14 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     )
                     .map_err(|error| error.to_string())?;
                 Ok(
-                    json!({"operation":operation.operation,"status":if updated_at == self.now {"PASS"} else {"FAIL"},"observedUpdatedAt":updated_at}),
+                    json!({"operation":operation.operation,"kind":"projection_current","status":if updated_at == self.now {"PASS"} else {"FAIL"},"observed":updated_at == self.now,"observedUpdatedAt":updated_at}),
                 )
             }
             "rebuild_projection" | "rebuild_fts" => {
                 let healthy = SearchService::projection_health(self.connection, self.project_id)
                     .map_err(|error| error.to_string())?;
                 Ok(
-                    json!({"operation":operation.operation,"status":if healthy {"PASS"} else {"FAIL"},"projectionHealthy":healthy}),
+                    json!({"operation":operation.operation,"kind":"projection_current","status":if healthy {"PASS"} else {"FAIL"},"observed":healthy,"projectionHealthy":healthy}),
                 )
             }
             "recompile_chapter_plan" => {
@@ -2561,8 +2561,13 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     revision,
                     &current_digest,
                 );
+                let observed = if matches!(stale, PlanStaleStatus::Valid) {
+                    "VALID"
+                } else {
+                    "PLAN_STALE"
+                };
                 Ok(
-                    json!({"operation":operation.operation,"status":if actual == *expected && matches!(stale, PlanStaleStatus::Valid) {"PASS"} else {"FAIL"},"owner":"B07::PlanningOwner","stale":if matches!(stale, PlanStaleStatus::Valid) {"VALID"} else {"PLAN_STALE"}}),
+                    json!({"operation":operation.operation,"kind":"chapter_plan_stale","status":if actual == *expected && observed == "VALID" {"PASS"} else {"FAIL"},"owner":"B07::PlanningOwner","observed":observed,"stale":observed}),
                 )
             }
             "backup_restore_maintenance" => {
@@ -2573,7 +2578,7 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .ok_or_else(|| "H03_BACKUP_PATH_REQUIRED".to_string())?;
                 let exists = std::path::Path::new(backup_path).is_file();
                 Ok(
-                    json!({"operation":operation.operation,"status":if exists {"PASS"} else {"FAIL"},"backupReadable":exists}),
+                    json!({"operation":operation.operation,"kind":"backup_exists","status":if exists {"PASS"} else {"FAIL"},"observed":exists,"backupReadable":exists}),
                 )
             }
             _ => Err("H03_POSTCONDITION_UNAVAILABLE".into()),

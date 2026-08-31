@@ -151,6 +151,19 @@ pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
             "every operation requires exactly one expectedPostcondition".into(),
         ));
     }
+    for expected in &plan.expected_postconditions {
+        let typed = expected
+            .as_object()
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| !kind.trim().is_empty())
+            && expected.get("expected").is_some();
+        if !typed {
+            return Err(RepairError::Invalid(
+                "expectedPostcondition requires typed kind and expected".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -274,8 +287,14 @@ pub fn execute(
         {
             match owner.verify(operation) {
                 Ok(mut value) => {
+                    let matches = value.get("kind") == expected.get("kind")
+                        && value.get("observed") == expected.get("expected")
+                        && value.get("status").and_then(Value::as_str) == Some("PASS");
                     value["expectedPostcondition"] = expected.clone();
                     value["typedRequery"] = Value::Bool(true);
+                    if !matches {
+                        value["status"] = Value::String("FAIL".into());
+                    }
                     postconditions.push(value)
                 }
                 Err(error) => postconditions.push(json!({
