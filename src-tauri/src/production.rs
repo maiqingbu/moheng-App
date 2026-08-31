@@ -466,8 +466,6 @@ pub fn run_chapter_production(
         StableIdKind::Artifact,
         &format!("{command_id}:context"),
     )?;
-    let plan_id =
-        StableIdentityFactory::from_command(StableIdKind::Artifact, &format!("{command_id}:plan"))?;
     let candidate_id = StableIdentityFactory::from_command(
         StableIdKind::Artifact,
         &format!("{command_id}:candidate"),
@@ -527,6 +525,18 @@ pub fn run_chapter_production(
         )?;
         context.provenance.created_by = "B06::ContextCompilerOwner".into();
         let context_ref = reference(&context);
+        let context_command_id = format!("{bootstrap_command_id}:context");
+        context.provenance.command_id = context_command_id.clone();
+        let context_bundle: CommitBundle = serde_json::from_value(json!({
+            "commitId":format!("commit:{context_command_id}"),"projectId":project_id,
+            "commandId":context_command_id,"idempotencyKey":format!("{idempotency_key}:context"),
+            "expectedProjectRevision":current_revision,"contractVersion":"m0a.v1","createdAt":now,
+            "artifacts":[context],"headUpdates":[{"artifactType":"ContextManifest","scope":chapter_scope(&chapter_id),
+                "artifactId":context_ref.artifact_id,"version":context_ref.version,"payloadHash":context_ref.payload_hash}]
+        })).map_err(|error| format!("B08_CONTEXT_BUNDLE_INVALID:{error}"))?;
+        let context_receipt = CommitService::commit(connection, &context_bundle, &now)
+            .map_err(|error| error.to_string())?;
+        current_revision = context_receipt.after_revision;
 
         update_stage(connection, &project_id, &job_id, "PLAN", &now)?;
         let planning_run_id = StableIdentityFactory::from_command(
@@ -583,39 +593,24 @@ pub fn run_chapter_production(
                 .map(|thread| thread.thread_id.clone())
                 .collect::<Vec<_>>(),
         )?;
-        let mut plan = artifact(
+        let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
+        let planning_receipt = crate::planning::recompile_chapter_plan_owner(
+            connection,
             &project_id,
-            plan_id,
-            ArtifactType::ChapterPlan,
             &chapter_id,
-            plan_payload.clone(),
-            &bootstrap_command_id,
-            &job_id,
-            Some(&planning_run_id),
+            &plan_payload,
+            &planning_command_id,
+            &format!("{idempotency_key}:planning-owner"),
+            current_revision,
             &now,
-            vec![context_ref.clone()],
+            Some(&planning_run_id),
         )?;
-        plan.provenance.created_by = "B07::PlanningOwner".into();
-        plan.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
-        let plan_ref = reference(&plan);
-        let bootstrap_bundle: CommitBundle = serde_json::from_value(json!({
-                "commitId":format!("commit:{command_id}:bootstrap"),
-                "projectId":project_id,
-                "commandId":bootstrap_command_id,
-                "idempotencyKey":format!("{idempotency_key}:bootstrap"),
-                "expectedProjectRevision":current_revision,
-                "contractVersion":"m0a.v1",
-                "createdAt":now,
-                "artifacts":[context,plan],
-                "headUpdates":[
-                    {"artifactType":"ContextManifest","scope":chapter_scope(&chapter_id),"artifactId":context_ref.artifact_id,"version":context_ref.version,"payloadHash":context_ref.payload_hash},
-                    {"artifactType":"ChapterPlan","scope":chapter_scope(&chapter_id),"artifactId":plan_ref.artifact_id,"version":plan_ref.version,"payloadHash":plan_ref.payload_hash}
-                ]
-            }))
-            .map_err(|error| format!("B08_BOOTSTRAP_BUNDLE_INVALID:{error}"))?;
-        let bootstrap_receipt = CommitService::commit(connection, &bootstrap_bundle, &now)
-            .map_err(|error| error.to_string())?;
-        current_revision = bootstrap_receipt.after_revision;
+        let plan_ref = planning_receipt
+            .committed_artifact_refs
+            .first()
+            .cloned()
+            .ok_or_else(|| "B08_PLANNING_OWNER_NO_RECEIPT".to_string())?;
+        current_revision = planning_receipt.after_revision;
         (context_ref, context_payload, plan_ref, plan_payload)
     } else {
         let plan_ref: ArtifactRef = connection

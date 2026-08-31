@@ -301,6 +301,7 @@ pub fn recompile_chapter_plan_owner(
     idempotency_key: &str,
     expected_revision: i64,
     now: &str,
+    model_run_id: Option<&str>,
 ) -> Result<CommitReceipt, String> {
     validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
@@ -342,7 +343,7 @@ pub fn recompile_chapter_plan_owner(
         "scope":{"level":"CHAPTER","chapterId":chapter_id},"version":version,
         "schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":plan,
         "payloadHash":hash,"dependencyRefs":[context_ref],
-        "provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"contextManifestRef":context_ref.artifact_id},
+        "provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"contextManifestRef":context_ref.artifact_id,"modelRunId":model_run_id},
         "createdAt":now
     }))
     .map_err(|error| error.to_string())?;

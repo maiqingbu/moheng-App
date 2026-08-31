@@ -2446,6 +2446,7 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     &format!("{command_id}:idempotency"),
                     revision,
                     self.now,
+                    None,
                 )?;
                 Ok(crate::repair::OwnerExecution {
                     owner: "B07::PlanningOwner".into(),
