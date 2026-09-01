@@ -122,11 +122,11 @@ function copyEvidenceTo(directory) {
   }
 }
 
-function walk(directory, output = []) {
+function walk(directory, output = [], rootDirectory = directory) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name)
-    if (entry.isDirectory()) walk(target, output)
-    else output.push({ path: target, relative: path.relative(directory, target), symlink: entry.isSymbolicLink() })
+    if (entry.isDirectory()) walk(target, output, rootDirectory)
+    else output.push({ path: target, relative: path.relative(rootDirectory, target), symlink: entry.isSymbolicLink() })
   }
   return output
 }
@@ -345,7 +345,7 @@ const qualityBoundary = packageSkills.filter(skill => ['S35', 'S36', 'S37', 'S38
 const productionSource = fs.readFileSync(path.join(root, 'src-tauri/src/production.rs'), 'utf8')
 const compositionOrder = productionSource.indexOf('enrich_chapter') < productionSource.indexOf('RENDER_CHAPTER')
   && productionSource.indexOf('NarrativeQualityReport') < productionSource.indexOf('AUDIT_EXTRACT')
-  && productionSource.indexOf('CommitService::commit') > productionSource.indexOf('AUDIT_EXTRACT')
+  && productionSource.lastIndexOf('CommitService::commit') > productionSource.indexOf('AUDIT_EXTRACT')
 
 setGate('B10-A00', freezePass, 'B10_PREBATCH_FREEZE.json', { freezeThrough: freeze?.freezeThrough, acceptedBaseline: freeze?.acceptedBaseline })
 setGate('B10-A01', sourceBinding && before.commit !== START_COMMIT, 'B10_SOURCE_BINDING.json', { startCommitIsAncestor })

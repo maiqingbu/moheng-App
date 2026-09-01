@@ -227,6 +227,6 @@ fn b10_repair_rechecks_only_affected_dimensions_before_hard_gate() {
     )
     .unwrap();
     assert_eq!(rechecked.rechecked_dimensions, vec!["hook"]);
-    assert_eq!(rechecked.soft_only, true);
+    assert!(rechecked.soft_only);
     assert_eq!(rechecked.model_provenance.evaluator_calls, 1);
 }
