@@ -352,6 +352,29 @@ impl SkillBundleLoader {
             },
         ))
     }
+
+    pub fn load_selected_resource(
+        &self,
+        selection: &SkillSelection,
+        skill_id: &str,
+        resource: &str,
+    ) -> Result<LoadedResource, String> {
+        let skill = selection
+            .selected
+            .iter()
+            .find(|skill| skill.id == skill_id)
+            .ok_or_else(|| "SKILL_NOT_SELECTED".to_string())?;
+        if !resource.starts_with("resources/") || resource.contains("..") {
+            return Err("SKILL_RESOURCE_PATH_DENIED".into());
+        }
+        let relative = format!("skills/{}/{resource}", skill.slug);
+        let (text, digest) = self.load_text(&relative)?;
+        Ok(LoadedResource {
+            reference: format!("creative-skills/v1.2.0/{relative}"),
+            digest,
+            text,
+        })
+    }
 }
 
 fn current_rfc3339_utc() -> String {

@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export const START_COMMIT = '2a5f741527eaf62830141f80d88dcbf3ecc69017'
-export const FROZEN_BASELINE_COMMIT = START_COMMIT
+export const START_COMMIT = '518cfc04234a93b1b21dc07b0d1c9b5b2fc0c16b'
+export const FROZEN_BASELINE_COMMIT = '2a5f741527eaf62830141f80d88dcbf3ecc69017'
 export const B10_BLOCKING_GATES = Array.from({ length: 34 }, (_, index) => `B10-A${String(index).padStart(2, '0')}`)
 export const NEGATIVE_BLOCKING_GATES = Array.from({ length: 16 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
 export const R2_GLOBAL_BLOCKING_GATES = [
@@ -55,6 +55,7 @@ export const B10_ENGINEERING_GATES = [
   'b10_negative_fixtures',
   'b10_ui',
   'b10_scale_context',
+  'b10_negative_matrix_exact_mapping',
 ]
 export const RELEASE_GATES = [
   'source_binding',

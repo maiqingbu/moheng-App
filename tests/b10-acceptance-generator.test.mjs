@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   B10_BLOCKING_GATES,
+  B10_ENGINEERING_GATES,
   NEGATIVE_BLOCKING_GATES,
   R2_GLOBAL_BLOCKING_GATES,
   REQUIRED_BLOCKING_GATES,
@@ -27,6 +31,16 @@ test('B10 acceptance contains the full functional, negative, global and release 
   assert.equal(NEGATIVE_BLOCKING_GATES.length, 16)
   assert.equal(R2_GLOBAL_BLOCKING_GATES.length, 15)
   assert.equal(evaluateAcceptance(passing()).status, 'READY_FOR_ACCEPTANCE')
+})
+
+test('B10 acceptance runner uses an exact assertion mapping for every negative gate', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const runner = readFileSync(resolve(root, 'scripts/run-b10-evidence-gates.mjs'), 'utf8')
+  assert.ok(B10_ENGINEERING_GATES.includes('b10_negative_matrix_exact_mapping'))
+  assert.match(runner, /B10_NEGATIVE_MATRIX\.json/)
+  assert.match(runner, /function exactTestPass\(/)
+  assert.match(runner, /const negativeCases = \[/)
+  assert.doesNotMatch(runner, /const negativePass = \{/)
 })
 
 test('every missing B10 gate fails closed', () => {

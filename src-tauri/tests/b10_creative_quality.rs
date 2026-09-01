@@ -2,7 +2,7 @@ use ai_novel_production_system_core::creative_skills::{
     build_skill_task_context, create_invocation_provenance, default_taste_profile,
     enforce_hard_quality_separation, enrich_chapter_with_policy, evaluate_narrative_quality,
     load_registry, normalize_skill_output, recheck_affected_dimensions, repair_candidate,
-    select_creative_skills, RepairCandidateRequest, SkillSelectionRequest,
+    select_creative_skills, RepairCandidateRequest, SkillBundleLoader, SkillSelectionRequest,
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use serde_json::json;
@@ -314,6 +314,21 @@ fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
             .get("digest")
             .and_then(|value| value.as_str())
             .is_some_and(|value| value.len() == 64))));
+    let selection = select_creative_skills(SkillSelectionRequest {
+        primary: "S14".into(),
+        support: vec!["S10".into()],
+        budget_reason: None,
+        context_tokens: 1200,
+        model_calls: 1,
+    })
+    .unwrap();
+    let loader = SkillBundleLoader::tracked_package();
+    assert_eq!(
+        loader
+            .load_selected_resource(&selection, "S21", "resources/operating_method.md")
+            .unwrap_err(),
+        "SKILL_NOT_SELECTED"
+    );
 }
 
 #[test]

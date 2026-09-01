@@ -20,6 +20,7 @@ const metadata = (id: string, slug = id.toLowerCase()): SkillMetadata => ({
   id,
   slug,
   nameZh: `技能 ${id}`,
+  version: '1.2.0',
   category: 'execution',
   priority: 1,
   role: 'authoring',

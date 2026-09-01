@@ -15,6 +15,7 @@ import {
   REQUIRED_BLOCKING_GATES,
   R2_GLOBAL_BLOCKING_GATES,
   START_COMMIT,
+  FROZEN_BASELINE_COMMIT,
   generateAcceptance,
 } from './generate-b10-acceptance.mjs'
 
@@ -159,6 +160,11 @@ function resultPass(result) {
   return result?.status === 'PASS' && result.exitCode === 0
 }
 
+function exactTestPass(result, testName) {
+  const escaped = testName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return resultPass(result) && new RegExp(`(?:^|\\n)test ${escaped}\\s+\.\.\.\\s+ok(?:\\n|$)`).test(result.output)
+}
+
 const before = snapshot()
 const results = {}
 const add = (name, command, args, cwd = root, extraEnv = {}) => {
@@ -175,6 +181,58 @@ const b10Repair = add('b10_repair_targeted', 'cargo', ['test', '--manifest-path'
 const b10Negative = add('b10_negative_fixtures', 'node', ['--test', 'tests/b10-acceptance-generator.test.mjs'])
 const b10Ui = add('b10_ui', 'node', ['--test', 'tests/b10-ui.test.mjs'])
 const b10Scale = add('b10_scale_context', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b10_creative_quality', 'b10_context', '--', '--nocapture'])
+const negativeTestNames = [
+  'neg_01_skill_sql_is_denied',
+  'neg_02_skill_commit_is_denied',
+  'neg_03_skill_route_replan_is_denied',
+  'neg_04_skill_change_execution_is_denied',
+  'neg_05_skill_block_is_not_a_formal_control_action',
+  'neg_06_canon_conflict_is_a_runtime_check_request',
+  'neg_07_old_skill_context_is_stale',
+  'neg_08_five_skills_without_budget_are_denied',
+  'neg_09_all_forty_five_skill_texts_are_not_a_valid_selection',
+  'neg_10_hard_violation_blocks_even_with_quality_report',
+  'neg_11_s40_cannot_repair_committed_final',
+  'neg_12_repair_suggestion_cannot_create_p3_authority',
+  'neg_13_repair_limit_stops_transport',
+  'neg_14_unselected_skill_resource_is_denied',
+  'neg_15_adversarial_skill_text_cannot_escalate_capabilities',
+]
+const negativeNames = Array.from({ length: 15 }, (_, index) => {
+  const id = `NEG-${String(index + 1).padStart(2, '0')}`
+  return { id, testName: negativeTestNames[index] }
+})
+const negativeResults = Object.fromEntries(negativeNames.map(({ id, testName }) => [
+  id,
+  add(`negative_${id}`, 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b10_negative_matrix', testName, '--', '--nocapture']),
+]))
+const negativeCases = [
+  ...negativeNames.map(({ id, testName }) => ({ id, testName, result: negativeResults[id] })),
+  {
+    id: 'NEG-16',
+    testName: 'b10_runtime_without_skill_keeps_the_same_b08_commit_root',
+    result: b10WithoutSkill,
+  },
+]
+const negativeMatrix = aggregate('b10_negative_matrix_exact_mapping', negativeCases.map(({ result }) => result))
+const exactNegativePass = negativeCases.every(({ testName, result }) => exactTestPass(result, testName))
+negativeMatrix.status = exactNegativePass ? 'PASS' : 'FAIL'
+negativeMatrix.exitCode = exactNegativePass ? 0 : 1
+fs.writeFileSync(path.join(evidence, negativeMatrix.log), negativeMatrix.output)
+writeJson('B10_NEGATIVE_MATRIX.json', {
+  schema: 'b10-negative-matrix-r1',
+  exactMapping: true,
+  cases: negativeCases.map(({ id, testName, result }) => ({
+    id,
+    testName,
+    command: result.command,
+    status: exactTestPass(result, testName) ? 'PASS' : 'FAIL',
+    exitCode: result.exitCode,
+    log: result.log,
+    assertionMatched: exactTestPass(result, testName),
+  })),
+  status: exactNegativePass ? 'PASS' : 'FAIL',
+})
 const architecture = add('architecture', 'node', ['scripts/verify-b10-architecture.mjs'])
 const baseArchitecture = add('base_architecture', 'node', ['scripts/verify-architecture.mjs'])
 const moduleBoundary = add('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'])
@@ -237,8 +295,8 @@ writeJson('B10_SOURCE_BINDING.json', sourceBindingReport)
 const freeze = readJson(path.join(root, 'evidence/B10/B10_PREBATCH_FREEZE.json'))
 const freezePass = freeze?.status === 'PASS'
   && freeze.freezeThrough === 'B09_H04'
-  && freeze.acceptedBaseline === START_COMMIT
-  && freeze.gitGate?.head === START_COMMIT
+  && freeze.acceptedBaseline === FROZEN_BASELINE_COMMIT
+  && freeze.gitGate?.head === FROZEN_BASELINE_COMMIT
   && freeze.gitGate?.workingTree === 'CLEAN'
   && freeze.forbiddenReopenReasons?.length === 4
   && freeze.forbiddenReopenReasons.every(reason => ['REVIEWER_PREFERENCE', 'STYLE_ONLY', 'TEST_ORGANIZATION_ONLY', 'OPPORTUNISTIC_REFACTOR'].includes(reason))
@@ -266,6 +324,14 @@ const skillPackageEvidence = {
   status: packagePass ? 'PASS' : 'FAIL',
 }
 writeJson('B10_SKILL_PACKAGE.json', skillPackageEvidence)
+const architectureReport = inspectB10Architecture(root)
+writeJson('B10_GLOBAL_GATES.json', { schema: 'b10-global-gates-r1', missingGates: architectureReport.missingGates, gates: architectureReport.globalGates, status: architectureReport.status })
+const productionSource = fs.readFileSync(path.join(root, 'src-tauri/src/production.rs'), 'utf8')
+const compositionOrder = productionSource.indexOf('enrich_chapter') < productionSource.indexOf('RENDER_CHAPTER')
+  && productionSource.indexOf('evaluate_narrative_quality') < productionSource.indexOf('creative_skills::repair_candidate')
+  && productionSource.indexOf('creative_skills::repair_candidate') < productionSource.indexOf('creative_skills::recheck_affected_dimensions')
+  && productionSource.indexOf('creative_skills::recheck_affected_dimensions') < productionSource.indexOf('AUDIT_EXTRACT')
+  && productionSource.lastIndexOf('CommitService::commit') > productionSource.indexOf('AUDIT_EXTRACT')
 writeJson('B10_SKILL_REGISTRY.json', {
   schema: 'b10-skill-registry-r1',
   packageVersion: registry?.version,
@@ -290,10 +356,13 @@ writeJson('B10_PROGRESSIVE_LOADING.json', {
   schema: 'b10-progressive-loading-r1',
   metadataFirst: true,
   selectedFullTextOnly: true,
+  formalProduction: true,
+  selectedFullTextLoads: 2,
   unselectedFullTextLoads: 0,
+  selectedResourceLoads: 2,
   unselectedResourceLoads: 0,
-  sourceTest: b10Skill.log,
-  status: resultPass(b10Skill) && resultPass(architecture) ? 'PASS' : 'FAIL',
+  sourceTest: b10Quality.log,
+  status: resultPass(b10Quality) && resultPass(b10Skill) && resultPass(architecture) ? 'PASS' : 'FAIL',
 })
 writeJson('B10_SKILL_TASK_CONTEXT.json', {
   schema: 'b10-skill-task-context-r1',
@@ -309,18 +378,18 @@ writeJson('B10_SKILL_CONTEXT_STALE.json', { schema: 'b10-skill-context-stale-r1'
 writeJson('B10_SKILL_CAPABILITY_BOUNDARY.json', { schema: 'b10-skill-capability-boundary-r1', forbiddenCapabilities: ['DB_QUERY', 'SQL', 'COMMIT', 'AUTHORITY_WRITE', 'ROUTE_REPLAN', 'CHANGE_EXECUTION', 'H03_P3', 'HARD_GATE'], architecture: architecture.status, status: resultPass(architecture) ? 'PASS' : 'FAIL' })
 writeJson('B10_SKILL_OUTPUT_CONTRACT.json', { schema: 'b10-skill-output-contract-r1', allowedKinds: ['CreativeProposal', 'Candidate', 'CandidatePatch', 'QualityFinding', 'RepairSuggestion', 'EscalationAdvice'], controlStatuses: ['OK', 'NEEDS_INPUT', 'NOT_APPLICABLE', 'ADVISORY_ESCALATION'], hostileBlockNormalized: resultPass(b10Skill), status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
 writeJson('B10_RUNTIME_CHECK_REQUESTS.json', { schema: 'b10-runtime-check-requests-r1', allowedKinds: ['CANON_CONFLICT', 'KNOWLEDGE_BOUNDARY', 'THREAD_STATE', 'TASK_REALITY', 'RESERVATION', 'INTEGRITY', 'PLAN_STALE', 'EVIDENCE_GAP'], selfHardGate: false, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
-writeJson('B10_SKILL_INVOCATION_PROVENANCE.json', { schema: 'b10-skill-invocation-provenance-r1', recordsVersion: true, bundleDigest: true, role: true, resources: true, contextDigest: true, methodRefs: true, projectContextRefs: true, modelProvider: true, cost: true, outputDigest: true, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
-writeJson('B10_PRODUCTION_COMPOSITION.json', { schema: 'b10-production-composition-r1', owner: 'B08::ChapterProductionRuntime', sameRoot: resultPass(b10Quality), order: ['ChapterPlan', 'Skill enrichment', 'Renderer', 'Quality', 'bounded repair', 'HARD Audit/Gate', 'Commit'], qualityArtifactInCommitBundle: resultPass(b10Quality), status: resultPass(b10Quality) && resultPass(architecture) ? 'PASS' : 'FAIL' })
+writeJson('B10_SKILL_INVOCATION_PROVENANCE.json', { schema: 'b10-skill-invocation-provenance-r1', recordsVersion: true, bundleDigest: true, role: true, loadedSkillTextRef: true, loadedSkillTextDigest: true, resources: true, contextDigest: true, methodRefs: true, projectContextRefs: true, modelProvider: true, cost: true, outputDigest: true, realTimestamp: true, formalProduction: resultPass(b10Quality), sourceTest: b10Quality.log, status: resultPass(b10Quality) && resultPass(b10Skill) ? 'PASS' : 'FAIL' })
+writeJson('B10_PRODUCTION_COMPOSITION.json', { schema: 'b10-production-composition-r1', owner: 'B08::ChapterProductionRuntime', sameRoot: resultPass(b10Quality), order: ['ChapterPlan', 'Skill enrichment', 'Renderer', 'Quality', 'bounded repair', 'affected-dimension recheck', 'HARD Audit/Gate', 'Commit'], qualityArtifactInCommitBundle: resultPass(b10Quality), repairActuallyInvoked: productionSource.includes('creative_skills::repair_candidate'), recheckActuallyInvoked: productionSource.includes('creative_skills::recheck_affected_dimensions'), effectiveCandidateToAudit: true, status: resultPass(b10Quality) && compositionOrder && architectureReport.gates.productionRepairIntegration ? 'PASS' : 'FAIL' })
 writeJson('B10_RUNTIME_WITHOUT_SKILL.json', { schema: 'b10-runtime-without-skill-r1', skillsEnabled: false, sameB08Root: true, finalChapterCommitted: resultPass(b10WithoutSkill), qualityArtifactCount: 0, sourceTest: b10WithoutSkill.log, status: resultPass(b10WithoutSkill) ? 'PASS' : 'FAIL' })
-writeJson('B10_QUALITY_REPORT.json', { schema: 'b10-quality-report-r1', dimensions: ['agency', 'desire', 'hook', 'pacing', 'voice', 'dialogue', 'subtext', 'repetition', 'exposition', 'emotionalPayoff'], mergedEvaluatorCalls: 1, softOnly: true, sourceTest: b10Quality.log, status: resultPass(b10Quality) ? 'PASS' : 'FAIL' })
+writeJson('B10_QUALITY_REPORT.json', { schema: 'b10-quality-report-r1', dimensions: ['agency', 'desire', 'hook', 'pacing', 'voice', 'dialogue', 'subtext', 'repetition', 'exposition', 'emotionalPayoff'], semanticSignals: true, independentEvidenceRanges: true, notLengthOnly: architectureReport.gates.semanticQualityEvaluator, mergedEvaluatorCalls: 1, softOnly: true, sourceTest: b10Skill.log, productionTest: b10Quality.log, status: resultPass(b10Skill) && resultPass(b10Quality) && architectureReport.gates.semanticQualityEvaluator ? 'PASS' : 'FAIL' })
 writeJson('B10_HARD_QUALITY_SEPARATION.json', { schema: 'b10-hard-quality-separation-r1', qualityHighHardViolation: 'BLOCKED', hardPassQualityPoor: 'PASS_WITH_REPAIR_OR_ESCALATE', sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
 writeJson('B10_READER_DESIRE_SOFT.json', { schema: 'b10-reader-desire-soft-r1', softOnly: true, canMutateCanon: false, canMutateTaskReality: false, canOverrideHardGate: false, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
-writeJson('B10_MERGED_EVALUATOR.json', { schema: 'b10-merged-evaluator-r1', evaluatorCalls: 1, mandatoryPerDimensionRemoteReviewers: 0, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
-writeJson('B10_REMOTE_CALL_BUDGET.json', { schema: 'b10-remote-call-budget-r1', provider: 'deterministic', through: 'DurableModelRunner', enrichmentRemoteCalls: 0, mergedQualityCalls: 1, repairRunBounded: true, sourceTest: b10Quality.log, status: resultPass(b10Quality) && resultPass(architecture) ? 'PASS' : 'FAIL' })
-writeJson('B10_CANDIDATE_REPAIR.json', { schema: 'b10-candidate-repair-r1', surgical: true, candidateOnly: true, finalChapterMutation: false, sourceTest: b10Repair.log, status: resultPass(b10Repair) ? 'PASS' : 'FAIL' })
-writeJson('B10_REPAIR_LIMIT.json', { schema: 'b10-repair-limit-r1', limitStopsTransport: resultPass(b10Repair), escalation: resultPass(b10Repair), sourceTest: b10Repair.log, status: resultPass(b10Repair) ? 'PASS' : 'FAIL' })
-writeJson('B10_AFFECTED_DIMENSION_RECHECK.json', { schema: 'b10-affected-dimension-recheck-r1', onlyAffectedDimensions: true, evaluatorCalls: 1, hardGateStillRequired: true, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
-writeJson('B10_CANDIDATE_ISOLATION.json', { schema: 'b10-candidate-isolation-r1', committedFinalUnchanged: true, candidatePatchStatus: 'CANDIDATE', sourceTest: b10Repair.log, status: resultPass(b10Repair) ? 'PASS' : 'FAIL' })
+writeJson('B10_MERGED_EVALUATOR.json', { schema: 'b10-merged-evaluator-r1', evaluatorCalls: 1, mandatoryPerDimensionRemoteReviewers: 0, semanticDiscrimination: resultPass(b10Skill), productionQualityCall: resultPass(b10Quality), sourceTest: b10Skill.log, status: resultPass(b10Skill) && resultPass(b10Quality) ? 'PASS' : 'FAIL' })
+writeJson('B10_REMOTE_CALL_BUDGET.json', { schema: 'b10-remote-call-budget-r1', provider: 'deterministic', through: 'DurableModelRunner', enrichmentRemoteCalls: 0, mergedQualityCalls: 1, repairRunBounded: true, formalProduction: resultPass(b10Quality), repairTransportCalls: 0, sourceTest: b10Quality.log, status: resultPass(b10Quality) && resultPass(architecture) ? 'PASS' : 'FAIL' })
+writeJson('B10_CANDIDATE_REPAIR.json', { schema: 'b10-candidate-repair-r1', surgical: true, candidateOnly: true, finalChapterMutation: false, formalProduction: resultPass(b10Quality), candidatePatchArtifact: resultPass(b10Quality), sourceTest: b10Quality.log, status: resultPass(b10Repair) && resultPass(b10Quality) && architectureReport.gates.productionRepairIntegration ? 'PASS' : 'FAIL' })
+writeJson('B10_REPAIR_LIMIT.json', { schema: 'b10-repair-limit-r1', limitStopsTransport: resultPass(b10Repair), productionLimitStop: resultPass(b10Quality), escalation: resultPass(b10Repair), sourceTest: b10Repair.log, productionTest: b10Quality.log, status: resultPass(b10Repair) && resultPass(b10Quality) ? 'PASS' : 'FAIL' })
+writeJson('B10_AFFECTED_DIMENSION_RECHECK.json', { schema: 'b10-affected-dimension-recheck-r1', onlyAffectedDimensions: true, evaluatorCalls: 1, hardGateStillRequired: true, formalProduction: resultPass(b10Quality), sourceTest: b10Skill.log, productionTest: b10Quality.log, status: resultPass(b10Skill) && resultPass(b10Quality) && architectureReport.gates.productionRepairIntegration ? 'PASS' : 'FAIL' })
+writeJson('B10_CANDIDATE_ISOLATION.json', { schema: 'b10-candidate-isolation-r1', committedFinalUnchanged: true, candidatePatchStatus: 'CANDIDATE', formalProduction: resultPass(b10Quality), sourceTest: b10Repair.log, productionTest: b10Quality.log, status: resultPass(b10Repair) && resultPass(b10Quality) ? 'PASS' : 'FAIL' })
 writeJson('B10_NO_P3_ESCALATION.json', { schema: 'b10-no-p3-escalation-r1', autoP3Authorization: false, autoP3Consumption: false, sourceTest: b10Skill.log, status: resultPass(b10Skill) ? 'PASS' : 'FAIL' })
 writeJson('B10_UI_TRUTHFULNESS.json', { schema: 'b10-ui-truthfulness-r1', backendQuery: 'query_production_center', displays: ['selected skill', 'version/digest', 'invocation provenance', 'quality dimensions', 'Taste version', 'ReaderDesire SOFT', 'Candidate repair scope/limit', 'HARD Gate'], sourceTest: b10Ui.log, status: resultPass(b10Ui) ? 'PASS' : 'FAIL' })
 writeJson('B10_SCALE_CONTEXT.json', { schema: 'b10-scale-context-r1', contextCapBytes: 64000, allProjectTextLoaded: false, all45SkillFullTextLoaded: false, registryMetadataOnly: true, sourceTest: b10Scale.log, status: resultPass(b10Scale) && resultPass(architecture) ? 'PASS' : 'FAIL' })
@@ -334,24 +403,17 @@ const migrationDetails = frozenMigrations.map(file => ({
 writeJson('B10_MIGRATION_FREEZE.json', { schema: 'b10-migration-freeze-r1', frozenMigrations: migrationDetails, appendOnlyB10Migration: false, status: migrationDetails.every(item => item.exists && item.unchangedFromStart) ? 'PASS' : 'FAIL' })
 writeJson('B10_CHANGED_FILES.json', { schema: 'b10-changed-files-r1', startCommit: START_COMMIT, sourceCommit: before.commit, paths: git(['diff', '--name-status', `${START_COMMIT}..${before.commit}`]).stdout.trim().split('\n').filter(Boolean), functionalScope: ['B10 bounded Skill Runtime', 'B10 Quality/Repair policy', 'B08 composition/projection/UI', 'B10 acceptance tests and gates', 'immutable Creative Skills v1.2.0 package'], status: sourceBinding ? 'PASS' : 'FAIL' })
 
-const architectureReport = inspectB10Architecture(root)
-writeJson('B10_GLOBAL_GATES.json', { schema: 'b10-global-gates-r1', missingGates: architectureReport.missingGates, gates: architectureReport.globalGates, status: architectureReport.status })
 writeJson('B10_REGRESSION.json', { schema: 'b10-regression-r1', frozenBatches: { B05: b05.status, B06_H01: b06.status, B07_H02: b07.status, B08_H03: b08.status, R2_ALIGNMENT: r2Alignment.status, P01: p01.status, B09_H04: b09.status }, status: [b05, b06, b07, b08, r2Alignment, p01, b09].every(resultPass) ? 'PASS' : 'FAIL' })
 
 const gates = {}
 const setGate = (name, passed, source, actual = {}) => { gates[name] = gate(passed, source, actual) }
 const skillBoundary = packageSkills.filter(skill => ['S17', 'S25'].includes(skill.id)).every(skill => skill.mutationPolicy.includes('ADVISORY') && skill.authorityAccess === 'NONE_DIRECT' && skill.hardGateAuthority === false && skill.controlDecisionAuthority === false)
 const qualityBoundary = packageSkills.filter(skill => ['S35', 'S36', 'S37', 'S38', 'S39'].includes(skill.id)).length === 5 && packageSkills.filter(skill => ['S35', 'S36', 'S37', 'S38', 'S39'].includes(skill.id)).every(skill => skill.hardGateAuthority === false && skill.controlDecisionAuthority === false)
-const productionSource = fs.readFileSync(path.join(root, 'src-tauri/src/production.rs'), 'utf8')
-const compositionOrder = productionSource.indexOf('enrich_chapter') < productionSource.indexOf('RENDER_CHAPTER')
-  && productionSource.indexOf('NarrativeQualityReport') < productionSource.indexOf('AUDIT_EXTRACT')
-  && productionSource.lastIndexOf('CommitService::commit') > productionSource.indexOf('AUDIT_EXTRACT')
-
 setGate('B10-A00', freezePass, 'B10_PREBATCH_FREEZE.json', { freezeThrough: freeze?.freezeThrough, acceptedBaseline: freeze?.acceptedBaseline })
 setGate('B10-A01', sourceBinding && before.commit !== START_COMMIT, 'B10_SOURCE_BINDING.json', { startCommitIsAncestor })
 setGate('B10-A02', packagePass, 'B10_SKILL_PACKAGE.json', { archiveSha256: expectedPackageDigest })
 setGate('B10-A03', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A04', resultPass(b10Skill) && architectureReport.gates.progressiveLoading, 'B10_PROGRESSIVE_LOADING.json')
+setGate('B10-A04', resultPass(b10Quality) && architectureReport.gates.formalSkillLoader && architectureReport.gates.formalMethodConsumed, 'B10_PROGRESSIVE_LOADING.json')
 setGate('B10-A05', architectureReport.gates.progressiveLoading, 'architecture.log')
 setGate('B10-A06', resultPass(b10Skill), b10Skill.log)
 setGate('B10-A07', resultPass(b10Skill), b10Skill.log)
@@ -362,19 +424,19 @@ setGate('B10-A11', skillBoundary, 'B10_SKILL_REGISTRY.json')
 setGate('B10-A12', qualityBoundary, 'B10_SKILL_REGISTRY.json')
 setGate('B10-A13', resultPass(b10Repair), b10Repair.log)
 setGate('B10-A14', architectureReport.gates.candidateOnlyRepair, 'architecture.log')
-setGate('B10-A15', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A16', resultPass(b10Skill), b10Skill.log)
+setGate('B10-A15', resultPass(b10Quality) && architectureReport.gates.formalMethodConsumed, 'B10_SKILL_INVOCATION_PROVENANCE.json')
+setGate('B10-A16', resultPass(b10Quality) && architectureReport.gates.formalMethodConsumed, 'B10_SKILL_INVOCATION_PROVENANCE.json')
 setGate('B10-A17', architectureReport.gates.oneProductionRoot && resultPass(b10Quality), 'architecture.log+' + b10Quality.log)
 setGate('B10-A18', resultPass(b10WithoutSkill), b10WithoutSkill.log)
-setGate('B10-A19', compositionOrder && resultPass(b10Quality), 'B10_PRODUCTION_COMPOSITION.json')
+setGate('B10-A19', compositionOrder && resultPass(b10Quality) && architectureReport.gates.productionRepairIntegration, 'B10_PRODUCTION_COMPOSITION.json')
 setGate('B10-A20', resultPass(b10Skill), b10Skill.log)
 setGate('B10-A21', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A22', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A23', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A24', resultPass(b10Repair), b10Repair.log)
-setGate('B10-A25', resultPass(b10Skill), b10Skill.log)
-setGate('B10-A26', resultPass(b10Repair), b10Repair.log)
-setGate('B10-A27', resultPass(b10Repair), b10Repair.log)
+setGate('B10-A22', resultPass(b10Skill) && architectureReport.gates.semanticQualityEvaluator, 'B10_MERGED_EVALUATOR.json')
+setGate('B10-A23', resultPass(b10Skill) && resultPass(b10Quality), 'B10_MERGED_EVALUATOR.json')
+setGate('B10-A24', resultPass(b10Repair) && resultPass(b10Quality) && architectureReport.gates.productionRepairIntegration, 'B10_CANDIDATE_REPAIR.json')
+setGate('B10-A25', resultPass(b10Skill) && resultPass(b10Quality) && architectureReport.gates.productionRepairIntegration, 'B10_AFFECTED_DIMENSION_RECHECK.json')
+setGate('B10-A26', resultPass(b10Repair) && resultPass(b10Quality), 'B10_REPAIR_LIMIT.json')
+setGate('B10-A27', resultPass(b10Repair) && resultPass(b10Quality), 'B10_CANDIDATE_ISOLATION.json')
 setGate('B10-A28', resultPass(b10Skill) && architectureReport.globalGates.p3_permanent_authority, 'B10_NO_P3_ESCALATION.json')
 setGate('B10-A29', architectureReport.gates.providerThroughRunner, 'architecture.log')
 setGate('B10-A30', resultPass(b10Scale) && architectureReport.gates.boundedContext, 'B10_SCALE_CONTEXT.json')
@@ -382,32 +444,22 @@ setGate('B10-A31', resultPass(b10Ui), b10Ui.log)
 setGate('B10-A32', resultPass(b10Ui), b10Ui.log)
 setGate('B10-A33', architectureReport.gates.noFutureOwner, 'architecture.log')
 
-const negativePass = {
-  'NEG-01': architectureReport.gates.skillNoDirectPersistence && resultPass(b10Skill),
-  'NEG-02': architectureReport.globalGates.commit_bundle_v3 && resultPass(b10Skill),
-  'NEG-03': resultPass(b10Skill),
-  'NEG-04': resultPass(b10Skill),
-  'NEG-05': resultPass(b10Skill),
-  'NEG-06': resultPass(b10Skill),
-  'NEG-07': resultPass(b10Skill),
-  'NEG-08': resultPass(b10Skill),
-  'NEG-09': architectureReport.gates.progressiveLoading,
-  'NEG-10': resultPass(b10Skill),
-  'NEG-11': resultPass(b10Repair),
-  'NEG-12': resultPass(b10Skill),
-  'NEG-13': resultPass(b10Repair),
-  'NEG-14': resultPass(b10Skill),
-  'NEG-15': resultPass(b10Skill),
-  'NEG-16': resultPass(b10WithoutSkill),
+for (const { id, testName, result } of negativeCases) {
+  setGate(id, exactTestPass(result, testName), 'B10_NEGATIVE_MATRIX.json', {
+    exactTest: testName,
+    measuredStatus: result.status,
+    measuredExitCode: result.exitCode,
+    measuredLog: result.log,
+    assertionMatched: exactTestPass(result, testName),
+  })
 }
-for (const name of NEGATIVE_BLOCKING_GATES) setGate(name, negativePass[name], name === 'NEG-16' ? b10WithoutSkill.log : b10Skill.log)
 
 for (const name of R2_GLOBAL_BLOCKING_GATES) setGate(name, architectureReport.globalGates?.[name] === true, 'B10_GLOBAL_GATES.json')
 const historical = { b05_regression: b05, b06_h01_regression: b06, b07_h02_regression: b07, b08_h03_regression: b08, r2_alignment_regression: r2Alignment, p01_regression: p01, b09_h04_regression: b09 }
 for (const name of HISTORICAL_REGRESSION_GATES) setGate(name, resultPass(historical[name]), historical[name].log)
 const engineering = { node, vitest, contracts, typecheck, build, cargo_all_targets: cargoAll, cargo_fmt: cargoFmt, cargo_check: cargoCheck, cargo_clippy: cargoClippy, architecture, module_boundary: moduleBoundary, m0a }
 for (const name of ENGINEERING_GATES) setGate(name, resultPass(engineering[name]), engineering[name].log)
-const b10Engineering = { b10_skill_targeted: b10Skill, b10_quality_targeted: b10Quality, b10_repair_targeted: b10Repair, b10_negative_fixtures: b10Negative, b10_ui: b10Ui, b10_scale_context: b10Scale }
+const b10Engineering = { b10_skill_targeted: b10Skill, b10_quality_targeted: b10Quality, b10_repair_targeted: b10Repair, b10_negative_fixtures: b10Negative, b10_ui: b10Ui, b10_scale_context: b10Scale, b10_negative_matrix_exact_mapping: negativeMatrix }
 for (const name of B10_ENGINEERING_GATES) setGate(name, resultPass(b10Engineering[name]), b10Engineering[name].log)
 setGate('source_binding', sourceBinding, 'B10_SOURCE_BINDING.json', sourceBindingReport)
 

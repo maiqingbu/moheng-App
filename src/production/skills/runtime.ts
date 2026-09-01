@@ -51,6 +51,7 @@ export interface SkillMetadata {
   id: string
   slug: string
   nameZh: string
+  version: string
   category: string
   priority: number
   role: string
@@ -59,6 +60,7 @@ export interface SkillMetadata {
   mutationPolicy: string
   coverage: string[]
   bundleDigest: string
+  methodResource?: string
   authorityAccess: string
   hardGateAuthority: boolean
   controlDecisionAuthority: boolean
@@ -74,13 +76,16 @@ type RegistryShape = {
 
 const registryShape = creativeSkillsManifest as RegistryShape
 
-const stringList = (value: unknown): string[] =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+const stringList = (value: unknown): string[] => {
+  if (typeof value === 'string') return [value]
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
 
 const toSkillMetadata = (value: Record<string, unknown>): SkillMetadata => ({
   id: String(value.id ?? ''),
   slug: String(value.slug ?? ''),
   nameZh: String(value.name_zh ?? value.nameZh ?? ''),
+  version: String(value.version ?? CREATIVE_SKILLS_VERSION),
   category: String(value.category ?? ''),
   priority: Number(value.priority ?? 0),
   role: String(value.role ?? ''),
@@ -89,6 +94,7 @@ const toSkillMetadata = (value: Record<string, unknown>): SkillMetadata => ({
   mutationPolicy: String(value.mutationPolicy ?? ''),
   coverage: stringList(value.coverage),
   bundleDigest: String(value.bundleDigest ?? ''),
+  methodResource: typeof value.methodResource === 'string' ? value.methodResource : undefined,
   authorityAccess: String(value.authorityAccess ?? 'NONE_DIRECT'),
   hardGateAuthority: value.hardGateAuthority === true,
   controlDecisionAuthority: value.controlDecisionAuthority === true,
@@ -448,6 +454,8 @@ export interface InvocationProvenance {
   skillVersion: string
   bundleDigest: string
   role: string
+  loadedSkillTextRef: string
+  loadedSkillTextDigest: string
   resourceRefs: string[]
   resourceDigests: Array<{ ref: string; digest: string }>
   contextRef: string
@@ -475,6 +483,7 @@ export function createInvocationProvenance(input: {
   methodRefs: readonly string[]
   projectContextRefs: readonly string[]
   resourceRefs?: readonly (string | { ref: string; digest: string })[]
+  loadedSkillText?: { ref: string; digest: string }
   runtimeCheckRequests?: readonly RuntimeCheckRequest[]
   model: string
   provider: string
@@ -493,6 +502,8 @@ export function createInvocationProvenance(input: {
     skillVersion: CREATIVE_SKILLS_VERSION,
     bundleDigest: input.skill.bundleDigest,
     role: input.skill.role,
+    loadedSkillTextRef: input.loadedSkillText?.ref ?? input.methodRefs[0] ?? '',
+    loadedSkillTextDigest: input.loadedSkillText?.digest ?? input.skill.bundleDigest.replace(/^sha256:/, ''),
     resourceRefs: resourceDigests.map(resource => resource.ref),
     resourceDigests,
     contextRef: input.context.contextManifestRef,

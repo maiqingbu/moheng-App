@@ -41,6 +41,10 @@ export function inspectB10Architecture(projectRoot = root) {
     noCommandsPersistenceSql: !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(commands),
     noProductionPersistenceSql: !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(production),
     repairOwnerRemainsExplicit: /TypedRepairOwner|repair_authorize|repair_execute/.test(repair),
+    formalSkillLoader: /enrich_chapter_with_policy/.test(production) && /SkillBundleLoader::tracked_package/.test(creativeRust) && /load_selected/.test(creativeRust),
+    formalMethodConsumed: /enrich_chapter_with_policy/.test(production) && /build_method_guidance/.test(creativeRust) && /method_guidance/.test(creativeRust) && /loaded_skill_texts/.test(creativeRust),
+    productionRepairIntegration: /creative_skills::repair_candidate/.test(production) && /creative_skills::recheck_affected_dimensions/.test(production),
+    semanticQualityEvaluator: /count_any|duplicate_sentence_count|dialogue_count|repeated_sentences/.test(creativeRust) && !/length_score/.test(creativeRust),
   }
   const globalGates = {
     second_authority: !/SecondAuthority|secondAuthorityOwner|AuthorityV2/i.test(source),
