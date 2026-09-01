@@ -1,9 +1,9 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_assistant_repair_plan_impl, query_book_health_impl,
-    query_canon_impl, query_chapter_versions_impl, query_decisions_impl,
-    query_history_impl, query_market_strategy_impl, query_opening_ready_impl,
-    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl,
-    query_volume_detail_impl, support_session_impl, KernelState,
+    query_canon_impl, query_chapter_versions_impl, query_decisions_impl, query_history_impl,
+    query_market_strategy_impl, query_opening_ready_impl, query_project_overview_impl,
+    query_story_directions_impl, query_story_setup_impl, query_volume_detail_impl,
+    support_session_impl, KernelState,
 };
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -712,11 +712,9 @@ fn b11_no_fake_owner_label() {
 fn b11_formal_ui_queries_are_typed_and_owner_backed() {
     let state = state();
     let project_id = create_opening_ready_fixture(&state, "cmd:b11:formal-queries");
-    let opening = query_opening_ready_impl(
-        &state,
-        json!({"projectId":project_id,"scope":"opening"}),
-    )
-    .unwrap();
+    let opening =
+        query_opening_ready_impl(&state, json!({"projectId":project_id,"scope":"opening"}))
+            .unwrap();
     let volume_id = opening["firstChapter"]["volumeId"].as_str().unwrap();
     let chapter_id = opening["firstChapter"]["chapterId"].as_str().unwrap();
 
