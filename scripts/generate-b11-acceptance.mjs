@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export const START_COMMIT = '2f6ebc02ad999c43c322ea23b4e9d48148baee01'
+export const START_COMMIT = 'ab2773d4e18e53c396fc607f27b3161594149278'
 export const B11_BLOCKING_GATES = Array.from({ length: 51 }, (_, index) => `B11-A${String(index).padStart(2, '0')}`)
 export const NEGATIVE_BLOCKING_GATES = Array.from({ length: 24 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
 export const R2_GLOBAL_BLOCKING_GATES = [
@@ -53,6 +53,7 @@ export const B11_ENGINEERING_GATES = [
   'b11_negative_matrix',
   'b11_product_ux',
   'b11_assistant_presentation',
+  'b11_capability_parity',
   'b11_language_scan',
 ]
 export const RELEASE_GATES = [
@@ -90,10 +91,13 @@ export function sourceBindingPass(report) {
     && report.excludedUncommittedPaths.length === 0
 }
 
-export function evaluateAcceptance(report = {}) {
+export function evaluateAcceptance(report = {}, options = {}) {
   const gates = report.gates ?? {}
-  const missingGates = REQUIRED_BLOCKING_GATES.filter(name => !gatePassed(gates[name]))
-  const failedGates = REQUIRED_BLOCKING_GATES.filter(name => gates[name]?.status === 'FAIL')
+  const requiredGates = options.excludeSelfGate
+    ? REQUIRED_BLOCKING_GATES.filter(name => name !== 'fresh_package_generator')
+    : REQUIRED_BLOCKING_GATES
+  const missingGates = requiredGates.filter(name => !gatePassed(gates[name]))
+  const failedGates = requiredGates.filter(name => gates[name]?.status === 'FAIL')
   const sourceBinding = sourceBindingPass(report)
   return {
     schema: 'b11-acceptance-r1',
@@ -109,7 +113,7 @@ export function evaluateAcceptance(report = {}) {
     workingTreeDirtyAfter: report.workingTreeDirtyAfter ?? null,
     excludedUncommittedPaths: report.excludedUncommittedPaths ?? [],
     sourceBinding: sourceBinding ? 'PASS' : 'FAIL',
-    requiredBlockingGates: REQUIRED_BLOCKING_GATES,
+    requiredBlockingGates: requiredGates,
     failedGates,
     missingGates,
   }
@@ -120,7 +124,7 @@ export function generateAcceptance(evidenceDir = process.env.B11_EVIDENCE_DIR ??
   if (!fs.existsSync(reportPath)) throw new Error(`B11_EVIDENCE_MISSING:${reportPath}`)
   const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
   const acceptance = {
-    ...evaluateAcceptance(report),
+    ...evaluateAcceptance(report, { excludeSelfGate: process.env.B11_GENERATOR_SELF_CHECK === '1' }),
     generatedAt: new Date().toISOString(),
     generator: 'scripts/generate-b11-acceptance.mjs',
   }

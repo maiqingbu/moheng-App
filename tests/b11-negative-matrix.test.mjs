@@ -14,6 +14,7 @@ const runtimePort = read('src/app/providers/runtimePort.ts')
 const router = read('src/app/router.ts')
 const assistantPage = read('src/ui/pages/ProjectAssistant.vue')
 const assistantView = read('src/ui/presentation/assistantPresentation.ts')
+const projectStore = read('src/ui/stores/projectStore.ts')
 const projectEntryTest = read('src-tauri/tests/b11_project_entry.rs')
 const assistantViewTest = read('tests/store/b11-assistant-presentation.test.ts')
 const b11UxTest = read('tests/b11-product-ux.test.mjs')
@@ -114,7 +115,7 @@ test('NEG-08 Start Creating cannot use BrowserDemo', () => {
 
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {
   assert.match(assistantViewTest, /现有记录不足以确认这件事/)
-  assert.match(assistantView, /sourceCount > 0/)
+  assert.match(assistantView, /buildEvidence/)
   assert.match(assistantView, /evidence: \[\]/)
 })
 
@@ -126,7 +127,9 @@ test('NEG-10 truncated query cannot be presented as no records', () => {
 
 test('NEG-11 a vague repair request cannot mutate without explicit confirmation', () => {
   assert.match(assistantPage, /我确认并执行修复/)
-  assert.match(assistantPage, /repair_authorize/)
+  assert.match(projectStore, /authorizeAssistantRepair/)
+  assert.match(projectStore, /repair_authorize/)
+  assert.match(projectStore, /repair_execute/)
   assert.match(assistantPage, /prepareRepair/)
   assert.doesNotMatch(assistantPage, /@click="prepareRepair"[^\n]*repair_execute/)
 })

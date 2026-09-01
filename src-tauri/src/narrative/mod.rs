@@ -3,9 +3,10 @@ use serde_json::Value;
 pub mod runtime;
 
 pub use runtime::{
-    build_continuity_threads, build_volume_progress, compile_context_manifest, evaluate_plan_stale,
-    evaluate_resume_condition, relevant_state_digest, ContextCompilerInput, ContinuityThreadView,
-    CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
+    build_continuity_threads, build_volume_progress, commit_opening_context_owner,
+    compile_context_manifest, evaluate_plan_stale, evaluate_resume_condition,
+    relevant_state_digest, ContextCompilerInput, ContinuityThreadView, CurrentNarrativeStateView,
+    PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

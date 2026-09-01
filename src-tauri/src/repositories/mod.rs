@@ -6,4 +6,5 @@ pub mod project_entry;
 pub mod provider;
 pub mod runtime;
 pub mod support;
+pub mod ui_projection;
 pub mod volume_lifecycle;

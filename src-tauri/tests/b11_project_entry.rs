@@ -1,7 +1,9 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_assistant_repair_plan_impl, query_market_strategy_impl,
-    query_opening_ready_impl, query_project_overview_impl, query_story_directions_impl,
-    query_story_setup_impl, support_session_impl, KernelState,
+    execute_command_impl, query_assistant_repair_plan_impl, query_book_health_impl,
+    query_canon_impl, query_chapter_versions_impl, query_decisions_impl,
+    query_history_impl, query_market_strategy_impl, query_opening_ready_impl,
+    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl,
+    query_volume_detail_impl, support_session_impl, KernelState,
 };
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -36,6 +38,55 @@ fn idea_request(command_id: &str) -> serde_json::Value {
             "forbidden":"不要悲剧结局"
         }
     })
+}
+
+fn market_request(command_id: &str, material: &str) -> serde_json::Value {
+    json!({
+        "type":"project_create_from_market",
+        "commandId":command_id,
+        "idempotencyKey":format!("{command_id}:key"),
+        "requestedAt":NOW,
+        "payload":{
+            "title":"市场输入因果测试",
+            "marketSource":"用户导入的市场观察",
+            "marketMaterial":material,
+            "platform":"起点中文网",
+            "length":"80–120 万字",
+            "tags":["悬疑"],
+            "forbidden":"不要套路化误会"
+        }
+    })
+}
+
+fn create_opening_ready_fixture(state: &KernelState, prefix: &str) -> String {
+    let created = execute_command_impl(state, json!({
+        "type":"project_create_from_idea",
+        "commandId":format!("{prefix}:create"),
+        "idempotencyKey":format!("{prefix}:create:key"),
+        "requestedAt":NOW,
+        "payload":{"title":"真实 owner 流程","idea":"近未来城市里的记忆调查员追查一宗被篡改的档案犯罪。","platform":"番茄小说","mode":"DIRECTOR"}
+    })).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let directions = query_story_directions_impl(
+        state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
+    execute_command_impl(state, json!({
+        "type":"pitch_select","commandId":format!("{prefix}:select"),"idempotencyKey":format!("{prefix}:select:key"),
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,"payload":{"pitchIds":[pitch_id],"mode":"single"}
+    })).unwrap();
+    execute_command_impl(state, json!({
+        "type":"story_setup_save","commandId":format!("{prefix}:setup"),"idempotencyKey":format!("{prefix}:setup:key"),
+        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
+        "payload":{"storyCore":{"protagonist":"记忆调查员","desire":"找回被篡改的真实经历","mechanism":"档案校验会留下可追踪痕迹","conflict":"城市档案权与个人记忆冲突","readerPromise":"每次调查都揭开一层真实代价","forbiddenReveals":[]}}
+    })).unwrap();
+    execute_command_impl(state, json!({
+        "type":"opening_ready","commandId":format!("{prefix}:opening"),"idempotencyKey":format!("{prefix}:opening:key"),
+        "projectId":project_id,"expectedRevision":2,"requestedAt":NOW,"payload":{"approved":true}
+    })).unwrap();
+    project_id
 }
 
 #[test]
@@ -441,6 +492,354 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
     .unwrap();
     assert_eq!(insufficient["finding"]["supportStatus"], "INSUFFICIENT");
     assert!(insufficient["finding"]["sourceRefs"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn b11_idea_semantic_causality_changes_direction_fields_not_only_digest() {
+    let state = state();
+    let first = idea_request("cmd:b11:causal:fantasy");
+    let second = json!({
+        "type":"project_create_from_idea",
+        "commandId":"cmd:b11:causal:future",
+        "idempotencyKey":"cmd:b11:causal:future:key",
+        "requestedAt":NOW,
+        "payload":{
+            "title":"近未来记忆犯罪",
+            "idea":"近未来城市里，记忆犯罪调查员发现一场连环案件正在篡改受害者的童年证据。",
+            "platform":"番茄小说",
+            "mode":"DIRECTOR",
+            "length":"80–120 万字",
+            "tags":["科幻","悬疑"],
+            "forbidden":"不要宗门修仙"
+        }
+    });
+    let first_id = execute_command_impl(&state, first).unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_id = execute_command_impl(&state, second).unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_pitches = query_story_directions_impl(
+        &state,
+        json!({"projectId":first_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let second_pitches = query_story_directions_impl(
+        &state,
+        json!({"projectId":second_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let a = &first_pitches["pitches"][0];
+    let b = &second_pitches["pitches"][0];
+    assert_ne!(a["mechanism"], b["mechanism"]);
+    assert_ne!(a["worldConflict"], b["worldConflict"]);
+    assert_ne!(a["protagonistDesire"], b["protagonistDesire"]);
+    assert_ne!(a["longArc"], b["longArc"]);
+    assert!(b["mechanism"].as_str().unwrap().contains("记忆"));
+    assert!(!b["mechanism"].as_str().unwrap().contains("废丹"));
+}
+
+#[test]
+fn b11_market_semantic_causality_changes_opportunity_and_pitch_fields() {
+    let state = state();
+    let urban = execute_command_impl(&state, market_request(
+        "cmd:b11:market:urban",
+        "都市情感 / 女频阅读信号：读者关注亲密关系中的信任修复、职业选择和女性成长，偏好现实城市背景。",
+    )).unwrap()["projectId"].as_str().unwrap().to_owned();
+    let fantasy = execute_command_impl(
+        &state,
+        market_request(
+            "cmd:b11:market:fantasy",
+            "东方玄幻 / 男频升级信号：读者关注宗门试炼、资源争夺、力量成长和明确的阶段性回报。",
+        ),
+    )
+    .unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let urban_market = query_market_strategy_impl(
+        &state,
+        json!({"projectId":urban,"scope":"market","pageSize":10}),
+    )
+    .unwrap();
+    let fantasy_market = query_market_strategy_impl(
+        &state,
+        json!({"projectId":fantasy,"scope":"market","pageSize":10}),
+    )
+    .unwrap();
+    assert_ne!(
+        urban_market["opportunities"][0]["title"],
+        fantasy_market["opportunities"][0]["title"]
+    );
+    assert_ne!(
+        urban_market["opportunities"][0]["audience"],
+        fantasy_market["opportunities"][0]["audience"]
+    );
+    assert_ne!(
+        urban_market["opportunities"][0]["direction"],
+        fantasy_market["opportunities"][0]["direction"]
+    );
+    let urban_pitches = query_story_directions_impl(
+        &state,
+        json!({"projectId":urban,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let fantasy_pitches = query_story_directions_impl(
+        &state,
+        json!({"projectId":fantasy,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    assert_ne!(
+        urban_pitches["pitches"][0]["mechanism"],
+        fantasy_pitches["pitches"][0]["mechanism"]
+    );
+    assert_ne!(
+        urban_pitches["pitches"][0]["worldConflict"],
+        fantasy_pitches["pitches"][0]["worldConflict"]
+    );
+}
+
+#[test]
+fn b11_regenerate_adjustment_causality_changes_semantic_fields() {
+    let state = state();
+    let created = execute_command_impl(&state, idea_request("cmd:b11:adjustment")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let before = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    execute_command_impl(&state, json!({
+        "type":"pitch_regenerate","commandId":"cmd:b11:adjustment:regen","idempotencyKey":"cmd:b11:adjustment:regen:key",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"adjustment":"强化人物关系，弱化升级，让主角更主动地保护同伴"}
+    })).unwrap();
+    let after = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let a = &before["pitches"][0];
+    let b = &after["pitches"][0];
+    assert_ne!(a["worldConflict"], b["worldConflict"]);
+    assert_ne!(a["protagonistDesire"], b["protagonistDesire"]);
+    assert_ne!(a["longArc"], b["longArc"]);
+    assert_eq!(
+        b["userAdjustment"],
+        "强化人物关系，弱化升级，让主角更主动地保护同伴"
+    );
+}
+
+#[test]
+fn b11_candidate_merge_causality_preserves_both_semantic_contributions() {
+    let state = state();
+    let created = execute_command_impl(&state, idea_request("cmd:b11:merge-causal")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let directions = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let first = &directions["pitches"][0];
+    let second = &directions["pitches"][1];
+    let first_id = first["id"].as_str().unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    execute_command_impl(&state, json!({
+        "type":"pitch_select","commandId":"cmd:b11:merge-causal:select","idempotencyKey":"cmd:b11:merge-causal:select:key",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"pitchIds":[first_id,second_id],"mode":"combine"}
+    })).unwrap();
+    state.manager.with_read_connection(&project_id, NOW, |connection| {
+        let raw: String = connection.query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='StoryBlueprint'",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        let blueprint: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(blueprint["semanticContributions"].as_array().unwrap().len(), 2);
+        let mechanism = blueprint["mechanismBoundary"].as_str().unwrap();
+        assert!(mechanism.contains(first["mechanism"].as_str().unwrap()));
+        assert!(mechanism.contains(second["mechanism"].as_str().unwrap()));
+        Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+    }).unwrap();
+}
+
+#[test]
+fn b11_opening_uses_real_b06_context_owner() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:owner-context");
+    state.manager.with_read_connection(&project_id, NOW, |connection| {
+        let raw: String = connection.query_row(
+            "SELECT provenance_json FROM artifacts WHERE project_id=?1 AND artifact_type='ContextManifest' ORDER BY created_at DESC LIMIT 1",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        let provenance: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(provenance["createdBy"], "B06::ContextCompilerOwner");
+        assert!(provenance["commandId"].as_str().unwrap().starts_with("b06:context-owner:"));
+        Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+    }).unwrap();
+}
+
+#[test]
+fn b11_opening_uses_real_b07_chapter_plan_owner() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:owner-plan");
+    state.manager.with_read_connection(&project_id, NOW, |connection| {
+        let raw: String = connection.query_row(
+            "SELECT provenance_json FROM artifacts WHERE project_id=?1 AND artifact_type='ChapterPlan' ORDER BY created_at DESC LIMIT 1",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        let provenance: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(provenance["createdBy"], "B07::PlanningOwner");
+        assert!(provenance["commandId"].as_str().unwrap().starts_with("b07:opening-plan-owner:"));
+        Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+    }).unwrap();
+}
+
+#[test]
+fn b11_no_fake_owner_label() {
+    let source = include_str!("../src/project_entry.rs");
+    assert!(!source.contains("\"artifactType\":\"ContextManifest\""));
+    assert!(!source.contains("\"artifactType\":\"ChapterPlan\""));
+    assert!(!source.contains("validate_current_chapter_plan"));
+}
+
+#[test]
+fn b11_formal_ui_queries_are_typed_and_owner_backed() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:formal-queries");
+    let opening = query_opening_ready_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"opening"}),
+    )
+    .unwrap();
+    let volume_id = opening["firstChapter"]["volumeId"].as_str().unwrap();
+    let chapter_id = opening["firstChapter"]["chapterId"].as_str().unwrap();
+
+    let volume = query_volume_detail_impl(
+        &state,
+        json!({"projectId":project_id,"volumeId":volume_id,"pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(volume["volume"]["id"], volume_id);
+    assert!(volume["chapters"]["items"].is_array());
+
+    let decisions = query_decisions_impl(
+        &state,
+        json!({"projectId":project_id,"status":"all","pageSize":10}),
+    )
+    .unwrap();
+    assert!(decisions["items"].is_array());
+    let versions = query_chapter_versions_impl(
+        &state,
+        json!({"projectId":project_id,"chapterId":chapter_id,"pageSize":10}),
+    )
+    .unwrap();
+    assert!(versions["items"].is_array());
+    let canon = query_canon_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"graph","pageSize":10}),
+    )
+    .unwrap();
+    assert!(canon["characters"]["items"].is_array());
+    let health = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":10}),
+    )
+    .unwrap();
+    assert!(health["issues"]["items"].is_array());
+    let history = query_history_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"history","kind":"all","pageSize":10}),
+    )
+    .unwrap();
+    assert!(history["entries"]["items"].is_array());
+}
+
+#[test]
+fn b11_assistant_repair_question_causality_selects_a_semantic_operation() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:repair-question");
+    let projection = query_assistant_repair_plan_impl(&state, json!({
+        "projectId":project_id,"scope":"assistant","question":"当前作品展示进度显示不对","requestedAt":NOW
+    })).unwrap();
+    assert_eq!(projection["action"], "EXECUTABLE");
+    assert_eq!(
+        projection["proposedOperations"][0]["operation"],
+        "rebuild_projection"
+    );
+    assert_eq!(projection["targetAuthorityOwner"], "B04::ProjectionOwner");
+
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap()
+        ["project"]["revision"]
+        .as_i64()
+        .unwrap();
+    execute_command_impl(&state, json!({
+        "type":"story_setup_save","commandId":"cmd:b11:repair-question:stale-setup",
+        "idempotencyKey":"cmd:b11:repair-question:stale-setup:key","projectId":project_id,
+        "expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"storyCore":{"protagonist":"记忆调查员","desire":"保护同伴并找回被篡改的真实经历","mechanism":"档案校验会留下可追踪痕迹","conflict":"城市档案权与个人记忆冲突升级","readerPromise":"每次调查都揭开一层真实代价","forbiddenReveals":[]}}
+    })).unwrap();
+
+    let chapter = query_assistant_repair_plan_impl(&state, json!({
+        "projectId":project_id,"scope":"assistant","question":"重新整理当前章节规划","requestedAt":NOW
+    })).unwrap();
+    assert_eq!(chapter["action"], "EXECUTABLE");
+    assert_eq!(
+        chapter["proposedOperations"][0]["operation"],
+        "recompile_chapter_plan"
+    );
+    assert!(chapter["proposedOperations"][0]["params"]["chapterId"]
+        .as_str()
+        .is_some());
+
+    let route = query_assistant_repair_plan_impl(&state, json!({
+        "projectId":project_id,"scope":"assistant","question":"当前卷安排需要重新规划","requestedAt":NOW
+    })).unwrap();
+    assert_ne!(
+        route["proposedOperations"][0]["operation"],
+        "rebuild_projection"
+    );
+}
+
+#[test]
+fn b11_assistant_repair_diagnosis_evidence_is_grounded() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:repair-evidence");
+    let plan = query_assistant_repair_plan_impl(&state, json!({
+        "projectId":project_id,"scope":"assistant","question":"当前作品展示进度显示不对","requestedAt":NOW
+    })).unwrap();
+    assert_eq!(plan["diagnosis"]["supportStatus"], "SUPPORTED");
+    assert!(!plan["diagnosis"]["sourceRefs"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!plan["findingRefs"].as_array().unwrap().is_empty());
+    assert_eq!(plan["diagnosis"]["question"], "当前作品展示进度显示不对");
+}
+
+#[test]
+fn b11_assistant_repair_capability_classification_is_fail_closed() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:repair-class");
+    let canon = query_assistant_repair_plan_impl(&state, json!({
+        "projectId":project_id,"scope":"assistant","question":"把已经死亡的人改成还活着","requestedAt":NOW
+    })).unwrap();
+    assert_eq!(canon["action"], "PROPOSAL_ONLY");
+    assert!(canon["proposedOperations"].as_array().unwrap().is_empty());
+    let ambiguous = query_assistant_repair_plan_impl(
+        &state,
+        json!({
+            "projectId":project_id,"scope":"assistant","question":"修一下","requestedAt":NOW
+        }),
+    )
+    .unwrap();
+    assert_eq!(ambiguous["action"], "NO_ACTION");
+    assert!(ambiguous["proposedOperations"]
         .as_array()
         .unwrap()
         .is_empty());

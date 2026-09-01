@@ -22,7 +22,6 @@ const marketMaterial = ref('')
 const showInference = ref(false)
 const showMarket = ref(false)
 const createKey = 'project-create'
-const marketKey = 'market-refresh'
 const clarifyAnswers = ref({ priority:'悬疑感更强', protagonist:'可以受挫，但关键节点必须主动选择', relation:'师徒关系重要，但不要压过主线' })
 
 const market = computed(() => store.market)
@@ -30,7 +29,6 @@ onMounted(() => store.loadMarket())
 const platforms = ['AI 推荐','番茄小说','起点中文网','晋江文学城','其他']
 const tags = ['武侠','悬疑','成长','志怪','群像','复仇','轻喜','慢热']
 const createState = computed(()=>store.commandState(createKey))
-const marketState = computed(()=>store.commandState(marketKey))
 const inference = computed(() => [
   ['目标平台', platform.value === 'AI 推荐' ? '番茄小说（AI 推荐）' : platform.value],
   ['题材方向', selectedTags.value.join(' · ') || '由 AI 推断'],
@@ -48,7 +46,6 @@ async function createFromIdea(){
   const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value,clarifications:clarifyAnswers.value}})
   if (receipt.finalStatus==='committed' && receipt.projectId) { showInference.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
 }
-async function refreshMarket(){ await store.runCommand(marketKey,{type:'market_refresh'}); await store.loadMarket() }
 async function createFromMarket(){
   const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
   if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
@@ -107,7 +104,7 @@ async function createFromMarket(){
     </div>
 
     <section class="section">
-      <div class="section-head"><div><h2>市场机会 · 本周趋势</h2><div class="muted" style="font-size:12px">市场用于发现需求，不复制任何具体作品情节、人物或文风。</div></div><div class="actions"><button class="btn small" @click="refreshMarket">重新分析</button><button class="btn small" @click="showMarket=true">查看完整市场分析</button></div></div><CommandFeedback :state="marketState" />
+      <div class="section-head"><div><h2>市场机会 · 本周趋势</h2><div class="muted" style="font-size:12px">市场用于发现需求，不复制任何具体作品情节、人物或文风。</div></div><div class="actions"><button class="btn small" @click="showMarket=true">查看完整市场分析</button></div></div>
       <div class="market-grid">
         <article v-for="item in market" :key="item.id" class="market-card" :class="{selected:selectedMarket===item.id}" @click="selectedMarket=item.id">
           <div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="item.kind==='稳健型'?'pine':item.kind==='潜力型'?'info':'warning'">{{ item.kind }}</span><span class="muted" style="font-size:10px">{{ item.collectedAt }}</span></div>

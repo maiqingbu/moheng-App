@@ -7,8 +7,8 @@ const supportedSession = {
     supportStatus: 'SUPPORTED',
     sourceRefs: ['thread:promise-1', 'chapter:18'],
   },
-  calls: [{ capabilityId: 'query_continuity', result: [{ chapterId: 'chapter:18', status: 'OPEN' }] }],
-  evidenceLedger: [{ sourceRefs: ['chapter:18'], truncated: false }],
+  calls: [{ callId: 'call:continuity', capabilityId: 'query_continuity', result: [{ chapterId: 'chapter:18', status: 'OPEN' }] }],
+  evidenceLedger: [{ callId: 'call:continuity', sourceRefs: ['chapter:18'], truncated: false, startedAt: '2026-09-02T02:00:00Z', finishedAt: '2026-09-02T02:00:00Z' }],
   receipt: { projectRevision: 7 },
 } as never
 
@@ -17,7 +17,15 @@ describe('B11 项目助手中文展示层', () => {
     const view = presentAssistantSession(supportedSession)
     expect(view.answer).toContain('第一卷的承诺尚未彻底解决')
     expect(view.sections.map(section => section.title)).toEqual(expect.arrayContaining(['当前情况', '依据']))
-    expect(view.evidence).toEqual([{ label: '已核验的项目记录', detail: '共 1 条记录，来自相关章节与项目状态。' }])
+    expect(view.evidence).toEqual([{
+      label: '剧情线1',
+      detail: '剧情线当前状态已查询',
+      source: '第 18 章',
+      record: '剧情线：进行中',
+      currentStatus: '进行中',
+      related: '相关剧情线',
+      recordedAt: '2026-09-02T02:00:00Z',
+    }])
     expect(view.answer).not.toMatch(/thread:|chapter:|sourceRefs|query_continuity|\{.*\}/)
   })
 
@@ -37,5 +45,22 @@ describe('B11 项目助手中文展示层', () => {
     const clean = sanitizeAssistantText('作为 AI，根据你提供的上下文，PLAN_STALE /src-tauri/src/commands.rs {"sourceRefs":[]}')
     expect(clean).not.toMatch(/作为 AI|根据你提供的上下文|PLAN_STALE|src-tauri|sourceRefs|\{/) 
     expect(clean).toContain('当前规划需要重新检查')
+  })
+
+  it('should expose grounded record details instead of only a source count', () => {
+    const view = presentAssistantSession({
+      finding: { claim: '角色知道这件事。', supportStatus: 'SUPPORTED', sourceRefs: ['fact:1'] },
+      calls: [{ capabilityId: 'query_knowledge', callId: 'call:knowledge', result: [{ knowerId: 'character:lin', epistemicState: 'KNOWS', fromChapterId: 'chapter:7', storyTime: '夜里' }] }],
+      evidenceLedger: [{ callId: 'call:knowledge', sourceRefs: ['fact:1'], startedAt: '2026-09-02T02:00:00Z', finishedAt: '2026-09-02T02:00:00Z' }],
+      receipt: { projectRevision: 7 },
+    } as never)
+    expect(view.evidence[0]).toMatchObject({
+      source: '第 7 章',
+      record: '角色知识：已知',
+      currentStatus: '已知',
+      related: '相关角色与事实',
+      recordedAt: '夜里',
+    })
+    expect(JSON.stringify(view.evidence)).not.toMatch(/character:|fact:|chapter:/)
   })
 })

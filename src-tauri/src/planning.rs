@@ -465,6 +465,100 @@ pub fn recompile_chapter_plan_owner(
     CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())
 }
 
+/// B07 owner entry used by B11's opening bootstrap. The caller supplies the
+/// context reference produced by B06; this owner builds only the current
+/// ChapterPlan and routes it through the same validation/commit function used
+/// by ordinary planning and stale recompile paths.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_opening_chapter_plan_owner(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    context_ref: &ArtifactRef,
+    authority_request: &Value,
+    expected_revision: i64,
+    command_id: &str,
+    idempotency_key: &str,
+    now: &str,
+) -> Result<CommitReceipt, String> {
+    let context_payload =
+        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            connection,
+            project_id,
+            context_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CONTEXT_MANIFEST_NOT_FOUND".to_string())?;
+    let authority = {
+        let mut request = authority_request.clone();
+        request["executionMode"] = json!("OPENING_BOOTSTRAP");
+        request["chapterId"] = json!(chapter_id);
+        request
+    };
+    let context_input = crate::commands::context_input_from_authority(
+        connection,
+        &authority,
+        project_id,
+        expected_revision,
+    )?;
+    let current_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let chapter_goal = authority
+        .get("openingChapterGoal")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("让主角面对一个必须主动回应的异常");
+    let continuity_actions = context_input
+        .continuity_threads
+        .iter()
+        .map(|thread| {
+            json!({
+                "threadRef":thread.thread_id,
+                "disposition":"KEEP_OPEN",
+            })
+        })
+        .collect::<Vec<_>>();
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1",
+        "chapterId":chapter_id,
+        "compiledFromProjectRevision":expected_revision,
+        "compiledFromStateDigest":current_digest,
+        "contextManifestRef":context_ref,
+        "chapterGoal":chapter_goal,
+        "activeTaskRefs":context_input.active_task_refs,
+        "continuityActions":continuity_actions,
+        "requiredStateOutcomes":[],
+        "forbiddenTransitions":[],
+        "knowledgeBoundaries":[],
+        "reservationRefs":[],
+        "sceneExecution":[],
+        "horizonPreview":[
+            {"slotNo":1,"objective":"展示当前异常并迫使主角选择","tentative":true},
+            {"slotNo":2,"objective":"给出局部回报并留下代价","tentative":true},
+            {"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}
+        ]
+    });
+    if context_payload
+        .get("compiledFromStateDigest")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err("CONTEXT_MANIFEST_STATE_DIGEST_MISSING".into());
+    }
+    recompile_chapter_plan_owner(
+        connection,
+        project_id,
+        chapter_id,
+        &plan,
+        &authority,
+        "OPENING_BOOTSTRAP",
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -549,6 +549,111 @@ pub fn query_single_chapter_impl(state: &KernelState, request: Value) -> Result<
         .map_err(|error| error.to_string())
 }
 
+pub fn query_volume_detail_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let volume_id = required_string(&request, "volumeId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::volume_detail(
+                connection, project_id, volume_id, cursor, limit,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_decisions_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let status = request.get("status").and_then(Value::as_str);
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(50);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::decisions(
+                connection, project_id, status, cursor, limit,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_chapter_versions_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let chapter_id = required_string(&request, "chapterId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::chapter_versions(
+                connection, project_id, chapter_id, cursor, limit,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_canon_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(60);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::canon(connection, project_id, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_book_health_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(50);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::book_health(connection, project_id, cursor, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_history_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let kind = request.get("kind").and_then(Value::as_str);
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(40);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ui_projection::history(connection, project_id, kind, cursor, limit)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn request_strings(request: &Value, field: &str) -> Vec<String> {
     request
         .get(field)
@@ -2457,9 +2562,14 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     )
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+                let execution_mode = operation
+                    .params
+                    .get("executionMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LONG_FORM");
                 let authority_request = json!({
                     "projectId":self.project_id,"chapterId":chapter_id,"volumeId":volume_id,
-                    "executionMode":"LONG_FORM","entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
+                    "executionMode":execution_mode,"entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
                     "references":operation.params.get("references").cloned().unwrap_or_else(|| json!([]))
                 });
                 let command_id = format!(
@@ -2475,7 +2585,7 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     chapter_id,
                     plan,
                     &authority_request,
-                    "LONG_FORM",
+                    execution_mode,
                     &command_id,
                     &format!("{command_id}:idempotency"),
                     revision,
@@ -2670,9 +2780,14 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     )
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+                let execution_mode = operation
+                    .params
+                    .get("executionMode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LONG_FORM");
                 let authority = json!({
                     "projectId":self.project_id,"chapterId":chapter_id,"volumeId":volume_id,
-                    "executionMode":"LONG_FORM","entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
+                    "executionMode":execution_mode,"entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
                     "references":operation.params.get("references").cloned().unwrap_or_else(|| json!([]))
                 });
                 let input = context_input_from_authority(
@@ -4213,6 +4328,39 @@ pub fn query_chapter_final(state: State<'_, KernelState>, request: Value) -> Res
 }
 
 #[tauri::command]
+pub fn query_volume_detail(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_volume_detail_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_decisions(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_decisions_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_chapter_versions(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_chapter_versions_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_canon(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_canon_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_book_health(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_book_health_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_history(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_history_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_narrative_state(
     state: State<'_, KernelState>,
     request: Value,
@@ -4439,6 +4587,12 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_chapter_list,
         query_chapter,
         query_chapter_final,
+        query_volume_detail,
+        query_decisions,
+        query_chapter_versions,
+        query_canon,
+        query_book_health,
+        query_history,
         query_narrative_state,
         query_continuity,
         query_volume_progress,

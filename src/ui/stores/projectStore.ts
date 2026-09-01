@@ -5,6 +5,7 @@ import type {
   CanonProjection,
   ChapterListItem,
   ChapterProjection,
+  CommandReceipt,
   CommandRequest,
   CommandStatus,
   FrontendPort,
@@ -256,6 +257,64 @@ export const useProjectStore = defineStore('project-projection', () => {
     return frontendPort.queryAssistantRepairPlan(request)
   }
 
+  async function prepareAssistantRepair(question: string): Promise<AssistantRepairPlan> {
+    commandStates.value['assistant-plan'] = { status: 'submitting', message: '正在核对修复范围…' }
+    try {
+      const plan = await queryAssistantRepairPlan(question)
+      if (plan.action !== 'EXECUTABLE') {
+        commandStates.value['assistant-plan'] = {
+          status: 'committed',
+          message: plan.action === 'PROPOSAL_ONLY' ? '这项请求只能先建立修改提案。' : '当前记录不需要执行修复。',
+        }
+        return plan
+      }
+      const receipt = await runCommand('assistant-plan', {
+        type: 'repair_plan_create',
+        projectId: currentProjectId.value ?? undefined,
+        expectedRevision: plan.basedOnProjectRevision,
+        payload: { dryRun: true, repairPlan: plan },
+      })
+      if (receipt.finalStatus !== 'committed') throw new Error(receipt.message || '修复方案未保存。')
+      return plan
+    } catch (error) {
+      commandStates.value['assistant-plan'] = {
+        status: 'failed',
+        message: error instanceof Error ? error.message : '无法核对修复范围。',
+      }
+      throw error
+    }
+  }
+
+  async function authorizeAssistantRepair(plan: AssistantRepairPlan): Promise<CommandReceipt> {
+    if (plan.action !== 'EXECUTABLE') throw new Error('当前方案不可执行。')
+    const projectId = currentProjectId.value
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    const authorizationId = `assistant-authorization:${plan.repairPlanId}`
+    const authorization = await runCommand('assistant-authorize', {
+      type: 'repair_authorize',
+      projectId,
+      expectedRevision: plan.basedOnProjectRevision,
+      payload: {
+        authorization: {
+          authorizationId,
+          projectId,
+          repairPlanId: plan.repairPlanId,
+          basedOnProjectRevision: plan.basedOnProjectRevision,
+          operationDigest: plan.operationDigest,
+          approvedByUser: true,
+          issuedAt: new Date().toISOString(),
+          consumedAt: null,
+        },
+      },
+    })
+    if (authorization.finalStatus !== 'committed') throw new Error(authorization.message || '授权未保存。')
+    return runCommand('assistant-execute', {
+      type: 'repair_execute',
+      projectId,
+      payload: { repairPlanId: plan.repairPlanId, authorizationId },
+    })
+  }
+
   async function refreshLoadedWorkspaces() {
     const jobs: Promise<unknown>[] = []
     if (marketStrategy.value) jobs.push(loadMarket(true))
@@ -344,7 +403,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
-    loadCanon, loadHealth, loadHistory, loadSettings, search, supportSession, queryAssistantRepairPlan, runCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHistory, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }
 })

@@ -29,8 +29,6 @@ const visibleFiles = [
   'src/ui/pages/CanonGraph.vue',
   'src/ui/pages/CreationLaunch.vue',
   'src/ui/pages/DecisionInbox.vue',
-  'src/ui/pages/HistoryCenter.vue',
-  'src/ui/pages/LongFormHealth.vue',
   'src/ui/pages/ManuscriptReader.vue',
   'src/ui/pages/MarketStrategy.vue',
   'src/ui/pages/OpeningReady.vue',
@@ -116,6 +114,8 @@ export function inspectB11Architecture(projectRoot = root) {
   const entryRepository = exists(projectRoot, 'src-tauri/src/repositories/project_entry.rs') ? read(projectRoot, 'src-tauri/src/repositories/project_entry.rs') : ''
   const commands = exists(projectRoot, 'src-tauri/src/commands.rs') ? read(projectRoot, 'src-tauri/src/commands.rs') : ''
   const production = exists(projectRoot, 'src-tauri/src/production.rs') ? read(projectRoot, 'src-tauri/src/production.rs') : ''
+  const narrativeRuntime = exists(projectRoot, 'src-tauri/src/narrative/runtime.rs') ? read(projectRoot, 'src-tauri/src/narrative/runtime.rs') : ''
+  const planning = exists(projectRoot, 'src-tauri/src/planning.rs') ? read(projectRoot, 'src-tauri/src/planning.rs') : ''
   const router = exists(projectRoot, 'src/app/router.ts') ? read(projectRoot, 'src/app/router.ts') : ''
   const frontendPort = exists(projectRoot, 'src/infrastructure/tauri/frontendPort.ts') ? read(projectRoot, 'src/infrastructure/tauri/frontendPort.ts') : ''
   const runtimePort = exists(projectRoot, 'src/app/providers/runtimePort.ts') ? read(projectRoot, 'src/app/providers/runtimePort.ts') : ''
@@ -156,14 +156,14 @@ export function inspectB11Architecture(projectRoot = root) {
     explicitSelection: /explicitSelectionRequired/.test(entry)
       && /B11_SELECTION_DUPLICATE/.test(entry)
       && /explicitUserDecision/.test(entry),
-    openingUsesExistingOwners: /B06::ContextCompilerOwner/.test(entry)
-      && /B07::PlanningOwner/.test(entry)
+    openingUsesExistingOwners: /B06::ContextCompilerOwner/.test(`${entry}\n${narrativeRuntime}`)
+      && /B07::PlanningOwner/.test(`${entry}\n${planning}`)
       && /B08::ChapterProductionRuntime/.test(entry)
       && !/OpeningEngine|SecondOpeningEngine|B11::PlanningOwner/.test(`${entry}\n${commands}`),
     assistantQueryBoundary: /query_assistant_repair_plan/.test(commands)
       && /support_session/.test(commands)
       && /queryAssistantRepairPlan/.test(frontendPort)
-      && /repair_plan_create|repair_authorize|repair_execute/.test(assistant),
+      && /prepareAssistantRepair|authorizeAssistantRepair/.test(exists(projectRoot, 'src/ui/stores/projectStore.ts') ? read(projectRoot, 'src/ui/stores/projectStore.ts') : ''),
     b11Routes: /StorySetup|story-setup|\/setup/.test(router)
       && /OpeningReady|opening-ready|\/opening/.test(router)
       && /ProjectAssistant|assistant|\/assistant/.test(router),

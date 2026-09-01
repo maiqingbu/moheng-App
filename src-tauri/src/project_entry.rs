@@ -9,9 +9,8 @@
 use crate::commit::CommitService;
 use crate::generated::types::{ArtifactEnvelope, ArtifactRef, CommitBundle};
 use crate::hash::sha256_canonical;
-use crate::planning;
 use crate::project_db::ProjectHandle;
-use crate::repositories::project_entry::{self, EntryArtifactRow, OpeningTopology};
+use crate::repositories::project_entry::{self, EntryArtifactRow};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Map, Value};
 
@@ -57,10 +56,6 @@ fn project_scope() -> Value {
 
 fn market_scope() -> Value {
     json!({"level":"MARKET"})
-}
-
-fn chapter_scope(chapter_id: &str) -> Value {
-    json!({"level":"CHAPTER","chapterId":chapter_id})
 }
 
 fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
@@ -140,134 +135,6 @@ fn receipt_value(receipt: crate::generated::types::CommitReceipt) -> Result<Valu
     serde_json::to_value(receipt).map_err(|error| error.to_string())
 }
 
-fn pitch_templates() -> [(&'static str, &'static str, &'static str, &'static str); PITCH_COUNT] {
-    [
-        (
-            "原始想法",
-            "废丹让妖兽进化",
-            "被逐出宗门的炼丹师必须证明废丹的价值，同时阻止宗门封锁真相",
-            "证明自己并找回师门尊严",
-        ),
-        (
-            "商业增强",
-            "妖兽学会炼丹",
-            "边境妖兽开始使用人类丹术，主角必须在宗门清剿与跨族谈判之间做选择",
-            "救下将被当作材料的妖兽群",
-        ),
-        (
-            "差异化",
-            "废丹交换记忆",
-            "每一颗废丹都能换回一段被抹去的记忆，但真相会反过来动摇主角的身份",
-            "找回失踪亲人的最后一段记忆",
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pitch_payload(
-    kind: EntryKind,
-    variant: &str,
-    index: usize,
-    idea: &str,
-    source_digest: &str,
-    generation: i64,
-    now: &str,
-    opportunity_ref: Option<&ArtifactRef>,
-) -> Value {
-    let templates = pitch_templates();
-    let (_, mechanism, conflict, desire) = templates[index];
-    let name = match index {
-        0 => "废丹成潮",
-        1 => "边境丹契",
-        _ => "记忆炼成灰",
-    };
-    let platform = if kind == EntryKind::Market {
-        "起点中文网"
-    } else {
-        "起点中文网 / 可调整"
-    };
-    let mut market_refs = Vec::new();
-    if let Some(reference) = opportunity_ref {
-        market_refs.push(json!(reference));
-    }
-    json!({
-        "payloadSchema":"project-pitch.r1",
-        "variant":variant,
-        "name":name,
-        "recommended":index == 0,
-        "platform":platform,
-        "genre":"东方奇幻 · 悬疑成长",
-        "audience":"喜欢强目标、升级回报和身份谜局的中文长篇读者",
-        "promise":format!("{mechanism}；每次推进都必须付出可验证的代价。"),
-        "emotion":"从受挫到主动破局的成长回报",
-        "reward":"不断揭开机制真相，同时让主角在选择中获得新的能力边界",
-        "protagonistDesire":desire,
-        "mechanism":mechanism,
-        "worldConflict":conflict,
-        "longArc":"从宗门旧案扩展到妖兽文明、记忆交易与世界规则的来源",
-        "openingHook":format!("第一章出现与“{mechanism}”有关的异常结果。"),
-        "volumeGoal":"建立机制代价，完成第一次局部回报，并留下更大的身份问题",
-        "expectedLength":"120–180 万字",
-        "commercialEdge":"强目标开局、明确升级代价、每卷都有可兑现的小回报",
-        "homogeneityRisk":"传统宗门成长题材供给较高，需持续保持机制与人物选择的差异",
-        "originality":"把炼丹、妖兽和身份谜局绑定为同一条因果链",
-        "difficulty":"需要保持规则一致，同时让升级不只依赖数值变强",
-        "failureRisk":"若只堆设定而缺少主角主动选择，长期推进会变慢",
-        "aiReason":"这是候选方向的解释，不替你做最终选择。",
-        "ideaExcerpt":idea.chars().take(280).collect::<String>(),
-        "sourceInputDigest":source_digest,
-        "inputKind":kind.as_str(),
-        "generation":generation,
-        "createdAt":now,
-        "authoritative":false,
-        "candidateStatus":"CANDIDATE",
-        "marketEvidenceRefs":market_refs,
-        "generationProvenance":{"provider":"deterministic-recording","model":"b11-pitch-v1","modelRunRefs":[],"transportCalls":0,"sourceInputDigest":source_digest}
-    })
-}
-
-fn market_opportunity_payload(
-    index: usize,
-    source: &str,
-    material_digest: &str,
-    now: &str,
-) -> Value {
-    let templates = [
-        ("稳健型", "强目标东方奇幻", "强目标 + 规则悬疑"),
-        ("潜力型", "人与妖兽共生成长", "跨族关系 + 成长"),
-        ("差异化型", "记忆机制悬疑长篇", "身份谜局 + 记忆代价"),
-    ];
-    let (kind, title, direction) = templates[index];
-    json!({
-        "payloadSchema":"genre-opportunity.r1",
-        "kind":kind,
-        "title":title,
-        "direction":direction,
-        "platform":"起点中文网",
-        "audience":"偏好东方奇幻、升级回报和持续谜团的长篇读者",
-        "demand":78 - index as i64 * 4,
-        "competition":64 + index as i64 * 5,
-        "homogeneityRisk":52 + index as i64 * 4,
-        "saturation":58 + index as i64 * 3,
-        "growth":82 - index as i64 * 2,
-        "monetization":75 - index as i64,
-        "newcomerDifficulty":61 + index as i64 * 5,
-        "longFormCapacity":88 - index as i64 * 3,
-        "originalitySpace":76 + index as i64 * 3,
-        "aiFeasibility":81 - index as i64 * 2,
-        "complianceRisk":12 + index as i64 * 2,
-        "dataConfidence":72,
-        "recommendationConfidence":74 - index as i64 * 3,
-        "evidence":["用户导入资料","可验证开篇信号","仅作机会判断"],
-        "recommendWhy":"资料显示强目标、明确代价和首章异常更容易形成继续阅读理由；这只是方向建议。",
-        "notRecommendWhy":"同类供给不低，需要通过机制代价和人物选择保持差异。",
-        "source":source,
-        "collectedAt":now,
-        "policyVersion":"B11-USER-MATERIAL-1",
-        "provenance":{"source":source,"capturedAt":now,"scope":"MARKET","inputDigest":material_digest,"kind":"USER_PROVIDED_DATA"}
-    })
-}
-
 fn initial_input(request: &Value, kind: EntryKind) -> Result<(String, String, String), String> {
     let payload = request.get("payload").unwrap_or(&Value::Null);
     let title = payload
@@ -317,6 +184,89 @@ pub fn validate_initial_request(request: &Value, kind: EntryKind) -> Result<(), 
     initial_input(request, kind).map(|_| ())
 }
 
+fn payload_string(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn payload_strings(payload: &Value, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn semantic_input_from_payload(
+    kind: EntryKind,
+    input: &str,
+    source_digest: &str,
+    payload: &Value,
+    adjustment: &str,
+    generation: i64,
+    now: &str,
+) -> crate::project_entry_semantic::SemanticInput {
+    let market_source =
+        (kind == EntryKind::Market).then(|| payload_string(payload, "marketSource"));
+    crate::project_entry_semantic::SemanticInput::new(
+        kind.as_str(),
+        input,
+        source_digest,
+        market_source.as_deref(),
+        &payload_string(payload, "platform"),
+        &payload_string(payload, "length"),
+        &payload_string(payload, "forbidden"),
+        payload_strings(payload, "tags"),
+        adjustment,
+        generation,
+        now,
+    )
+}
+
+fn semantic_input_from_brief(
+    brief: &EntryArtifactRow,
+    source_text: &str,
+    source_digest: &str,
+    adjustment: &str,
+    generation: i64,
+    now: &str,
+) -> crate::project_entry_semantic::SemanticInput {
+    let kind = brief
+        .payload
+        .get("inputKind")
+        .and_then(Value::as_str)
+        .unwrap_or("IDEA");
+    crate::project_entry_semantic::SemanticInput::new(
+        kind,
+        source_text,
+        source_digest,
+        brief.payload.get("marketSource").and_then(Value::as_str),
+        &payload_string(&brief.payload, "platform"),
+        &payload_string(&brief.payload, "length"),
+        &payload_string(&brief.payload, "forbidden"),
+        brief
+            .payload
+            .get("preferences")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
+        adjustment,
+        generation,
+        now,
+    )
+}
+
 pub fn commit_initial(
     connection: &ProjectHandle,
     project_id: &str,
@@ -327,11 +277,14 @@ pub fn commit_initial(
     kind: EntryKind,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     let (title, input, source_digest) = initial_input(request, kind)?;
+    let payload = request.get("payload").unwrap_or(&Value::Null);
+    let semantic_input =
+        semantic_input_from_payload(kind, &input, &source_digest, payload, "", 1, now);
     let brief_id = format!("brief:{project_id}:{command_id}");
     let brief_payload = if kind == EntryKind::Idea {
         json!({
             "payloadSchema":"creative-brief.r1","inputKind":"IDEA","title":title,
-            "idea":input,"sourceInputDigest":source_digest,"authoritative":false,"createdAt":now
+            "idea":input,"sourceInputDigest":source_digest,"platform":semantic_input.platform,"length":semantic_input.length,"forbidden":semantic_input.forbidden,"preferences":semantic_input.preferences,"authoritative":false,"createdAt":now
         })
     } else {
         let source = required_text(
@@ -340,7 +293,7 @@ pub fn commit_initial(
         )?;
         json!({
             "payloadSchema":"creative-brief.r1","inputKind":"MARKET","title":title,
-            "marketMaterial":input,"marketSource":source,"sourceInputDigest":source_digest,
+            "marketMaterial":input,"marketSource":source,"sourceInputDigest":source_digest,"platform":semantic_input.platform,"length":semantic_input.length,"forbidden":semantic_input.forbidden,"preferences":semantic_input.preferences,
             "authoritative":false,"createdAt":now
         })
     };
@@ -360,7 +313,6 @@ pub fn commit_initial(
     let mut artifacts = vec![brief];
     let mut opportunity_refs = Vec::new();
     if kind == EntryKind::Market {
-        let payload = request.get("payload").unwrap_or(&Value::Null);
         let source = required_text(payload, "/marketSource")?;
         let snapshot_id = format!("market-snapshot:{project_id}:{command_id}");
         let snapshot = artifact(
@@ -406,7 +358,7 @@ pub fn commit_initial(
                 format!("opportunity:{project_id}:{command_id}:{}", index + 1),
                 "GenreOpportunity",
                 market_scope(),
-                market_opportunity_payload(index, source.as_str(), &source_digest, now),
+                crate::project_entry_semantic::compile_market_opportunity(&semantic_input, index),
                 vec![evidence_ref.clone()],
                 "B11::MarketEvidenceOwner",
                 command_id,
@@ -417,21 +369,19 @@ pub fn commit_initial(
         }
     }
     for index in 0..PITCH_COUNT {
-        let (variant, _, _, _) = pitch_templates()[index];
+        let opportunity_ref = opportunity_refs
+            .get(index)
+            .map(|reference| serde_json::to_value(reference).map_err(|error| error.to_string()))
+            .transpose()?;
         let pitch = artifact(
             project_id,
             format!("pitch:{project_id}:{command_id}:{}", index + 1),
             "ProjectPitch",
             project_scope(),
-            pitch_payload(
-                kind,
-                variant,
+            crate::project_entry_semantic::compile_pitch(
+                &semantic_input,
                 index,
-                &input,
-                &source_digest,
-                1,
-                now,
-                opportunity_refs.get(index),
+                opportunity_ref.as_ref(),
             ),
             if let Some(reference) = opportunity_refs.get(index) {
                 vec![brief_ref.clone(), reference.clone()]
@@ -501,6 +451,14 @@ pub fn commit_regenerate(
         .unwrap_or("")
         .trim()
         .to_owned();
+    let semantic_input = semantic_input_from_brief(
+        &brief,
+        &idea,
+        source_input_digest,
+        &adjustment,
+        generation,
+        now,
+    );
     let mut artifacts = Vec::new();
     let brief_ref = ArtifactRef {
         artifact_id: brief.artifact_id.clone(),
@@ -508,24 +466,7 @@ pub fn commit_regenerate(
         payload_hash: brief.payload_hash.clone(),
     };
     for index in 0..PITCH_COUNT {
-        let (variant, _, _, _) = pitch_templates()[index];
-        let mut payload = pitch_payload(
-            if brief.payload.get("inputKind").and_then(Value::as_str) == Some("MARKET") {
-                EntryKind::Market
-            } else {
-                EntryKind::Idea
-            },
-            variant,
-            index,
-            &idea,
-            source_input_digest,
-            generation,
-            now,
-            None,
-        );
-        if !adjustment.is_empty() {
-            payload["userAdjustment"] = json!(adjustment);
-        }
+        let payload = crate::project_entry_semantic::compile_pitch(&semantic_input, index, None);
         artifacts.push(artifact(
             project_id,
             format!("pitch:{project_id}:{command_id}:{}", index + 1),
@@ -610,20 +551,22 @@ pub fn commit_selection(
             payload_hash: row.payload_hash.clone(),
         })
         .collect::<Vec<_>>();
-    let first = &selected[0].payload;
+    let selected_payloads = selected
+        .iter()
+        .map(|row| row.payload.clone())
+        .collect::<Vec<_>>();
+    let blueprint_payload = crate::project_entry_semantic::merge_candidates(
+        &selected_ids,
+        &selected_payloads,
+        &selected_refs,
+        now,
+    )?;
     let blueprint = artifact(
         project_id,
         format!("story-blueprint:{project_id}:{command_id}"),
         "StoryBlueprint",
         project_scope(),
-        json!({
-            "payloadSchema":"story-blueprint.r1","selectedPitchIds":selected_ids,
-            "selectedPitchRefs":selected_refs,"sourceInputDigest":first["sourceInputDigest"],
-            "storyPromise":first["promise"],"protagonistDirection":first["protagonistDesire"],
-            "mechanismBoundary":first["mechanism"],"coreConflict":first["worldConflict"],
-            "readerPromise":first["promise"],"longTermDirection":first["longArc"],
-            "explicitUserDecision":true,"authoritative":true,"createdAt":now
-        }),
+        blueprint_payload,
         selected_refs.clone(),
         "B11::ProjectSelectionOwner",
         command_id,
@@ -777,78 +720,6 @@ fn opening_ids(project_id: &str) -> Result<(String, String, String, String), Str
     ))
 }
 
-fn prepare_plan_commit(
-    connection: &ProjectHandle,
-    project_id: &str,
-    command_id: &str,
-    idempotency_key: &str,
-    expected_revision: i64,
-    now: &str,
-    topology: &OpeningTopology,
-) -> Result<crate::generated::types::CommitReceipt, String> {
-    let constitution =
-        project_entry::canonical_head_ref(connection, project_id, "StoryConstitution")
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
-    let book_plan = project_entry::canonical_head_ref(connection, project_id, "BookPlan")
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
-    let state_digest = sha256_canonical(&json!({"projectId":project_id,"constitution":constitution,"bookPlan":book_plan,"opening":true}))
-        .map_err(|error| error.to_string())?;
-    let context_payload = json!({
-        "payloadSchema":"context-manifest.r1","executionMode":"OPENING_BOOTSTRAP",
-        "compiledFromProjectRevision":expected_revision + 1,"compiledFromStateDigest":state_digest,
-        "goalContractRefs":[constitution.clone(),book_plan.clone()],"activeVolumeTaskRefs":[],"continuityThreadRefs":[],"futureReservationRefs":[],
-        "narrativeStateSources":[{"kind":"StoryConstitution","ref":constitution.artifact_id}],"selectedEvidence":[],"hardSourceCount":2,"omittedSoftSources":[],"budget":{"hardTokens":1024,"softTokens":0,"totalTokens":1024}
-    });
-    let context = artifact(
-        project_id,
-        format!("context:{project_id}:{command_id}"),
-        "ContextManifest",
-        chapter_scope(&topology.chapter_id),
-        context_payload,
-        vec![constitution.clone(), book_plan.clone()],
-        "B06::ContextCompilerOwner",
-        command_id,
-        now,
-    )?;
-    let context_ref = artifact_ref(&context);
-    let chapter_plan_payload = json!({
-        "payloadSchema":"chapter-plan.r1","chapterId":topology.chapter_id,"compiledFromProjectRevision":expected_revision + 1,"compiledFromStateDigest":state_digest,
-        "contextManifestRef":context_ref,"chapterGoal":"让主角面对一个必须主动回应的异常","activeTaskRefs":[],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],
-        "horizonPreview":[{"slotNo":1,"objective":"展示异常并迫使主角选择","tentative":true},{"slotNo":2,"objective":"给出局部回报并留下代价","tentative":true},{"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}]
-    });
-    planning::validate_current_chapter_plan(&chapter_plan_payload, &topology.chapter_id, &[], &[])?;
-    let chapter_plan = artifact(
-        project_id,
-        format!("chapter-plan:{project_id}:{command_id}"),
-        "ChapterPlan",
-        chapter_scope(&topology.chapter_id),
-        chapter_plan_payload,
-        vec![context_ref.clone()],
-        "B07::PlanningOwner",
-        command_id,
-        now,
-    )?;
-    let plan_ref = artifact_ref(&chapter_plan);
-    let heads = vec![
-        json!({"artifactType":"ChapterPlan","scope":chapter_scope(&topology.chapter_id),"artifactId":plan_ref.artifact_id,"version":plan_ref.version,"payloadHash":plan_ref.payload_hash}),
-    ];
-    let commit = bundle(
-        project_id,
-        command_id,
-        idempotency_key,
-        Some(expected_revision),
-        now,
-        vec![context, chapter_plan],
-        Some(heads),
-        None,
-        "B11_OPENING_READY",
-        json!({"chapterId":topology.chapter_id,"owner":"B07::PlanningOwner","minimumBoundary":true}).as_object().cloned().unwrap_or_default(),
-    )?;
-    CommitService::commit(connection, &commit, now).map_err(|error| error.to_string())
-}
-
 pub fn commit_opening_ready(
     connection: &ProjectHandle,
     project_id: &str,
@@ -929,14 +800,35 @@ pub fn commit_opening_ready(
     )?;
     let first_receipt =
         CommitService::commit(connection, &first_commit, now).map_err(|error| error.to_string())?;
-    prepare_plan_commit(
+    let authority_request = json!({
+        "projectId":project_id,
+        "volumeId":topology.volume_id,
+        "chapterId":topology.chapter_id,
+        "executionMode":"OPENING_BOOTSTRAP",
+        "scope":"CHAPTER",
+        "entityIds":[],
+        "references":[]
+    });
+    let context_command_id = format!("b06:context-owner:{command_id}");
+    let (context_receipt, context_ref) = crate::narrative::commit_opening_context_owner(
         connection,
         project_id,
-        &format!("{command_id}:plan"),
-        &format!("{idempotency_key}:plan"),
+        &authority_request,
         first_receipt.after_revision,
+        &context_command_id,
+        &format!("{idempotency_key}:b06-context"),
         now,
-        &topology,
+    )?;
+    crate::planning::commit_opening_chapter_plan_owner(
+        connection,
+        project_id,
+        &topology.chapter_id,
+        &context_ref,
+        &authority_request,
+        context_receipt.after_revision,
+        &format!("b07:opening-plan-owner:{command_id}"),
+        &format!("{idempotency_key}:b07-plan"),
+        now,
     )
 }
 
@@ -1111,6 +1003,140 @@ pub fn query_opening_ready(
     }))
 }
 
+fn assistant_authority_refs(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut refs = project_entry::canonical_head_ref(connection, project_id, "StoryBlueprint")
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|reference| reference.artifact_id)
+        .collect::<Vec<_>>();
+    refs.extend(
+        project_entry::canonical_head_ref(connection, project_id, "StoryConstitution")
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|reference| reference.artifact_id),
+    );
+    refs.extend(
+        project_entry::canonical_head_ref(connection, project_id, "BookPlan")
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|reference| reference.artifact_id),
+    );
+    if refs.is_empty() {
+        refs.extend(
+            project_entry::latest_artifact_by_type(connection, project_id, "CreativeBrief")
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|row| row.artifact_id),
+        );
+    }
+    refs.sort();
+    refs.dedup();
+    Ok(refs)
+}
+
+fn contains_any_text(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn explicit_repair_requested(question: &str) -> bool {
+    contains_any_text(
+        question,
+        &["修复", "重建", "重新整理", "纠正", "不对", "错误", "不一致"],
+    )
+}
+
+fn repair_question_kind(question: &str) -> &'static str {
+    let lower = question.to_lowercase();
+    if contains_any_text(
+        &lower,
+        &[
+            "改成还活着",
+            "改写正式事实",
+            "retcon",
+            "事实修订",
+            "改变 canon",
+            "改变正式",
+        ],
+    ) {
+        "PROPOSAL_ONLY"
+    } else if contains_any_text(
+        &lower,
+        &["章节规划", "章节计划", "chapterplan", "stale", "章节安排"],
+    ) {
+        "RECOMPILE_CHAPTER_PLAN"
+    } else if contains_any_text(
+        &lower,
+        &["当前卷安排", "卷规划", "路线", "route", "卷级安排"],
+    ) {
+        "REPLAN_VOLUME_ROUTE"
+    } else if contains_any_text(&lower, &["搜索", "全文", "索引", "fts", "检索"]) {
+        "REBUILD_FTS"
+    } else if contains_any_text(
+        &lower,
+        &["进度显示", "展示", "投影", "状态显示", "页面数据"],
+    ) {
+        "REBUILD_PROJECTION"
+    } else {
+        "NO_ACTION"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_plan_response(
+    project_id: &str,
+    question: &str,
+    revision: i64,
+    kind: &str,
+    diagnosis_type: &str,
+    claim: &str,
+    support_status: &str,
+    source_refs: Vec<String>,
+    operation: Option<crate::repair::RepairOperation>,
+    owner: &str,
+    affected_artifacts: Vec<String>,
+    affected_scopes: Vec<String>,
+    expected_postconditions: Vec<Value>,
+    now: &str,
+) -> Result<Value, String> {
+    let finding_digest = sha256_canonical(&json!({
+        "projectId":project_id,
+        "question":question,
+        "revision":revision,
+        "kind":kind,
+        "sourceRefs":source_refs,
+    }))
+    .map_err(|error| error.to_string())?;
+    let operations = operation.into_iter().collect::<Vec<_>>();
+    let operation_digest =
+        crate::repair::operation_digest_with_postconditions(&operations, &expected_postconditions)
+            .map_err(|error| error.to_string())?;
+    let operation_values = operations
+        .iter()
+        .map(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let finding_ref = format!("assistant-finding:{}", &finding_digest[..24]);
+    Ok(json!({
+        "action":kind,
+        "repairPlanId":format!("assistant-repair:{}", &finding_digest[..24]),
+        "projectId":project_id,
+        "basedOnProjectRevision":revision,
+        "diagnosis":{"diagnosisType":diagnosis_type,"claim":claim,"question":question,"supportStatus":support_status,"sourceRefs":source_refs,"findingRef":finding_ref},
+        "findingRefs":[finding_ref],
+        "targetAuthorityOwner":owner,
+        "proposedOperations":operation_values,
+        "affectedArtifacts":affected_artifacts,
+        "affectedScopes":affected_scopes,
+        "riskLevel":if kind == "EXECUTABLE" { "LOW" } else { "NONE" },
+        "requiresBackup":false,
+        "expectedPostconditions":expected_postconditions,
+        "operationDigest":operation_digest,
+        "createdAt":now
+    }))
+}
+
 pub fn assistant_repair_plan(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -1121,29 +1147,337 @@ pub fn assistant_repair_plan(
         connection, project_id,
     )
     .map_err(|error| error.to_string())?;
-    let operation: crate::repair::RepairOperation = serde_json::from_value(json!({
-        "operation":"rebuild_projection","target":"项目展示","params":{},"postconditions":{}
-    }))
-    .map_err(|error| error.to_string())?;
-    let expected_postconditions = vec![json!({"kind":"projection_current","expected":true})];
-    let operation_digest = crate::repair::operation_digest_with_postconditions(
-        std::slice::from_ref(&operation),
-        &expected_postconditions,
-    )
-    .map_err(|error| error.to_string())?;
-    let question_digest = sha256_canonical(&json!({
-        "projectId":project_id,"question":question,"revision":revision
-    }))
-    .map_err(|error| error.to_string())?;
-    Ok(json!({
-        "repairPlanId":format!("assistant-repair:{}", &question_digest[..24]),
-        "projectId":project_id,"basedOnProjectRevision":revision,
-        "diagnosis":{"diagnosisType":"PROJECTION_DRIFT","claim":"项目展示需要重新核对","question":question,"sourceRefs":[]},
-        "findingRefs":[],"targetAuthorityOwner":"B04::ProjectionOwner",
-        "proposedOperations":[operation],"affectedArtifacts":["项目展示"],"affectedScopes":["当前作品"],
-        "riskLevel":"LOW","requiresBackup":false,"expectedPostconditions":expected_postconditions,
-        "operationDigest":operation_digest,"createdAt":now
-    }))
+    let source_refs = assistant_authority_refs(connection, project_id)?;
+    let kind = repair_question_kind(question);
+    match kind {
+        "REBUILD_PROJECTION" => {
+            let healthy =
+                crate::repositories::ops::SearchService::projection_health(connection, project_id)
+                    .map_err(|error| error.to_string())?;
+            if healthy && !explicit_repair_requested(question) {
+                repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "PROJECTION_CURRENT",
+                    "当前作品展示已经与记录一致，不需要执行修复。",
+                    "SUPPORTED",
+                    source_refs,
+                    None,
+                    "无",
+                    vec!["项目展示".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                )
+            } else {
+                let operation = crate::repair::RepairOperation {
+                    operation: "rebuild_projection".into(),
+                    target: "项目展示".into(),
+                    params: json!({}),
+                    postconditions: json!({}),
+                };
+                repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "EXECUTABLE",
+                    "PROJECTION_DRIFT",
+                    "当前作品展示与可重建记录不一致，需要重新整理。",
+                    "SUPPORTED",
+                    source_refs,
+                    Some(operation),
+                    "B04::ProjectionOwner",
+                    vec!["项目展示".into()],
+                    vec!["当前作品".into()],
+                    vec![json!({"kind":"projection_current","expected":true})],
+                    now,
+                )
+            }
+        }
+        "REBUILD_FTS" => {
+            let healthy =
+                crate::repositories::ops::SearchService::projection_health(connection, project_id)
+                    .map_err(|error| error.to_string())?;
+            if healthy && !explicit_repair_requested(question) {
+                repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "FTS_CURRENT",
+                    "当前搜索记录已经可用，不需要执行修复。",
+                    "SUPPORTED",
+                    source_refs,
+                    None,
+                    "无",
+                    vec!["搜索记录".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                )
+            } else {
+                let operation = crate::repair::RepairOperation {
+                    operation: "rebuild_fts".into(),
+                    target: "搜索记录".into(),
+                    params: json!({}),
+                    postconditions: json!({}),
+                };
+                repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "EXECUTABLE",
+                    "FTS_PROJECTION_DRIFT",
+                    "当前搜索记录需要由既有索引维护责任方重新整理。",
+                    "SUPPORTED",
+                    source_refs,
+                    Some(operation),
+                    "B04::FTSMaintenanceOwner",
+                    vec!["搜索记录".into()],
+                    vec!["当前作品".into()],
+                    vec![json!({"kind":"projection_current","expected":true})],
+                    now,
+                )
+            }
+        }
+        "RECOMPILE_CHAPTER_PLAN" => {
+            let Some(topology) = project_entry::opening_topology(connection, project_id)
+                .map_err(|error| error.to_string())?
+            else {
+                return repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "CHAPTER_PLAN_UNAVAILABLE",
+                    "当前还没有可重新整理的章节规划。",
+                    "INSUFFICIENT",
+                    Vec::new(),
+                    None,
+                    "无",
+                    vec!["当前章节规划".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                );
+            };
+            let Some(plan_row) = project_entry::canonical_chapter_head(
+                connection,
+                project_id,
+                "ChapterPlan",
+                &topology.chapter_id,
+            )
+            .map_err(|error| error.to_string())?
+            else {
+                return repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "CHAPTER_PLAN_UNAVAILABLE",
+                    "当前还没有可重新整理的章节规划。",
+                    "INSUFFICIENT",
+                    Vec::new(),
+                    None,
+                    "无",
+                    vec!["当前章节规划".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                );
+            };
+            let mut authority = json!({
+                "projectId":project_id,"volumeId":topology.volume_id,"chapterId":topology.chapter_id,
+                "executionMode":"OPENING_BOOTSTRAP","scope":"CHAPTER","entityIds":[],"references":[]
+            });
+            let input = crate::commands::context_input_from_authority(
+                connection, &authority, project_id, revision,
+            )?;
+            let current_digest = crate::narrative::relevant_state_digest(&input)?;
+            let compiled_revision = plan_row
+                .payload
+                .get("compiledFromProjectRevision")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            let compiled_digest = plan_row
+                .payload
+                .get("compiledFromStateDigest")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let stale = matches!(
+                crate::narrative::evaluate_plan_stale(
+                    compiled_revision,
+                    compiled_digest,
+                    revision,
+                    &current_digest,
+                ),
+                crate::narrative::PlanStaleStatus::PlanStale
+            );
+            let mut source_refs = source_refs;
+            source_refs.push(plan_row.artifact_id.clone());
+            if let Some(context_ref) = plan_row
+                .payload
+                .get("contextManifestRef")
+                .and_then(|value| value.get("artifactId"))
+                .and_then(Value::as_str)
+            {
+                source_refs.push(context_ref.to_owned());
+            }
+            if !stale {
+                return repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "CHAPTER_PLAN_CURRENT",
+                    "当前章节规划仍然有效，不需要执行修复。",
+                    "SUPPORTED",
+                    source_refs,
+                    None,
+                    "B07::PlanningOwner",
+                    vec![plan_row.artifact_id],
+                    vec!["当前章节".into()],
+                    Vec::new(),
+                    now,
+                );
+            }
+            authority["executionMode"] = json!("OPENING_BOOTSTRAP");
+            let mut executable_plan = plan_row.payload.clone();
+            executable_plan["compiledFromProjectRevision"] = json!(revision);
+            executable_plan["compiledFromStateDigest"] = json!(current_digest);
+            let operation = crate::repair::RepairOperation {
+                operation: "recompile_chapter_plan".into(),
+                target: "当前章节规划".into(),
+                params: json!({
+                    "chapterId":topology.chapter_id,
+                    "plan":executable_plan,
+                    "executionMode":"OPENING_BOOTSTRAP",
+                    "entityIds":[],"references":[]
+                }),
+                postconditions: json!({}),
+            };
+            repair_plan_response(
+                project_id,
+                question,
+                revision,
+                "EXECUTABLE",
+                "CHAPTER_PLAN_STALE",
+                "当前章节规划与最新作品记录不一致，需要由规划责任方重新整理。",
+                "SUPPORTED",
+                source_refs,
+                Some(operation),
+                "B07::PlanningOwner",
+                vec![plan_row.artifact_id],
+                vec!["当前章节".into()],
+                vec![json!({"kind":"chapter_plan_stale","expected":"VALID"})],
+                now,
+            )
+        }
+        "REPLAN_VOLUME_ROUTE" => {
+            let Some(topology) = project_entry::opening_topology(connection, project_id)
+                .map_err(|error| error.to_string())?
+            else {
+                return repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "VOLUME_ROUTE_UNAVAILABLE",
+                    "当前还没有可重新规划的卷级安排。",
+                    "INSUFFICIENT",
+                    Vec::new(),
+                    None,
+                    "无",
+                    vec!["当前卷安排".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                );
+            };
+            let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                connection,
+                project_id,
+                &topology.volume_id,
+            )
+            .map_err(|error| error.to_string())?;
+            let Some(route_ref) = route_ref else {
+                return repair_plan_response(
+                    project_id,
+                    question,
+                    revision,
+                    "NO_ACTION",
+                    "VOLUME_ROUTE_UNAVAILABLE",
+                    "当前卷级安排尚未进入可重新规划阶段。",
+                    "INSUFFICIENT",
+                    Vec::new(),
+                    None,
+                    "无",
+                    vec!["当前卷安排".into()],
+                    vec!["当前作品".into()],
+                    Vec::new(),
+                    now,
+                );
+            };
+            let mut route_sources = source_refs;
+            route_sources.push(route_ref.artifact_id);
+            let operation = crate::repair::RepairOperation {
+                operation: "replan_volume_route".into(),
+                target: "当前卷安排".into(),
+                params: json!({"volumeId":topology.volume_id,"trigger":"ASSISTANT_DIAGNOSIS","reason":question,"evidenceRefs":route_sources}),
+                postconditions: json!({}),
+            };
+            repair_plan_response(
+                project_id,
+                question,
+                revision,
+                "EXECUTABLE",
+                "VOLUME_ROUTE_REPLAN_REQUIRED",
+                "当前卷级安排已存在，可以提交给卷级责任方重新规划。",
+                "SUPPORTED",
+                route_sources,
+                Some(operation),
+                "B09::VolumeLifecycleOwner",
+                vec!["当前卷安排".into()],
+                vec![topology.volume_id],
+                vec![json!({"kind":"volume_route_replanned","expected":true})],
+                now,
+            )
+        }
+        "PROPOSAL_ONLY" => repair_plan_response(
+            project_id,
+            question,
+            revision,
+            "PROPOSAL_ONLY",
+            "FORMAL_CHANGE_REQUEST",
+            "这会改变已经确认的作品事实，只能先建立修改提案，当前不会执行。",
+            "SUPPORTED",
+            source_refs,
+            None,
+            "现有修改提案入口",
+            vec!["正式作品事实".into()],
+            vec!["当前作品".into()],
+            Vec::new(),
+            now,
+        ),
+        _ => repair_plan_response(
+            project_id,
+            question,
+            revision,
+            "NO_ACTION",
+            "UNSUPPORTED_REPAIR_REQUEST",
+            "当前请求还不能确定一个安全、可核对的修复范围。",
+            "INSUFFICIENT",
+            Vec::new(),
+            None,
+            "无",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            now,
+        ),
+    }
 }
 
 pub fn project_entry_value(

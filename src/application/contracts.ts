@@ -98,6 +98,7 @@ export interface OpeningReadyProjection {
 }
 
 export interface AssistantRepairPlan {
+  action?: 'EXECUTABLE' | 'PROPOSAL_ONLY' | 'NO_ACTION'
   repairPlanId: string
   projectId: string
   basedOnProjectRevision: number

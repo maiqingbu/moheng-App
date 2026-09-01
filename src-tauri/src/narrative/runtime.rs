@@ -1,6 +1,7 @@
+use crate::commit::CommitService;
 use crate::generated::types::{
-    ArtifactRef, ContextManifestR1, ContextManifestR1Budget, EvidenceRef, OmittedSource, SourceRef,
-    VolumeProgressProjection,
+    ArtifactEnvelope, ArtifactRef, CommitBundle, CommitReceipt, ContextManifestR1,
+    ContextManifestR1Budget, EvidenceRef, OmittedSource, SourceRef, VolumeProgressProjection,
 };
 use crate::hash::sha256_canonical;
 use crate::repositories::narrative::{
@@ -389,6 +390,79 @@ pub fn compile_context_manifest(
             total_tokens: input.hard_tokens.max(0) + input.soft_tokens.max(0),
         },
     })
+}
+
+/// B06's persisted opening context owner. Callers provide only a typed
+/// authority request; this function resolves the bounded authority input,
+/// compiles the manifest with the existing narrative compiler, and records the
+/// resulting artifact through the frozen CommitService.
+pub fn commit_opening_context_owner(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    authority_request: &Value,
+    expected_revision: i64,
+    command_id: &str,
+    idempotency_key: &str,
+    now: &str,
+) -> Result<(CommitReceipt, ArtifactRef), String> {
+    if authority_request
+        .get("executionMode")
+        .and_then(Value::as_str)
+        != Some("OPENING_BOOTSTRAP")
+    {
+        return Err("B06_OPENING_CONTEXT_MODE_REQUIRED".into());
+    }
+    let input = crate::commands::context_input_from_authority(
+        connection,
+        authority_request,
+        project_id,
+        expected_revision,
+    )?;
+    let context = compile_context_manifest(input)?;
+    let payload = serde_json::to_value(&context).map_err(|error| error.to_string())?;
+    let payload_hash =
+        crate::hash::sha256_canonical(&payload).map_err(|error| error.to_string())?;
+    let chapter_id = authority_request
+        .get("chapterId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "B06_OPENING_CHAPTER_REQUIRED".to_string())?;
+    let artifact_id = format!("context:{project_id}:{command_id}");
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,
+        "projectId":project_id,
+        "artifactType":"ContextManifest",
+        "scope":{"level":"CHAPTER","chapterId":chapter_id},
+        "version":1,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"APPROVED_PLAN",
+        "payload":payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":context.goal_contract_refs,
+        "provenance":{"createdBy":"B06::ContextCompilerOwner","commandId":command_id,"stepId":"B06::ContextCompilerOwner"},
+        "createdAt":now
+    }))
+    .map_err(|error| format!("B06_CONTEXT_ARTIFACT_INVALID:{error}"))?;
+    let reference = ArtifactRef {
+        artifact_id: artifact.artifact_id.clone(),
+        version: artifact.version,
+        payload_hash: artifact.payload_hash.clone(),
+    };
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":idempotency_key,
+        "expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":now,
+        "artifacts":[artifact],
+        "receiptDraft":{"domain":"B06_OPENING_CONTEXT","artifactRefs":[reference.clone()],"payload":{"owner":"B06::ContextCompilerOwner","executionMode":"OPENING_BOOTSTRAP","compiledFromStateDigest":context.compiled_from_state_digest}}
+    }))
+    .map_err(|error| format!("B06_CONTEXT_BUNDLE_INVALID:{error}"))?;
+    let receipt =
+        CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())?;
+    Ok((receipt, reference))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
