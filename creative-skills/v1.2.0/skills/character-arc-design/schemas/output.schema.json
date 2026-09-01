@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/character-arc-design/output.schema.json",
+  "title": "S19 人物弧设计 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S19"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "arc_question",
+        "pressure_sequence",
+        "choice_points",
+        "costs",
+        "belief_shifts",
+        "evidence_targets",
+        "failure_paths"
+      ],
+      "properties": {
+        "arc_question": {
+          "description": "BUILD_SPEC 要求的 arc_question；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "pressure_sequence": {
+          "description": "BUILD_SPEC 要求的 pressure_sequence；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "choice_points": {
+          "description": "BUILD_SPEC 要求的 choice_points；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "costs": {
+          "description": "BUILD_SPEC 要求的 costs；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "belief_shifts": {
+          "description": "BUILD_SPEC 要求的 belief_shifts；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "evidence_targets": {
+          "description": "BUILD_SPEC 要求的 evidence_targets；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "failure_paths": {
+          "description": "BUILD_SPEC 要求的 failure_paths；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

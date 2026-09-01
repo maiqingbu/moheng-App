@@ -1,0 +1,23 @@
+{
+  "id": "S43",
+  "slug": "longform-health-diagnosis",
+  "name_zh": "长篇健康诊断",
+  "version": "1.2.0",
+  "category": "longform",
+  "priority": "P1",
+  "role": "evaluator",
+  "runtimeStage": "longform",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:a366e13fe550b7a0613dd8a450bdc8b2964674eb3c08980b733be6e45505be2f",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "SOFT_ONLY",
+  "architectureNote": "B11 负责 obligation/foreshadow/task/route health；Skill 仅诊断软质量漂移。"
+}

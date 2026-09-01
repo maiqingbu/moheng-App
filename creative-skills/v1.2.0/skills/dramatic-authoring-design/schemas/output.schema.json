@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/dramatic-authoring-design/output.schema.json",
+  "title": "S27 戏剧化创作设计 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S27"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "want",
+        "opposition",
+        "stakes",
+        "tactics",
+        "countermoves",
+        "forced_choice",
+        "cost",
+        "turn",
+        "agency_chain"
+      ],
+      "properties": {
+        "want": {
+          "description": "BUILD_SPEC 要求的 want；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "opposition": {
+          "description": "BUILD_SPEC 要求的 opposition；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "stakes": {
+          "description": "BUILD_SPEC 要求的 stakes；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "tactics": {
+          "description": "BUILD_SPEC 要求的 tactics；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "countermoves": {
+          "description": "BUILD_SPEC 要求的 countermoves；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "forced_choice": {
+          "description": "BUILD_SPEC 要求的 forced_choice；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "cost": {
+          "description": "BUILD_SPEC 要求的 cost；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "turn": {
+          "description": "BUILD_SPEC 要求的 turn；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "agency_chain": {
+          "description": "BUILD_SPEC 要求的 agency_chain；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

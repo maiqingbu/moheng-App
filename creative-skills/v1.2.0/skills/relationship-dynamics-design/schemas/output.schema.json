@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/relationship-dynamics-design/output.schema.json",
+  "title": "S05 人物关系动力设计 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S05"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "relationship_axes",
+        "power_balance",
+        "trust_state",
+        "hidden_tension",
+        "change_triggers",
+        "payoff_paths"
+      ],
+      "properties": {
+        "relationship_axes": {
+          "description": "BUILD_SPEC 要求的 relationship_axes；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "power_balance": {
+          "description": "BUILD_SPEC 要求的 power_balance；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "trust_state": {
+          "description": "BUILD_SPEC 要求的 trust_state；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "hidden_tension": {
+          "description": "BUILD_SPEC 要求的 hidden_tension；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "change_triggers": {
+          "description": "BUILD_SPEC 要求的 change_triggers；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "payoff_paths": {
+          "description": "BUILD_SPEC 要求的 payoff_paths；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "S17",
+  "slug": "volume-architecture",
+  "name_zh": "卷级结构设计",
+  "version": "1.2.0",
+  "category": "architecture",
+  "priority": "P1",
+  "role": "architect",
+  "runtimeStage": "architecture",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:4d80adfe81936c632b0e4361d0e4e54ba0ee3e2b168f5f8c45da29541dfc318c",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "REFRAME",
+  "architectureNote": "Volume route / capacity / exit truth 属于 B07/B09 Runtime；Skill 仅做卷级创作品质 shaping。"
+}

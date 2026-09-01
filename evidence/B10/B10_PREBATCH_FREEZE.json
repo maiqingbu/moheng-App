@@ -1,0 +1,53 @@
+{
+  "schema": "b10-prebatch-freeze-r1",
+  "freezeThrough": "B09_H04",
+  "architectureStatus": "FROZEN",
+  "prdStatus": "FROZEN",
+  "acceptedStages": [
+    "M0/B01-B04",
+    "B05",
+    "B06/H01",
+    "B07/H02",
+    "B08/H03",
+    "POST_B08_H03_R2_ALIGNMENT",
+    "P01",
+    "B09/H04"
+  ],
+  "acceptedBaseline": "2a5f741527eaf62830141f80d88dcbf3ecc69017",
+  "frozenMigrations": [
+    "0001_catalog.sql",
+    "0002_project_authority.sql",
+    "0003_project_command.sql",
+    "0004_project_longterm.sql",
+    "0005_m0c_commit_delta.sql",
+    "0006_m0e_ops.sql",
+    "0007_b05_narrative_foundation.sql",
+    "0008_h01_support_checkpoint.sql",
+    "0009_h03_repair_workflow.sql",
+    "0010_b09_h04_volume_lifecycle.sql"
+  ],
+  "historicalAcceptanceRefs": {
+    "b08H03PreAlignment": "ec1a12176100ba427395c2d62bdc1661dcabfa5e",
+    "r2Alignment": "bc1878bce9613a7ffb184227531372177d72bdeb",
+    "p01": "6992b544f59f385160e3aa2f34f2e206ae715e59",
+    "b09H04": "2a5f741527eaf62830141f80d88dcbf3ecc69017"
+  },
+  "allowedReopenReasons": [
+    "B10_AUTHORIZED_DEPENDENCY_INTEGRATION",
+    "B10_REGRESSION",
+    "R2_FROZEN_HARD_INVARIANT_VIOLATION",
+    "EXPLICIT_USER_INSTRUCTION"
+  ],
+  "forbiddenReopenReasons": [
+    "REVIEWER_PREFERENCE",
+    "STYLE_ONLY",
+    "TEST_ORGANIZATION_ONLY",
+    "OPPORTUNISTIC_REFACTOR"
+  ],
+  "nextAuthorizedBatch": "B10",
+  "gitGate": {
+    "head": "2a5f741527eaf62830141f80d88dcbf3ecc69017",
+    "workingTree": "CLEAN"
+  },
+  "status": "PASS"
+}

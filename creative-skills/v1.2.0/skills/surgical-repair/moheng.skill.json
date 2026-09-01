@@ -1,0 +1,23 @@
+{
+  "id": "S40",
+  "slug": "surgical-repair",
+  "name_zh": "局部修复",
+  "version": "1.2.0",
+  "category": "repair",
+  "priority": "P0",
+  "role": "repairer",
+  "runtimeStage": "repair",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:930964a7370e2b4cf30e4b8e0bf36c1add67b67cb29ee06d5c5fc9d82cafdfb1",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "CANDIDATE_REPAIR_ONLY",
+  "architectureNote": "只修 Candidate/working text；formal RepairPlan 与 Authority repair 属于 Support Harness/Runtime。"
+}

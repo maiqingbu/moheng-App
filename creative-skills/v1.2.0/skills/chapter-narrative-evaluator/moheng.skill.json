@@ -1,0 +1,23 @@
+{
+  "id": "S37",
+  "slug": "chapter-narrative-evaluator",
+  "name_zh": "章节叙事质量评估",
+  "version": "1.2.0",
+  "category": "evaluation",
+  "priority": "P0",
+  "role": "evaluator",
+  "runtimeStage": "evaluation",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:82dc680b21f4e4841b150ec17ee41f2f67fa52caef83c4cc3cfb770bcef87c46",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "SOFT_QUALITY_ONLY",
+  "architectureNote": "Evaluator findings are SOFT; suspected HARD issues become runtimeCheckRequests."
+}

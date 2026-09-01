@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/volume-architecture/output.schema.json",
+  "title": "S17 卷级结构设计 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S17"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "creative_phase_options",
+        "pressure_curve",
+        "character_focus",
+        "payoff_opportunities",
+        "tone_variation",
+        "quality_risks"
+      ],
+      "properties": {
+        "creative_phase_options": {
+          "description": "v1.2 architecture-aligned creative payload `creative_phase_options`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        },
+        "pressure_curve": {
+          "description": "v1.2 architecture-aligned creative payload `pressure_curve`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        },
+        "character_focus": {
+          "description": "v1.2 architecture-aligned creative payload `character_focus`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        },
+        "payoff_opportunities": {
+          "description": "v1.2 architecture-aligned creative payload `payoff_opportunities`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        },
+        "tone_variation": {
+          "description": "v1.2 architecture-aligned creative payload `tone_variation`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        },
+        "quality_risks": {
+          "description": "v1.2 architecture-aligned creative payload `quality_risks`；精确子类型在 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/information-reveal-design/output.schema.json",
+  "title": "S12 信息释放与秘密控制 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S12"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "reveal_plan",
+        "withheld_info",
+        "reader_knows",
+        "pov_knows",
+        "signals",
+        "forbidden_reveals"
+      ],
+      "properties": {
+        "reveal_plan": {
+          "description": "BUILD_SPEC 要求的 reveal_plan；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "withheld_info": {
+          "description": "BUILD_SPEC 要求的 withheld_info；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "reader_knows": {
+          "description": "BUILD_SPEC 要求的 reader_knows；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "pov_knows": {
+          "description": "BUILD_SPEC 要求的 pov_knows；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "signals": {
+          "description": "BUILD_SPEC 要求的 signals；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "forbidden_reveals": {
+          "description": "BUILD_SPEC 要求的 forbidden_reveals；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

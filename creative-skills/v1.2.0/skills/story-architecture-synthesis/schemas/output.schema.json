@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/story-architecture-synthesis/output.schema.json",
+  "title": "S15 黄金三章后的故事架构综合 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S15"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "architecture_candidates",
+        "mainline",
+        "major_phases",
+        "character_trajectories",
+        "escalation_model",
+        "ending_boundary",
+        "tradeoffs"
+      ],
+      "properties": {
+        "architecture_candidates": {
+          "description": "BUILD_SPEC 要求的 architecture_candidates；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "mainline": {
+          "description": "BUILD_SPEC 要求的 mainline；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "major_phases": {
+          "description": "BUILD_SPEC 要求的 major_phases；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "character_trajectories": {
+          "description": "BUILD_SPEC 要求的 character_trajectories；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "escalation_model": {
+          "description": "BUILD_SPEC 要求的 escalation_model；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "ending_boundary": {
+          "description": "BUILD_SPEC 要求的 ending_boundary；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "tradeoffs": {
+          "description": "BUILD_SPEC 要求的 tradeoffs；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

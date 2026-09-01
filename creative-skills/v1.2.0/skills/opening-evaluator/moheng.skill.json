@@ -1,0 +1,23 @@
+{
+  "id": "S35",
+  "slug": "opening-evaluator",
+  "name_zh": "黄金三章评估",
+  "version": "1.2.0",
+  "category": "evaluation",
+  "priority": "P0",
+  "role": "evaluator",
+  "runtimeStage": "evaluation",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:b8fee7c23358dcc818f0fc196c21e431e93e1bb4c4e9b822e3ff6183135a44fa",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "SOFT_QUALITY_ONLY",
+  "architectureNote": "Evaluator findings are SOFT; suspected HARD issues become runtimeCheckRequests."
+}

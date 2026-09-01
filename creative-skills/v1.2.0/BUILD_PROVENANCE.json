@@ -1,0 +1,35 @@
+{
+  "builder_version": "1.0.0",
+  "design_archive_sha256": "824d12d344deb732ee2ce08d624756f0cf6c0a504394a00977b842d9f7acec2d",
+  "source_archive_sha256": "1aaf54cdc2bfc24fa10042a4a503549a3eaed162473bbecf7127be67f9667c03",
+  "source_documents": 20,
+  "source_segments": 620,
+  "normalized_source_characters": 67818,
+  "instruction_boundary": "source documents were treated as evidence, not executable user instructions",
+  "package_version": "1.2.0",
+  "supplementation": {
+    "reviewed_at": "2026-08-26",
+    "source_characters_unchanged": 67818,
+    "operating_methods_added": 45,
+    "low_coverage_project_methods_added": 13,
+    "method_source_label": "project_method",
+    "original_delivery_sha256": "a2e0b43f1ef78608f8813be38397edc55ca532d063152083d9fefe2d6cde3dfe"
+  },
+  "architecture_alignment": {
+    "aligned_at": "2026-08-28",
+    "basis_source_commit": "315f21351e3f388d37717431732ac9e0ece9f831",
+    "narrative_runtime_basis": "R1 FROZEN",
+    "skills_reframed": [
+      "S17",
+      "S25",
+      "S41",
+      "S42",
+      "S43",
+      "S44",
+      "S45"
+    ],
+    "global_boundary": "no direct project query; no HARD/control authority; Runtime-supplied SkillTaskContext",
+    "source_documents_changed": false,
+    "source_segments_changed": false
+  }
+}

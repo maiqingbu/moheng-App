@@ -1,0 +1,24 @@
+{
+  "package": "moheng-creative-skills",
+  "version": "1.2.0",
+  "skill_count": 45,
+  "schema_files_parsed": 45,
+  "eval_case_counts": {
+    "positive": 445,
+    "negative": 445,
+    "boundary": 179,
+    "adversarial": 135
+  },
+  "unique_prompt_counts": {
+    "positive": 445,
+    "negative": 445,
+    "boundary": 179,
+    "adversarial": 135
+  },
+  "offline_fixture_validation": "PASS",
+  "model_ab_execution": "PENDING_B10_SKILL_RUNTIME",
+  "authority_violation_expected": 0,
+  "boundary_fail_open_expected": 0,
+  "note": "v1.2 aligns all skills to Narrative Runtime R1: no direct project query, no HARD/control authority; same-model A/B remains a B10 task.",
+  "architecture_boundary_validation": "PASS"
+}

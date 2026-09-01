@@ -1,0 +1,23 @@
+{
+  "id": "S38",
+  "slug": "agency-reader-desire-evaluator",
+  "name_zh": "人物主动性与读者期待评估",
+  "version": "1.2.0",
+  "category": "evaluation",
+  "priority": "P0",
+  "role": "evaluator",
+  "runtimeStage": "evaluation",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "MEDIUM",
+  "coverageReason": "存在直接证据，但部分规则仍依赖相邻主题或项目策略。",
+  "bundleDigest": "sha256:6bca82fc3b7dbf9b157f15ac25953ee3c9427beeaaccc645c39bc1f7b6438543",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "SOFT_QUALITY_ONLY",
+  "architectureNote": "Evaluator findings are SOFT; suspected HARD issues become runtimeCheckRequests."
+}

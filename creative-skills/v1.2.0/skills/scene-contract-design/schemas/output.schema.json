@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "moheng://creative-skills/scene-contract-design/output.schema.json",
+  "title": "S26 场景契约设计 SkillResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "skillId",
+    "skillVersion",
+    "bundleDigest",
+    "taskId",
+    "status",
+    "sourceRefs",
+    "assumptions",
+    "payload",
+    "findings",
+    "contextRefs",
+    "runtimeCheckRequests",
+    "confidence",
+    "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {
+      "const": "S26"
+    },
+    "skillVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "bundleDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "OK",
+        "NEEDS_INPUT",
+        "NOT_APPLICABLE",
+        "ADVISORY_ESCALATION"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "scene_goal",
+        "participants",
+        "allowed_facts",
+        "forbidden_facts",
+        "knowledge_boundary",
+        "required_outcomes",
+        "scene_mode"
+      ],
+      "properties": {
+        "scene_goal": {
+          "description": "BUILD_SPEC 要求的 scene_goal；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "participants": {
+          "description": "BUILD_SPEC 要求的 participants；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "allowed_facts": {
+          "description": "BUILD_SPEC 要求的 allowed_facts；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "forbidden_facts": {
+          "description": "BUILD_SPEC 要求的 forbidden_facts；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "knowledge_boundary": {
+          "description": "BUILD_SPEC 要求的 knowledge_boundary；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "required_outcomes": {
+          "description": "BUILD_SPEC 要求的 required_outcomes；精确子类型待 B10 Skill Runtime contract 冻结。"
+        },
+        "scene_mode": {
+          "description": "BUILD_SPEC 要求的 scene_mode；精确子类型待 B10 Skill Runtime contract 冻结。"
+        }
+      },
+      "additionalProperties": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nextSkillHints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contextRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Project fact/evidence refs supplied by Runtime; Skill may not fetch outside this context."
+    },
+    "runtimeCheckRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason",
+          "refs"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "CANON_CONFLICT",
+              "KNOWLEDGE_BOUNDARY",
+              "THREAD_STATE",
+              "TASK_REALITY",
+              "RESERVATION",
+              "INTEGRITY",
+              "PLAN_STALE",
+              "EVIDENCE_GAP"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Advisory requests for deterministic Runtime/Support Harness checks; never a HARD decision."
+    }
+  }
+}

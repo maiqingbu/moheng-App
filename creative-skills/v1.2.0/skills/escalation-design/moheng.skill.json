@@ -1,0 +1,23 @@
+{
+  "id": "S20",
+  "slug": "escalation-design",
+  "name_zh": "长期升级与压力递增设计",
+  "version": "1.2.0",
+  "category": "architecture",
+  "priority": "P1",
+  "role": "architect",
+  "runtimeStage": "architecture",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:902984ab569911ee3a10e3ddd4e65adfd2056b454b56bcc463fe1c2a72ad7e67",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "CREATIVE_METHOD",
+  "architectureNote": "Creative method only; project truth/control remains Runtime-owned."
+}

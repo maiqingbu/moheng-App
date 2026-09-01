@@ -1,0 +1,23 @@
+{
+  "id": "S10",
+  "slug": "hook-curiosity-design",
+  "name_zh": "Hook 与好奇缺口设计",
+  "version": "1.2.0",
+  "category": "opening",
+  "priority": "P0",
+  "role": "planner",
+  "runtimeStage": "opening",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:90eeb152341ba475969a266df538b4b69183b8cb02e61f453b82d60348fa5982",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "CREATIVE_METHOD",
+  "architectureNote": "Creative method only; project truth/control remains Runtime-owned."
+}

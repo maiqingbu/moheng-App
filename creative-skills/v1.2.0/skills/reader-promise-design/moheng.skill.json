@@ -1,0 +1,23 @@
+{
+  "id": "S02",
+  "slug": "reader-promise-design",
+  "name_zh": "读者承诺与期待设计",
+  "version": "1.2.0",
+  "category": "foundation",
+  "priority": "P0",
+  "role": "planner",
+  "runtimeStage": "foundation",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:c834eacfe6334380e93b1032e1bc850c4010e3fe2cfec928e61cb22fa5b15cfc",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "CREATIVE_METHOD",
+  "architectureNote": "Creative method only; project truth/control remains Runtime-owned."
+}

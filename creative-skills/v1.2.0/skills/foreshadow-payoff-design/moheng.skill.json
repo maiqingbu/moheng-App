@@ -1,0 +1,23 @@
+{
+  "id": "S23",
+  "slug": "foreshadow-payoff-design",
+  "name_zh": "伏笔与回收设计",
+  "version": "1.2.0",
+  "category": "architecture",
+  "priority": "P1",
+  "role": "architect",
+  "runtimeStage": "architecture",
+  "contextPolicy": "metadata discovery; runtime-supplied bounded SkillTaskContext; primary+support<=4; lazy resources",
+  "mutationPolicy": "CREATIVE_ADVISORY_ONLY; no direct project query; no authority/control write",
+  "coverage": "HIGH",
+  "coverageReason": "存在多个标题级直接证据段。",
+  "bundleDigest": "sha256:89203a4c7ee194375632fb0f512a736d7bb7755d07cf8ae41336af887f8ad3ea",
+  "digestScope": "all skill files except moheng.skill.json",
+  "methodResource": "resources/operating_method.md",
+  "sourceEvidencePolicy": "on-demand; non-binding; METHOD_PRECEDENCE applies",
+  "authorityAccess": "NONE_DIRECT",
+  "hardGateAuthority": false,
+  "controlDecisionAuthority": false,
+  "architectureAlignment": "CREATIVE_METHOD",
+  "architectureNote": "Creative method only; project truth/control remains Runtime-owned."
+}
