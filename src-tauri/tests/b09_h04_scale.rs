@@ -28,6 +28,7 @@ fn scope_key(value: Value) -> String {
     String::from_utf8(canonical_bytes(&value).unwrap()).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_committed_artifact(
     connection: &Connection,
     project_id: &str,
