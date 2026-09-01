@@ -622,7 +622,7 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
 fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
     let (_temp, _manager, connection) = formal_project();
     seed_formal_budget(&connection, "budget:p01:real", 3, 20);
-    let body = r#"{"id":"req:local","choices":[{"message":{"content":"{\"body\":\"ok\"}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
+    let body = r#"{"id":"req:local","choices":[{"message":{"content":"{\"body\":\"ok\"}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}}"#;
     let (endpoint, calls) = local_provider_server_with_calls(200, body);
     let secrets = MemorySecretStore::new();
     secrets.put("fixture", "fixture-token-real-http").unwrap();
@@ -699,5 +699,15 @@ fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
             )
             .unwrap(),
         "req:local"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT json_extract(payload_json,'$.cachedTokens') FROM production_events WHERE event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        2
     );
 }

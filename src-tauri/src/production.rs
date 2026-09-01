@@ -279,6 +279,50 @@ impl<'a> GatewayTransport<'a> {
 }
 
 impl ModelTransport for GatewayTransport<'_> {
+    fn defer_usage_until_raw_persist(&self) -> bool {
+        true
+    }
+
+    fn usage_after_raw_persist(
+        &mut self,
+        _connection: &libsql_rusqlite::Connection,
+        _spec: &ModelRunSpec,
+        raw_response: &str,
+        usage: &TransportUsage,
+    ) -> Result<TransportUsage, RuntimeError> {
+        let Ok(envelope) = serde_json::from_str::<Value>(raw_response) else {
+            return Ok(usage.clone());
+        };
+        let Some(provider_usage) = envelope.get("usage") else {
+            return Ok(usage.clone());
+        };
+        let input_tokens = provider_usage
+            .get("prompt_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        let output_tokens = provider_usage
+            .get("completion_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        Ok(TransportUsage {
+            input_tokens,
+            output_tokens,
+            cached_tokens: provider_usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_i64)
+                .map(|value| value.max(0)),
+            provider_reported_cost_cents: usage.provider_reported_cost_cents,
+            latency_ms: usage.latency_ms,
+            provider_request_id: envelope
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .or_else(|| usage.provider_request_id.clone()),
+        })
+    }
+
     fn before_raw_persist(
         &mut self,
         _connection: &libsql_rusqlite::Connection,

@@ -565,6 +565,23 @@ pub trait ModelTransport {
         Ok(())
     }
 
+    /// Provider metadata may be authoritative only after the exact raw body
+    /// has been persisted.  Legacy transports keep the historical behavior;
+    /// the configured production transport opts into this post-persist path.
+    fn defer_usage_until_raw_persist(&self) -> bool {
+        false
+    }
+
+    fn usage_after_raw_persist(
+        &mut self,
+        _connection: &Connection,
+        _spec: &ModelRunSpec,
+        _raw_response: &str,
+        usage: &TransportUsage,
+    ) -> Result<TransportUsage, RuntimeError> {
+        Ok(usage.clone())
+    }
+
     fn credential(&self) -> &str {
         ""
     }
@@ -760,7 +777,10 @@ impl DurableModelRunner {
                 return Err(RuntimeError::Transport(error));
             }
         };
-        settle_remote_usage(connection, spec, &response.usage, now)?;
+        let defer_usage_until_raw_persist = transport.defer_usage_until_raw_persist();
+        if !defer_usage_until_raw_persist {
+            settle_remote_usage(connection, spec, &response.usage, now)?;
+        }
         if let Err(error) = transport.before_raw_persist(connection, spec) {
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(error);
@@ -768,6 +788,15 @@ impl DurableModelRunner {
         if persist_raw_response(connection, spec, &response.raw_response, now).is_err() {
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(RuntimeError::RawResponsePersistenceFailed);
+        }
+        if defer_usage_until_raw_persist {
+            let usage = transport.usage_after_raw_persist(
+                connection,
+                spec,
+                &response.raw_response,
+                &response.usage,
+            )?;
+            settle_remote_usage(connection, spec, &usage, now)?;
         }
         finish_parse(connection, spec, &response.raw_response, now)
     }
@@ -1299,7 +1328,7 @@ fn settle_remote_usage(
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, 'MODEL_USAGE_RECORDED', ?4, ?5)",
-            libsql_rusqlite::params![format!("event:usage:{}", spec.model_run_id), project_id, spec.job_id, serde_json::json!({"modelRunId":spec.model_run_id,"provider":spec.provider,"model":spec.model,"attempt":spec.attempt_no,"latencyMs":usage.latency_ms.max(0),"inputTokens":usage.input_tokens.max(0),"outputTokens":usage.output_tokens.max(0),"costCents":actual_cost,"actualCostStatus":if usage.provider_reported_cost_cents.is_some() {"ACTUAL"} else {"ESTIMATED"}}).to_string(), now],
+            libsql_rusqlite::params![format!("event:usage:{}", spec.model_run_id), project_id, spec.job_id, serde_json::json!({"modelRunId":spec.model_run_id,"provider":spec.provider,"model":spec.model,"attempt":spec.attempt_no,"latencyMs":usage.latency_ms.max(0),"inputTokens":usage.input_tokens.max(0),"outputTokens":usage.output_tokens.max(0),"cachedTokens":usage.cached_tokens,"costCents":actual_cost,"providerRequestId":usage.provider_request_id,"actualCostStatus":if usage.provider_reported_cost_cents.is_some() {"ACTUAL"} else {"ESTIMATED"}}).to_string(), now],
         )?;
         Ok::<_, RuntimeError>(())
     })();
@@ -1425,6 +1454,21 @@ impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport
         spec: &ModelRunSpec,
     ) -> Result<(), RuntimeError> {
         self.inner.before_raw_persist(connection, spec)
+    }
+
+    fn defer_usage_until_raw_persist(&self) -> bool {
+        self.inner.defer_usage_until_raw_persist()
+    }
+
+    fn usage_after_raw_persist(
+        &mut self,
+        connection: &Connection,
+        spec: &ModelRunSpec,
+        raw_response: &str,
+        usage: &TransportUsage,
+    ) -> Result<TransportUsage, RuntimeError> {
+        self.inner
+            .usage_after_raw_persist(connection, spec, raw_response, usage)
     }
 
     fn credential(&self) -> &str {
