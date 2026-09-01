@@ -69,7 +69,7 @@ if (before.dirtyPaths.length === 0) {
 }
 
 const sourceStage = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b09-h04-source-stage-'))
-const archive = spawnSync('git', ['archive', '--format=tar', '--prefix=ai-novel-production-system/', 'HEAD'], { cwd: root, encoding: 'buffer' })
+const archive = spawnSync('git', ['archive', '--format=tar', '--prefix=ai-novel-production-system/', 'HEAD'], { cwd: root, encoding: 'buffer', maxBuffer: 200 * 1024 * 1024 })
 const extract = archive.status === 0 ? spawnSync('tar', ['-xf', '-', '-C', sourceStage], { input: archive.stdout, encoding: 'utf8' }) : { status: 1, stdout: '', stderr: 'git archive failed' }
 const sourceRoot = path.join(sourceStage, 'ai-novel-production-system')
 // Historical B01-B08 evidence is not part of the source-only payload. B09
@@ -120,7 +120,7 @@ const gates = {
   'H04-A03': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*typed_owner=PASS .*explicit_authorization=PASS/), b09.log),
   'H04-A04': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*read_registry_unchanged=PASS/), b09.log),
   'H04-A05': gate(marker(b09, /H04_PROJECTION_REPAIR_RESULT .*authority_unchanged=PASS .*reality_unchanged=PASS/), b09.log),
-  'H04-A06': gate(marker(b06, /H01_RESULT .*checkpoint_stale=PASS .*checkpoint_safe=PASS/), b06.log),
+  'H04-A06': gate(marker(b06, /H01_RESULT .*checkpoint_safe=PASS .*checkpoint_stale=PASS/), b06.log),
   'H04-A07': gate(b08.status === 'PASS' && /proposal_only|change_request/.test(b08.output), b08.log),
   'H04-A08': gate(marker(b06, /H01_RESULT .*bounded_replan=PASS .*max_steps=7/) && moduleBoundary.status === 'PASS', 'b06_h01_regression.log+module_boundary.log'),
   'H04-A09': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*volumes=3/), b09.log),
