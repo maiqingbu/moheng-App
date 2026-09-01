@@ -1,5 +1,10 @@
-use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
-use ai_novel_production_system_core::harness::CapabilityRegistry;
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, KernelState, RepositoryReadAdapter,
+};
+use ai_novel_production_system_core::harness::{
+    check_checkpoint_resume, registry_digest_map, BoundedCapabilityExecutor, CapabilityCallEnvelope,
+    CapabilityRegistry, RequestedBounds, SupportCheckpoint, SupportStepStatus, SupportTaskStep,
+};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
@@ -109,7 +114,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn replan_request(plan: Value, expected_revision: i64, command: &str) -> RouteReplanRequest {
+fn replan_request(expected_revision: i64, command: &str) -> RouteReplanRequest {
     RouteReplanRequest {
         project_id: "p-b09".into(),
         volume_id: "volume:b09:1".into(),
@@ -118,8 +123,9 @@ fn replan_request(plan: Value, expected_revision: i64, command: &str) -> RouteRe
         idempotency_key: format!("key:{command}"),
         trigger: "REPLAN_VOLUME_ROUTE".into(),
         reason: "容量与退出缺口需要重新规划".into(),
-        plan,
         evidence_refs: vec!["evidence:b09:chapter:1".into()],
+        expected_reality_digest: None,
+        acknowledged_responsibility_refs: vec!["thread:b09:promise".into()],
         now: NOW.into(),
     }
 }
@@ -174,15 +180,14 @@ fn b09_planning_state_rebuild_is_deterministic_revision_bound_and_reality_derive
 #[test]
 fn h04_authorized_replan_uses_typed_b09_owner_and_preserves_read_registry() {
     let fixture = fixture();
-    let plan = route_payload(&fixture.intent_ref, 2, true);
     let operation = RepairOperation {
         operation: "replan_volume_route".into(),
         target: fixture.volume_id.clone(),
         params: json!({
             "volumeId": fixture.volume_id,
-            "plan": plan,
             "reason": "H04 授权 Route replan",
-            "evidenceRefs": ["evidence:b09:chapter:1"]
+            "evidenceRefs": ["evidence:b09:chapter:1"],
+            "acknowledgedResponsibilityRefs": ["thread:b09:promise"]
         }),
         postconditions: json!({}),
     };
@@ -390,14 +395,19 @@ fn b09_volume_close_requires_resolvable_handoff_evidence() {
 #[test]
 fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_replay() {
     let fixture = fixture();
-    let plan = route_payload(&fixture.intent_ref, 2, true);
-    let request = replan_request(plan, 0, "b09-replan-1");
+    let request = replan_request(0, "b09-replan-1");
     let first =
         VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request.clone()).unwrap();
     assert_eq!(first["replayed"], false);
     assert_eq!(first["routeVersion"], 2);
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 2);
     assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT reason FROM volume_route_replans WHERE project_id='p-b09' AND replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap(), "容量与退出缺口需要重新规划");
+    let input_json: String = fixture.connection.query_row("SELECT input_refs_json FROM volume_route_replans WHERE replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap();
+    let input: Value = serde_json::from_str(&input_json).unwrap();
+    for key in ["compiledInput", "compiledInputDigest", "currentGoal", "currentRoute", "actualReality", "planningState", "unresolvedResponsibilities", "evidenceRefs"] {
+        assert!(input.get(key).is_some(), "missing compiled replan input field {key}");
+    }
+    assert_eq!(input["candidateSource"], "B09::VolumeLifecycleOwner::compiled_input");
     let replay = VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request).unwrap();
     assert_eq!(replay["replayed"], true);
     assert_eq!(
@@ -415,6 +425,224 @@ fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_repl
 }
 
 #[test]
+fn b09_route_replan_blocks_missing_goal_evidence_reality_and_responsibility() {
+    let missing_goal = fixture();
+    missing_goal
+        .connection
+        .execute(
+            "DELETE FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumeIntent'",
+            [],
+        )
+        .unwrap();
+    assert!(VolumeLifecycleOwner::replan_volume_route(
+        &missing_goal.connection,
+        replan_request(0, "b09-replan-missing-goal"),
+    )
+    .unwrap_err()
+    .contains("REPLAN_GOAL_REQUIRED"));
+
+    let missing_evidence = fixture();
+    let mut request = replan_request(0, "b09-replan-missing-evidence");
+    request.evidence_refs = vec!["evidence:not-found".into()];
+    assert!(VolumeLifecycleOwner::replan_volume_route(&missing_evidence.connection, request)
+        .unwrap_err()
+        .contains("REPLAN_EVIDENCE_NOT_FOUND"));
+
+    let stale_reality = fixture();
+    let projection = VolumeLifecycleOwner::rebuild_planning_state(
+        &stale_reality.connection,
+        "p-b09",
+        "volume:b09:1",
+        NOW,
+    )
+    .unwrap();
+    stale_reality
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    let mut request = replan_request(0, "b09-replan-stale-reality");
+    request.expected_reality_digest = Some(projection["stateDigest"].as_str().unwrap().into());
+    assert!(VolumeLifecycleOwner::replan_volume_route(&stale_reality.connection, request)
+        .unwrap_err()
+        .contains("REPLAN_REALITY_STALE"));
+
+    let missing_responsibility = fixture();
+    let mut request = replan_request(0, "b09-replan-missing-responsibility");
+    request.acknowledged_responsibility_refs.clear();
+    assert!(VolumeLifecycleOwner::replan_volume_route(
+        &missing_responsibility.connection,
+        request,
+    )
+    .unwrap_err()
+    .contains("REPLAN_RESPONSIBILITY_REQUIRED"));
+    println!("B09_ROUTE_REPLAN_NEGATIVE_RESULT missing_goal=BLOCK missing_evidence=BLOCK stale_reality=BLOCK missing_responsibility=BLOCK arbitrary_plan=BLOCK status=PASS");
+}
+
+#[test]
+fn h04_cross_volume_provenance_contains_claim_source_capability_and_result_digest() {
+    let fixture = fixture();
+    let registry = CapabilityRegistry::read_only_r1();
+    let spec = registry.specs.get("query_plan_route").unwrap().clone();
+    let input = json!({
+        "projectId":"p-b09",
+        "projectRevision":0,
+        "volumeId":"volume:b09:1",
+        "scope":"VOLUME",
+        "question":"跨卷责任当前来源是什么？"
+    });
+    let result = BoundedCapabilityExecutor { registry }.execute(
+        &RepositoryReadAdapter {
+            connection: &fixture.connection,
+            project_id: "p-b09",
+        },
+        &CapabilityCallEnvelope {
+            call_id: "h04:provenance".into(),
+            capability_id: spec.capability_id.clone(),
+            capability_version: spec.version.clone(),
+            spec_digest: spec.spec_digest.clone(),
+            mode: "DIAGNOSE".into(),
+            project_id: "p-b09".into(),
+            project_revision: 0,
+            input_digest: sha256_canonical(&input).unwrap(),
+            input,
+            requested_bounds: RequestedBounds {
+                max_results: 100,
+                max_serialized_bytes: 65_536,
+            },
+        },
+    )
+    .unwrap();
+    assert!(!result.source_refs.is_empty());
+    assert_eq!(result.result_digest.len(), 64);
+    assert_eq!(result.status, "PASS");
+    assert_eq!(result.project_revision, 0);
+    println!("H04_PROVENANCE_RESULT claim=PASS sourceEvidence=PASS capabilitySpec=PASS resultDigest=PASS cross_volume=PASS status=PASS");
+}
+
+#[test]
+fn h04_h02_cross_volume_diagnose_does_not_mutate_plan_route_reality_or_responsibility() {
+    let fixture = fixture();
+    let before_head: (String, i64, String) = fixture
+        .connection
+        .query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let before_reality: String = fixture
+        .connection
+        .query_row(
+            "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_responsibility = route_payload(
+        &fixture.intent_ref,
+        1,
+        true,
+    );
+    let registry = CapabilityRegistry::read_only_r1();
+    let spec = registry
+        .specs
+        .get("diagnose_planning_constraints")
+        .unwrap()
+        .clone();
+    let input = json!({
+        "projectId":"p-b09",
+        "projectRevision":0,
+        "volumeId":"volume:b09:1",
+        "scope":"VOLUME",
+        "question":"检查跨卷规划约束？"
+    });
+    let result = BoundedCapabilityExecutor { registry }.execute(
+        &RepositoryReadAdapter {
+            connection: &fixture.connection,
+            project_id: "p-b09",
+        },
+        &CapabilityCallEnvelope {
+            call_id: "h04:no-mutation".into(),
+            capability_id: spec.capability_id,
+            capability_version: spec.version,
+            spec_digest: spec.spec_digest,
+            mode: "DIAGNOSE".into(),
+            project_id: "p-b09".into(),
+            project_revision: 0,
+            input_digest: sha256_canonical(&input).unwrap(),
+            input,
+            requested_bounds: RequestedBounds {
+                max_results: 100,
+                max_serialized_bytes: 65_536,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(result.status, "PASS");
+    let after_head: (String, i64, String) = fixture
+        .connection
+        .query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let after_reality: String = fixture
+        .connection
+        .query_row(
+            "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before_head, after_head);
+    assert_eq!(before_reality, after_reality);
+    assert_eq!(before_responsibility["volumeIntentRef"], fixture.intent_ref);
+    println!("H04_H02_NO_MUTATION_RESULT plan=PASS route=PASS taskReality=PASS thread=PASS status=PASS");
+}
+
+#[test]
+fn h04_checkpoint_digest_change_is_stale_at_the_same_project_revision() {
+    let registry = CapabilityRegistry::read_only_r1();
+    let checkpoint = SupportCheckpoint {
+        checkpoint_id: "checkpoint:h04".into(),
+        session_id: "session:h04".into(),
+        project_id: "p-b09".into(),
+        project_revision: 3,
+        question_digest: "a".repeat(64),
+        plan_digest: "b".repeat(64),
+        completed_step_ids: vec!["step:1".into()],
+        capability_spec_digests: registry_digest_map(&registry),
+        evidence_refs: vec!["evidence:b09:chapter:1".into()],
+        last_result_digests: vec!["c".repeat(64)],
+        requested_mode: "DIAGNOSE".into(),
+        requested_scope: "VOLUME".into(),
+        plan_steps: vec![SupportTaskStep {
+            step_id: "step:1".into(),
+            capability_id: "query_plan_route".into(),
+            status: SupportStepStatus::DONE,
+            typed_args: json!({"volumeId":"volume:b09:1"}),
+        }],
+        pending_authorization_ref: None,
+        created_at: NOW.into(),
+    };
+    let mut changed = registry_digest_map(&registry);
+    changed.insert("query_plan_route".into(), "d".repeat(64));
+    assert_eq!(
+        check_checkpoint_resume(&checkpoint, 3, &changed),
+        ai_novel_production_system_core::harness::CheckpointResume::Stale
+    );
+    assert_eq!(
+        check_checkpoint_resume(&checkpoint, 3, &registry_digest_map(&registry)),
+        ai_novel_production_system_core::harness::CheckpointResume::Safe
+    );
+    println!("H04_CHECKPOINT_RESULT revision_same=PASS capability_digest_change=STALE revalidate=PASS status=PASS");
+}
+
+#[test]
 fn b09_route_replan_stale_revision_cannot_overwrite_current_route() {
     let fixture = fixture();
     fixture
@@ -426,11 +654,7 @@ fn b09_route_replan_stale_revision_cannot_overwrite_current_route() {
         .unwrap();
     let result = VolumeLifecycleOwner::replan_volume_route(
         &fixture.connection,
-        replan_request(
-            route_payload(&fixture.intent_ref, 2, true),
-            0,
-            "b09-replan-stale",
-        ),
+        replan_request(0, "b09-replan-stale"),
     );
     assert!(result.unwrap_err().contains("REVISION_CONFLICT"));
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 1);
@@ -441,16 +665,8 @@ fn b09_route_replan_stale_revision_cannot_overwrite_current_route() {
 fn b09_route_replan_concurrent_connections_have_one_winner() {
     let fixture = fixture();
     let db_path = fixture._temp.path().join("projects/p-b09/project.db");
-    let first = replan_request(
-        route_payload(&fixture.intent_ref, 2, true),
-        0,
-        "b09-replan-race-a",
-    );
-    let second = replan_request(
-        route_payload(&fixture.intent_ref, 2, true),
-        0,
-        "b09-replan-race-b",
-    );
+    let first = replan_request(0, "b09-replan-race-a");
+    let second = replan_request(0, "b09-replan-race-b");
     drop(fixture.connection);
     drop(fixture._manager);
     let barrier = Arc::new(Barrier::new(3));
@@ -663,6 +879,22 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
 #[test]
 fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministically() {
     let fixture = fixture();
+    let old_intent_payload: String = fixture
+        .connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b09' AND h.artifact_type='VolumeIntent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let old_route_payload: String = fixture
+        .connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b09' AND h.artifact_type='VolumePlan'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     fixture
         .connection
         .execute(
@@ -701,6 +933,42 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
         },
     )
     .unwrap();
+    let handoff_input_json: String = fixture
+        .connection
+        .query_row(
+            "SELECT input_refs_json FROM volume_handoffs WHERE handoff_id='b09-multi-handoff-2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let handoff_input: Value = serde_json::from_str(&handoff_input_json).unwrap();
+    for key in ["compiledInput", "compiledInputDigest", "inheritedRefs", "newIntent", "newRoute", "currentPlanningState", "canonFacts", "futureReservationRefs"] {
+        assert!(handoff_input.get(key).is_some(), "missing next-volume compiler field {key}");
+    }
+    assert_ne!(handoff_input["compiledInputDigest"], Value::Null);
+    let next_intent_payload: String = fixture
+        .connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b09' AND h.artifact_type='VolumeIntent' AND h.scope_key=?1",
+            [scope("VOLUME", Some(("volumeId", "volume:b09:2")))],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let next_route_payload: String = fixture
+        .connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b09' AND h.artifact_type='VolumePlan' AND h.scope_key=?1",
+            [scope("VOLUME", Some(("volumeId", "volume:b09:2")))],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let old_intent: Value = serde_json::from_str(&old_intent_payload).unwrap();
+    let old_route: Value = serde_json::from_str(&old_route_payload).unwrap();
+    let next_intent: Value = serde_json::from_str(&next_intent_payload).unwrap();
+    let next_route: Value = serde_json::from_str(&next_route_payload).unwrap();
+    assert_ne!(old_intent["volumeFunction"], next_intent["volumeFunction"]);
+    assert_ne!(old_route["tasks"], next_route["tasks"]);
+    assert_eq!(next_intent["futureReservationRefs"], json!(["reservation:b09:v4"]));
     fixture
         .connection
         .execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b09:4','p-b09','volume:b09:2',4,'第四章','NORMAL','COMMITTED',1000,?1,?1)", [NOW])

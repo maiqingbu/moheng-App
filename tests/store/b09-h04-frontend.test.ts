@@ -16,6 +16,7 @@ describe('B09/H04 lifecycle frontend boundary', () => {
           planningState: { closeReadiness: 'READY' },
           route: {},
           latestClose: null,
+          latestHandoff: { fromVolumeId: 'volume:b09:1', toVolumeId: 'volume:b09:2', handoffStatus: 'ELIGIBLE' },
           routeReplans: [],
           owner: 'B09::VolumeLifecycleOwner',
         }
@@ -37,5 +38,6 @@ describe('B09/H04 lifecycle frontend boundary', () => {
       },
     })
     expect(result.owner).toBe('B09::VolumeLifecycleOwner')
+    expect(result.latestHandoff?.handoffStatus).toBe('ELIGIBLE')
   })
 })

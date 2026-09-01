@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { B09_BLOCKING_GATES, H04_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, evaluateAcceptance } from '../scripts/generate-b09-h04-acceptance.mjs'
+import { B09_BLOCKING_GATES, H04_BLOCKING_GATES, H04_GATE_DEFINITIONS, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b09-h04-acceptance.mjs'
 
 const passing = () => ({
   sourceCommit: 'final',
@@ -17,6 +17,24 @@ test('B09/H04 acceptance contains the complete functional and global matrix', ()
   assert.equal(B09_BLOCKING_GATES.length, 22)
   assert.equal(H04_BLOCKING_GATES.length, 12)
   assert.equal(evaluateAcceptance(passing()).status, 'READY_FOR_ACCEPTANCE')
+})
+
+test('H04 gate ids retain the frozen meanings and source binding requires the start commit', () => {
+  assert.equal(START_COMMIT, '6992b544f59f385160e3aa2f34f2e206ae715e59')
+  assert.deepEqual(H04_GATE_DEFINITIONS, {
+    'H04-A01': 'No Fourth Harness',
+    'H04-A02': 'Cross-volume Bounded Read',
+    'H04-A03': 'Cross-volume Provenance',
+    'H04-A04': 'H02 No Mutation',
+    'H04-A05': 'replan_volume_route Capability',
+    'H04-A06': 'Projection Drift Repair',
+    'H04-A07': 'Canon Conflict Proposal Only',
+    'H04-A08': 'Checkpoint Revision Revalidation',
+    'H04-A09': 'Capability Digest Revalidation',
+    'H04-A10': 'Repair Authorization One-time',
+    'H04-A11': '10M Bounded Query',
+    'H04-A12': 'No Unbounded Loop',
+  })
 })
 
 test('any missing gate fails closed and cannot claim readiness', () => {
