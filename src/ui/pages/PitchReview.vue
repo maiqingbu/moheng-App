@@ -8,7 +8,7 @@ import { useProjectStore } from '../stores/projectStore'
 
 const store = useProjectStore()
 const router = useRouter()
-const selected = ref<string[]>(['pitch-b'])
+const selected = ref<string[]>([])
 const combineOpen = ref(false)
 const constraintsOpen = ref(false)
 const newConstraint = ref('保持“名字可被篡改”的核心机制，但减少过多规则解释；前三章必须让主角更主动。')
@@ -22,20 +22,18 @@ const bookPlanState = computed(()=>store.commandState('book-plan-revise'))
 
 function choose(id:string){ selected.value=[id] }
 function toggleCombine(id:string){ selected.value = selected.value.includes(id) ? selected.value.filter(x=>x!==id) : [...selected.value,id].slice(0,2) }
-function aiChoose(){ selected.value=['pitch-b'] }
 async function regenerate(){ await store.runCommand(regenerateKey,{type:'pitch_regenerate',projectId:store.project?.id,payload:{adjustment:newConstraint.value,regeneratePitches:true}}); constraintsOpen.value=false }
 async function reviseBookPlan(){ await store.runCommand('book-plan-revise',{type:'book_plan_revise',payload:{reason:'用户从故事方向页请求重新审视书级战略'}}) }
 async function confirm(){
   await store.runCommand(commandKey,{type:'pitch_select',projectId:store.project?.id,payload:{pitchIds:selected.value,mode:selected.value.length>1?'combine':'single'}})
-  setTimeout(()=>router.push(`/projects/${store.currentProjectId ?? ''}/production`),350)
+  setTimeout(()=>router.push(`/projects/${store.currentProjectId ?? ''}/setup`),350)
 }
 </script>
 
 <template>
   <div class="page">
-    <PageHeader title="故事方向选择" subtitle="系统已经生成三份实质不同的立项方案。你可以选一个、组合两个，或交给 AI 选择。">
+    <PageHeader title="故事方向选择" subtitle="系统已经生成三份实质不同的立项方案。请明确选择一个方向，或组合两个方向后继续。">
       <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" @click="regenerate">重新推荐</button>
-      <button class="btn soft" @click="aiChoose">交给 AI 选择</button>
     </PageHeader>
 
     <div class="pitch-toolbar">

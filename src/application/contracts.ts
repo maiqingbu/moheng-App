@@ -67,8 +67,52 @@ export interface NarrativeStateProjection { projectId: string; projectRevision: 
 export interface ContinuityProjection { projectId: string; projectRevision: number; threads: import('../generated/contracts').ContinuityThreadProjection[] }
 export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
 export interface PlanStaleProjection { projectId: string; projectRevision: number; status: 'VALID' | 'PLAN_STALE' }
-export interface SupportSessionProjection { plan: Record<string, unknown>; calls: Record<string, unknown>[]; finding: Record<string, unknown>; receipt: Record<string, unknown> }
+export interface SupportSessionProjection {
+  plan: Record<string, unknown>
+  calls: Record<string, unknown>[]
+  finding: Record<string, unknown>
+  receipt: Record<string, unknown>
+  evidenceLedger?: Record<string, unknown>[]
+}
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
+
+export interface StorySetupProjection {
+  projectId: string
+  status: 'NOT_SELECTED' | 'SELECTED' | 'SETUP_SAVED'
+  selectedPitchId: string | null
+  selectedPitchIds?: string[]
+  storyCore: Record<string, unknown> | null
+  openingReady: boolean
+  provenance?: Record<string, unknown>
+}
+
+export interface OpeningReadyProjection {
+  projectId: string
+  ready: boolean
+  firstChapterPlan: { artifactId: string; version: number; payloadHash: string; owner: string } | null
+  firstChapter: { bookId: string; volumeId: string; chapterId: string } | null
+  firstChapterGoal: string
+  firstThreeChapterPromise: string
+  forbiddenReveals: string[]
+  readerDesire: string
+}
+
+export interface AssistantRepairPlan {
+  repairPlanId: string
+  projectId: string
+  basedOnProjectRevision: number
+  diagnosis: Record<string, unknown>
+  findingRefs: string[]
+  targetAuthorityOwner: string
+  proposedOperations: Array<Record<string, unknown>>
+  affectedArtifacts: string[]
+  affectedScopes: string[]
+  riskLevel: string
+  requiresBackup: boolean
+  expectedPostconditions: Array<Record<string, unknown>>
+  operationDigest: string
+  createdAt: string
+}
 
 export interface ProjectSnapshot {
   id: string
@@ -725,6 +769,9 @@ export interface FrontendPort {
   queryProjectOverview(request: ProjectQueryRequest): Promise<ProjectOverviewProjection>
   queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection>
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
+  queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
+  queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
+  queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>
   queryVolumeDetail(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeDetailProjection>

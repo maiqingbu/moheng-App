@@ -7,9 +7,12 @@ import type {
   ChapterProjection,
   CommandRequest,
   CommandStatus,
+  FrontendPort,
   DecisionItem,
   HistoryProjection,
+  AssistantRepairPlan,
   MarketStrategyProjection,
+  OpeningReadyProjection,
   PageResult,
   PlanningRouteProjection,
   ProductionCenterProjection,
@@ -17,6 +20,8 @@ import type {
   SearchHit,
   SettingsProjection,
   ProviderSettingsInput,
+  StorySetupProjection,
+  SupportSessionProjection,
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -47,6 +52,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   const overview = ref<ProjectOverviewProjection | null>(null)
   const marketStrategy = ref<MarketStrategyProjection | null>(null)
   const directions = ref<StoryDirectionProjection | null>(null)
+  const storySetup = ref<StorySetupProjection | null>(null)
+  const openingReady = ref<OpeningReadyProjection | null>(null)
+  const assistantSession = ref<SupportSessionProjection | null>(null)
   const production = ref<ProductionCenterProjection | null>(null)
   const volumes = ref<PageResult<VolumeSummary> | null>(null)
   const volumeDetail = ref<VolumeDetailProjection | null>(null)
@@ -82,6 +90,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   function resetWorkspaces() {
     marketStrategy.value = null
     directions.value = null
+    storySetup.value = null
+    openingReady.value = null
+    assistantSession.value = null
     production.value = null
     volumes.value = null
     volumeDetail.value = null
@@ -169,6 +180,14 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (directions.value && !force) return directions.value
     return withWorkspace('directions', () => frontendPort.queryStoryDirections(queryBase('directions', 10)), v => { directions.value=v })
   }
+  async function loadStorySetup(force=false) {
+    if (storySetup.value && !force) return storySetup.value
+    return withWorkspace('story-setup', () => frontendPort.queryStorySetup(queryBase('story-setup', 1)), v => { storySetup.value = v })
+  }
+  async function loadOpeningReady(force=false) {
+    if (openingReady.value && !force) return openingReady.value
+    return withWorkspace('opening-ready', () => frontendPort.queryOpeningReady(queryBase('opening-ready', 1)), v => { openingReady.value = v })
+  }
   async function loadProduction(force=false) {
     if (production.value && !force) return production.value
     return withWorkspace('production', () => frontendPort.queryProductionCenter(queryBase('production', 20)), v => { production.value=v })
@@ -227,10 +246,22 @@ export const useProjectStore = defineStore('project-projection', () => {
     return withWorkspace('search', () => frontendPort.searchFulltext({ ...queryBase('search', 30), text }), v => { searchResults.value=v })
   }
 
+  async function supportSession(question: string, mode: 'INSPECT'|'DIAGNOSE' = 'DIAGNOSE') {
+    const request = { ...queryBase('assistant', 12), question, mode, requestedAt: new Date().toISOString() } as Parameters<FrontendPort['supportSession']>[0]
+    return withWorkspace('assistant', () => frontendPort.supportSession(request), value => { assistantSession.value = value })
+  }
+
+  async function queryAssistantRepairPlan(question: string): Promise<AssistantRepairPlan> {
+    const request = { ...queryBase('assistant-repair', 1), question, requestedAt: new Date().toISOString() }
+    return frontendPort.queryAssistantRepairPlan(request)
+  }
+
   async function refreshLoadedWorkspaces() {
     const jobs: Promise<unknown>[] = []
     if (marketStrategy.value) jobs.push(loadMarket(true))
     if (directions.value) jobs.push(loadDirections(true))
+    if (storySetup.value) jobs.push(loadStorySetup(true))
+    if (openingReady.value) jobs.push(loadOpeningReady(true))
     if (production.value) jobs.push(loadProduction(true))
     if (volumes.value) jobs.push(loadVolumes(true))
     if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
@@ -308,12 +339,12 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, production, volumes, volumeDetail, planningRoute, decisions,
+    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
-    bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadProduction, loadVolumes,
+    bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
-    loadCanon, loadHealth, loadHistory, loadSettings, search, runCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHistory, loadSettings, search, supportSession, queryAssistantRepairPlan, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }
 })

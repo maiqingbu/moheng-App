@@ -18,13 +18,16 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '总览', icon: '◫', to: `/projects/${id.value}`, match: 'project-overview' },
   { label: '市场与平台策略', icon: '↗', to: `/projects/${id.value}/market`, match: 'market' },
   { label: '故事方向', icon: '◇', to: `/projects/${id.value}/directions`, match: 'directions' },
-  { label: 'AI 制片中心', icon: '◉', to: `/projects/${id.value}/production`, match: 'production' },
+  { label: '故事核心', icon: '◎', to: `/projects/${id.value}/setup`, match: 'story-setup' },
+  { label: '开篇准备', icon: '◇', to: `/projects/${id.value}/opening`, match: 'opening-ready' },
+  { label: '项目助手', icon: '?', to: `/projects/${id.value}/assistant`, match: 'assistant' },
+  { label: '创作中心', icon: '◉', to: `/projects/${id.value}/production`, match: 'production' },
   { label: '卷管理', icon: '▥', to: `/projects/${id.value}/volumes`, match: 'volumes' },
   { label: '决策收件箱', icon: '⌁', to: `/projects/${id.value}/decisions`, match: 'decisions', count: store.pendingDecisionCount },
   { label: '成品阅读', icon: '▤', to: `/projects/${id.value}/read`, match: 'read' },
   { label: '作品图谱', icon: '⌘', to: `/projects/${id.value}/graph`, match: 'graph' },
   { label: '长篇健康', icon: '♡', to: `/projects/${id.value}/health`, match: 'health' },
-  { label: '版本 / 修改 / Retcon', icon: '↺', to: `/projects/${id.value}/history`, match: 'history' }
+  { label: '版本与变更记录', icon: '↺', to: `/projects/${id.value}/history`, match: 'history' }
 ] : [])
 </script>
 
@@ -69,7 +72,7 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
           <span><b>{{ library.projection.totals.active }}</b> 个活跃作品</span>
           <span><b>{{ library.projection.totals.waitingDecision }}</b> 个等待决定</span>
         </div>
-        <div class="demo-note">浏览器演示适配器只用于 UI 验证；正式多作品状态必须由 Tauri + SQLite 按 projectId 隔离查询。</div>
+        <div class="demo-note">正式状态由本地项目记录确认，切换作品不会混用数据。</div>
       </div>
     </aside>
 

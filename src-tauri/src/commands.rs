@@ -434,6 +434,26 @@ pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<V
         .map_err(|error| error.to_string())
 }
 
+pub fn query_assistant_repair_plan_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    state
+        .manager
+        .with_read_connection(project_id, now, |connection| {
+            crate::project_entry::assistant_repair_plan(connection, project_id, question, now)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
 /// B08 production projection.  This is a bounded read projection assembled
 /// from the authoritative job/artifact/runtime rows; it never reconstructs a
 /// candidate as a committed chapter and never trusts Vue-local state.
@@ -4123,6 +4143,14 @@ pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Res
 }
 
 #[tauri::command]
+pub fn query_assistant_repair_plan(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_assistant_repair_plan_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_production_center(
     state: State<'_, KernelState>,
     request: Value,
@@ -4382,6 +4410,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_story_directions,
         query_story_setup,
         query_opening_ready,
+        query_assistant_repair_plan,
         query_production_center,
         search_fulltext,
         query_volume_list,

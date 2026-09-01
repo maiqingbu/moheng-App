@@ -76,7 +76,7 @@ async function executeRepair() {
 
 <template>
   <div v-if="project && production" class="page">
-    <PageHeader title="AI 制片中心" subtitle="B08 章节生产与 H03 授权修复均从 SQLite 权威投影重新查询。">
+    <PageHeader title="创作中心" subtitle="章节生产与授权修复均从当前作品记录重新查询。">
       <button v-if="project.runState !== 'ACTIVE' && production.nextChapter" class="btn primary" @click="startProduction">开始第 {{ production.nextChapter.number }} 章</button>
       <button v-if="project.runState === 'ACTIVE'" class="btn" @click="controlProduction('production_pause')">暂停</button>
       <button v-if="project.runState === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
@@ -85,7 +85,7 @@ async function executeRepair() {
     <CommandFeedback :state="commandState" />
 
     <div class="metric-grid section">
-      <MetricCard label="当前阶段" :value="production.productionStage || 'IDLE'" :note="production.activeWork.detail" />
+      <MetricCard label="当前阶段" :value="production.productionStage || '尚未开始'" :note="production.activeWork.detail" />
       <MetricCard label="正式章节" :value="project.committedChapters" note="ChapterCandidate 不进入正式计数" />
       <MetricCard label="Final Gate" :value="production.gate?.status || 'PENDING'" :note="production.gate?.reason || '等待结构化校验'" />
       <MetricCard label="Reconciliation" :value="production.reconciliation || 'NO_ACTION'" note="B08 只分类，不执行 B09/B11" />

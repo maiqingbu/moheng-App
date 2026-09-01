@@ -16,6 +16,9 @@ const length = ref('120–180 万字')
 const forbidden = ref('不要悲剧结局；不要后宫；避免主角长期被动；不要靠低智误会推进剧情。')
 const selectedTags = ref(['武侠','悬疑','成长'])
 const selectedMarket = ref('market-growth')
+const entryMode = ref<'idea' | 'market'>('idea')
+const marketSource = ref('')
+const marketMaterial = ref('')
 const showInference = ref(false)
 const showMarket = ref(false)
 const createKey = 'project-create'
@@ -40,14 +43,14 @@ function toggleTag(tag:string){
   selectedTags.value = selectedTags.value.includes(tag) ? selectedTags.value.filter(t=>t!==tag) : [...selectedTags.value,tag].slice(0,4)
 }
 
-function startPitch(){ showInference.value = true }
+function startPitch(){ entryMode.value = 'idea'; showInference.value = true }
 async function createFromIdea(){
   const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value,clarifications:clarifyAnswers.value}})
   if (receipt.finalStatus==='committed' && receipt.projectId) { showInference.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
 }
 async function refreshMarket(){ await store.runCommand(marketKey,{type:'market_refresh'}); await store.loadMarket() }
 async function createFromMarket(){
-  const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketOpportunityId:selectedMarket.value,mode:mode.value,forbidden:forbidden.value}})
+  const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
   if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
 }
 </script>
@@ -65,11 +68,15 @@ async function createFromMarket(){
         <textarea v-model="idea" aria-label="故事想法" placeholder="例如：我想看一个不愿当英雄的人，被迫卷进一场关于名字与记忆的江湖阴谋……" />
         <div class="composer-foot">
           <div class="actions">
-            <button class="btn soft" @click="showMarket=true">从市场机会开始</button>
+            <button class="btn soft" @click="entryMode='market';showMarket=true">从市场机会开始</button>
             <span class="muted" style="font-size:11px">支持一句话、梗概、人物设想、旧稿片段</span>
           </div>
           <button class="btn primary large" :disabled="!idea.trim()" @click="startPitch">生成三份故事方向</button>
         </div>
+      </div>
+      <div class="entry-paths" style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn primary" @click="entryMode='idea';showInference=true">我已经有故事想法</button>
+        <button class="btn soft" @click="entryMode='market';showMarket=true">帮我找值得写的方向</button>
       </div>
     </section>
 
@@ -121,13 +128,16 @@ async function createFromMarket(){
 
     <BaseModal :open="showMarket" title="市场机会分析" subtitle="来源、日期与置信度都必须可追溯；低置信度数据不会冒充确定结论。" @close="showMarket=false">
       <div style="display:grid;gap:12px">
+        <label class="field"><span class="field-label">资料来源</span><input v-model="marketSource" class="input" placeholder="例如：我整理的读者评论、平台观察或访谈记录" /></label>
+        <label class="field"><span class="field-label">粘贴你的市场资料</span><textarea v-model="marketMaterial" class="textarea" style="min-height:120px" placeholder="粘贴一份你有权使用的市场观察；资料只用于机会判断，不会直接写入作品事实。" /></label>
+        <div v-if="!market.length" class="empty">尚未配置市场资料源；粘贴一份你的市场观察即可分析。</div>
         <article v-for="item in market" :key="item.id" class="card pad" :style="selectedMarket===item.id?'border-color:var(--pine-400)':''">
           <div style="display:flex;justify-content:space-between;gap:10px"><div><span class="badge pine">{{ item.kind }}</span><h3 style="margin:8px 0 2px">{{ item.title }}</h3><div class="muted" style="font-size:11px">{{ item.source }} · {{ item.collectedAt }} · 政策 {{ item.policyVersion }}</div></div><button class="btn small" :class="selectedMarket===item.id?'primary':''" @click="selectedMarket=item.id">{{ selectedMarket===item.id?'已选':'选择' }}</button></div>
           <div class="score-grid" style="grid-template-columns:repeat(3,1fr);margin-top:14px"><div class="score"><b>{{ item.demand }}</b><span>需求</span></div><div class="score"><b>{{ item.competition }}</b><span>竞争</span></div><div class="score"><b>{{ item.homogeneityRisk }}</b><span>同质化</span></div><div class="score"><b>{{ item.growth }}</b><span>增长</span></div><div class="score"><b>{{ item.monetization }}</b><span>变现</span></div><div class="score"><b>{{ item.newcomerDifficulty }}</b><span>新作者难度</span></div><div class="score"><b>{{ item.longFormCapacity }}</b><span>长篇容量</span></div><div class="score"><b>{{ item.originalitySpace }}</b><span>原创空间</span></div><div class="score"><b>{{ item.aiFeasibility }}</b><span>AI 可行性</span></div></div><p style="margin:12px 0 6px"><strong>为什么推荐：</strong>{{ item.recommendWhy }}</p><p class="muted" style="font-size:12px"><strong>风险：</strong>{{ item.notRecommendWhy }}</p>
           <div class="chip-row"><span v-for="e in item.evidence" :key="e" class="badge">{{ e }}</span></div>
         </article>
       </div>
-      <CommandFeedback :state="createState" /><template #footer><button class="btn" @click="showMarket=false">关闭</button><button class="btn primary" :disabled="['submitting','accepted','processing'].includes(createState.status)" @click="createFromMarket">按所选机会继续</button></template>
+      <CommandFeedback :state="createState" /><template #footer><button class="btn" @click="showMarket=false">关闭</button><button class="btn primary" :disabled="!marketSource.trim() || !marketMaterial.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromMarket">分析这份市场资料</button></template>
     </BaseModal>
   </div>
 </template>

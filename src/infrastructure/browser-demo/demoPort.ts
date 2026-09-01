@@ -1,5 +1,6 @@
 import type {
   ArtifactSummary,
+  AssistantRepairPlan,
   BookHealthProjection,
   ChapterListItem,
   ChapterProjection,
@@ -12,6 +13,7 @@ import type {
   HistoryEntry,
   HistoryProjection,
   MarketStrategyProjection,
+  OpeningReadyProjection,
   PageRequest,
   PageResult,
   ProductionCenterProjection,
@@ -23,6 +25,8 @@ import type {
   SearchHit,
   SettingsProjection,
   StoryDirectionProjection,
+  StorySetupProjection,
+  SupportSessionProjection,
   VersionProjection,
   VolumeDetailProjection,
   VolumeSummary,
@@ -296,6 +300,56 @@ export class BrowserDemoPort implements FrontendPort {
     })
   }
 
+  async queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection> {
+    await wait(35)
+    const record = this.record(request.projectId)
+    const selected = record.bundle.project.phase === 'PITCHING' ? null : (record.bundle.pitches.find(p => p.recommended)?.id ?? record.bundle.pitches[0]?.id ?? null)
+    return clone({
+      projectId: request.projectId,
+      status: selected ? (record.bundle.project.phase === 'OPENING_PRODUCTION' ? 'SETUP_SAVED' : 'SELECTED') : 'NOT_SELECTED',
+      selectedPitchId: selected,
+      selectedPitchIds: selected ? [selected] : [],
+      storyCore: selected ? { protagonist: '等待你确认的主角', desire: '等待你确认的核心欲望', mechanism: '等待你确认的核心机制', conflict: '等待你确认的核心冲突', readerPromise: '等待你确认的读者承诺' } : null,
+      openingReady: record.bundle.project.phase === 'OPENING_PRODUCTION',
+    })
+  }
+
+  async queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection> {
+    await wait(35)
+    const ready = this.record(request.projectId).bundle.project.phase === 'OPENING_PRODUCTION'
+    return clone({
+      projectId: request.projectId,
+      ready,
+      firstChapterPlan: ready ? { artifactId: 'demo-chapter-plan', version: 1, payloadHash: 'd'.repeat(64), owner: 'B07::PlanningOwner' } : null,
+      firstChapter: ready ? { bookId: 'demo-book', volumeId: 'demo-volume', chapterId: 'demo-chapter' } : null,
+      firstChapterGoal: '让主角面对一个必须主动回应的异常',
+      firstThreeChapterPromise: '兑现一次局部回报并留下更深的问题',
+      forbiddenReveals: ['前三章不揭开机制来源'],
+      readerDesire: '看见主角如何用自己的选择承担代价。',
+    })
+  }
+
+  async queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan> {
+    await wait(30)
+    const revision = this.record(request.projectId).bundle.project.revision
+    return {
+      repairPlanId: `demo-repair-${revision}`,
+      projectId: request.projectId,
+      basedOnProjectRevision: revision,
+      diagnosis: { summary: '项目展示需要重新核对' },
+      findingRefs: [],
+      targetAuthorityOwner: 'B04::ProjectionOwner',
+      proposedOperations: [{ operation: 'rebuild_projection', target: '项目展示', params: {}, postconditions: {} }],
+      affectedArtifacts: ['项目展示'],
+      affectedScopes: ['当前作品'],
+      riskLevel: 'LOW',
+      requiresBackup: false,
+      expectedPostconditions: [{ kind: 'projection_current', expected: true }],
+      operationDigest: 'e'.repeat(64),
+      createdAt: new Date().toISOString(),
+    }
+  }
+
   async queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection> {
     await wait(45)
     const record = this.record(request.projectId)
@@ -450,7 +504,17 @@ export class BrowserDemoPort implements FrontendPort {
   async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }
   async queryPlanRoute(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_route') }
   async queryVolumeLifecycle(_request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { throw new Error('IPC_UNSUPPORTED:query_volume_lifecycle') }
-  async supportSession(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_session') }
+  async supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string }): Promise<SupportSessionProjection> {
+    await wait(45)
+    const supported = !request.question.includes('没有')
+    return clone({
+      plan: { status: 'READY', steps: [{ capabilityId: 'query_project_meta', status: 'DONE' }] },
+      calls: [{ capabilityId: 'query_project_meta', result: supported ? { summary: '项目记录已查询' } : {} }],
+      evidenceLedger: supported ? [{ sourceRefs: ['demo:project-record'], truncated: false }] : [],
+      finding: { claim: supported ? '当前项目记录已完成查询。' : '现有记录不足以确认这件事。', supportStatus: supported ? 'SUPPORTED' : 'INSUFFICIENT', sourceRefs: supported ? ['demo:project-record'] : [] },
+      receipt: { projectId: request.projectId, projectRevision: this.record(request.projectId).bundle.project.revision },
+    })
+  }
   async supportCheckpointResume(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_checkpoint_resume') }
 
   async executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
@@ -517,6 +581,9 @@ export class BrowserDemoPort implements FrontendPort {
           case 'production_cancel': bundle.project.runState='FAILED'; bundle.project.blockReason=null; message='本次生产已取消；正式提交内容保持不变。'; break
           case 'pitch_regenerate': bundle.project.phase='PITCHING'; bundle.project.runState='IDLE'; bundle.project.blockReason=null; message='三份故事方向已根据新约束重新生成。'; break
           case 'pitch_select': bundle.project.phase='STORY_BLUEPRINT'; bundle.project.runState='ACTIVE'; bundle.project.blockReason=null; bundle.project.progress=Math.max(bundle.project.progress,16); message='故事方向已确认，系统将继续建立书级战略。'; break
+          case 'story_setup_save': bundle.project.phase='OPENING_CONTRACT'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,28); message='故事核心已保存，等待你批准开篇准备。'; break
+          case 'opening_ready': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,36); message='开篇准备已完成，已生成第一章的最小规划。'; break
+          case 'opening_start_creating': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='ACTIVE'; bundle.project.progress=Math.max(bundle.project.progress,40); message='已进入正式创作中心。'; break
           case 'book_plan_create': bundle.project.phase='BOOK_PLANNING'; message='BookPlan 与 MainContract 规划任务已创建。'; break
           case 'book_plan_revise': bundle.project.phase='BOOK_PLANNING'; message='书级战略修订已进入影响分析。'; break
           case 'volume_plan_build':

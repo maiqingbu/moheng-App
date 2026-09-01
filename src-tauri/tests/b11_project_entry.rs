@@ -1,6 +1,7 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_market_strategy_impl, query_opening_ready_impl,
-    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl, KernelState,
+    query_assistant_repair_plan_impl, query_project_overview_impl, query_story_directions_impl,
+    query_story_setup_impl, KernelState,
 };
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -239,4 +240,47 @@ fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
     assert_eq!(opening["ready"], true);
     assert!(opening["firstChapterPlan"]["artifactId"].as_str().is_some());
     assert_eq!(opening["firstChapterPlan"]["owner"], "B07::PlanningOwner");
+}
+
+#[test]
+fn b11_assistant_repair_plan_uses_h03_authorization_and_postverify() {
+    let state = state();
+    let created = execute_command_impl(&state, idea_request("cmd:b11:assistant-repair")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_string();
+    let plan = query_assistant_repair_plan_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"assistant","question":"当前卷进度显示不对，帮我修复。","requestedAt":NOW}),
+    )
+    .unwrap();
+    assert_eq!(plan["targetAuthorityOwner"], "B04::ProjectionOwner");
+    assert_eq!(plan["expectedPostconditions"][0]["kind"], "projection_current");
+    assert_eq!(plan["operationDigest"].as_str().unwrap().len(), 64);
+
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id}))
+        .unwrap()["project"]["revision"]
+        .as_i64()
+        .unwrap();
+    let plan_receipt = execute_command_impl(&state, json!({
+        "type":"repair_plan_create","commandId":"cmd:b11:repair-plan","idempotencyKey":"cmd:b11:repair-plan:key",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"dryRun":true,"repairPlan":plan}
+    })).unwrap();
+    assert_eq!(plan_receipt["finalStatus"], "committed");
+    let authorization = json!({
+        "authorizationId":"authorization:b11:repair","projectId":project_id,
+        "repairPlanId":plan["repairPlanId"],"basedOnProjectRevision":revision,
+        "operationDigest":plan["operationDigest"],"approvedByUser":true,"issuedAt":NOW,"consumedAt":null
+    });
+    execute_command_impl(&state, json!({
+        "type":"repair_authorize","commandId":"cmd:b11:repair-auth","idempotencyKey":"cmd:b11:repair-auth:key",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"authorization":authorization}
+    })).unwrap();
+    let executed = execute_command_impl(&state, json!({
+        "type":"repair_execute","commandId":"cmd:b11:repair-execute","idempotencyKey":"cmd:b11:repair-execute:key",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"repairPlanId":plan["repairPlanId"],"authorizationId":"authorization:b11:repair"}
+    })).unwrap();
+    assert_eq!(executed["finalStatus"], "committed");
+    assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
 }

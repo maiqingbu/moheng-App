@@ -574,6 +574,10 @@ pub fn commit_selection(
     if selected_ids.is_empty() || selected_ids.len() > 2 {
         return Err("B11_SELECTION_COUNT_INVALID".into());
     }
+    let unique_ids = selected_ids.iter().collect::<std::collections::BTreeSet<_>>();
+    if unique_ids.len() != selected_ids.len() {
+        return Err("B11_SELECTION_DUPLICATE".into());
+    }
     let mut selected = Vec::new();
     for id in &selected_ids {
         let row = project_entry::artifact_by_id(connection, project_id, id)
@@ -625,7 +629,7 @@ pub fn commit_selection(
         "decisionId":format!("decision:{project_id}:{command_id}"),
         "decisionType":"STORY_DIRECTION_SELECTION","outcome":"SELECTED",
         "reason":"用户明确采用故事方向","sourceRef":blueprint_ref.artifact_id,
-        "payloadJson":{"selectedPitchRefs":blueprint_ref.clone(),"explicitUserDecision":true}
+        "payloadJson":{"selectedPitchRefs":selected_refs.clone(),"explicitUserDecision":true}
     });
     let receipt_payload = json!({"selectedPitchCount":selected_refs.len(),"explicitUserDecision":true,"canonicalHead":"StoryBlueprint"})
         .as_object().cloned().unwrap_or_default();
@@ -727,7 +731,7 @@ pub fn commit_story_setup(
         format!("book-plan-seed:{project_id}:{command_id}"),
         "BookPlan",
         project_scope(),
-        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":"解决核心机制与主角选择之间的权力冲突","mustNotBreak":[{"id":"rule:mechanism-cost","description":"核心机制每次使用都必须产生可验证代价"}],"openingHypotheses":["开篇先展示异常结果，再逐步解释规则"],"globalLengthBudget":{"preferredWords":1200000},"storyConstitutionRef":constitution_ref,"openingContractRef":opening_ref,"createdAt":now}),
+        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":"解决核心机制与主角选择之间的权力冲突","mustNotBreak":[{"id":"rule:mechanism-cost","description":"核心机制每次使用都必须产生可验证代价"}],"openingHypotheses":["开篇先展示异常结果，再逐步解释规则"],"globalLengthBudget":{"preferredWords":1200000},"createdAt":now}),
         vec![constitution_ref.clone(), opening_ref.clone()],
         "B07::PlanningOwner",
         command_id,
@@ -1079,16 +1083,16 @@ pub fn query_opening_ready(
         .map_err(|error| error.to_string())?;
     let topology = project_entry::opening_topology(connection, project_id)
         .map_err(|error| error.to_string())?;
-    let plan = topology.as_ref().and_then(|topology| {
-        project_entry::canonical_chapter_head(
+    let plan = match topology.as_ref() {
+        Some(topology) => project_entry::canonical_chapter_head(
             connection,
             project_id,
             "ChapterPlan",
             &topology.chapter_id,
         )
-        .ok()
-        .flatten()
-    });
+        .map_err(|error| error.to_string())?,
+        None => None,
+    };
     let ready = opening
         .as_ref()
         .and_then(|row| row.payload.get("openingReady"))
@@ -1099,6 +1103,42 @@ pub fn query_opening_ready(
         "projectId":project_id,"ready":ready,"firstChapterPlan":plan.as_ref().map(|row| json!({"artifactId":row.artifact_id,"version":row.version,"payloadHash":row.payload_hash,"owner":"B07::PlanningOwner"})),
         "firstChapter":topology.as_ref().map(|item| json!({"bookId":item.book_id,"volumeId":item.volume_id,"chapterId":item.chapter_id})),
         "firstChapterGoal":"让主角面对一个必须主动回应的异常","firstThreeChapterPromise":"兑现一次局部机制回报并留下更深的问题","forbiddenReveals":["前三章不揭开机制来源"],"readerDesire":"看见主角如何用自己的选择承担机制代价。"
+    }))
+}
+
+pub fn assistant_repair_plan(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    question: &str,
+    now: &str,
+) -> Result<Value, String> {
+    let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+        connection,
+        project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let operation: crate::repair::RepairOperation = serde_json::from_value(json!({
+        "operation":"rebuild_projection","target":"项目展示","params":{},"postconditions":{}
+    }))
+    .map_err(|error| error.to_string())?;
+    let expected_postconditions = vec![json!({"kind":"projection_current","expected":true})];
+    let operation_digest = crate::repair::operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &expected_postconditions,
+    )
+    .map_err(|error| error.to_string())?;
+    let question_digest = sha256_canonical(&json!({
+        "projectId":project_id,"question":question,"revision":revision
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "repairPlanId":format!("assistant-repair:{}", &question_digest[..24]),
+        "projectId":project_id,"basedOnProjectRevision":revision,
+        "diagnosis":{"diagnosisType":"PROJECTION_DRIFT","claim":"项目展示需要重新核对","question":question,"sourceRefs":[]},
+        "findingRefs":[],"targetAuthorityOwner":"B04::ProjectionOwner",
+        "proposedOperations":[operation],"affectedArtifacts":["项目展示"],"affectedScopes":["当前作品"],
+        "riskLevel":"LOW","requiresBackup":false,"expectedPostconditions":expected_postconditions,
+        "operationDigest":operation_digest,"createdAt":now
     }))
 }
 
