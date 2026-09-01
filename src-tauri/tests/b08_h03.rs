@@ -1,4 +1,4 @@
-use ai_novel_production_system_core::commands::query_context_manifest_impl;
+use ai_novel_production_system_core::commands::{query_context_manifest_impl, query_production_center_impl};
 use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
@@ -575,6 +575,13 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         "SELECT json_array_length(json_extract(p.payload_json,'$.invocationProvenance')) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
         [], |row| row.get(0)
     ).unwrap(), 2);
+    let projection = query_production_center_impl(
+        &state,
+        json!({"projectId":"p-b10-root"}),
+    ).unwrap();
+    assert_eq!(projection["creativeSkills"]["packageVersion"], "1.2.0");
+    assert_eq!(projection["quality"]["softOnly"], true);
+    assert_eq!(projection["quality"]["modelProvenance"]["evaluatorCalls"], 1);
 }
 
 #[test]
