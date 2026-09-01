@@ -542,6 +542,38 @@ fn b08_production_start_without_chapter_fails_closed_instead_of_using_legacy_fal
 }
 
 #[test]
+fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state.manager.create("p-b10-root", "B10", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-root");
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
+        "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open("p-b10-root", "B10", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT json_extract(p.payload_json,'$.creativeEnrichment.packageVersion') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate'",
+        [], |row| row.get(0)
+    ).unwrap(), "1.2.0");
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT json_array_length(json_extract(p.payload_json,'$.invocations')) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), 2);
+}
+
+#[test]
 fn b08_revalidates_relevant_state_after_render_and_blocks_stale_final_commit() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());
