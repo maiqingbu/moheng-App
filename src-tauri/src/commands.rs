@@ -2492,6 +2492,27 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                         .map(ToOwned::to_owned),
                 })
             }
+            "rebuild_planning_state_projection" => {
+                let volume_id = operation
+                    .params
+                    .get("volumeId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "B09_PROJECTION_VOLUME_REQUIRED".to_string())?;
+                let projection =
+                    crate::volume_lifecycle::VolumeLifecycleOwner::rebuild_planning_state(
+                        self.connection,
+                        self.project_id,
+                        volume_id,
+                        self.now,
+                    )?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B09::PlanningStateProjectionOwner".into(),
+                    owner_receipt_ref: projection
+                        .get("projectionDigest")
+                        .and_then(Value::as_str)
+                        .map(|digest| format!("planning-projection:{digest}")),
+                })
+            }
             "execute_change_request" => Err("H03_CHANGE_REQUEST_PROPOSAL_ONLY".into()),
             _ => Err("H03_OWNER_OPERATION_UNKNOWN".into()),
         }
@@ -2626,6 +2647,33 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     "observed": observed,
                     "owner": "B09::VolumeLifecycleOwner",
                     "routeRef": route_ref,
+                }))
+            }
+            "rebuild_planning_state_projection" => {
+                let volume_id = operation
+                    .params
+                    .get("volumeId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "B09_PROJECTION_VOLUME_REQUIRED".to_string())?;
+                let projection = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::planning_projection(
+                    self.connection,
+                    self.project_id,
+                    volume_id,
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "B09_PROJECTION_NOT_FOUND".to_string())?;
+                let observed = projection.get("volumeId").and_then(Value::as_str)
+                    == Some(volume_id)
+                    && projection
+                        .get("projectionDigest")
+                        .and_then(Value::as_str)
+                        .is_some_and(|digest| digest.len() == 64);
+                Ok(json!({
+                    "operation": operation.operation,
+                    "kind": "planning_state_projection_current",
+                    "status": if observed {"PASS"} else {"FAIL"},
+                    "observed": observed,
+                    "owner": "B09::PlanningStateProjectionOwner"
                 }))
             }
             _ => Err("H03_POSTCONDITION_UNAVAILABLE".into()),

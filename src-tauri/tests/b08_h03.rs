@@ -1353,7 +1353,7 @@ fn h03_same_authorization_two_workers_exactly_one_executes() {
 }
 
 #[test]
-fn h03_stage_matrix_rejects_b09_route_and_keeps_change_request_proposal_only() {
+fn h03_stage_matrix_keeps_b09_route_typed_and_change_request_proposal_only() {
     for (suffix, operation, expected) in [
         (
             "route",
@@ -1385,12 +1385,25 @@ fn h03_stage_matrix_rejects_b09_route_and_keeps_change_request_proposal_only() {
             0,
         );
         authorize_h03(&state, &project_id, &plan_id, &auth_id, &digest, 0);
-        let error = execute_command_impl(&state, json!({
-            "type":"repair_execute","commandId":format!("cmd:h03:{suffix}:execute"),
-            "idempotencyKey":format!("key:h03:{suffix}:execute"),"projectId":project_id,"requestedAt":NOW,
-            "payload":{"repairPlanId":plan_id,"authorizationId":auth_id}
-        })).unwrap_err();
-        assert!(error.contains(expected));
+        let result = execute_command_impl(
+            &state,
+            json!({
+                "type":"repair_execute","commandId":format!("cmd:h03:{suffix}:execute"),
+                "idempotencyKey":format!("key:h03:{suffix}:execute"),"projectId":project_id,"requestedAt":NOW,
+                "payload":{"repairPlanId":plan_id,"authorizationId":auth_id}
+            }),
+        );
+        if operation == "replan_volume_route" {
+            let result = result.unwrap();
+            assert_eq!(result["receipt"]["status"], "REPAIR_VERIFICATION_FAILED");
+            assert!(result["receipt"]["postconditions"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("B09_REPLAN_VOLUME_REQUIRED"));
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains(expected));
+        }
     }
 }
 

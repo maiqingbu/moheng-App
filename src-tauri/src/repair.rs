@@ -138,6 +138,7 @@ pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
                 | "recompile_chapter_plan"
                 | "backup_restore_maintenance"
                 | "replan_volume_route"
+                | "rebuild_planning_state_projection"
                 | "execute_change_request"
         ) {
             return Err(RepairError::Invalid(format!(
@@ -209,7 +210,7 @@ fn stage_gate(operation: &RepairOperation) -> Result<(), RepairError> {
         // B09 promotes route replan from the H03 placeholder to the typed
         // lifecycle owner. Authorization is still required by `execute`;
         // this gate only rejects operations that belong to a later batch.
-        "replan_volume_route" => Ok(()),
+        "replan_volume_route" | "rebuild_planning_state_projection" => Ok(()),
         "execute_change_request" => Err(RepairError::ProposalOnly),
         _ => Ok(()),
     }

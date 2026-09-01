@@ -13,6 +13,7 @@ use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Instant;
 use tempfile::TempDir;
 
 const NOW: &str = "2026-09-01T00:00:00Z";
@@ -266,7 +267,124 @@ fn h04_authorized_replan_uses_typed_b09_owner_and_preserves_read_registry() {
     assert!(repair_registry
         .exact_authorized_repair("replan_volume_route", "1.0.0", &spec.spec_digest, "EXECUTE")
         .is_ok());
+    let full_repair_registry = CapabilityRegistry::b09_repair_r1();
+    assert_eq!(
+        full_repair_registry
+            .specs
+            .get("rebuild_planning_state_projection")
+            .unwrap()
+            .owner,
+        "B09::PlanningStateProjectionOwner"
+    );
     println!("H04_REPLAN_AUTH_RESULT typed_owner=PASS explicit_authorization=PASS read_registry_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn h04_projection_repair_changes_only_rebuildable_projection() {
+    let fixture = fixture();
+    let head_before: (String, i64, String) = fixture
+        .connection
+        .query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let reality_before: String = fixture
+        .connection
+        .query_row(
+            "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first = VolumeLifecycleOwner::rebuild_planning_state(
+        &fixture.connection,
+        "p-b09",
+        &fixture.volume_id,
+        NOW,
+    )
+    .unwrap();
+    let second = VolumeLifecycleOwner::rebuild_planning_state(
+        &fixture.connection,
+        "p-b09",
+        &fixture.volume_id,
+        NOW,
+    )
+    .unwrap();
+    let head_after: (String, i64, String) = fixture
+        .connection
+        .query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let reality_after: String = fixture
+        .connection
+        .query_row(
+            "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(head_before, head_after);
+    assert_eq!(reality_before, reality_after);
+    assert_eq!(first["projectionDigest"].as_str().unwrap().len(), 64);
+    println!("H04_PROJECTION_REPAIR_RESULT authority_unchanged=PASS reality_unchanged=PASS projection_rebuilt=PASS status=PASS");
+}
+
+#[test]
+fn b09_volume_close_requires_resolvable_handoff_evidence() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute("DELETE FROM canon_evidence WHERE project_id='p-b09'", [])
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    let result = VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "b09-close-no-evidence".into(),
+            idempotency_key: "key:b09-close-no-evidence".into(),
+            reason: "缺少退出证据".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    );
+    assert!(result
+        .unwrap_err()
+        .contains("VOLUME_CLOSE_EVIDENCE_REQUIRED"));
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeExitState'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM volume_close_records", [], |row| row
+                .get(0))
+            .unwrap(),
+        0
+    );
+    println!("B09_VOLUME_CLOSE_EVIDENCE_NEGATIVE_RESULT missing_evidence=BLOCK partial_close=0 status=PASS");
 }
 
 #[test]
@@ -672,5 +790,28 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
             .unwrap(),
         3
     );
-    println!("B09_MULTI_VOLUME_RESULT volumes=3 boundary_state=PASS open_thread_preserved=PASS deterministic_rebuild=PASS status=PASS");
+    println!("B09_MULTI_VOLUME_RESULT volumes=3 boundary_state=PASS open_thread_preserved=PASS reservation_boundary=PASS exact_evidence_chain=PASS deterministic_rebuild=PASS status=PASS");
+}
+
+#[test]
+fn b09_bounded_lifecycle_query_performance_is_measured_and_enforced() {
+    let fixture = fixture();
+    let mut samples = Vec::with_capacity(30);
+    for _ in 0..30 {
+        let started = Instant::now();
+        let projection = VolumeLifecycleOwner::rebuild_planning_state(
+            &fixture.connection,
+            "p-b09",
+            &fixture.volume_id,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(projection["volumeId"], fixture.volume_id);
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    let index = ((samples.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+    let p95 = samples[index];
+    assert!(p95 <= 250.0, "bounded lifecycle projection p95={p95}ms");
+    println!("B09_EQUIVALENT_PERFORMANCE_RESULT profile=3_VOLUME_BOUNDED_EQUIVALENT samples=30 p95Ms={p95:.3} thresholdMs=250 bounded=PASS status=PASS");
 }

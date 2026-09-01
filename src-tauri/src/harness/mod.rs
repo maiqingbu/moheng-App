@@ -168,6 +168,44 @@ impl CapabilityRegistry {
         Self { specs }
     }
 
+    pub fn b09_repair_r1() -> Self {
+        let mut registry = Self::b09_replan_r1();
+        let capability_id = "rebuild_planning_state_projection";
+        let version = "1.0.0";
+        let modes = vec!["EXECUTE".into()];
+        let mut hard_bounds = BTreeMap::new();
+        hard_bounds.insert("maxResults".into(), 100);
+        hard_bounds.insert("maxSerializedBytes".into(), 65_536);
+        let spec_digest = sha256_canonical(&json!({
+            "capabilityId": capability_id,
+            "version": version,
+            "modes": modes,
+            "stage": H03_REPAIR_STAGE,
+            "owner": "B09::PlanningStateProjectionOwner",
+            "readOrWrite": "WRITE",
+            "inputContract": "planning-state-projection-r1",
+            "outputContract": "project-command-receipt",
+            "hardBounds": hard_bounds,
+        }))
+        .unwrap();
+        registry.specs.insert(
+            capability_id.into(),
+            CapabilitySpec {
+                capability_id: capability_id.into(),
+                version: version.into(),
+                spec_digest,
+                modes,
+                stage: H03_REPAIR_STAGE.into(),
+                owner: "B09::PlanningStateProjectionOwner".into(),
+                read_or_write: "WRITE".into(),
+                input_contract: "planning-state-projection-r1".into(),
+                output_contract: "project-command-receipt".into(),
+                hard_bounds,
+            },
+        );
+        registry
+    }
+
     pub fn exact_authorized_repair(
         &self,
         id: &str,

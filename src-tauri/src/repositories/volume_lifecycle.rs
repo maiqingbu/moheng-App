@@ -21,19 +21,6 @@ pub struct VolumeMetadata {
 pub struct VolumeLifecycleRepository;
 
 impl VolumeLifecycleRepository {
-    pub fn project_revision(
-        connection: &Connection,
-        project_id: &str,
-    ) -> Result<i64, VolumeLifecycleRepositoryError> {
-        connection
-            .query_row(
-                "SELECT revision FROM project_meta WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
-    }
-
     pub fn volume_metadata(
         connection: &Connection,
         project_id: &str,
@@ -69,6 +56,19 @@ impl VolumeLifecycleRepository {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn mark_closed(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        updated_at: &str,
+    ) -> Result<bool, VolumeLifecycleRepositoryError> {
+        let updated = connection.execute(
+            "UPDATE volumes SET status='CLOSED', updated_at=?1 WHERE project_id=?2 AND volume_id=?3 AND status<>'CLOSED'",
+            libsql_rusqlite::params![updated_at, project_id, volume_id],
+        )?;
+        Ok(updated == 1)
     }
 
     pub fn upsert_planning_projection(
@@ -227,6 +227,30 @@ impl VolumeLifecycleRepository {
                     "rangeStart": row.get::<_, Option<i64>>(2)?,
                     "rangeEnd": row.get::<_, Option<i64>>(3)?,
                     "quote": row.get::<_, Option<String>>(4)?,
+                }))
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn current_canon_facts(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Value>, VolumeLifecycleRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT fact_id,subject_id,predicate,object_json,authority_level FROM canon_facts WHERE project_id=?1 AND superseded_by IS NULL ORDER BY fact_id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, limit.clamp(1, 100)],
+            |row| {
+                let object_json: String = row.get(3)?;
+                Ok(json!({
+                    "factId": row.get::<_, String>(0)?,
+                    "subjectId": row.get::<_, String>(1)?,
+                    "predicate": row.get::<_, String>(2)?,
+                    "object": serde_json::from_str::<Value>(&object_json).unwrap_or(Value::Null),
+                    "authorityLevel": row.get::<_, String>(4)?,
                 }))
             },
         )?;

@@ -1266,13 +1266,27 @@ pub fn run_chapter_production(
     update_stage(connection, &project_id, &job_id, "COMMIT", &now)?;
     let receipt =
         CommitService::commit(connection, &bundle, &now).map_err(|error| error.to_string())?;
+    // B09 owns the rebuildable volume planning projection. Refresh it only
+    // after B08's authoritative chapter CommitBundle succeeds; a projection
+    // failure is recoverable and must not turn an already committed chapter
+    // into a false command failure.
+    let planning_projection_status =
+        match crate::volume_lifecycle::VolumeLifecycleOwner::rebuild_planning_state(
+            connection,
+            &project_id,
+            &volume_id,
+            &now,
+        ) {
+            Ok(_) => "UPDATED",
+            Err(_) => "DEFERRED_REBUILDABLE",
+        };
     DurableJobService::release_lease(connection, &project_id, &job_id, &now)
         .map_err(|error| error.to_string())?;
     DurableJobService::set_runtime_state(connection, &project_id, "ACTIVE", None, &now)
         .map_err(|error| error.to_string())?;
     update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(
-        json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"receipt":receipt}),
+        json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"receipt":receipt}),
     )
 }
 

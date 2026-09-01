@@ -17,7 +17,7 @@ use crate::repositories::narrative::NarrativeRepository;
 use crate::repositories::volume_lifecycle::VolumeLifecycleRepository;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct RouteReplanRequest {
@@ -278,6 +278,59 @@ fn current_intent(
     Ok((intent_ref, intent))
 }
 
+fn validate_route_reservations(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+    route: &Value,
+    intent: &Value,
+) -> Result<(), String> {
+    let declared = intent
+        .get("futureReservationRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let route_refs = route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.get("reservationRefs").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if route_refs
+        .iter()
+        .any(|reference| !declared.contains(reference))
+    {
+        return Err("FUTURE_RESERVATION_VIOLATION".into());
+    }
+    let Some(book_plan) =
+        NarrativeRepository::latest_artifact_payload(connection, project_id, "BookPlan")
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let reservations = book_plan
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if reservations.is_empty() || route_refs.is_empty() {
+        return Ok(());
+    }
+    let current_volume_no = NarrativeRepository::volume_number(connection, project_id, volume_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    let actions = json!({
+        "reservationRefs": route_refs.into_iter().collect::<Vec<_>>(),
+        "sceneExecution": []
+    });
+    planning::validate_reservation_actions(&actions, &reservations, current_volume_no)
+}
+
 fn build_planning_state(
     connection: &Connection,
     project_id: &str,
@@ -289,12 +342,13 @@ fn build_planning_state(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
     let revision = revision_override.unwrap_or(
-        VolumeLifecycleRepository::project_revision(connection, project_id)
+        NarrativeRepository::project_revision(connection, project_id)
             .map_err(|error| error.to_string())?,
     );
     let (route_ref, route) = current_route(connection, project_id, volume_id)?;
     planning::validate_volume_route(&route)?;
     let (intent_ref, intent) = current_intent(connection, project_id, &route)?;
+    validate_route_reservations(connection, project_id, volume_id, &route, &intent)?;
     let tasks = route
         .get("tasks")
         .and_then(Value::as_array)
@@ -502,7 +556,15 @@ fn apply_route_replan(
     let (previous_ref, previous_route) =
         current_route(connection, &request.project_id, &request.volume_id)?;
     planning::validate_volume_route(&request.plan)?;
-    let (intent_ref, _) = current_intent(connection, &request.project_id, &previous_route)?;
+    let (intent_ref, intent_payload) =
+        current_intent(connection, &request.project_id, &previous_route)?;
+    validate_route_reservations(
+        connection,
+        &request.project_id,
+        &request.volume_id,
+        &request.plan,
+        &intent_payload,
+    )?;
     planning::validate_volume_route_reference(&request.plan, &intent_ref)?;
     let previous_route_version = previous_route
         .get("routeVersion")
@@ -698,13 +760,14 @@ fn apply_volume_close(
         &exit_scope_key,
     )
     .map_err(|error| error.to_string())?;
-    let updated = connection
-        .execute(
-            "UPDATE volumes SET status='CLOSED', updated_at=?1 WHERE project_id=?2 AND volume_id=?3 AND status<>'CLOSED'",
-            libsql_rusqlite::params![request.now, request.project_id, request.volume_id],
-        )
-        .map_err(|error| error.to_string())?;
-    if updated != 1 {
+    if !VolumeLifecycleRepository::mark_closed(
+        connection,
+        &request.project_id,
+        &request.volume_id,
+        &request.now,
+    )
+    .map_err(|error| error.to_string())?
+    {
         return Err("VOLUME_CLOSE_STATUS_UPDATE_FAILED".into());
     }
     VolumeLifecycleRepository::update_planning_ledger(
@@ -799,6 +862,30 @@ fn apply_next_volume_handoff(
         current_route(connection, &request.project_id, &request.current_volume_id)?;
     let (current_intent_ref, current_intent_payload) =
         current_intent(connection, &request.project_id, &current_route)?;
+    validate_route_reservations(
+        connection,
+        &request.project_id,
+        &request.current_volume_id,
+        &current_route,
+        &current_intent_payload,
+    )?;
+    let current_planning_state = build_planning_state(
+        connection,
+        &request.project_id,
+        &request.current_volume_id,
+        &request.now,
+        Some(request.expected_revision),
+    )?;
+    let goal_contract_refs = NarrativeRepository::goal_contract_refs_for_volume(
+        connection,
+        &request.project_id,
+        &request.current_volume_id,
+        100,
+    )
+    .map_err(|error| error.to_string())?;
+    let canon_facts =
+        VolumeLifecycleRepository::current_canon_facts(connection, &request.project_id, 100)
+            .map_err(|error| error.to_string())?;
     let exit_scope_key =
         scope_key(&volume_scope(&request.current_volume_id)).map_err(|error| error.to_string())?;
     let current_exit_ref = NarrativeRepository::canonical_head_ref(
@@ -829,7 +916,7 @@ fn apply_next_volume_handoff(
         ArtifactType::VolumeIntent,
         volume_scope(&request.next_volume_id),
         1,
-        current_intent_payload,
+        current_intent_payload.clone(),
         vec![current_intent_ref.clone(), current_exit_ref.clone()],
         &request.command_id,
         "B09::VolumeLifecycleOwner",
@@ -925,9 +1012,14 @@ fn apply_next_volume_handoff(
         &request.now,
     )?;
     let input_refs = json!({
+        "goalContractRefs": goal_contract_refs,
+        "canonFacts": canon_facts,
+        "currentPlanningState": current_planning_state,
         "currentIntent": current_intent_ref,
         "currentRoute": current_route_ref,
         "currentExit": current_exit_ref,
+        "continuityRefs": current_intent_payload.get("crossVolumeResponsibilityRefs").cloned().unwrap_or_else(|| json!([])),
+        "futureReservationRefs": current_intent_payload.get("futureReservationRefs").cloned().unwrap_or_else(|| json!([])),
         "nextIntent": next_intent_ref,
         "nextPlan": artifact_ref(&next_plan),
     });
