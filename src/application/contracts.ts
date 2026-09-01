@@ -502,6 +502,7 @@ export interface VolumeLifecycleProjection {
   planningState: Record<string, unknown>
   route: PlanningRouteProjection
   latestClose: Record<string, unknown> | null
+  latestHandoff: Record<string, unknown> | null
   routeReplans: Record<string, unknown>[]
   owner: string
 }

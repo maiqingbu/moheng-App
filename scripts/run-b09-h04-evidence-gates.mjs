@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { generateAcceptance } from './generate-b09-h04-acceptance.mjs'
+import { generateAcceptance, H04_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, START_COMMIT } from './generate-b09-h04-acceptance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const rustRoot = path.join(root, 'src-tauri')
@@ -22,8 +22,8 @@ function snapshot() {
   }
 }
 
-function run(name, command, args, cwd = root) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: process.env })
+function run(name, command, args, cwd = root, extraEnv = {}) {
+  const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: { ...process.env, ...extraEnv } })
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
   const log = `${name}.log`
   fs.writeFileSync(path.join(evidence, log), output)
@@ -32,9 +32,15 @@ function run(name, command, args, cwd = root) {
 
 const before = snapshot()
 const results = {}
-const add = (name, command, args, cwd = root) => { results[name] = run(name, command, args, cwd); return results[name] }
+const add = (name, command, args, cwd = root, extraEnv = {}) => { results[name] = run(name, command, args, cwd, extraEnv); return results[name] }
 
 const b09 = add('b09_targeted', 'cargo', ['test', '--test', 'b09_h04', '--', '--nocapture'], rustRoot)
+const scale = process.env.B09_H04_RUN_SCALE === '1'
+  ? add('b09_h04_scale', 'cargo', ['test', '--test', 'b09_h04_scale', '--', '--ignored', '--nocapture'], rustRoot, { B09_H04_SCALE_EVIDENCE_DIR: evidence })
+  : { name: 'b09_h04_scale', command: 'cargo test --test b09_h04_scale -- --ignored --nocapture', status: 'FAIL', exitCode: 77, output: 'B09_H04_SCALE_SKIPPED: set B09_H04_RUN_SCALE=1\n', log: 'b09_h04_scale.log' }
+if (scale.status !== 'PASS' && !fs.existsSync(path.join(evidence, scale.log))) {
+  fs.writeFileSync(path.join(evidence, scale.log), scale.output)
+}
 const b08 = add('b08_h03_regression', 'cargo', ['test', '--test', 'b08_h03', '--', '--nocapture'], rustRoot)
 const b07 = add('b07_h02_regression', 'cargo', ['test', '--test', 'b07_h02', '--test', 'b07_h02_semantic_negative'], rustRoot)
 const b06 = add('b06_h01_regression', 'cargo', ['test', '--test', 'b06_h01', '--', '--nocapture'], rustRoot)
@@ -68,6 +74,23 @@ if (before.dirtyPaths.length === 0) {
   }
 }
 
+const after = snapshot()
+const startCommitIsAncestor = git(['merge-base', '--is-ancestor', START_COMMIT, before.commit]).status === 0
+const sourceBinding = before.commit === after.commit && before.dirtyPaths.length === 0 && after.dirtyPaths.length === 0
+const sourceBindingReport = {
+  batch: 'B09_H04',
+  startCommit: START_COMMIT,
+  startCommitIsAncestor,
+  sourceCommit: before.commit,
+  evidenceSourceCommit: before.commit,
+  sourceCommitAfter: after.commit,
+  workingTreeDirtyBefore: before.dirtyPaths.length > 0,
+  workingTreeDirtyAfter: after.dirtyPaths.length > 0,
+  excludedUncommittedPaths: [],
+  status: sourceBinding ? 'PASS' : 'FAIL',
+}
+fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.stringify(sourceBindingReport, null, 2)}\n`)
+
 const sourceStage = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b09-h04-source-stage-'))
 const archive = spawnSync('git', ['archive', '--format=tar', '--prefix=ai-novel-production-system/', 'HEAD'], { cwd: root, encoding: 'buffer', maxBuffer: 200 * 1024 * 1024 })
 const extract = archive.status === 0 ? spawnSync('tar', ['-xf', '-', '-C', sourceStage], { input: archive.stdout, encoding: 'utf8' }) : { status: 1, stdout: '', stderr: 'git archive failed' }
@@ -88,12 +111,61 @@ const forbiddenEntries = sourceEntries.filter(entry => /(^|\/)(?:\.git|node_modu
 const packageSmoke = archive.status === 0 && extract.status === 0 && fs.existsSync(sourceRoot) && forbiddenEntries.length === 0
 fs.writeFileSync(path.join(evidence, 'package_smoke.log'), `${archive.stderr ?? ''}${extract.stdout ?? ''}${extract.stderr ?? ''}\nforbiddenEntries=${forbiddenEntries.length}\nsourceRoot=${sourceRoot}\n`)
 
+// Re-run the architecture and acceptance generator from the same source-only
+// shape that a receiver gets.  There is no .git in this stage; the binding file
+// and frozen migration hashes are the only baseline authority available there.
+const receiverEvidence = path.join(sourceRoot, 'evidence/B09_H04')
+fs.mkdirSync(receiverEvidence, { recursive: true })
+fs.copyFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), path.join(receiverEvidence, 'B09_H04_SOURCE_BINDING.json'))
+fs.writeFileSync(path.join(receiverEvidence, 'gate-results.json'), `${JSON.stringify({
+  schema: 'b09-h04-gate-results-r1',
+  batch: 'B09_H04',
+  ...sourceBindingReport,
+  sourceBinding: 'PASS',
+  gates: Object.fromEntries(REQUIRED_BLOCKING_GATES.map(name => [name, { status: 'PASS', source: 'receiver-schema-smoke' }])),
+}, null, 2)}\n`)
+const freshArchitecture = run('fresh_package_architecture', 'node', ['scripts/verify-b09-h04-architecture.mjs'], sourceRoot)
+const freshBaseArchitecture = run('fresh_package_base_architecture', 'node', ['scripts/verify-architecture.mjs'], sourceRoot)
+const freshModuleBoundary = run('fresh_package_module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'], sourceRoot)
+const freshGenerator = run('fresh_package_generator', 'node', ['scripts/generate-b09-h04-acceptance.mjs'], sourceRoot, { B09_H04_EVIDENCE_DIR: receiverEvidence })
+const freshNode = run('fresh_package_node', 'node', ['--test', 'tests/b09-h04-acceptance-generator.test.mjs', 'tests/b09-h04-ui.test.mjs'], sourceRoot)
+Object.assign(results, {
+  fresh_package_architecture: freshArchitecture,
+  fresh_package_base_architecture: freshBaseArchitecture,
+  fresh_package_module_boundary: freshModuleBoundary,
+  fresh_package_generator: freshGenerator,
+  fresh_package_node: freshNode,
+})
+const freshPackageArchitecture = archive.status === 0
+  && extract.status === 0
+  && freshArchitecture.status === 'PASS'
+  && freshBaseArchitecture.status === 'PASS'
+  && freshModuleBoundary.status === 'PASS'
+  && freshGenerator.status === 'PASS'
+  && freshNode.status === 'PASS'
+
 const marker = (result, pattern) => result.status === 'PASS' && pattern.test(result.output)
 const gate = (status, source, actual = {}) => ({ status: status ? 'PASS' : 'FAIL', source, blocking: true, ...actual })
 const allPass = (...items) => items.every(item => item.status === 'PASS')
+const readJson = file => {
+  try { return JSON.parse(fs.readFileSync(path.join(evidence, file), 'utf8')) } catch { return null }
+}
+const scaleReport = readJson('b09_h04_scale.json')
+const scaleCountsPass = scaleReport?.fixture === 'LONG_BOOK_10M'
+  && Number(scaleReport.materializedFinalBodyChars) >= 10_000_000
+  && Number(scaleReport.counts?.books) >= 1
+  && Number(scaleReport.counts?.volumes) >= 40
+  && Number(scaleReport.counts?.chapters) >= 4_000
+  && Number(scaleReport.counts?.artifacts) >= 500_000
+  && Number(scaleReport.counts?.canonFacts) >= 1_000_000
+  && Number(scaleReport.counts?.dependencies) >= 3_000_000
+  && Number(scaleReport.counts?.modelRuns) >= 100_000
+  && scaleReport.fullProjectScan === false
+  && scaleReport.webviewFullDump === false
+  && scaleReport.status === 'PASS'
 
 const gates = {
-  'B09-A01': gate(architecture.status === 'PASS' && before.commit !== '6992b544f59f385160e3aa2f34f2e206ae715e59', 'architecture.log'),
+  'B09-A01': gate(architecture.status === 'PASS' && before.commit !== START_COMMIT && startCommitIsAncestor, 'architecture.log+git'),
   'B09-A02': gate(architecture.status === 'PASS' && !/CommitBundleV3|NarrativeRuntimeDelta/.test(architecture.output), 'architecture.log'),
   'B09-A03': gate(marker(b09, /B09_PLANNING_STATE_RESULT .*status=PASS/), b09.log),
   'B09-A04': gate(marker(b09, /H04_PROJECTION_REPAIR_RESULT .*projection_rebuilt=PASS/), b09.log),
@@ -114,19 +186,19 @@ const gates = {
   'B09-A19': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*exact_evidence_chain=PASS/), b09.log),
   'B09-A20': gate(architecture.status === 'PASS' && /noSecondCommitProtocol/.test(architecture.output), 'architecture.log'),
   'B09-A21': gate(architecture.status === 'PASS' && /uiTruthful/.test(architecture.output), 'architecture.log'),
-  'B09-A22': gate(marker(b09, /B09_EQUIVALENT_PERFORMANCE_RESULT .*bounded=PASS .*status=PASS/), b09.log),
-  'H04-A01': gate(allPass(b09, b08, b07, b06), 'regression logs'),
-  'H04-A02': gate(marker(b06, /H01_RESULT .*bounded_query=PASS/) && architecture.status === 'PASS', 'b06_h01_regression.log+architecture.log'),
-  'H04-A03': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*typed_owner=PASS .*explicit_authorization=PASS/), b09.log),
-  'H04-A04': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*read_registry_unchanged=PASS/), b09.log),
-  'H04-A05': gate(marker(b09, /H04_PROJECTION_REPAIR_RESULT .*authority_unchanged=PASS .*reality_unchanged=PASS/), b09.log),
-  'H04-A06': gate(marker(b06, /H01_RESULT .*checkpoint_safe=PASS .*checkpoint_stale=PASS/), b06.log),
+  'B09-A22': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*boundedRead=PASS .*contextBounded=PASS .*pagination=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'H04-A01': gate(architecture.status === 'PASS' && /"noFourthHarness": "PASS"/.test(architecture.output), 'architecture.log'),
+  'H04-A02': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*boundedRead=PASS .*contextBounded=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'H04-A03': gate(marker(b09, /H04_PROVENANCE_RESULT .*claim=PASS .*sourceEvidence=PASS .*capabilitySpec=PASS .*resultDigest=PASS .*cross_volume=PASS .*status=PASS/), b09.log),
+  'H04-A04': gate(marker(b09, /H04_H02_NO_MUTATION_RESULT .*plan=PASS .*route=PASS .*taskReality=PASS .*thread=PASS .*status=PASS/), b09.log),
+  'H04-A05': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*typed_owner=PASS .*explicit_authorization=PASS .*status=PASS/), b09.log),
+  'H04-A06': gate(marker(b09, /H04_PROJECTION_REPAIR_RESULT .*authority_unchanged=PASS .*reality_unchanged=PASS .*projection_rebuilt=PASS .*status=PASS/), b09.log),
   'H04-A07': gate(b08.status === 'PASS' && /proposal_only|change_request/.test(b08.output), b08.log),
-  'H04-A08': gate(marker(b06, /H01_RESULT .*bounded_replan=PASS .*max_steps=7/) && moduleBoundary.status === 'PASS', 'b06_h01_regression.log+module_boundary.log'),
-  'H04-A09': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*volumes=3/), b09.log),
-  'H04-A10': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*exact_evidence_chain=PASS/), b09.log),
-  'H04-A11': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*reservation_boundary=PASS/), b09.log),
-  'H04-A12': gate(allPass(b02, b03, b05, b06, b07, b08, p01), 'regression logs'),
+  'H04-A08': gate(marker(b09, /H04_CHECKPOINT_RESULT .*revision_same=PASS .*revalidate=PASS .*status=PASS/), b09.log),
+  'H04-A09': gate(marker(b09, /H04_CHECKPOINT_RESULT .*revision_same=PASS .*capability_digest_change=STALE .*revalidate=PASS .*status=PASS/), b09.log),
+  'H04-A10': gate(marker(b08, /H03_AUTH_RACE_RESULT .*workers=2 .*successful=1 .*rejected=1 .*activeOwners=1 .*status=PASS/), b08.log),
+  'H04-A11': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*fixture=LONG_BOOK_10M .*boundedRead=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'H04-A12': gate(marker(b06, /H01_RESULT .*bounded_replan=PASS .*max_steps=7/) && moduleBoundary.status === 'PASS', 'b06_h01_regression.log+module_boundary.log'),
   baseline: gate(architecture.status === 'PASS', 'architecture.log'),
   no_second_engine: gate(architecture.status === 'PASS', 'architecture.log'),
   migration_freeze: gate(architecture.status === 'PASS', 'architecture.log'),
@@ -149,15 +221,16 @@ const gates = {
   b08_h03_regression: gate(b08.status === 'PASS', b08.log),
   p01_regression: gate(p01.status === 'PASS', p01.log),
   package_smoke: gate(packageSmoke, 'package_smoke.log', { forbiddenEntries: forbiddenEntries.length }),
+  fresh_package_architecture: gate(freshPackageArchitecture, 'fresh_package_architecture.log+fresh_package_generator.log', { receiver: { architecture: freshArchitecture.status, generator: freshGenerator.status, node: freshNode.status } }),
 }
 
 function productionRootConnected() {
   return architecture.status === 'PASS' && /productionRootConnected/.test(architecture.output)
 }
 
-const after = snapshot()
-const sourceBinding = before.commit === after.commit && before.dirtyPaths.length === 0 && after.dirtyPaths.length === 0
 gates.source_binding = gate(sourceBinding, 'git', {
+  startCommit: START_COMMIT,
+  startCommitIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -169,6 +242,8 @@ gates.source_binding = gate(sourceBinding, 'git', {
 const report = {
   schema: 'b09-h04-gate-results-r1',
   batch: 'B09_H04',
+  startCommit: START_COMMIT,
+  startCommitIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -185,7 +260,7 @@ fs.writeFileSync(path.join(evidence, 'gate-results.json'), `${JSON.stringify(rep
 const structured = (name, gateNames, extra = {}) => {
   const selected = gateNames.map(gateName => ({ name: gateName, ...(gates[gateName] ?? { status: 'FAIL', source: 'missing' }) }))
   const status = selected.every(gate => gate.status === 'PASS') ? 'PASS' : 'FAIL'
-  fs.writeFileSync(path.join(evidence, name), `${JSON.stringify({ batch: 'B09_H04', status, sourceCommit: before.commit, evidenceSourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: report.workingTreeDirtyBefore, workingTreeDirtyAfter: report.workingTreeDirtyAfter, ...extra, gates: selected }, null, 2)}\n`)
+  fs.writeFileSync(path.join(evidence, name), `${JSON.stringify({ batch: 'B09_H04', status, startCommit: START_COMMIT, startCommitIsAncestor, sourceCommit: before.commit, evidenceSourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: report.workingTreeDirtyBefore, workingTreeDirtyAfter: report.workingTreeDirtyAfter, excludedUncommittedPaths: [], ...extra, gates: selected }, null, 2)}\n`)
 }
 
 structured('B09_PLANNING_STATE.json', ['B09-A03', 'B09-A04'])
@@ -201,19 +276,24 @@ structured('B09_MULTI_VOLUME_CERTIFICATION.json', ['B09-A17', 'B09-A18', 'B09-A1
 structured('B09_EXACT_EVIDENCE_CHAIN.json', ['B09-A19'])
 structured('B09_RESERVATION_CROSS_VOLUME.json', ['B09-A18'])
 structured('B09_UI_TRUTHFULNESS.json', ['B09-A21'])
-structured('H04_CERTIFICATION.json', ['H04-A01', 'H04-A03', 'H04-A04'])
-structured('H04_BOUNDED_READ.json', ['H04-A02', 'H04-A08'])
+structured('H04_CERTIFICATION.json', H04_BLOCKING_GATES)
+structured('H04_BOUNDED_READ.json', ['H04-A02', 'H04-A11', 'H04-A12'])
 structured('H04_PROVENANCE.json', ['H04-A03'])
-structured('H04_REPLAN_CAPABILITY.json', ['H04-A03', 'H04-A04'])
-structured('H04_PROJECTION_REPAIR.json', ['H04-A05'])
-structured('H04_CHECKPOINT_REVALIDATION.json', ['H04-A06'])
+structured('H04_H02_NO_MUTATION.json', ['H04-A04'])
+structured('H04_REPLAN_CAPABILITY.json', ['H04-A05'])
+structured('H04_PROJECTION_REPAIR.json', ['H04-A06'])
+structured('H04_CHECKPOINT_REVALIDATION.json', ['H04-A08'])
+structured('H04_CAPABILITY_REVALIDATION.json', ['H04-A09'])
 structured('H04_CANON_CONFLICT_PROPOSAL_ONLY.json', ['H04-A07'])
-structured('H04_NO_UNBOUNDED_LOOP.json', ['H04-A08'])
-structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22'], { profile: '3_VOLUME_BOUNDED_EQUIVALENT', thresholdMs: 250 })
-structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'source_binding', 'package_smoke'])
+structured('H04_REPAIR_AUTHORIZATION.json', ['H04-A10'])
+structured('H04_NO_UNBOUNDED_LOOP.json', ['H04-A12'])
+structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22', 'H04-A02', 'H04-A11'], { profile: 'LONG_BOOK_10M', scale: scaleReport, fullProjectScan: scaleReport?.fullProjectScan ?? null, webviewFullDump: scaleReport?.webviewFullDump ?? null })
+structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'source_binding', 'package_smoke', 'fresh_package_architecture'])
 structured('B09_H04_REGRESSION.json', ['b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression'])
 fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.stringify({
   batch: 'B09_H04',
+  startCommit: START_COMMIT,
+  startCommitIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -222,7 +302,7 @@ fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.str
   excludedUncommittedPaths: [],
   status: report.sourceBinding,
 }, null, 2)}\n`)
-const baselineCommit = '6992b544f59f385160e3aa2f34f2e206ae715e59'
+const baselineCommit = START_COMMIT
 const changedFiles = git(['diff', '--name-status', `${baselineCommit}..${before.commit}`]).stdout.trim().split('\n').filter(Boolean).map(line => {
   const [status, ...file] = line.split(/\s+/)
   return { status, file: file.join(' ') }

@@ -22,6 +22,8 @@ const realityStatus = (taskId: unknown) => { const value = taskReality.value.fin
 const tasksByClass = (taskClass: string) => tasks.value.filter(task => String(task.class) === taskClass)
 const closeReady = computed(() => planningState.value.closeReadiness === 'READY')
 const remainingTasks = computed(() => Array.isArray(planningState.value.remainingTaskIds) ? planningState.value.remainingTaskIds as string[] : [])
+const responsibilities = computed(() => Array.isArray(planningState.value.unresolvedResponsibilities) ? planningState.value.unresolvedResponsibilities as Array<Record<string, unknown>> : [])
+const routeReplans = computed(() => lifecycle.value?.routeReplans ?? [])
 
 async function closeVolume() {
   await store.runCommand('volume-close', {
@@ -51,6 +53,9 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
         <MetricCard label="Projection revision" :value="String(planningState.generatedRevision ?? lifecycle.projectRevision)" note="可重建投影版本" />
       </div>
       <div v-if="remainingTasks.length" class="muted" style="margin-top:10px">阻塞项：{{ remainingTasks.join('、') }}</div>
+      <div v-if="responsibilities.length" class="section-subgroup" style="margin-top:14px"><strong>OPEN / SUSPENDED responsibilities · PROJECTION</strong><div class="timeline"><div v-for="item in responsibilities" :key="String(item.threadRef)" class="timeline-item"><div class="timeline-marker">T</div><div><strong>{{ String(item.threadRef) }}</strong><div class="muted" style="font-size:12px">{{ String(item.status ?? 'OPEN') }} · 跨卷责任由后端 projection 提供</div></div></div></div></div>
+      <div v-if="routeReplans.length" class="section-subgroup" style="margin-top:14px"><strong>Route replan history · PLAN</strong><div class="timeline"><div v-for="item in routeReplans" :key="String(item.replanId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>v{{ String(item.newVersion) }} · {{ String(item.validationStatus ?? 'UNKNOWN') }}</strong><div class="muted" style="font-size:12px">{{ String(item.reason ?? '未提供原因') }} · {{ String(item.trigger ?? '—') }}</div></div></div></div></div>
+      <div class="section-subgroup" style="margin-top:14px"><strong>Next-volume handoff · PROJECTION</strong><div v-if="lifecycle.latestHandoff" class="muted">{{ String(lifecycle.latestHandoff.handoffStatus ?? 'UNKNOWN') }} · {{ String(lifecycle.latestHandoff.fromVolumeId) }} → {{ String(lifecycle.latestHandoff.toVolumeId) }}</div><div v-else class="muted">当前卷尚无 handoff 记录；关闭并通过 eligibility 后才可创建。</div></div>
       <CommandFeedback :state="closeState" />
       <div class="actions" style="margin-top:14px"><button class="btn primary" :disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成 VolumeExitState 并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出快照在同一事务中提交；失败会完整回滚。</span></div>
     </section>

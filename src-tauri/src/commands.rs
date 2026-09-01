@@ -1214,6 +1214,12 @@ pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Resul
                 volume_id,
             )
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let handoff = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::latest_handoff(
+                connection,
+                project_id,
+                volume_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
             let replans = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::route_replan_history(
                 connection,
                 project_id,
@@ -1228,6 +1234,7 @@ pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Resul
                 "planningState": planning_state,
                 "route": route,
                 "latestClose": close,
+                "latestHandoff": handoff,
                 "routeReplans": replans,
                 "owner": "B09::VolumeLifecycleOwner"
             }))
@@ -2423,11 +2430,6 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .get("volumeId")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "B09_REPLAN_VOLUME_REQUIRED".to_string())?;
-                let plan = operation
-                    .params
-                    .get("plan")
-                    .cloned()
-                    .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
                 let revision =
                     crate::repositories::narrative::NarrativeRepository::project_revision(
                         self.connection,
@@ -2468,10 +2470,23 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .into(),
-                    plan,
                     evidence_refs: operation
                         .params
                         .get("evidenceRefs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                    expected_reality_digest: operation
+                        .params
+                        .get("expectedRealityDigest")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    acknowledged_responsibility_refs: operation
+                        .params
+                        .get("acknowledgedResponsibilityRefs")
                         .and_then(Value::as_array)
                         .into_iter()
                         .flatten()
@@ -2619,10 +2634,6 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .get("volumeId")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "B09_REPLAN_VOLUME_REQUIRED".to_string())?;
-                let expected = operation
-                    .params
-                    .get("plan")
-                    .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
                 let route_ref =
                     crate::repositories::narrative::NarrativeRepository::volume_plan_route(
                         self.connection,
@@ -2639,7 +2650,18 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     )
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "B09_REPLAN_ROUTE_PAYLOAD_NOT_FOUND".to_string())?;
-                let observed = actual == *expected;
+                let observed = actual
+                    .get("routeVersion")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|version| version > 1)
+                    && actual
+                        .get("routeInvariants")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .any(|invariant| {
+                            invariant.as_str() == Some("B09_REPLAN_DERIVED_FROM_COMPILED_INPUT")
+                        });
                 Ok(json!({
                     "operation": operation.operation,
                     "kind": "volume_route_replanned",
@@ -2821,10 +2843,6 @@ fn execute_volume_lifecycle_command(
     let result = match command_type {
         "volume_replan_route" => {
             let volume_id = required_string(payload, "volumeId")?;
-            let plan = payload
-                .get("plan")
-                .cloned()
-                .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
             crate::volume_lifecycle::VolumeLifecycleOwner::replan_volume_route(
                 &handle,
                 crate::volume_lifecycle::RouteReplanRequest {
@@ -2839,8 +2857,14 @@ fn execute_volume_lifecycle_command(
                         .unwrap_or("USER_AUTHORIZED_REPLAN")
                         .into(),
                     reason: required_string(payload, "reason")?.into(),
-                    plan,
                     evidence_refs: string_array(payload.get("evidenceRefs")),
+                    expected_reality_digest: payload
+                        .get("expectedRealityDigest")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    acknowledged_responsibility_refs: string_array(
+                        payload.get("acknowledgedResponsibilityRefs"),
+                    ),
                     now: requested_at.into(),
                 },
             )?

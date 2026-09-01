@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { B09_BLOCKING_GATES, H04_BLOCKING_GATES, H04_GATE_DEFINITIONS, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b09-h04-acceptance.mjs'
 
 const passing = () => ({
+  startCommit: START_COMMIT,
+  startCommitIsAncestor: true,
   sourceCommit: 'final',
   evidenceSourceCommit: 'final',
   sourceCommitAfter: 'final',

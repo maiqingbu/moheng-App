@@ -2,8 +2,9 @@ use ai_novel_production_system_core::commands::{
     execute_command_impl, KernelState, RepositoryReadAdapter,
 };
 use ai_novel_production_system_core::harness::{
-    check_checkpoint_resume, registry_digest_map, BoundedCapabilityExecutor, CapabilityCallEnvelope,
-    CapabilityRegistry, RequestedBounds, SupportCheckpoint, SupportStepStatus, SupportTaskStep,
+    check_checkpoint_resume, registry_digest_map, BoundedCapabilityExecutor,
+    CapabilityCallEnvelope, CapabilityRegistry, RequestedBounds, SupportCheckpoint,
+    SupportStepStatus, SupportTaskStep,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -393,6 +394,141 @@ fn b09_volume_close_requires_resolvable_handoff_evidence() {
 }
 
 #[test]
+fn b09_next_volume_handoff_requires_a_committed_exit_snapshot() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute(
+            "UPDATE volumes SET status='CLOSED' WHERE project_id='p-b09' AND volume_id='volume:b09:1'",
+            [],
+        )
+        .unwrap();
+    let result = VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "volume:b09:2".into(),
+            expected_revision: 0,
+            command_id: "b09-handoff-missing-exit".into(),
+            idempotency_key: "key:b09-handoff-missing-exit".into(),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    );
+    assert!(result
+        .unwrap_err()
+        .contains("NEXT_VOLUME_BLOCKED_ELIGIBILITY"));
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volumes WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    println!("B09_NEXT_VOLUME_NEGATIVE_RESULT missing_exit_snapshot=BLOCK no_partial_handoff=PASS status=PASS");
+}
+
+#[test]
+fn b09_next_volume_compiled_input_digest_changes_with_canon_authority() {
+    fn handoff_digest(with_canon: bool) -> String {
+        let fixture = fixture();
+        fixture
+            .connection
+            .execute(
+                "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+                [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+            )
+            .unwrap();
+        if with_canon {
+            fixture
+                .connection
+                .execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:b09:canon','p-b09','Canon','PERSON',?1,?1)", [NOW])
+                .unwrap();
+            fixture
+                .connection
+                .execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,source_chapter_id,authority_level,created_at,updated_at) VALUES ('fact:b09:canon','p-b09','entity:b09:canon','status','{\"value\":\"changed\"}','plan:b09:1',1,'chapter:b09:1','B',?1,?1)", [NOW])
+                .unwrap();
+        }
+        VolumeLifecycleOwner::close_volume(
+            &fixture.connection,
+            VolumeCloseRequest {
+                project_id: "p-b09".into(),
+                volume_id: fixture.volume_id.clone(),
+                expected_revision: 0,
+                command_id: if with_canon {
+                    "b09-canon-close"
+                } else {
+                    "b09-base-close"
+                }
+                .into(),
+                idempotency_key: if with_canon {
+                    "key:b09-canon-close"
+                } else {
+                    "key:b09-base-close"
+                }
+                .into(),
+                reason: "输入 digest 认证".into(),
+                fault_injection: None,
+                now: NOW.into(),
+            },
+        )
+        .unwrap();
+        VolumeLifecycleOwner::handoff_next_volume(
+            &fixture.connection,
+            NextVolumeHandoffRequest {
+                project_id: "p-b09".into(),
+                current_volume_id: fixture.volume_id.clone(),
+                next_volume_id: "volume:b09:2".into(),
+                expected_revision: 1,
+                command_id: if with_canon {
+                    "b09-canon-handoff"
+                } else {
+                    "b09-base-handoff"
+                }
+                .into(),
+                idempotency_key: if with_canon {
+                    "key:b09-canon-handoff"
+                } else {
+                    "key:b09-base-handoff"
+                }
+                .into(),
+                title: "第二卷".into(),
+                chapter_start: 4,
+                chapter_end: 6,
+                target_words: 3000,
+                now: NOW.into(),
+            },
+        )
+        .unwrap();
+        let input: String = fixture
+            .connection
+            .query_row(
+                "SELECT input_refs_json FROM volume_handoffs WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let input: Value = serde_json::from_str(&input).unwrap();
+        if with_canon {
+            assert_eq!(input["canonFacts"].as_array().map(Vec::len), Some(1));
+        } else {
+            assert_eq!(input["canonFacts"].as_array().map(Vec::len), Some(0));
+        }
+        input["compiledInputDigest"].as_str().unwrap().into()
+    }
+    assert_ne!(handoff_digest(false), handoff_digest(true));
+    println!("B09_NEXT_VOLUME_DIGEST_RESULT canon_change_recompiled=PASS digest_changed=PASS status=PASS");
+}
+
+#[test]
 fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_replay() {
     let fixture = fixture();
     let request = replan_request(0, "b09-replan-1");
@@ -402,12 +538,34 @@ fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_repl
     assert_eq!(first["routeVersion"], 2);
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 2);
     assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT reason FROM volume_route_replans WHERE project_id='p-b09' AND replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap(), "容量与退出缺口需要重新规划");
-    let input_json: String = fixture.connection.query_row("SELECT input_refs_json FROM volume_route_replans WHERE replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap();
+    let input_json: String = fixture
+        .connection
+        .query_row(
+            "SELECT input_refs_json FROM volume_route_replans WHERE replan_id='b09-replan-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let input: Value = serde_json::from_str(&input_json).unwrap();
-    for key in ["compiledInput", "compiledInputDigest", "currentGoal", "currentRoute", "actualReality", "planningState", "unresolvedResponsibilities", "evidenceRefs"] {
-        assert!(input.get(key).is_some(), "missing compiled replan input field {key}");
+    for key in [
+        "compiledInput",
+        "compiledInputDigest",
+        "currentGoal",
+        "currentRoute",
+        "actualReality",
+        "planningState",
+        "unresolvedResponsibilities",
+        "evidenceRefs",
+    ] {
+        assert!(
+            input.get(key).is_some(),
+            "missing compiled replan input field {key}"
+        );
     }
-    assert_eq!(input["candidateSource"], "B09::VolumeLifecycleOwner::compiled_input");
+    assert_eq!(
+        input["candidateSource"],
+        "B09::VolumeLifecycleOwner::compiled_input"
+    );
     let replay = VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request).unwrap();
     assert_eq!(replay["replayed"], true);
     assert_eq!(
@@ -444,9 +602,11 @@ fn b09_route_replan_blocks_missing_goal_evidence_reality_and_responsibility() {
     let missing_evidence = fixture();
     let mut request = replan_request(0, "b09-replan-missing-evidence");
     request.evidence_refs = vec!["evidence:not-found".into()];
-    assert!(VolumeLifecycleOwner::replan_volume_route(&missing_evidence.connection, request)
-        .unwrap_err()
-        .contains("REPLAN_EVIDENCE_NOT_FOUND"));
+    assert!(
+        VolumeLifecycleOwner::replan_volume_route(&missing_evidence.connection, request)
+            .unwrap_err()
+            .contains("REPLAN_EVIDENCE_NOT_FOUND")
+    );
 
     let stale_reality = fixture();
     let projection = VolumeLifecycleOwner::rebuild_planning_state(
@@ -465,19 +625,20 @@ fn b09_route_replan_blocks_missing_goal_evidence_reality_and_responsibility() {
         .unwrap();
     let mut request = replan_request(0, "b09-replan-stale-reality");
     request.expected_reality_digest = Some(projection["stateDigest"].as_str().unwrap().into());
-    assert!(VolumeLifecycleOwner::replan_volume_route(&stale_reality.connection, request)
-        .unwrap_err()
-        .contains("REPLAN_REALITY_STALE"));
+    assert!(
+        VolumeLifecycleOwner::replan_volume_route(&stale_reality.connection, request)
+            .unwrap_err()
+            .contains("REPLAN_REALITY_STALE")
+    );
 
     let missing_responsibility = fixture();
     let mut request = replan_request(0, "b09-replan-missing-responsibility");
     request.acknowledged_responsibility_refs.clear();
-    assert!(VolumeLifecycleOwner::replan_volume_route(
-        &missing_responsibility.connection,
-        request,
-    )
-    .unwrap_err()
-    .contains("REPLAN_RESPONSIBILITY_REQUIRED"));
+    assert!(
+        VolumeLifecycleOwner::replan_volume_route(&missing_responsibility.connection, request,)
+            .unwrap_err()
+            .contains("REPLAN_RESPONSIBILITY_REQUIRED")
+    );
     println!("B09_ROUTE_REPLAN_NEGATIVE_RESULT missing_goal=BLOCK missing_evidence=BLOCK stale_reality=BLOCK missing_responsibility=BLOCK arbitrary_plan=BLOCK status=PASS");
 }
 
@@ -493,28 +654,29 @@ fn h04_cross_volume_provenance_contains_claim_source_capability_and_result_diges
         "scope":"VOLUME",
         "question":"跨卷责任当前来源是什么？"
     });
-    let result = BoundedCapabilityExecutor { registry }.execute(
-        &RepositoryReadAdapter {
-            connection: &fixture.connection,
-            project_id: "p-b09",
-        },
-        &CapabilityCallEnvelope {
-            call_id: "h04:provenance".into(),
-            capability_id: spec.capability_id.clone(),
-            capability_version: spec.version.clone(),
-            spec_digest: spec.spec_digest.clone(),
-            mode: "DIAGNOSE".into(),
-            project_id: "p-b09".into(),
-            project_revision: 0,
-            input_digest: sha256_canonical(&input).unwrap(),
-            input,
-            requested_bounds: RequestedBounds {
-                max_results: 100,
-                max_serialized_bytes: 65_536,
+    let result = BoundedCapabilityExecutor { registry }
+        .execute(
+            &RepositoryReadAdapter {
+                connection: &fixture.connection,
+                project_id: "p-b09",
             },
-        },
-    )
-    .unwrap();
+            &CapabilityCallEnvelope {
+                call_id: "h04:provenance".into(),
+                capability_id: spec.capability_id.clone(),
+                capability_version: spec.version.clone(),
+                spec_digest: spec.spec_digest.clone(),
+                mode: "DIAGNOSE".into(),
+                project_id: "p-b09".into(),
+                project_revision: 0,
+                input_digest: sha256_canonical(&input).unwrap(),
+                input,
+                requested_bounds: RequestedBounds {
+                    max_results: 100,
+                    max_serialized_bytes: 65_536,
+                },
+            },
+        )
+        .unwrap();
     assert!(!result.source_refs.is_empty());
     assert_eq!(result.result_digest.len(), 64);
     assert_eq!(result.status, "PASS");
@@ -541,11 +703,7 @@ fn h04_h02_cross_volume_diagnose_does_not_mutate_plan_route_reality_or_responsib
             |row| row.get(0),
         )
         .unwrap();
-    let before_responsibility = route_payload(
-        &fixture.intent_ref,
-        1,
-        true,
-    );
+    let before_responsibility = route_payload(&fixture.intent_ref, 1, true);
     let registry = CapabilityRegistry::read_only_r1();
     let spec = registry
         .specs
@@ -559,28 +717,29 @@ fn h04_h02_cross_volume_diagnose_does_not_mutate_plan_route_reality_or_responsib
         "scope":"VOLUME",
         "question":"检查跨卷规划约束？"
     });
-    let result = BoundedCapabilityExecutor { registry }.execute(
-        &RepositoryReadAdapter {
-            connection: &fixture.connection,
-            project_id: "p-b09",
-        },
-        &CapabilityCallEnvelope {
-            call_id: "h04:no-mutation".into(),
-            capability_id: spec.capability_id,
-            capability_version: spec.version,
-            spec_digest: spec.spec_digest,
-            mode: "DIAGNOSE".into(),
-            project_id: "p-b09".into(),
-            project_revision: 0,
-            input_digest: sha256_canonical(&input).unwrap(),
-            input,
-            requested_bounds: RequestedBounds {
-                max_results: 100,
-                max_serialized_bytes: 65_536,
+    let result = BoundedCapabilityExecutor { registry }
+        .execute(
+            &RepositoryReadAdapter {
+                connection: &fixture.connection,
+                project_id: "p-b09",
             },
-        },
-    )
-    .unwrap();
+            &CapabilityCallEnvelope {
+                call_id: "h04:no-mutation".into(),
+                capability_id: spec.capability_id,
+                capability_version: spec.version,
+                spec_digest: spec.spec_digest,
+                mode: "DIAGNOSE".into(),
+                project_id: "p-b09".into(),
+                project_revision: 0,
+                input_digest: sha256_canonical(&input).unwrap(),
+                input,
+                requested_bounds: RequestedBounds {
+                    max_results: 100,
+                    max_serialized_bytes: 65_536,
+                },
+            },
+        )
+        .unwrap();
     assert_eq!(result.status, "PASS");
     let after_head: (String, i64, String) = fixture
         .connection
@@ -601,7 +760,9 @@ fn h04_h02_cross_volume_diagnose_does_not_mutate_plan_route_reality_or_responsib
     assert_eq!(before_head, after_head);
     assert_eq!(before_reality, after_reality);
     assert_eq!(before_responsibility["volumeIntentRef"], fixture.intent_ref);
-    println!("H04_H02_NO_MUTATION_RESULT plan=PASS route=PASS taskReality=PASS thread=PASS status=PASS");
+    println!(
+        "H04_H02_NO_MUTATION_RESULT plan=PASS route=PASS taskReality=PASS thread=PASS status=PASS"
+    );
 }
 
 #[test]
@@ -942,8 +1103,20 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
         )
         .unwrap();
     let handoff_input: Value = serde_json::from_str(&handoff_input_json).unwrap();
-    for key in ["compiledInput", "compiledInputDigest", "inheritedRefs", "newIntent", "newRoute", "currentPlanningState", "canonFacts", "futureReservationRefs"] {
-        assert!(handoff_input.get(key).is_some(), "missing next-volume compiler field {key}");
+    for key in [
+        "compiledInput",
+        "compiledInputDigest",
+        "inheritedRefs",
+        "newIntent",
+        "newRoute",
+        "currentPlanningState",
+        "canonFacts",
+        "futureReservationRefs",
+    ] {
+        assert!(
+            handoff_input.get(key).is_some(),
+            "missing next-volume compiler field {key}"
+        );
     }
     assert_ne!(handoff_input["compiledInputDigest"], Value::Null);
     let next_intent_payload: String = fixture
@@ -968,7 +1141,10 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
     let next_route: Value = serde_json::from_str(&next_route_payload).unwrap();
     assert_ne!(old_intent["volumeFunction"], next_intent["volumeFunction"]);
     assert_ne!(old_route["tasks"], next_route["tasks"]);
-    assert_eq!(next_intent["futureReservationRefs"], json!(["reservation:b09:v4"]));
+    assert_eq!(
+        next_intent["futureReservationRefs"],
+        json!(["reservation:b09:v4"])
+    );
     fixture
         .connection
         .execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b09:4','p-b09','volume:b09:2',4,'第四章','NORMAL','COMMITTED',1000,?1,?1)", [NOW])
@@ -976,6 +1152,10 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
     fixture
         .connection
         .execute("INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:b09:chapter:4','p-b09','chapter:b09:4','plan:volume:b09:2',1,'ROUTE_INPUT',?1)", [NOW])
+        .unwrap();
+    fixture
+        .connection
+        .execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:goal:volume:b09:2:responsibility:0','p-b09','volume.task.progress',?1,'chapter:b09:4','{}',?2,?2)", libsql_rusqlite::params![json!({"taskId":"task:goal:volume:b09:2:responsibility:0","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string(), NOW])
         .unwrap();
     VolumeLifecycleOwner::close_volume(
         &fixture.connection,

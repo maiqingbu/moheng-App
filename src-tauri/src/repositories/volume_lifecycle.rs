@@ -206,7 +206,41 @@ impl VolumeLifecycleRepository {
                 libsql_rusqlite::params![project_id, evidence_ref],
                 |row| row.get(0),
             )
-            .map_err(Into::into)
+        .map_err(Into::into)
+    }
+
+    pub fn latest_handoff(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<Value>, VolumeLifecycleRepositoryError> {
+        let row: Option<(String, String, String, String, String, String)> = connection
+            .query_row(
+                "SELECT handoff_id,from_volume_id,to_volume_id,eligibility,from_exit_artifact_id,created_at FROM volume_handoffs WHERE project_id=?1 AND (from_volume_id=?2 OR to_volume_id=?2) ORDER BY created_at DESC,handoff_id DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()?;
+        row.map(
+            |(
+                handoff_id,
+                from_volume_id,
+                to_volume_id,
+                eligibility,
+                exit_artifact_id,
+                created_at,
+            )| {
+                Ok::<Value, VolumeLifecycleRepositoryError>(json!({
+                    "handoffId": handoff_id,
+                    "fromVolumeId": from_volume_id,
+                    "toVolumeId": to_volume_id,
+                    "handoffStatus": eligibility,
+                    "fromExitArtifactId": exit_artifact_id,
+                    "createdAt": created_at,
+                }))
+            },
+        )
+        .transpose()
     }
 
     pub fn handoff_evidence(
