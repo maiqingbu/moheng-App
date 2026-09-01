@@ -212,6 +212,32 @@ structured('H04_NO_UNBOUNDED_LOOP.json', ['H04-A08'])
 structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22'], { profile: '3_VOLUME_BOUNDED_EQUIVALENT', thresholdMs: 250 })
 structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'source_binding', 'package_smoke'])
 structured('B09_H04_REGRESSION.json', ['b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression'])
+fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.stringify({
+  batch: 'B09_H04',
+  sourceCommit: before.commit,
+  evidenceSourceCommit: before.commit,
+  sourceCommitAfter: after.commit,
+  workingTreeDirtyBefore: report.workingTreeDirtyBefore,
+  workingTreeDirtyAfter: report.workingTreeDirtyAfter,
+  excludedUncommittedPaths: [],
+  status: report.sourceBinding,
+}, null, 2)}\n`)
+const baselineCommit = '6992b544f59f385160e3aa2f34f2e206ae715e59'
+const changedFiles = git(['diff', '--name-status', `${baselineCommit}..${before.commit}`]).stdout.trim().split('\n').filter(Boolean).map(line => {
+  const [status, ...file] = line.split(/\s+/)
+  return { status, file: file.join(' ') }
+})
+fs.writeFileSync(path.join(evidence, 'B09_H04_CHANGED_FILES.json'), `${JSON.stringify({
+  batch: 'B09_H04', baselineCommit, sourceCommit: before.commit, changedFiles, status: before.dirtyPaths.length === 0 ? 'PASS' : 'FAIL',
+}, null, 2)}\n`)
+const frozenMigrationPaths = Array.from({ length: 9 }, (_, index) => `src-tauri/migrations/${String(index + 1).padStart(4, '0')}_${['catalog','project_authority','project_command','project_longterm','m0c_commit_delta','m0e_ops','b05_narrative_foundation','h01_support_checkpoint','h03_repair_workflow'][index]}.sql`)
+const frozenMigrationsUnchanged = frozenMigrationPaths.every(file => git(['diff', '--quiet', `${baselineCommit}..${before.commit}`, '--', file]).status === 0)
+fs.writeFileSync(path.join(evidence, 'B09_H04_MIGRATION_FREEZE.json'), `${JSON.stringify({
+  batch: 'B09_H04', baselineCommit, frozenMigrations: frozenMigrationPaths, unchanged: frozenMigrationsUnchanged, additiveMigration: 'src-tauri/migrations/0010_b09_h04_volume_lifecycle.sql', status: frozenMigrationsUnchanged ? 'PASS' : 'FAIL',
+}, null, 2)}\n`)
+fs.writeFileSync(path.join(evidence, 'B09_H04_PACKAGE_SMOKE.json'), `${JSON.stringify({
+  batch: 'B09_H04', sourceCommit: before.commit, sourceOnlyStage: true, rootPrefix: 'ai-novel-production-system/', forbiddenEntries, archiveValidated: packageSmoke, status: packageSmoke ? 'PASS' : 'FAIL',
+}, null, 2)}\n`)
 const acceptance = generateAcceptance(evidence)
 
 const failed = Object.entries(gates).filter(([, gate]) => gate.status !== 'PASS').map(([name]) => name)
