@@ -495,6 +495,17 @@ export interface PlanningRouteProjection {
   truncated: boolean
 }
 
+export interface VolumeLifecycleProjection {
+  projectId: string
+  projectRevision: number
+  volumeId: string
+  planningState: Record<string, unknown>
+  route: PlanningRouteProjection
+  latestClose: Record<string, unknown> | null
+  routeReplans: Record<string, unknown>[]
+  owner: string
+}
+
 export interface HealthIssue {
   id: string
   category: '主线' | '伏笔' | '角色' | '重复' | '卷目标' | '修改影响'
@@ -619,6 +630,8 @@ export type CommandType =
   | 'volume_production_start'
   | 'volume_production_pause'
   | 'volume_close'
+  | 'volume_replan_route'
+  | 'volume_handoff'
   | 'decision_submit'
   | 'revision_request'
   | 'chapter_revision_request'
@@ -676,6 +689,7 @@ export interface FrontendPort {
   queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection>
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection>
   queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection>
+  queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection>
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>

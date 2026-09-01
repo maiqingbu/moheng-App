@@ -605,6 +605,7 @@ fn apply_route_replan(
         "replayed": false,
         "routeVersion": route_version,
         "projectRevision": request.expected_revision + 1,
+        "receiptId": format!("project-receipt:{}", request.command_id),
         "routeRef": artifact_ref,
         "reason": request.reason,
         "evidenceRefs": request.evidence_refs,
@@ -637,6 +638,16 @@ fn apply_volume_close(
     }
     let (route_ref, route) = current_route(connection, &request.project_id, &request.volume_id)?;
     let (intent_ref, _) = current_intent(connection, &request.project_id, &route)?;
+    let handoff_evidence = VolumeLifecycleRepository::handoff_evidence(
+        connection,
+        &request.project_id,
+        &request.volume_id,
+        20,
+    )
+    .map_err(|error| error.to_string())?;
+    if handoff_evidence.is_empty() {
+        return Err("VOLUME_CLOSE_EVIDENCE_REQUIRED".into());
+    }
     let exit_artifact_id = format!("exit:{}", request.volume_id);
     let exit_version = ArtifactRepository::next_version(connection, &exit_artifact_id)
         .map_err(|error| error.to_string())?;
@@ -648,7 +659,7 @@ fn apply_volume_close(
         "remainingTaskIds": projection["remainingTaskIds"],
         "unresolvedThreadRefs": projection["unresolvedThreadRefs"],
         "nextVolumeEligibility": "ELIGIBLE",
-        "handoffEvidenceRefs": [],
+        "handoffEvidenceRefs": handoff_evidence,
     });
     let exit_artifact = make_artifact(
         &request.project_id,
@@ -715,7 +726,12 @@ fn apply_volume_close(
         request.expected_revision,
         "ELIGIBLE",
         "[]",
-        "[]",
+        &exit_artifact
+            .payload
+            .get("handoffEvidenceRefs")
+            .cloned()
+            .unwrap_or_else(|| json!([]))
+            .to_string(),
         &format!("project-receipt:{}", request.command_id),
         &request.now,
     )
@@ -740,6 +756,7 @@ fn apply_volume_close(
         "exitRef": exit_ref,
         "nextVolumeEligibility": "ELIGIBLE",
         "projectRevision": request.expected_revision + 1,
+        "receiptId": format!("project-receipt:{}", request.command_id),
     }))
 }
 
@@ -933,6 +950,7 @@ fn apply_next_volume_handoff(
         "fromVolumeId": request.current_volume_id,
         "toVolumeId": request.next_volume_id,
         "projectRevision": request.expected_revision + 1,
+        "receiptId": format!("project-receipt:{}", request.command_id),
         "inputRefs": input_refs,
     }))
 }

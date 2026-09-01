@@ -206,7 +206,10 @@ pub fn issue_authorization(
 
 fn stage_gate(operation: &RepairOperation) -> Result<(), RepairError> {
     match operation.operation.as_str() {
-        "replan_volume_route" => Err(RepairError::CapabilityUnavailable),
+        // B09 promotes route replan from the H03 placeholder to the typed
+        // lifecycle owner. Authorization is still required by `execute`;
+        // this gate only rejects operations that belong to a later batch.
+        "replan_volume_route" => Ok(()),
         "execute_change_request" => Err(RepairError::ProposalOnly),
         _ => Ok(()),
     }

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 pub const READ_ONLY_STAGE: &str = "H01_READ_DIAGNOSE";
 pub const H02_READ_ONLY_STAGE: &str = "H02_PLANNING_DIAGNOSE";
+pub const H03_REPAIR_STAGE: &str = "H03_AUTHORIZED_REPAIR";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +128,70 @@ impl CapabilityRegistry {
     pub fn digest(&self) -> Result<String, String> {
         sha256_canonical(&serde_json::to_value(&self.specs).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())
+    }
+
+    pub fn b09_replan_r1() -> Self {
+        let capability_id = "replan_volume_route";
+        let version = "1.0.0";
+        let modes = vec!["EXECUTE".into()];
+        let mut hard_bounds = BTreeMap::new();
+        hard_bounds.insert("maxResults".into(), 100);
+        hard_bounds.insert("maxSerializedBytes".into(), 65_536);
+        let spec_digest = sha256_canonical(&json!({
+            "capabilityId": capability_id,
+            "version": version,
+            "modes": modes,
+            "stage": H03_REPAIR_STAGE,
+            "owner": "B09::VolumeLifecycleOwner",
+            "readOrWrite": "WRITE",
+            "inputContract": "route-replan-r1",
+            "outputContract": "project-command-receipt",
+            "hardBounds": hard_bounds,
+        }))
+        .unwrap();
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            capability_id.into(),
+            CapabilitySpec {
+                capability_id: capability_id.into(),
+                version: version.into(),
+                spec_digest,
+                modes,
+                stage: H03_REPAIR_STAGE.into(),
+                owner: "B09::VolumeLifecycleOwner".into(),
+                read_or_write: "WRITE".into(),
+                input_contract: "route-replan-r1".into(),
+                output_contract: "project-command-receipt".into(),
+                hard_bounds,
+            },
+        );
+        Self { specs }
+    }
+
+    pub fn exact_authorized_repair(
+        &self,
+        id: &str,
+        version: &str,
+        digest: &str,
+        mode: &str,
+    ) -> Result<&CapabilitySpec, String> {
+        let spec = self
+            .specs
+            .get(id)
+            .ok_or_else(|| "CAPABILITY_UNKNOWN".to_string())?;
+        if spec.version != version {
+            return Err("CAPABILITY_VERSION_MISMATCH".into());
+        }
+        if spec.spec_digest != digest {
+            return Err("CAPABILITY_SPEC_DIGEST_MISMATCH".into());
+        }
+        if !spec.modes.iter().any(|candidate| candidate == mode) {
+            return Err("CAPABILITY_MODE_FORBIDDEN".into());
+        }
+        if spec.stage != H03_REPAIR_STAGE || spec.read_or_write != "WRITE" {
+            return Err("CAPABILITY_STAGE_FORBIDDEN".into());
+        }
+        Ok(spec)
     }
     pub fn exact(
         &self,

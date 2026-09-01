@@ -1177,6 +1177,64 @@ pub fn query_plan_route_impl(state: &KernelState, request: Value) -> Result<Valu
         .map_err(|e| e.to_string())
 }
 
+pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let volume_id = required_string(&request, "volumeId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|error| error.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let planning_state = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::planning_projection(
+                connection,
+                project_id,
+                volume_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            .unwrap_or_else(|| json!({
+                "status": "NOT_MATERIALIZED",
+                "projectId": project_id,
+                "volumeId": volume_id,
+                "generatedRevision": revision,
+                "closeReadiness": "BLOCKED",
+                "owner": "B09::PlanningStateProjectionOwner"
+            }));
+            let route_request = json!({
+                "projectId": project_id,
+                "volumeId": volume_id,
+                "maxResults": request.get("maxResults").cloned().unwrap_or_else(|| json!(100))
+            });
+            let route = plan_route_from_authority(connection, &route_request, project_id, revision)
+                .map_err(ManagerError::ProjectCommand)?;
+            let close = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::latest_close_record(
+                connection,
+                project_id,
+                volume_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let replans = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::route_replan_history(
+                connection,
+                project_id,
+                volume_id,
+                20,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            Ok(json!({
+                "projectId": project_id,
+                "projectRevision": revision,
+                "volumeId": volume_id,
+                "planningState": planning_state,
+                "route": route,
+                "latestClose": close,
+                "routeReplans": replans,
+                "owner": "B09::VolumeLifecycleOwner"
+            }))
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_context_manifest_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let revision = state
@@ -2359,7 +2417,81 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     owner_receipt_ref: Some(manifest.backup_id),
                 })
             }
-            "replan_volume_route" => Err("H03_CAPABILITY_UNAVAILABLE_BEFORE_B09".into()),
+            "replan_volume_route" => {
+                let volume_id = operation
+                    .params
+                    .get("volumeId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "B09_REPLAN_VOLUME_REQUIRED".to_string())?;
+                let plan = operation
+                    .params
+                    .get("plan")
+                    .cloned()
+                    .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
+                let revision =
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let operation_digest = sha256_canonical(
+                    &serde_json::to_value(operation).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                let command_id = operation
+                    .params
+                    .get("commandId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("h03:replan:{}", &operation_digest[..24]));
+                let idempotency_key = operation
+                    .params
+                    .get("idempotencyKey")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("{command_id}:idempotency"));
+                let request = crate::volume_lifecycle::RouteReplanRequest {
+                    project_id: self.project_id.into(),
+                    volume_id: volume_id.into(),
+                    expected_revision: revision,
+                    command_id,
+                    idempotency_key,
+                    trigger: operation
+                        .params
+                        .get("trigger")
+                        .and_then(Value::as_str)
+                        .unwrap_or("H03_AUTHORIZED_REPLAN")
+                        .into(),
+                    reason: operation
+                        .params
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    plan,
+                    evidence_refs: operation
+                        .params
+                        .get("evidenceRefs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                    now: self.now.into(),
+                };
+                let result = crate::volume_lifecycle::VolumeLifecycleOwner::replan_volume_route(
+                    self.connection,
+                    request,
+                )?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: "B09::VolumeLifecycleOwner".into(),
+                    owner_receipt_ref: result
+                        .get("receiptId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            }
             "execute_change_request" => Err("H03_CHANGE_REQUEST_PROPOSAL_ONLY".into()),
             _ => Err("H03_OWNER_OPERATION_UNKNOWN".into()),
         }
@@ -2459,6 +2591,42 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                 Ok(
                     json!({"operation":operation.operation,"kind":"backup_exists","status":if exists {"PASS"} else {"FAIL"},"observed":exists,"backupReadable":exists}),
                 )
+            }
+            "replan_volume_route" => {
+                let volume_id = operation
+                    .params
+                    .get("volumeId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "B09_REPLAN_VOLUME_REQUIRED".to_string())?;
+                let expected = operation
+                    .params
+                    .get("plan")
+                    .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
+                let route_ref =
+                    crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                        self.connection,
+                        self.project_id,
+                        volume_id,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "B09_REPLAN_ROUTE_NOT_FOUND".to_string())?;
+                let actual =
+                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                        self.connection,
+                        self.project_id,
+                        &route_ref,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "B09_REPLAN_ROUTE_PAYLOAD_NOT_FOUND".to_string())?;
+                let observed = actual == *expected;
+                Ok(json!({
+                    "operation": operation.operation,
+                    "kind": "volume_route_replanned",
+                    "status": if observed {"PASS"} else {"FAIL"},
+                    "observed": observed,
+                    "owner": "B09::VolumeLifecycleOwner",
+                    "routeRef": route_ref,
+                }))
             }
             _ => Err("H03_POSTCONDITION_UNAVAILABLE".into()),
         }
@@ -2580,6 +2748,112 @@ fn execute_repair_command(
         }
         _ => Err("H03_UNSUPPORTED_COMMAND".into()),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_volume_lifecycle_command(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for B09 lifecycle".to_string())?;
+    let payload = request
+        .get("payload")
+        .ok_or_else(|| "IPC_INVALID:payload".to_string())?;
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let result = match command_type {
+        "volume_replan_route" => {
+            let volume_id = required_string(payload, "volumeId")?;
+            let plan = payload
+                .get("plan")
+                .cloned()
+                .ok_or_else(|| "B09_REPLAN_PLAN_REQUIRED".to_string())?;
+            crate::volume_lifecycle::VolumeLifecycleOwner::replan_volume_route(
+                &handle,
+                crate::volume_lifecycle::RouteReplanRequest {
+                    project_id: project_id.into(),
+                    volume_id: volume_id.into(),
+                    expected_revision,
+                    command_id: command_id.into(),
+                    idempotency_key: idempotency_key.into(),
+                    trigger: payload
+                        .get("trigger")
+                        .and_then(Value::as_str)
+                        .unwrap_or("USER_AUTHORIZED_REPLAN")
+                        .into(),
+                    reason: required_string(payload, "reason")?.into(),
+                    plan,
+                    evidence_refs: string_array(payload.get("evidenceRefs")),
+                    now: requested_at.into(),
+                },
+            )?
+        }
+        "volume_close" => crate::volume_lifecycle::VolumeLifecycleOwner::close_volume(
+            &handle,
+            crate::volume_lifecycle::VolumeCloseRequest {
+                project_id: project_id.into(),
+                volume_id: required_string(payload, "volumeId")?.into(),
+                expected_revision,
+                command_id: command_id.into(),
+                idempotency_key: idempotency_key.into(),
+                reason: required_string(payload, "reason")?.into(),
+                fault_injection: payload
+                    .get("faultInjection")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                now: requested_at.into(),
+            },
+        )?,
+        "volume_handoff" => crate::volume_lifecycle::VolumeLifecycleOwner::handoff_next_volume(
+            &handle,
+            crate::volume_lifecycle::NextVolumeHandoffRequest {
+                project_id: project_id.into(),
+                current_volume_id: required_string(payload, "currentVolumeId")?.into(),
+                next_volume_id: required_string(payload, "nextVolumeId")?.into(),
+                expected_revision,
+                command_id: command_id.into(),
+                idempotency_key: idempotency_key.into(),
+                title: required_string(payload, "title")?.into(),
+                chapter_start: payload
+                    .get("chapterStart")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| "IPC_INVALID:payload.chapterStart".to_string())?,
+                chapter_end: payload
+                    .get("chapterEnd")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| "IPC_INVALID:payload.chapterEnd".to_string())?,
+                target_words: payload
+                    .get("targetWords")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| "IPC_INVALID:payload.targetWords".to_string())?,
+                now: requested_at.into(),
+            },
+        )?,
+        _ => return Err("B09_UNSUPPORTED_LIFECYCLE_COMMAND".into()),
+    };
+    Ok(json!({
+        "commandId": command_id,
+        "projectId": project_id,
+        "finalStatus": "committed",
+        "message": match command_type {
+            "volume_close" => "卷已完成原子关闭并生成 VolumeExitState。",
+            "volume_handoff" => "下一卷已完成权威 handoff。",
+            _ => "Volume route 已由 B09 生命周期 owner 原子更新。",
+        },
+        "receiptId": result.get("receiptId"),
+        "beforeRevision": expected_revision,
+        "afterRevision": result.get("projectRevision"),
+        "result": result,
+    }))
 }
 
 // Runtime command handling intentionally carries the complete command envelope
@@ -3210,6 +3484,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "volume_replan_route" | "volume_close" | "volume_handoff" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_volume_lifecycle_command(
+                state,
+                &request,
+                command_type,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+            )
+        }
         "project_create_from_idea" | "project_create_from_market" => {
             let title = request
                 .pointer("/payload/title")
@@ -3616,6 +3903,14 @@ pub fn query_plan_route(state: State<'_, KernelState>, request: Value) -> Result
 }
 
 #[tauri::command]
+pub fn query_volume_lifecycle(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_volume_lifecycle_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     support_session_impl(&state, request)
 }
@@ -3796,6 +4091,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_context_manifest,
         query_plan_stale,
         query_plan_route,
+        query_volume_lifecycle,
         support_session,
         support_checkpoint_resume,
         execute_command,

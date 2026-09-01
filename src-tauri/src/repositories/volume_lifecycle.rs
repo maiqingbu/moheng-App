@@ -1,9 +1,12 @@
 use libsql_rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VolumeLifecycleRepositoryError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] libsql_rusqlite::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +88,82 @@ impl VolumeLifecycleRepository {
         Ok(())
     }
 
+    pub fn planning_projection(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<Value>, VolumeLifecycleRepositoryError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT payload_json FROM volume_planning_state_projection WHERE project_id=?1 AND volume_id=?2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub fn route_replan_history(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Value>, VolumeLifecycleRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT replan_id,previous_artifact_id,previous_version,new_artifact_id,new_version,trigger,reason,source_revision,input_refs_json,validation_status,project_command_receipt_id,created_at FROM volume_route_replans WHERE project_id=?1 AND volume_id=?2 ORDER BY created_at DESC,replan_id DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, volume_id, limit.clamp(1, 100)],
+            |row| {
+                let input_refs: String = row.get(8)?;
+                Ok(serde_json::json!({
+                    "replanId": row.get::<_, String>(0)?,
+                    "previousArtifactId": row.get::<_, Option<String>>(1)?,
+                    "previousVersion": row.get::<_, Option<i64>>(2)?,
+                    "newArtifactId": row.get::<_, String>(3)?,
+                    "newVersion": row.get::<_, i64>(4)?,
+                    "trigger": row.get::<_, String>(5)?,
+                    "reason": row.get::<_, String>(6)?,
+                    "sourceRevision": row.get::<_, i64>(7)?,
+                    "inputRefs": serde_json::from_str::<Value>(&input_refs).unwrap_or(Value::Null),
+                    "validationStatus": row.get::<_, String>(9)?,
+                    "receiptId": row.get::<_, String>(10)?,
+                    "createdAt": row.get::<_, String>(11)?,
+                }))
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn latest_close_record(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<Value>, VolumeLifecycleRepositoryError> {
+        let row: Option<(String, i64, i64, String, String, String)> = connection
+            .query_row(
+                "SELECT close_id,exit_version,close_revision,status,next_volume_eligibility,blocking_refs_json FROM volume_close_records WHERE project_id=?1 AND volume_id=?2 ORDER BY close_revision DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()?;
+        row.map(|(close_id, exit_version, close_revision, status, eligibility, blocking_refs)| {
+            Ok::<Value, VolumeLifecycleRepositoryError>(json!({
+                "closeId": close_id,
+                "exitVersion": exit_version,
+                "closeRevision": close_revision,
+                "status": status,
+                "nextVolumeEligibility": eligibility,
+                "blockingRefs": serde_json::from_str::<Value>(&blocking_refs).unwrap_or(Value::Null),
+            }))
+        })
+        .transpose()
+        .map_err(Into::into)
+    }
+
     pub fn update_plan_index(
         connection: &Connection,
         project_id: &str,
@@ -128,6 +207,30 @@ impl VolumeLifecycleRepository {
                 |row| row.get(0),
             )
             .map_err(Into::into)
+    }
+
+    pub fn handoff_evidence(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Value>, VolumeLifecycleRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT e.source_artifact_id,e.source_version,e.range_start,e.range_end,e.quote FROM canon_evidence e JOIN chapters c ON c.project_id=e.project_id AND c.chapter_id=e.final_chapter_id WHERE e.project_id=?1 AND c.volume_id=?2 ORDER BY e.created_at,e.evidence_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, volume_id, limit.clamp(1, 100)],
+            |row| {
+                Ok(json!({
+                    "artifactId": row.get::<_, String>(0)?,
+                    "version": row.get::<_, i64>(1)?,
+                    "rangeStart": row.get::<_, Option<i64>>(2)?,
+                    "rangeEnd": row.get::<_, Option<i64>>(3)?,
+                    "quote": row.get::<_, Option<String>>(4)?,
+                }))
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn record_route_replan(

@@ -25,7 +25,8 @@ import type {
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
-  VolumeSummary
+  VolumeSummary,
+  VolumeLifecycleProjection
 } from '../../application/contracts'
 import { demoBundle, demoProjectRecords, starterMarket, type DemoProjectRecord } from './fixtures'
 
@@ -448,6 +449,7 @@ export class BrowserDemoPort implements FrontendPort {
   async queryContextManifest(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_context_manifest') }
   async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }
   async queryPlanRoute(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_route') }
+  async queryVolumeLifecycle(_request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { throw new Error('IPC_UNSUPPORTED:query_volume_lifecycle') }
   async supportSession(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_session') }
   async supportCheckpointResume(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_checkpoint_resume') }
 

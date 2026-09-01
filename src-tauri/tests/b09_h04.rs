@@ -1,11 +1,18 @@
+use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
+use ai_novel_production_system_core::harness::CapabilityRegistry;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
+use ai_novel_production_system_core::repair::{
+    operation_digest_with_postconditions, RepairOperation, RepairPlan,
+};
 use ai_novel_production_system_core::volume_lifecycle::{
     NextVolumeHandoffRequest, RouteReplanRequest, VolumeCloseRequest, VolumeLifecycleOwner,
 };
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use tempfile::TempDir;
 
 const NOW: &str = "2026-09-01T00:00:00Z";
@@ -149,7 +156,117 @@ fn b09_planning_state_rebuild_is_deterministic_revision_bound_and_reality_derive
     assert_eq!(after["requiredTasksRemaining"], 0);
     assert_eq!(after["closeReadiness"], "READY");
     assert_ne!(before_digest, after["projectionDigest"]);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT version FROM migration_history WHERE version=10",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        10
+    );
     println!("B09_PLANNING_STATE_RESULT deterministic=PASS rebuild=PASS revision_bound=PASS reality_derived=PASS status=PASS");
+}
+
+#[test]
+fn h04_authorized_replan_uses_typed_b09_owner_and_preserves_read_registry() {
+    let fixture = fixture();
+    let plan = route_payload(&fixture.intent_ref, 2, true);
+    let operation = RepairOperation {
+        operation: "replan_volume_route".into(),
+        target: fixture.volume_id.clone(),
+        params: json!({
+            "volumeId": fixture.volume_id,
+            "plan": plan,
+            "reason": "H04 授权 Route replan",
+            "evidenceRefs": ["evidence:b09:chapter:1"]
+        }),
+        postconditions: json!({}),
+    };
+    let expected_postconditions = vec![json!({"kind":"volume_route_replanned","expected":true})];
+    let operation_digest = operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &expected_postconditions,
+    )
+    .unwrap();
+    let repair_plan = RepairPlan {
+        repair_plan_id: "repair-plan:b09:replan".into(),
+        project_id: "p-b09".into(),
+        based_on_project_revision: 0,
+        diagnosis: json!({"kind":"route_stale"}),
+        finding_refs: vec!["finding:b09:route".into()],
+        target_authority_owner: "B09::VolumeLifecycleOwner".into(),
+        proposed_operations: vec![operation],
+        affected_artifacts: vec!["plan:b09:1".into()],
+        affected_scopes: vec!["volume:b09:1".into()],
+        risk_level: "MEDIUM".into(),
+        requires_backup: false,
+        expected_postconditions,
+        operation_digest: operation_digest.clone(),
+        created_at: NOW.into(),
+    };
+    drop(fixture.connection);
+    drop(fixture._manager);
+    let state = KernelState::new(AppPaths::new(fixture._temp.path()));
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_plan_create",
+            "commandId":"cmd:b09:repair-plan",
+            "idempotencyKey":"key:b09:repair-plan",
+            "projectId":"p-b09",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"dryRun":true,"repairPlan":repair_plan}
+        }),
+    )
+    .unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_authorize",
+            "commandId":"cmd:b09:repair-auth",
+            "idempotencyKey":"key:b09:repair-auth",
+            "projectId":"p-b09",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"authorization":{
+                "authorizationId":"repair-auth:b09:replan",
+                "projectId":"p-b09",
+                "repairPlanId":"repair-plan:b09:replan",
+                "basedOnProjectRevision":0,
+                "operationDigest":operation_digest,
+                "approvedByUser":true,
+                "issuedAt":NOW
+            }}
+        }),
+    )
+    .unwrap();
+    let executed = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_execute",
+            "commandId":"cmd:b09:repair-execute",
+            "idempotencyKey":"key:b09:repair-execute",
+            "projectId":"p-b09",
+            "requestedAt":NOW,
+            "payload":{"repairPlanId":"repair-plan:b09:replan","authorizationId":"repair-auth:b09:replan"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(executed["finalStatus"], "committed");
+    assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
+    let read_registry = CapabilityRegistry::read_only_r1();
+    assert!(!read_registry.specs.contains_key("replan_volume_route"));
+    let repair_registry = CapabilityRegistry::b09_replan_r1();
+    let spec = repair_registry.specs.get("replan_volume_route").unwrap();
+    assert_eq!(spec.owner, "B09::VolumeLifecycleOwner");
+    assert!(repair_registry
+        .exact_authorized_repair("replan_volume_route", "1.0.0", &spec.spec_digest, "EXECUTE")
+        .is_ok());
+    println!("H04_REPLAN_AUTH_RESULT typed_owner=PASS explicit_authorization=PASS read_registry_unchanged=PASS status=PASS");
 }
 
 #[test]
@@ -176,7 +293,7 @@ fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_repl
             .unwrap(),
         1
     );
-    println!("B09_ROUTE_REPLAN_RESULT owner=B07::PlanningOwner reason=PASS evidence=PASS receipt=PASS replay=PASS status=PASS");
+    println!("B09_ROUTE_REPLAN_RESULT owner=B09::VolumeLifecycleOwner reuses=B07::PlanningOwner reason=PASS evidence=PASS receipt=PASS replay=PASS status=PASS");
 }
 
 #[test]
@@ -200,6 +317,73 @@ fn b09_route_replan_stale_revision_cannot_overwrite_current_route() {
     assert!(result.unwrap_err().contains("REVISION_CONFLICT"));
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 1);
     println!("B09_ROUTE_REPLAN_STALE_RESULT stale=BLOCK current_head_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn b09_route_replan_concurrent_connections_have_one_winner() {
+    let fixture = fixture();
+    let db_path = fixture._temp.path().join("projects/p-b09/project.db");
+    let first = replan_request(
+        route_payload(&fixture.intent_ref, 2, true),
+        0,
+        "b09-replan-race-a",
+    );
+    let second = replan_request(
+        route_payload(&fixture.intent_ref, 2, true),
+        0,
+        "b09-replan-race-b",
+    );
+    drop(fixture.connection);
+    drop(fixture._manager);
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = [first, second]
+        .into_iter()
+        .map(|request| {
+            let barrier = Arc::clone(&barrier);
+            let db_path = db_path.clone();
+            thread::spawn(move || {
+                let connection =
+                    ai_novel_production_system_core::project_db::connection::open_connection(
+                        &db_path, false,
+                    )
+                    .unwrap();
+                barrier.wait();
+                VolumeLifecycleOwner::replan_volume_route(&connection, request)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    let success_count = results.iter().filter(|result| result.is_ok()).count();
+    assert_eq!(success_count, 1);
+    let verifier =
+        ai_novel_production_system_core::project_db::connection::open_connection(&db_path, false)
+            .unwrap();
+    assert_eq!(
+        verifier
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        verifier
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volume_route_replans WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(verifier.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:1")))], |row| row.get(0)).unwrap(), 2);
+    println!("B09_ROUTE_REPLAN_RACE_RESULT dual_connection=PASS successCount=1 currentHead=2 status=PASS");
 }
 
 #[test]
@@ -307,6 +491,12 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     )
     .unwrap();
     assert_eq!(closed["nextVolumeEligibility"], "ELIGIBLE");
+    let exit_payload: String = fixture.connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.artifact_type='VolumeExitState'", [], |row| row.get(0)).unwrap();
+    let exit_payload: Value = serde_json::from_str(&exit_payload).unwrap();
+    assert_eq!(
+        exit_payload["unresolvedThreadRefs"],
+        json!(["thread:b09:promise"])
+    );
     assert_eq!(
         fixture
             .connection
@@ -350,4 +540,137 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeIntent' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     println!("B09_CLOSE_RESULT blocked_atomic=PASS close=PASS exit_snapshot=PASS eligibility=PASS handoff=PASS status=PASS");
+}
+
+#[test]
+fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministically() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "b09-multi-close-1".into(),
+            idempotency_key: "key:b09-multi-close-1".into(),
+            reason: "第一卷边界条件已满足".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "volume:b09:2".into(),
+            expected_revision: 1,
+            command_id: "b09-multi-handoff-2".into(),
+            idempotency_key: "key:b09-multi-handoff-2".into(),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    fixture
+        .connection
+        .execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b09:4','p-b09','volume:b09:2',4,'第四章','NORMAL','COMMITTED',1000,?1,?1)", [NOW])
+        .unwrap();
+    fixture
+        .connection
+        .execute("INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:b09:chapter:4','p-b09','chapter:b09:4','plan:volume:b09:2',1,'ROUTE_INPUT',?1)", [NOW])
+        .unwrap();
+    VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: "volume:b09:2".into(),
+            expected_revision: 2,
+            command_id: "b09-multi-close-2".into(),
+            idempotency_key: "key:b09-multi-close-2".into(),
+            reason: "第二卷边界条件已满足".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: "volume:b09:2".into(),
+            next_volume_id: "volume:b09:3".into(),
+            expected_revision: 3,
+            command_id: "b09-multi-handoff-3".into(),
+            idempotency_key: "key:b09-multi-handoff-3".into(),
+            title: "第三卷".into(),
+            chapter_start: 7,
+            chapter_end: 9,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    let first = VolumeLifecycleOwner::rebuild_planning_state(
+        &fixture.connection,
+        "p-b09",
+        "volume:b09:3",
+        NOW,
+    )
+    .unwrap();
+    let second = VolumeLifecycleOwner::rebuild_planning_state(
+        &fixture.connection,
+        "p-b09",
+        "volume:b09:3",
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first["volumeStatus"], "PLANNING");
+    assert_eq!(first["unresolvedThreadRefs"], json!(["thread:b09:promise"]));
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volumes WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volumes WHERE project_id='p-b09' AND status='CLOSED'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volume_planning_state_projection WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        3
+    );
+    println!("B09_MULTI_VOLUME_RESULT volumes=3 boundary_state=PASS open_thread_preserved=PASS deterministic_rebuild=PASS status=PASS");
 }

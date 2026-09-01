@@ -20,7 +20,8 @@ import type {
   StoryDirectionProjection,
   VersionProjection,
   VolumeDetailProjection,
-  VolumeSummary
+  VolumeSummary,
+  VolumeLifecycleProjection
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 import { useProjectLibraryStore } from './projectLibraryStore'
@@ -50,6 +51,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const volumes = ref<PageResult<VolumeSummary> | null>(null)
   const volumeDetail = ref<VolumeDetailProjection | null>(null)
   const planningRoute = ref<PlanningRouteProjection | null>(null)
+  const volumeLifecycle = ref<VolumeLifecycleProjection | null>(null)
   const decisions = ref<PageResult<DecisionItem> | null>(null)
   const readerVolumes = ref<PageResult<VolumeSummary> | null>(null)
   const chapterLists = ref<Record<string, PageResult<ChapterListItem>>>({})
@@ -84,6 +86,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     volumes.value = null
     volumeDetail.value = null
     planningRoute.value = null
+    volumeLifecycle.value = null
     decisions.value = null
     readerVolumes.value = null
     chapterLists.value = {}
@@ -182,6 +185,10 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (planningRoute.value?.volumeId === volumeId && !force) return planningRoute.value
     return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId }), route => { planningRoute.value = route })
   }
+  async function loadVolumeLifecycle(volumeId:string, force=false) {
+    if (volumeLifecycle.value?.volumeId === volumeId && !force) return volumeLifecycle.value
+    return withWorkspace('volume-lifecycle', () => frontendPort.queryVolumeLifecycle({ ...queryBase(`volume-lifecycle:${volumeId}`, 30), volumeId }), value => { volumeLifecycle.value = value })
+  }
   async function loadDecisions(status:'pending'|'resolved'|'all'='all', force=false) {
     if (decisions.value && !force && status==='all') return decisions.value
     return withWorkspace('decisions', () => frontendPort.queryDecisions({ ...queryBase('decisions', 50), status }), v => { decisions.value=v })
@@ -227,6 +234,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (production.value) jobs.push(loadProduction(true))
     if (volumes.value) jobs.push(loadVolumes(true))
     if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
+    if (volumeLifecycle.value) jobs.push(loadVolumeLifecycle(volumeLifecycle.value.volumeId, true))
     if (decisions.value) jobs.push(loadDecisions('all', true))
     if (readerVolumes.value) jobs.push(loadReaderVolumes(true))
     if (canon.value) jobs.push(loadCanon(true))
@@ -301,10 +309,10 @@ export const useProjectStore = defineStore('project-projection', () => {
 
   return {
     currentProjectId, overview, marketStrategy, directions, production, volumes, volumeDetail, planningRoute, decisions,
-    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults,
+    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadProduction, loadVolumes,
-    loadVolumeDetail, loadPlanningRoute, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
+    loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadCanon, loadHealth, loadHistory, loadSettings, search, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }

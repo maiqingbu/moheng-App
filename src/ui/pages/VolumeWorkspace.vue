@@ -11,14 +11,28 @@ const route = useRoute()
 const volumeId = computed(() => String(route.params.volumeId ?? ''))
 const detail = computed(() => store.volumeDetail)
 const planRoute = computed(() => store.planningRoute)
+const lifecycle = computed(() => store.volumeLifecycle)
+const planningState = computed(() => lifecycle.value?.planningState ?? {})
 const tasks = computed(() => planRoute.value?.tasks ?? [])
 const state = computed(() => store.commandState('volume-build'))
+const closeState = computed(() => store.commandState('volume-close'))
 const locked = computed(() => detail.value?.volume.status === 'LOCKED')
 const taskReality = computed(() => planRoute.value?.taskReality ?? [])
 const realityStatus = (taskId: unknown) => { const value = taskReality.value.find(item => String(item.stateId) === String(taskId))?.value as Record<string, unknown> | undefined; return String(value?.status ?? 'NOT_STARTED') }
 const tasksByClass = (taskClass: string) => tasks.value.filter(task => String(task.class) === taskClass)
+const closeReady = computed(() => planningState.value.closeReadiness === 'READY')
+const remainingTasks = computed(() => Array.isArray(planningState.value.remainingTaskIds) ? planningState.value.remainingTaskIds as string[] : [])
 
-onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPlanningRoute(volumeId.value) })
+async function closeVolume() {
+  await store.runCommand('volume-close', {
+    type: 'volume_close',
+    projectId: store.currentProjectId ?? undefined,
+    payload: { volumeId: volumeId.value, reason: '用户在卷工作区确认关闭；退出条件已由 B09 projection 复核。' }
+  })
+  await store.loadVolumeLifecycle(volumeId.value, true)
+}
+
+onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPlanningRoute(volumeId.value); void store.loadVolumeLifecycle(volumeId.value) })
 </script>
 
 <template>
@@ -27,6 +41,19 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
     </PageHeader>
     <section class="card pad section"><span class="badge">PLAN</span><h2 class="card-title" style="margin-top:8px">Volume Goal</h2><p class="card-subtitle">{{ detail.volume.goal }}</p></section>
     <CommandFeedback :state="state" />
+
+    <section v-if="lifecycle" class="card pad section">
+      <div class="card-head"><div><h2 class="card-title">卷生命周期</h2><p class="card-subtitle">B09::VolumeLifecycleOwner · 状态来自权威计划/Reality 的可重建 projection。</p></div><span class="badge" :class="closeReady ? 'success' : 'warning'">{{ closeReady ? 'READY' : 'BLOCKED' }}</span></div>
+      <div class="metric-grid compact-grid">
+        <MetricCard label="关闭准入" :value="closeReady ? '可关闭' : '条件未满足'" :note="`exit gap ${String(planningState.exitConditionGap ?? 0)}`" />
+        <MetricCard label="剩余 Required" :value="String(planningState.requiredTasksRemaining ?? '—')" note="REALITY-derived" />
+        <MetricCard label="下一卷" :value="String(lifecycle.latestClose?.nextVolumeEligibility ?? '待关闭')" note="VolumeExitState snapshot" />
+        <MetricCard label="Projection revision" :value="String(planningState.generatedRevision ?? lifecycle.projectRevision)" note="可重建投影版本" />
+      </div>
+      <div v-if="remainingTasks.length" class="muted" style="margin-top:10px">阻塞项：{{ remainingTasks.join('、') }}</div>
+      <CommandFeedback :state="closeState" />
+      <div class="actions" style="margin-top:14px"><button class="btn primary" :disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成 VolumeExitState 并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出快照在同一事务中提交；失败会完整回滚。</span></div>
+    </section>
 
     <div v-if="locked" class="banner warning section"><div><div class="banner-title">当前卷仍处于准入锁定</div><div class="banner-copy">开篇评估 PASS 前可以查看全书战略中的卷意图，但不能创建详细卷计划或启动后续正文生产。</div></div></div>
 
