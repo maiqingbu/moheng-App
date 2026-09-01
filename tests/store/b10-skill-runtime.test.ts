@@ -94,14 +94,14 @@ describe('B10 Creative Skill Runtime', () => {
 
   it('loads selected skill text and resources progressively', async () => {
     const source = new MemoryBundleSource()
-    const loader = new CreativeSkillLoader(source, [metadata('S14'), metadata('S21'), metadata('S40')])
+    const loader = new CreativeSkillLoader(source, [metadata('S14'), metadata('S21')])
     await loader.loadMetadata()
     expect(loader.evidence().selectedFullTextLoads).toBe(0)
     await loader.loadSkillText('S14')
     expect(loader.evidence()).toMatchObject({ selectedFullTextLoads: 1, unselectedFullTextLoads: 0 })
     await loader.loadResource('S14', 'decision_rules.md')
     expect(loader.evidence()).toMatchObject({ selectedResourceLoads: 1, unselectedResourceLoads: 0 })
-    expect(() => loader.loadSkillText('S40')).toThrow('SKILL_NOT_SELECTED')
+    await expect(loader.loadSkillText('S40')).rejects.toThrow('SKILL_NOT_SELECTED')
     expect(source.skillLoads).toEqual(['S14'])
     expect(source.resourceLoads).toEqual(['S14/decision_rules.md'])
   })
@@ -188,7 +188,7 @@ describe('B10 Creative Skill Runtime', () => {
     const candidate = { status: 'CANDIDATE' as const, body: '他走进门。', candidateDigest: 'old', candidateRef: 'candidate:9' }
     const repaired = repairCandidate({
       candidate, findingRefs: ['finding:hook'], affectedDimensions: ['hook'],
-      patch: { start: 3, end: 6, replacement: '他停在门前。' },
+      patch: { start: 0, end: 5, replacement: '他停在门前。' },
       skillId: 'S40', skillVersion: '1.2.0', model: 'local-recording',
       repairRun: 1, repairRunLimit: 2, contextTokens: 200, modelCalls: 1,
     })
