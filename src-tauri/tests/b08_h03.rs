@@ -588,6 +588,42 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
 }
 
 #[test]
+fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state.manager.create("p-b10-no-skill", "B10", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-no-skill");
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b10:no-skill","idempotencyKey":"key:b10:no-skill",
+            "projectId":"p-b10-no-skill","expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open("p-b10-no-skill", "B10", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-no-skill' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-no-skill' AND artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b10-no-skill' AND artifact_type='FinalChapter'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+}
+
+#[test]
 fn b08_revalidates_relevant_state_after_render_and_blocks_stale_final_commit() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());

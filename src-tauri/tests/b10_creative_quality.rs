@@ -2,7 +2,7 @@ use ai_novel_production_system_core::creative_skills::{
     build_skill_task_context, create_invocation_provenance, default_taste_profile,
     enforce_hard_quality_separation, evaluate_narrative_quality, load_registry,
     normalize_skill_output, repair_candidate, select_creative_skills, RepairCandidateRequest,
-    SkillSelectionRequest,
+    SkillSelectionRequest, recheck_affected_dimensions,
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use serde_json::json;
@@ -205,4 +205,28 @@ fn b10_repair_is_candidate_only_and_stops_before_transport_at_limit() {
     assert_eq!(stopped.status, "ADVISORY_ESCALATION");
     assert_eq!(stopped.transport_calls, 0);
     assert_eq!(stopped.reason, Some("REPAIR_RUN_LIMIT".into()));
+}
+
+#[test]
+fn b10_repair_rechecks_only_affected_dimensions_before_hard_gate() {
+    let profile = default_taste_profile(7);
+    let report = evaluate_narrative_quality(
+        &candidate_ref("candidate:b10:recheck"),
+        "project:b10",
+        7,
+        "短正文",
+        &profile,
+        vec!["inv:b10:recheck".into()],
+    )
+    .unwrap();
+    let rechecked = recheck_affected_dimensions(
+        &report,
+        "他停在门前，听见门后的脚步声。",
+        &profile,
+        vec!["hook".into()],
+    )
+    .unwrap();
+    assert_eq!(rechecked.rechecked_dimensions, vec!["hook"]);
+    assert_eq!(rechecked.soft_only, true);
+    assert_eq!(rechecked.model_provenance.evaluator_calls, 1);
 }
