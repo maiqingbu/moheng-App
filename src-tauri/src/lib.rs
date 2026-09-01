@@ -11,6 +11,7 @@ pub mod provider;
 pub mod repair;
 pub mod repositories;
 pub mod stable_id;
+pub mod volume_lifecycle;
 
 pub use repositories::runtime;
 

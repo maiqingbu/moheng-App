@@ -40,6 +40,18 @@ pub struct GcReceipt {
 
 pub struct ArtifactRepository;
 impl ArtifactRepository {
+    pub fn next_version(connection: &Connection, artifact_id: &str) -> Result<i64, ArtifactError> {
+        let latest: Option<i64> = connection
+            .query_row(
+                "SELECT MAX(version) FROM artifacts WHERE artifact_id=?1",
+                [artifact_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(latest.map_or(1, |version| version + 1))
+    }
+
     pub fn insert_candidate(
         connection: &Connection,
         project_id: &str,
@@ -157,7 +169,33 @@ impl ArtifactRepository {
         }) {
             return Err(ArtifactError::VersionConflict);
         }
-        connection.execute("INSERT INTO canonical_heads(project_id, artifact_type, scope_level, scope_key, artifact_id, version, payload_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(project_id, artifact_type, scope_level, scope_key) DO UPDATE SET artifact_id=excluded.artifact_id, version=excluded.version, payload_hash=excluded.payload_hash", libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key_value, artifact.artifact_id, artifact.version, artifact.payload_hash])?;
+        // The frozen trigger rejects UPDATE OF payload_hash. Replace the
+        // derived head row atomically instead of using an UPSERT that would
+        // fire that trigger when a newer version becomes current.
+        connection.execute(
+            "DELETE FROM canonical_heads WHERE project_id=?1 AND artifact_type=?2 AND scope_level=?3 AND scope_key=?4",
+            libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key_value],
+        )?;
+        connection.execute(
+            "INSERT INTO canonical_heads(project_id, artifact_type, scope_level, scope_key, artifact_id, version, payload_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key_value, artifact.artifact_id, artifact.version, artifact.payload_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn commit_candidate(
+        connection: &Connection,
+        artifact_id: &str,
+        version: i64,
+        committed_at: &str,
+    ) -> Result<(), ArtifactError> {
+        let updated = connection.execute(
+            "UPDATE artifacts SET artifact_status='COMMITTED', committed_at=?1 WHERE artifact_id=?2 AND version=?3 AND artifact_status IN ('CANDIDATE','VALIDATED')",
+            libsql_rusqlite::params![committed_at, artifact_id, version],
+        )?;
+        if updated != 1 {
+            return Err(ArtifactError::CandidateHead);
+        }
         Ok(())
     }
 

@@ -12,7 +12,7 @@ const NOW: &str = "2026-09-01T00:00:00Z";
 
 struct Fixture {
     _temp: TempDir,
-    manager: ProjectManager,
+    _manager: ProjectManager,
     connection: ProjectHandle,
     volume_id: String,
     intent_ref: Value,
@@ -71,11 +71,34 @@ fn fixture() -> Fixture {
         connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p-b09',?2,?3,?4,'NORMAL',?5,1000,?6,?6)", libsql_rusqlite::params![format!("chapter:b09:{chapter_no}"),volume_id,chapter_no,format!("第{chapter_no}章"),if chapter_no == 1 {"COMMITTED"} else {"PLANNED"},NOW]).unwrap();
     }
     let intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"第一卷主线推进","entryConditions":[],"mustAchieve":[{"id":"goal:b09:main","description":"完成卷内主任务"}],"mustNotBreak":[],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:b09:required"}],"futureReservationRefs":["reservation:b09:v4"],"crossVolumeResponsibilityRefs":["thread:b09:promise"],"targetChapterRange":{"min":1,"preferred":3,"max":3},"targetWordRange":{"preferred":3000}});
-    let intent_ref = insert_committed_artifact(&connection, "p-b09", "intent:b09:1", "VolumeIntent", "VOLUME", &scope("VOLUME", Some(("volumeId", &volume_id))), &intent);
+    let intent_ref = insert_committed_artifact(
+        &connection,
+        "p-b09",
+        "intent:b09:1",
+        "VolumeIntent",
+        "VOLUME",
+        &scope("VOLUME", Some(("volumeId", &volume_id))),
+        &intent,
+    );
     let route = route_payload(&intent_ref, 1, true);
-    insert_committed_artifact(&connection, "p-b09", "plan:b09:1", "VolumePlan", "VOLUME", &scope("VOLUME", Some(("volumeId", &volume_id))), &route);
+    insert_committed_artifact(
+        &connection,
+        "p-b09",
+        "plan:b09:1",
+        "VolumePlan",
+        "VOLUME",
+        &scope("VOLUME", Some(("volumeId", &volume_id))),
+        &route,
+    );
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:b09:chapter:1','p-b09','chapter:b09:1','plan:b09:1',1,'ROUTE_INPUT',?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:b09:required','p-b09','volume.task.progress',?1,'chapter:b09:1','{}',?2,?2)", libsql_rusqlite::params![json!({"taskId":"task:b09:required","status":"ACTIVE","evidenceRefs":[],"remainingConditions":[]}).to_string(),NOW]).unwrap();
-    Fixture { _temp: temp, manager, connection, volume_id, intent_ref }
+    Fixture {
+        _temp: temp,
+        _manager: manager,
+        connection,
+        volume_id,
+        intent_ref,
+    }
 }
 
 fn replan_request(plan: Value, expected_revision: i64, command: &str) -> RouteReplanRequest {
@@ -134,24 +157,45 @@ fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_repl
     let fixture = fixture();
     let plan = route_payload(&fixture.intent_ref, 2, true);
     let request = replan_request(plan, 0, "b09-replan-1");
-    let first = VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request.clone()).unwrap();
+    let first =
+        VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request.clone()).unwrap();
     assert_eq!(first["replayed"], false);
     assert_eq!(first["routeVersion"], 2);
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 2);
     assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT reason FROM volume_route_replans WHERE project_id='p-b09' AND replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap(), "容量与退出缺口需要重新规划");
     let replay = VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request).unwrap();
     assert_eq!(replay["replayed"], true);
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM volume_route_replans WHERE project_id='p-b09'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volume_route_replans WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
     println!("B09_ROUTE_REPLAN_RESULT owner=B07::PlanningOwner reason=PASS evidence=PASS receipt=PASS replay=PASS status=PASS");
 }
 
 #[test]
 fn b09_route_replan_stale_revision_cannot_overwrite_current_route() {
     let fixture = fixture();
-    fixture.connection.execute("UPDATE project_meta SET revision=revision+1 WHERE project_id='p-b09'", []).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_meta SET revision=revision+1 WHERE project_id='p-b09'",
+            [],
+        )
+        .unwrap();
     let result = VolumeLifecycleOwner::replan_volume_route(
         &fixture.connection,
-        replan_request(route_payload(&fixture.intent_ref, 2, true), 0, "b09-replan-stale"),
+        replan_request(
+            route_payload(&fixture.intent_ref, 2, true),
+            0,
+            "b09-replan-stale",
+        ),
     );
     assert!(result.unwrap_err().contains("REVISION_CONFLICT"));
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 1);
@@ -175,9 +219,36 @@ fn b09_volume_close_blocks_unfinished_exit_without_partial_state() {
         },
     );
     assert!(result.unwrap_err().contains("VOLUME_CLOSE_BLOCKED"));
-    assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT status FROM volumes WHERE volume_id=?1", [&fixture.volume_id], |row| row.get(0)).unwrap(), "PLANNING");
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeExitState'", [], |row| row.get(0)).unwrap(), 0);
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM volume_close_records", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM volumes WHERE volume_id=?1",
+                [&fixture.volume_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "PLANNING"
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeExitState'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM volume_close_records", [], |row| row
+                .get(0))
+            .unwrap(),
+        0
+    );
     println!("B09_VOLUME_CLOSE_NEGATIVE_RESULT required_exit=BLOCK partial_close=0 false_eligibility=0 status=PASS");
 }
 
@@ -187,25 +258,96 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     fixture.connection.execute("UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'", [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()]).unwrap();
     let fault = VolumeLifecycleOwner::close_volume(
         &fixture.connection,
-        VolumeCloseRequest { project_id:"p-b09".into(), volume_id:fixture.volume_id.clone(), expected_revision:0, command_id:"b09-close-fault".into(), idempotency_key:"key:b09-close-fault".into(), reason:"fault".into(), fault_injection:Some("after_exit_artifact".into()), now:NOW.into() },
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "b09-close-fault".into(),
+            idempotency_key: "key:b09-close-fault".into(),
+            reason: "fault".into(),
+            fault_injection: Some("after_exit_artifact".into()),
+            now: NOW.into(),
+        },
     );
     assert!(fault.is_err());
-    assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT status FROM volumes WHERE volume_id=?1", [&fixture.volume_id], |row| row.get(0)).unwrap(), "PLANNING");
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeExitState'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM volumes WHERE volume_id=?1",
+                [&fixture.volume_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "PLANNING"
+    );
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeExitState'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
     let closed = VolumeLifecycleOwner::close_volume(
         &fixture.connection,
-        VolumeCloseRequest { project_id:"p-b09".into(), volume_id:fixture.volume_id.clone(), expected_revision:0, command_id:"b09-close-ok".into(), idempotency_key:"key:b09-close-ok".into(), reason:"all exit conditions satisfied".into(), fault_injection:None, now:NOW.into() },
-    ).unwrap();
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: "b09-close-ok".into(),
+            idempotency_key: "key:b09-close-ok".into(),
+            reason: "all exit conditions satisfied".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
     assert_eq!(closed["nextVolumeEligibility"], "ELIGIBLE");
-    assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT status FROM volumes WHERE volume_id=?1", [&fixture.volume_id], |row| row.get(0)).unwrap(), "CLOSED");
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM volumes WHERE volume_id=?1",
+                [&fixture.volume_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "CLOSED"
+    );
     let handoff = VolumeLifecycleOwner::handoff_next_volume(
         &fixture.connection,
-        NextVolumeHandoffRequest { project_id:"p-b09".into(), current_volume_id:fixture.volume_id.clone(), next_volume_id:"volume:b09:2".into(), expected_revision:1, command_id:"b09-handoff-2".into(), idempotency_key:"key:b09-handoff-2".into(), title:"第二卷".into(), chapter_start:4, chapter_end:6, target_words:3000, now:NOW.into() },
-    ).unwrap();
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "volume:b09:2".into(),
+            expected_revision: 1,
+            command_id: "b09-handoff-2".into(),
+            idempotency_key: "key:b09-handoff-2".into(),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
     assert_eq!(handoff["eligibility"], "ELIGIBLE");
-    assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM volumes WHERE project_id='p-b09'", [], |row| row.get(0)).unwrap(), 2);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM volumes WHERE project_id='p-b09'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        2
+    );
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeIntent' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     println!("B09_CLOSE_RESULT blocked_atomic=PASS close=PASS exit_snapshot=PASS eligibility=PASS handoff=PASS status=PASS");
 }
-

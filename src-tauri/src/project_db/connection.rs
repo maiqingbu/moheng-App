@@ -23,6 +23,8 @@ const B05_NARRATIVE_MIGRATION: &str =
 const H01_SUPPORT_MIGRATION: &str =
     include_str!("../../migrations/0008_h01_support_checkpoint.sql");
 const H03_REPAIR_MIGRATION: &str = include_str!("../../migrations/0009_h03_repair_workflow.sql");
+const B09_H04_VOLUME_LIFECYCLE_MIGRATION: &str =
+    include_str!("../../migrations/0010_b09_h04_volume_lifecycle.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     if !read_only {
@@ -139,13 +141,21 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
+    let applied_v10: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 10",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(applied.is_none()
         || applied_v3.is_none()
         || applied_v4.is_none()
         || applied_v5.is_none()
         || applied_v6.is_none()
         || applied_v7.is_none()
-        || applied_v8.is_none())
+        || applied_v8.is_none()
+        || applied_v10.is_none())
 }
 
 pub fn migrate_project(
@@ -182,6 +192,14 @@ pub fn migrate_project(
         // history: B01--H01 compatibility treats v8 as the last schema
         // version, while these tables carry no narrative authority.
         connection.execute_batch(H03_REPAIR_MIGRATION)?;
+        let needs_b09_migration: bool = connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM migration_history WHERE version=10)",
+            [],
+            |row| row.get(0),
+        )?;
+        if needs_b09_migration {
+            connection.execute_batch(B09_H04_VOLUME_LIFECYCLE_MIGRATION)?;
+        }
         // Additive B04 query-coverage index. It is replay-safe and intentionally
         // does not alter any frozen migration SQL/history.
         connection.execute_batch(
@@ -216,6 +234,12 @@ pub fn migrate_project(
         if needs_h01_migration {
             connection.execute(
                 "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (8, ?1)",
+                [now],
+            )?;
+        }
+        if needs_b09_migration {
+            connection.execute(
+                "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (10, ?1)",
                 [now],
             )?;
         }
