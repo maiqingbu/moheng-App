@@ -51,6 +51,8 @@ test('P01 formal provider evidence is source-bound to raw, unknown, and budget p
   assert.match(acceptance, /p01_formal_provider_raw_response_persists_before_model_payload_parse/)
   assert.match(acceptance, /p01_formal_configured_gateway_timeout_preserves_unknown_remote_outcome/)
   assert.match(acceptance, /p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cost/)
+  assert.match(acceptance, /p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist/)
   assert.match(acceptance, /P01_FORMAL_RAW_RESPONSE\.json/)
+  assert.match(acceptance, /P01_FORMAL_PROVIDER_USAGE\.json/)
   assert.match(acceptance, /READY_FOR_REACCEPTANCE/)
 })
