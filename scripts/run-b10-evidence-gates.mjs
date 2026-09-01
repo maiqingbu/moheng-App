@@ -181,6 +181,7 @@ const b10Repair = add('b10_repair_targeted', 'cargo', ['test', '--manifest-path'
 const b10Negative = add('b10_negative_fixtures', 'node', ['--test', 'tests/b10-acceptance-generator.test.mjs'])
 const b10Ui = add('b10_ui', 'node', ['--test', 'tests/b10-ui.test.mjs'])
 const b10Scale = add('b10_scale_context', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b10_creative_quality', 'b10_context', '--', '--nocapture'])
+const negativeMatrixRun = add('b10_negative_matrix', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b10_negative_matrix', '--', '--nocapture'])
 const negativeTestNames = [
   'neg_01_skill_sql_is_denied',
   'neg_02_skill_commit_is_denied',
@@ -204,7 +205,7 @@ const negativeNames = Array.from({ length: 15 }, (_, index) => {
 })
 const negativeResults = Object.fromEntries(negativeNames.map(({ id, testName }) => [
   id,
-  add(`negative_${id}`, 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b10_negative_matrix', testName, '--', '--nocapture']),
+  negativeMatrixRun,
 ]))
 const negativeCases = [
   ...negativeNames.map(({ id, testName }) => ({ id, testName, result: negativeResults[id] })),
@@ -214,10 +215,15 @@ const negativeCases = [
     result: b10WithoutSkill,
   },
 ]
-const negativeMatrix = aggregate('b10_negative_matrix_exact_mapping', negativeCases.map(({ result }) => result))
 const exactNegativePass = negativeCases.every(({ testName, result }) => exactTestPass(result, testName))
-negativeMatrix.status = exactNegativePass ? 'PASS' : 'FAIL'
-negativeMatrix.exitCode = exactNegativePass ? 0 : 1
+const negativeMatrix = {
+  name: 'b10_negative_matrix_exact_mapping',
+  command: `${negativeMatrixRun.command} && ${b10WithoutSkill.command}`,
+  status: exactNegativePass ? 'PASS' : 'FAIL',
+  exitCode: exactNegativePass ? 0 : 1,
+  output: `--- ${negativeMatrixRun.name} ---\n${negativeMatrixRun.output}\n--- ${b10WithoutSkill.name} ---\n${b10WithoutSkill.output}`,
+  log: 'b10_negative_matrix_exact_mapping.log',
+}
 fs.writeFileSync(path.join(evidence, negativeMatrix.log), negativeMatrix.output)
 writeJson('B10_NEGATIVE_MATRIX.json', {
   schema: 'b10-negative-matrix-r1',
