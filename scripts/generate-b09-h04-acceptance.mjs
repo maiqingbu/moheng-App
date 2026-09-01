@@ -25,7 +25,7 @@ export const GLOBAL_BLOCKING_GATES = [
   'baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary',
   'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt',
   'cargo_check', 'cargo_clippy', 'b02_regression', 'b03_regression', 'b05_regression',
-  'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression',
+  'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'm0a',
   'source_binding', 'package_smoke', 'fresh_package_architecture',
 ]
 export const REQUIRED_BLOCKING_GATES = [...B09_BLOCKING_GATES, ...H04_BLOCKING_GATES, ...GLOBAL_BLOCKING_GATES]

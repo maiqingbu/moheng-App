@@ -220,6 +220,7 @@ const gates = {
   b07_h02_regression: gate(b07.status === 'PASS', b07.log),
   b08_h03_regression: gate(b08.status === 'PASS', b08.log),
   p01_regression: gate(p01.status === 'PASS', p01.log),
+  m0a: gate(m0a.status === 'PASS', m0a.log),
   package_smoke: gate(packageSmoke, 'package_smoke.log', { forbiddenEntries: forbiddenEntries.length }),
   fresh_package_architecture: gate(freshPackageArchitecture, 'fresh_package_architecture.log+fresh_package_generator.log', { receiver: { architecture: freshArchitecture.status, generator: freshGenerator.status, node: freshNode.status } }),
 }
@@ -288,7 +289,7 @@ structured('H04_CANON_CONFLICT_PROPOSAL_ONLY.json', ['H04-A07'])
 structured('H04_REPAIR_AUTHORIZATION.json', ['H04-A10'])
 structured('H04_NO_UNBOUNDED_LOOP.json', ['H04-A12'])
 structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22', 'H04-A02', 'H04-A11'], { profile: 'LONG_BOOK_10M', scale: scaleReport, fullProjectScan: scaleReport?.fullProjectScan ?? null, webviewFullDump: scaleReport?.webviewFullDump ?? null })
-structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'source_binding', 'package_smoke', 'fresh_package_architecture'])
+structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'm0a', 'source_binding', 'package_smoke', 'fresh_package_architecture'])
 structured('B09_H04_REGRESSION.json', ['b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression'])
 fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.stringify({
   batch: 'B09_H04',
