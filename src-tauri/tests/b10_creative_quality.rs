@@ -1,9 +1,8 @@
 use ai_novel_production_system_core::creative_skills::{
     build_skill_task_context, create_invocation_provenance, default_taste_profile,
     enforce_hard_quality_separation, enrich_chapter_with_policy, evaluate_narrative_quality,
-    load_registry,
-    normalize_skill_output, recheck_affected_dimensions, repair_candidate, select_creative_skills,
-    RepairCandidateRequest, SkillSelectionRequest,
+    load_registry, normalize_skill_output, recheck_affected_dimensions, repair_candidate,
+    select_creative_skills, RepairCandidateRequest, SkillSelectionRequest,
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use serde_json::json;
@@ -277,16 +276,15 @@ fn b10_formal_loader_consumes_selected_skill_text_and_keeps_unselected_loads_zer
         .loaded_skill_texts
         .iter()
         .all(|loaded| loaded.reference.ends_with("/SKILL.md") && loaded.digest.len() == 64));
-    assert!(opening
-        .invocations
-        .iter()
-        .all(|invocation| invocation.loaded_skill_text_ref.ends_with("/SKILL.md")
-            && invocation.loaded_skill_text_digest.len() == 64
-            && invocation.created_at == NOW
-            && invocation
-                .method_refs
-                .iter()
-                .any(|reference| reference.ends_with("/SKILL.md"))));
+    assert!(opening.invocations.iter().all(|invocation| invocation
+        .loaded_skill_text_ref
+        .ends_with("/SKILL.md")
+        && invocation.loaded_skill_text_digest.len() == 64
+        && invocation.created_at == NOW
+        && invocation
+            .method_refs
+            .iter()
+            .any(|reference| reference.ends_with("/SKILL.md"))));
     assert_ne!(opening.method_guidance, long_form.method_guidance);
 }
 
@@ -308,17 +306,14 @@ fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
     assert_eq!(enrichment.loading.selected_resource_loads, 2);
     assert_eq!(enrichment.loading.unselected_resource_loads, 0);
     assert_eq!(enrichment.loaded_resources.len(), 2);
-    assert!(enrichment
-        .invocations
+    assert!(enrichment.invocations.iter().all(|invocation| invocation
+        .resource_refs
         .iter()
-        .all(|invocation| invocation
-            .resource_refs
-            .iter()
-            .any(|reference| reference.ends_with("resources/operating_method.md"))
-            && invocation
-                .resource_digests
-                .iter()
-                .all(|digest| digest.as_str().unwrap().len() == 64)));
+        .any(|reference| reference.ends_with("resources/operating_method.md"))
+        && invocation.resource_digests.iter().all(|digest| digest
+            .get("digest")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.len() == 64))));
 }
 
 #[test]
@@ -337,17 +332,32 @@ fn b10_quality_semantics_distinguish_agency_dialogue_repetition_and_hook() {
     };
     let active = report("林舟决定推门，拔刀冲向守卫。门后传来脚步声，谁在那里？");
     let passive = report("林舟被推倒在地，只能等待守卫决定他的命运。房间安静地结束了。");
-    assert_ne!(active.dimensions["agency"].score, passive.dimensions["agency"].score);
-    assert_ne!(active.dimensions["hook"].score, passive.dimensions["hook"].score);
+    assert_ne!(
+        active.dimensions["agency"].score,
+        passive.dimensions["agency"].score
+    );
+    assert_ne!(
+        active.dimensions["hook"].score,
+        passive.dimensions["hook"].score
+    );
 
     let dialogue = report("“你来了。”林舟说。“我一直在等你。”对方回答。");
     let exposition = report("所谓旧城，是一座建于三百年前的城池。城池的历史、制度与地理沿革如下。");
-    assert_ne!(dialogue.dimensions["dialogue"].score, exposition.dimensions["dialogue"].score);
-    assert_ne!(dialogue.dimensions["exposition"].score, exposition.dimensions["exposition"].score);
+    assert_ne!(
+        dialogue.dimensions["dialogue"].score,
+        exposition.dimensions["dialogue"].score
+    );
+    assert_ne!(
+        dialogue.dimensions["exposition"].score,
+        exposition.dimensions["exposition"].score
+    );
 
     let repeated = report("门后传来脚步声。门后传来脚步声。门后传来脚步声。门后传来脚步声。");
     let varied = report("雨停后，林舟看见远处的灯，决定沿着河岸寻找出口。");
-    assert_ne!(repeated.dimensions["repetition"].score, varied.dimensions["repetition"].score);
+    assert_ne!(
+        repeated.dimensions["repetition"].score,
+        varied.dimensions["repetition"].score
+    );
 }
 
 #[test]

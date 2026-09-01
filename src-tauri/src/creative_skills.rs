@@ -9,7 +9,11 @@ use crate::generated::types::ArtifactRef;
 use crate::hash::sha256_canonical;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CREATIVE_SKILLS_VERSION: &str = "1.2.0";
 pub const CREATIVE_SKILLS_ARCHIVE_SHA256: &str =
@@ -61,6 +65,7 @@ pub struct SkillMetadata {
     pub id: String,
     pub slug: String,
     pub name_zh: String,
+    pub version: String,
     pub category: String,
     pub role: String,
     pub runtime_stage: String,
@@ -68,6 +73,7 @@ pub struct SkillMetadata {
     pub mutation_policy: String,
     pub coverage: Vec<String>,
     pub bundle_digest: String,
+    pub method_resource: Option<String>,
     pub authority_access: String,
     pub hard_gate_authority: bool,
     pub control_decision_authority: bool,
@@ -92,16 +98,15 @@ fn string_field(value: &Value, field: &str) -> String {
 }
 
 fn string_array(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    match value {
+        Some(Value::String(item)) => vec![item.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Loads package metadata only. Skill text and resources are intentionally not
@@ -118,6 +123,7 @@ pub fn load_registry() -> Result<SkillRegistry, String> {
             id: string_field(value, "id"),
             slug: string_field(value, "slug"),
             name_zh: string_field(value, "name_zh"),
+            version: string_field(value, "version"),
             category: string_field(value, "category"),
             role: string_field(value, "role"),
             runtime_stage: string_field(value, "runtimeStage"),
@@ -125,6 +131,10 @@ pub fn load_registry() -> Result<SkillRegistry, String> {
             mutation_policy: string_field(value, "mutationPolicy"),
             coverage: string_array(value.get("coverage")),
             bundle_digest: string_field(value, "bundleDigest"),
+            method_resource: value
+                .get("methodResource")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
             authority_access: string_field(value, "authorityAccess"),
             hard_gate_authority: value
                 .get("hardGateAuthority")
@@ -225,6 +235,154 @@ pub fn select_creative_skills(request: SkillSelectionRequest) -> Result<SkillSel
         context_tokens: request.context_tokens,
         model_calls: request.model_calls,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedSkillText {
+    pub reference: String,
+    pub digest: String,
+    #[serde(skip_serializing)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedResource {
+    pub reference: String,
+    pub digest: String,
+    #[serde(skip_serializing)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillLoadingEvidence {
+    pub selected_full_text_loads: usize,
+    pub unselected_full_text_loads: usize,
+    pub selected_resource_loads: usize,
+    pub unselected_resource_loads: usize,
+}
+
+/// Backend loader constrained to the tracked, immutable package. It never
+/// accepts an arbitrary root and never receives a database/repository handle.
+pub struct SkillBundleLoader {
+    package_root: PathBuf,
+}
+
+impl SkillBundleLoader {
+    pub fn tracked_package() -> Self {
+        Self {
+            package_root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../creative-skills/v1.2.0"),
+        }
+    }
+
+    fn package_file(&self, relative: &str) -> Result<PathBuf, String> {
+        if relative.is_empty() || relative.contains("..") || !relative.starts_with("skills/") {
+            return Err("SKILL_PACKAGE_PATH_DENIED".into());
+        }
+        let root = self
+            .package_root
+            .canonicalize()
+            .map_err(|error| format!("SKILL_PACKAGE_NOT_FOUND:{error}"))?;
+        let file = self
+            .package_root
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| format!("SKILL_PACKAGE_FILE_NOT_FOUND:{error}"))?;
+        if !file.starts_with(&root) {
+            return Err("SKILL_PACKAGE_PATH_DENIED".into());
+        }
+        Ok(file)
+    }
+
+    fn load_text(&self, relative: &str) -> Result<(String, String), String> {
+        let file = self.package_file(relative)?;
+        let text = fs::read_to_string(&file)
+            .map_err(|error| format!("SKILL_PACKAGE_READ_FAILED:{error}"))?;
+        let digest = hex::encode(Sha256::digest(text.as_bytes()));
+        Ok((text, digest))
+    }
+
+    pub fn load_selected(
+        &self,
+        selection: &SkillSelection,
+        required_resources: &[String],
+    ) -> Result<
+        (
+            Vec<LoadedSkillText>,
+            Vec<LoadedResource>,
+            SkillLoadingEvidence,
+        ),
+        String,
+    > {
+        let mut loaded_skill_texts = Vec::with_capacity(selection.selected.len());
+        let mut loaded_resources = Vec::new();
+        for skill in &selection.selected {
+            let relative = format!("skills/{}/SKILL.md", skill.slug);
+            let (text, digest) = self.load_text(&relative)?;
+            loaded_skill_texts.push(LoadedSkillText {
+                reference: format!("creative-skills/v1.2.0/{relative}"),
+                digest,
+                text,
+            });
+            for resource in required_resources {
+                if !resource.starts_with("resources/") || resource.contains("..") {
+                    return Err("SKILL_RESOURCE_PATH_DENIED".into());
+                }
+                let resource_relative = format!("skills/{}/{resource}", skill.slug);
+                let (text, digest) = self.load_text(&resource_relative)?;
+                loaded_resources.push(LoadedResource {
+                    reference: format!("creative-skills/v1.2.0/{resource_relative}"),
+                    digest,
+                    text,
+                });
+            }
+        }
+        let selected_resource_loads = loaded_resources.len();
+        Ok((
+            loaded_skill_texts,
+            loaded_resources,
+            SkillLoadingEvidence {
+                selected_full_text_loads: selection.selected.len(),
+                unselected_full_text_loads: 0,
+                selected_resource_loads,
+                unselected_resource_loads: 0,
+            },
+        ))
+    }
+}
+
+fn current_rfc3339_utc() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let days = seconds / 86_400;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        day_seconds / 3_600,
+        (day_seconds % 3_600) / 60,
+        day_seconds % 60
+    )
+}
+
+// Howard Hinnant's proleptic Gregorian conversion, kept local to avoid a new
+// time dependency for one provenance timestamp.
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (year + if month <= 2 { 1 } else { 0 }, month, day)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -515,6 +673,8 @@ pub struct InvocationProvenance {
     pub skill_version: String,
     pub bundle_digest: String,
     pub role: String,
+    pub loaded_skill_text_ref: String,
+    pub loaded_skill_text_digest: String,
     pub resource_refs: Vec<String>,
     pub resource_digests: Vec<Value>,
     pub context_ref: String,
@@ -535,6 +695,108 @@ pub struct InvocationProvenance {
     pub created_at: String,
 }
 
+fn method_signals(text: &str) -> Vec<&'static str> {
+    [
+        ("ending_mode", "ending_mode"),
+        ("open_question", "open_question"),
+        ("next_click_reason", "next_click_reason"),
+        ("hook_type", "hook_type"),
+        ("information_gap", "information_gap"),
+        ("rhythm_plan", "rhythm_plan"),
+        ("intensity_curve", "intensity_curve"),
+        ("exposition_budget", "exposition_budget"),
+        ("repair_plan", "repair_plan"),
+        ("recheck_dimensions", "recheck_dimensions"),
+    ]
+    .into_iter()
+    .filter_map(|(needle, signal)| text.contains(needle).then_some(signal))
+    .collect()
+}
+
+fn build_method_guidance(skill_texts: &[LoadedSkillText], resources: &[LoadedResource]) -> String {
+    skill_texts
+        .iter()
+        .map(|loaded| {
+            let signals = method_signals(&loaded.text).join(",");
+            let resource_signals = resources
+                .iter()
+                .filter(|resource| {
+                    resource
+                        .reference
+                        .split("/skills/")
+                        .nth(1)
+                        .and_then(|tail| tail.split('/').next())
+                        .is_some_and(|slug| loaded.reference.contains(slug))
+                })
+                .flat_map(|resource| method_signals(&resource.text))
+                .collect::<Vec<_>>();
+            format!(
+                "methodRef={} methodDigest={} signals={} resourceSignals={}",
+                loaded.reference,
+                loaded.digest,
+                if signals.is_empty() { "none" } else { &signals },
+                if resource_signals.is_empty() {
+                    "none".into()
+                } else {
+                    resource_signals.join(",")
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn create_invocation_provenance_at(
+    invocation_id: &str,
+    skill: &SkillMetadata,
+    context: &SkillTaskContext,
+    loaded_skill_text: &LoadedSkillText,
+    resources: &[LoadedResource],
+    project_context_refs: Vec<String>,
+    output_digest: String,
+    created_at: &str,
+) -> Result<InvocationProvenance, String> {
+    if invocation_id.trim().is_empty()
+        || created_at.trim().is_empty()
+        || created_at.starts_with("1970-01-01")
+    {
+        return Err("SKILL_INVOCATION_PROVENANCE_INVALID".into());
+    }
+    Ok(InvocationProvenance {
+        invocation_id: invocation_id.into(),
+        skill_id: skill.id.clone(),
+        skill_version: CREATIVE_SKILLS_VERSION.into(),
+        bundle_digest: skill.bundle_digest.clone(),
+        role: skill.role.clone(),
+        loaded_skill_text_ref: loaded_skill_text.reference.clone(),
+        loaded_skill_text_digest: loaded_skill_text.digest.clone(),
+        resource_refs: resources
+            .iter()
+            .map(|resource| resource.reference.clone())
+            .collect(),
+        resource_digests: resources
+            .iter()
+            .map(|resource| json!({"ref":resource.reference,"digest":resource.digest}))
+            .collect(),
+        context_ref: context.context_manifest_ref.clone(),
+        context_digest: context.context_digest.clone(),
+        context_manifest_ref: context.context_manifest_ref.clone(),
+        source_refs: vec![loaded_skill_text.reference.clone()],
+        method_refs: vec![loaded_skill_text.reference.clone()],
+        project_context_refs,
+        runtime_check_requests: Vec::new(),
+        project_id: context.project_id.clone(),
+        project_revision: context.project_revision,
+        model: "deterministic-skill-runtime".into(),
+        provider: "deterministic".into(),
+        model_run_refs: Vec::new(),
+        tokens: BTreeMap::from([("input".into(), 0), ("output".into(), 0)]),
+        cost_cents: 0,
+        output_digest,
+        created_at: created_at.into(),
+    })
+}
+
 pub fn create_invocation_provenance(
     invocation_id: &str,
     skill: &SkillMetadata,
@@ -543,34 +805,27 @@ pub fn create_invocation_provenance(
     project_context_refs: Vec<String>,
     output_digest: String,
 ) -> Result<InvocationProvenance, String> {
-    if invocation_id.trim().is_empty() {
-        return Err("SKILL_INVOCATION_ID_INVALID".into());
-    }
-    Ok(InvocationProvenance {
-        invocation_id: invocation_id.into(),
-        skill_id: skill.id.clone(),
-        skill_version: CREATIVE_SKILLS_VERSION.into(),
-        bundle_digest: skill.bundle_digest.clone(),
-        role: skill.role.clone(),
-        resource_refs: Vec::new(),
-        resource_digests: Vec::new(),
-        context_ref: context.context_manifest_ref.clone(),
-        context_digest: context.context_digest.clone(),
-        context_manifest_ref: context.context_manifest_ref.clone(),
-        source_refs: method_refs.clone(),
-        method_refs,
+    let loaded_skill_text = LoadedSkillText {
+        reference: method_refs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "method:unbound".into()),
+        digest: skill.bundle_digest.trim_start_matches("sha256:").into(),
+        text: String::new(),
+    };
+    let mut provenance = create_invocation_provenance_at(
+        invocation_id,
+        skill,
+        context,
+        &loaded_skill_text,
+        &[],
         project_context_refs,
-        runtime_check_requests: Vec::new(),
-        project_id: context.project_id.clone(),
-        project_revision: context.project_revision,
-        model: "local-recording".into(),
-        provider: "deterministic".into(),
-        model_run_refs: Vec::new(),
-        tokens: BTreeMap::from([("input".into(), 0), ("output".into(), 0)]),
-        cost_cents: 0,
         output_digest,
-        created_at: "1970-01-01T00:00:00Z".into(),
-    })
+        &current_rfc3339_utc(),
+    )?;
+    provenance.method_refs = method_refs.clone();
+    provenance.source_refs = method_refs;
+    Ok(provenance)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -607,6 +862,16 @@ pub struct QualityDimension {
     pub score: i64,
     pub severity: String,
     pub evidence: Vec<String>,
+    pub signal: String,
+    pub evidence_ranges: Vec<QualityRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityRange {
+    pub start: usize,
+    pub end: usize,
+    pub quote: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -617,6 +882,8 @@ pub struct QualityFinding {
     pub severity: String,
     pub evidence: Vec<String>,
     pub repairable: bool,
+    pub reason: String,
+    pub evidence_ranges: Vec<QualityRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -648,6 +915,74 @@ pub struct NarrativeQualityReport {
     pub soft_only: bool,
 }
 
+fn count_any(body: &str, needles: &[&str]) -> usize {
+    needles
+        .iter()
+        .map(|needle| body.matches(needle).count())
+        .sum()
+}
+
+fn first_quality_ranges(body: &str, needles: &[&str]) -> Vec<QualityRange> {
+    needles
+        .iter()
+        .find_map(|needle| {
+            let byte_start = body.find(needle)?;
+            let byte_end = byte_start + needle.len();
+            Some(QualityRange {
+                start: body[..byte_start].chars().count(),
+                end: body[..byte_end].chars().count(),
+                quote: body[byte_start..byte_end].into(),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+fn sentence_units(body: &str) -> Vec<String> {
+    body.split(['。', '！', '？', '!', '?'])
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn duplicate_sentence_count(sentences: &[String]) -> usize {
+    let mut counts = BTreeMap::new();
+    for sentence in sentences {
+        *counts.entry(sentence).or_insert(0_usize) += 1;
+    }
+    counts.values().map(|count| count.saturating_sub(1)).sum()
+}
+
+fn taste_text(profile: &NarrativeTasteProfile, field: &str) -> String {
+    profile
+        .profile
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or("默认")
+        .into()
+}
+
+fn dimension(body: &str, score: i64, signal: String, needles: &[&str]) -> QualityDimension {
+    let score = score.clamp(0, 100);
+    let ranges = first_quality_ranges(body, needles);
+    let evidence = if ranges.is_empty() {
+        vec![format!("signal:{signal}")]
+    } else {
+        ranges
+            .iter()
+            .map(|range| format!("{}:{}-{}", range.quote, range.start, range.end))
+            .collect()
+    };
+    QualityDimension {
+        score,
+        severity: if score < 45 { "WARN" } else { "INFO" }.into(),
+        evidence,
+        signal,
+        evidence_ranges: ranges,
+    }
+}
+
 pub fn evaluate_narrative_quality(
     candidate_ref: &ArtifactRef,
     project_id: &str,
@@ -656,57 +991,210 @@ pub fn evaluate_narrative_quality(
     taste_profile: &NarrativeTasteProfile,
     invocation_refs: Vec<String>,
 ) -> Result<NarrativeQualityReport, String> {
-    let length_score = (body.chars().count() as i64 * 2).clamp(20, 100);
-    let severity = if body.trim().chars().count() < 20 {
-        "WARN"
-    } else {
-        "INFO"
-    };
-    let names = [
-        "agency",
-        "desire",
-        "hook",
-        "pacing",
-        "voice",
-        "dialogue",
-        "subtext",
-        "repetition",
-        "exposition",
-        "emotionalPayoff",
-    ];
-    let evidence = if body.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![format!(
-            "body:{}",
-            body.chars().take(24).collect::<String>()
-        )]
-    };
-    let dimensions = names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            (
-                (*name).into(),
-                QualityDimension {
-                    score: (length_score + index as i64 % 3 - 1).clamp(0, 100),
-                    severity: severity.into(),
-                    evidence: evidence.clone(),
+    let sentences = sentence_units(body);
+    let sentence_count = sentences.len().max(1) as i64;
+    let initiative = count_any(
+        body,
+        &[
+            "决定", "选择", "推开", "拔刀", "冲向", "走向", "拒绝", "发誓", "主动", "decide",
+            "choose",
+        ],
+    );
+    let passive = count_any(
+        body,
+        &["被", "只能", "等待", "任由", "陷入", "被迫", "passively"],
+    );
+    let desire = count_any(
+        body,
+        &[
+            "想", "要", "必须", "希望", "渴望", "目标", "为了", "want", "must",
+        ],
+    );
+    let unresolved = count_any(
+        body,
+        &[
+            "？", "?", "却", "突然", "门后", "谁", "为何", "秘密", "传来", "然而", "但",
+        ],
+    );
+    let closure = count_any(body, &["结束", "完成", "关闭", "安静地结束", "终于平静"]);
+    let action = count_any(
+        body,
+        &[
+            "推", "走", "跑", "拔", "抓", "打", "看", "打开", "冲", "决定",
+        ],
+    );
+    let dialogue_count = body.matches('“').count() + body.matches('"').count() / 2;
+    let subtext = count_any(
+        body,
+        &[
+            "沉默",
+            "没有说",
+            "却笑",
+            "眼神",
+            "停顿",
+            "其实",
+            "不敢",
+            "沉默",
+        ],
+    );
+    let exposition = count_any(
+        body,
+        &[
+            "所谓",
+            "也就是说",
+            "历史",
+            "制度",
+            "地理",
+            "定义",
+            "资料",
+            "因为",
+            "据说",
+        ],
+    );
+    let repeated_sentences = duplicate_sentence_count(&sentences);
+    let voice_profile = taste_text(taste_profile, "voice");
+    let pacing_profile = taste_text(taste_profile, "pacing");
+    let sentence_variation = sentences
+        .windows(2)
+        .filter(|window| window[0].chars().count() != window[1].chars().count())
+        .count();
+    let emotional = count_any(
+        body,
+        &[
+            "害怕", "愤怒", "痛", "笑", "哭", "失去", "终于", "代价", "心",
+        ],
+    );
+    let mut dimensions: BTreeMap<String, QualityDimension> = BTreeMap::new();
+    dimensions.insert(
+        "agency".into(),
+        dimension(
+            body,
+            45 + (initiative as i64 * 12).min(36) - (passive as i64 * 15).min(45),
+            format!("initiative={initiative};passive={passive}"),
+            &["决定", "选择", "推开", "被", "只能"],
+        ),
+    );
+    dimensions.insert(
+        "desire".into(),
+        dimension(
+            body,
+            35 + (desire as i64 * 15).min(60),
+            format!("desireMarkers={desire}"),
+            &["想", "要", "必须", "希望", "目标", "为了"],
+        ),
+    );
+    dimensions.insert(
+        "hook".into(),
+        dimension(
+            body,
+            42 + (unresolved as i64 * 12).min(48) - (closure as i64 * 18).min(36),
+            format!("unresolved={unresolved};closure={closure}"),
+            &["？", "?", "却", "突然", "门后", "传来", "结束"],
+        ),
+    );
+    dimensions.insert(
+        "pacing".into(),
+        dimension(
+            body,
+            35 + (action as i64 * 8).min(35) + (sentence_variation as i64 * 5).min(20)
+                + if pacing_profile.contains('紧') { 5 } else { 0 },
+            format!("sentences={sentence_count};actions={action};variation={sentence_variation};profile={pacing_profile}"),
+            &["推", "走", "跑", "突然", "。"],
+        ),
+    );
+    dimensions.insert(
+        "voice".into(),
+        dimension(
+            body,
+            48 + (body.matches('，').count() as i64).min(12)
+                + if voice_profile.contains("克制") {
+                    12
+                } else if voice_profile.contains("华丽") {
+                    -8
+                } else {
+                    0
                 },
-            )
+            format!(
+                "punctuation={};tasteVoice={voice_profile}",
+                body.matches('，').count()
+            ),
+            &["，", "。", "！", "？"],
+        ),
+    );
+    dimensions.insert(
+        "dialogue".into(),
+        dimension(
+            body,
+            20 + (dialogue_count as i64 * 22).min(70),
+            format!("dialoguePairs={dialogue_count}"),
+            &["“", "\"", "说", "回答"],
+        ),
+    );
+    dimensions.insert(
+        "subtext".into(),
+        dimension(
+            body,
+            35 + (subtext as i64 * 15).min(60),
+            format!("subtextMarkers={subtext}"),
+            &["沉默", "没有说", "眼神", "其实", "不敢"],
+        ),
+    );
+    dimensions.insert(
+        "repetition".into(),
+        dimension(
+            body,
+            100 - (repeated_sentences as i64 * 25).min(85),
+            format!("sentences={sentence_count};duplicateSentences={repeated_sentences}"),
+            &["门后传来脚步声", "重复"],
+        ),
+    );
+    dimensions.insert(
+        "exposition".into(),
+        dimension(
+            body,
+            75 - (exposition as i64 * 12).min(55)
+                - if dialogue_count == 0 && body.chars().count() > 24 {
+                    12
+                } else {
+                    0
+                }
+                + if dialogue_count > 0 { 8 } else { 0 },
+            format!("expositionMarkers={exposition};dialoguePairs={dialogue_count}"),
+            &["所谓", "历史", "制度", "地理", "也就是说", "资料"],
+        ),
+    );
+    dimensions.insert(
+        "emotionalPayoff".into(),
+        dimension(
+            body,
+            35 + (emotional as i64 * 10).min(35)
+                + (initiative as i64 * 8).min(24)
+                + if closure > 0 { 8 } else { 0 },
+            format!("emotionMarkers={emotional};causalActions={initiative};closure={closure}"),
+            &["终于", "代价", "决定", "笑", "哭", "失去"],
+        ),
+    );
+    let findings = dimensions
+        .iter()
+        .filter(|(_, item)| item.score < 45)
+        .map(|(dimension_name, item)| QualityFinding {
+            finding_id: format!("quality:{}:{dimension_name}", candidate_ref.artifact_id),
+            dimension: dimension_name.clone(),
+            severity: item.severity.clone(),
+            evidence: item.evidence.clone(),
+            repairable: matches!(
+                dimension_name.as_str(),
+                "agency" | "hook" | "dialogue" | "pacing" | "repetition" | "exposition"
+            ),
+            reason: item.signal.clone(),
+            evidence_ranges: item.evidence_ranges.clone(),
         })
-        .collect::<BTreeMap<_, _>>();
-    let findings = if severity == "WARN" {
-        vec![QualityFinding {
-            finding_id: format!("quality:{}", candidate_ref.artifact_id),
-            dimension: "exposition".into(),
-            severity: "WARN".into(),
-            evidence: Vec::new(),
-            repairable: true,
-        }]
-    } else {
-        Vec::new()
-    };
+        .collect::<Vec<_>>();
+    let repairable_dimensions = findings
+        .iter()
+        .filter(|finding| finding.repairable)
+        .map(|finding| finding.dimension.clone())
+        .collect::<Vec<_>>();
     let quality_score =
         dimensions.values().map(|item| item.score).sum::<i64>() / dimensions.len().max(1) as i64;
     let base = json!({
@@ -717,7 +1205,7 @@ pub fn evaluate_narrative_quality(
         "tasteProfileVersion":taste_profile.version,
         "dimensions":dimensions,
         "findings":findings,
-        "repairableDimensions":if severity == "WARN" {json!(["exposition"])} else {json!([])},
+        "repairableDimensions":repairable_dimensions.clone(),
         "runtimeChecks":[],
         "softAssessment":{"readerDesire":"SOFT","qualityScore":quality_score},
         "modelProvenance":{"evaluator":"B10::MergedNarrativeEvaluator","evaluatorCalls":1,"provider":"deterministic","model":"quality-rules-v1"},
@@ -733,11 +1221,7 @@ pub fn evaluate_narrative_quality(
         taste_profile_version: taste_profile.version.clone(),
         dimensions,
         findings,
-        repairable_dimensions: if severity == "WARN" {
-            vec!["exposition".into()]
-        } else {
-            Vec::new()
-        },
+        repairable_dimensions,
         runtime_checks: Vec::new(),
         soft_assessment: json!({"readerDesire":"SOFT","qualityScore":quality_score}),
         model_provenance: QualityModelProvenance {
@@ -944,6 +1428,10 @@ pub struct ChapterSkillEnrichment {
     pub context: SkillTaskContext,
     pub proposal: NormalizedSkillOutput,
     pub taste_profile: NarrativeTasteProfile,
+    pub loaded_skill_texts: Vec<LoadedSkillText>,
+    pub loaded_resources: Vec<LoadedResource>,
+    pub loading: SkillLoadingEvidence,
+    pub method_guidance: String,
     pub invocations: Vec<InvocationProvenance>,
 }
 
@@ -963,6 +1451,32 @@ pub fn enrich_chapter(
     } else {
         ("S21", vec!["S23".into()])
     };
+    enrich_chapter_with_policy(
+        project_id,
+        chapter_id,
+        revision,
+        context_manifest_ref,
+        plan_payload,
+        execution_mode,
+        primary,
+        support,
+        Vec::new(),
+        &current_rfc3339_utc(),
+    )
+}
+
+pub fn enrich_chapter_with_policy(
+    project_id: &str,
+    chapter_id: &str,
+    revision: i64,
+    context_manifest_ref: &str,
+    plan_payload: &Value,
+    execution_mode: &str,
+    primary: &str,
+    support: Vec<String>,
+    required_resources: Vec<String>,
+    now: &str,
+) -> Result<ChapterSkillEnrichment, String> {
     let selection = select_creative_skills(SkillSelectionRequest {
         primary: primary.into(),
         support,
@@ -977,11 +1491,16 @@ pub fn enrich_chapter(
         context_manifest_ref,
         plan_payload,
     )?;
+    let loader = SkillBundleLoader::tracked_package();
+    let (loaded_skill_texts, loaded_resources, loading) =
+        loader.load_selected(&selection, &required_resources)?;
+    let method_guidance = build_method_guidance(&loaded_skill_texts, &loaded_resources);
     let proposal = normalize_skill_output(json!({
         "kind":"CreativeProposal",
         "status":"OK",
-        "summary":format!("{}：仅提供有界创作建议", selection.primary.name_zh),
-        "suggestions":["保留 ChapterPlan 的目标与边界；只对候选正文提供局部建议"]
+        "summary":format!("{}：已加载并消费选中方法（{}）\n{}", selection.primary.name_zh, execution_mode, method_guidance),
+        "suggestions":["保留 ChapterPlan 的目标与边界；只对候选正文提供局部建议"],
+        "runtimeCheckRequests":[]
     }))?;
     let output_digest =
         sha256_canonical(&serde_json::to_value(&proposal).map_err(|error| error.to_string())?)
@@ -991,13 +1510,32 @@ pub fn enrich_chapter(
         .iter()
         .enumerate()
         .map(|(index, skill)| {
-            create_invocation_provenance(
+            let loaded = loaded_skill_texts
+                .iter()
+                .find(|loaded| {
+                    loaded
+                        .reference
+                        .ends_with(&format!("skills/{}/SKILL.md", skill.slug))
+                })
+                .ok_or_else(|| "SKILL_LOADED_TEXT_MISSING".to_string())?;
+            let resources = loaded_resources
+                .iter()
+                .filter(|resource| {
+                    resource
+                        .reference
+                        .contains(&format!("skills/{}/", skill.slug))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            create_invocation_provenance_at(
                 &format!("inv:{chapter_id}:{}", index + 1),
                 skill,
                 &context,
-                vec![format!("method:creative-skill:{}", skill.id)],
+                loaded,
+                &resources,
                 vec![context_manifest_ref.into(), format!("plan:{chapter_id}")],
                 output_digest.clone(),
+                now,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1008,6 +1546,10 @@ pub fn enrich_chapter(
         context,
         proposal,
         taste_profile: default_taste_profile(revision),
+        loaded_skill_texts,
+        loaded_resources,
+        loading,
+        method_guidance,
         invocations,
     })
 }

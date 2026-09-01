@@ -930,14 +930,55 @@ pub fn run_chapter_production(
         .and_then(Value::as_bool)
         .unwrap_or(true)
     {
+        let default_primary = if execution_mode == "OPENING_BOOTSTRAP" {
+            "S14"
+        } else {
+            "S21"
+        };
+        let default_support = if execution_mode == "OPENING_BOOTSTRAP" {
+            vec!["S10".to_string()]
+        } else {
+            vec!["S23".to_string()]
+        };
+        let primary = request
+            .pointer("/payload/primarySkillId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(default_primary);
+        let support = request
+            .pointer("/payload/supportSkillIds")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or(default_support);
+        let required_resources = request
+            .pointer("/payload/skillResourcePaths")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Some(
-            crate::creative_skills::enrich_chapter(
+            crate::creative_skills::enrich_chapter_with_policy(
                 &project_id,
                 &chapter_id,
                 current_revision,
                 &context_ref.artifact_id,
                 &plan_payload,
                 execution_mode,
+                primary,
+                support,
+                required_resources,
+                &now,
             )
             .map_err(|error| format!("B10_SKILL_RUNTIME:{error}"))?,
         )

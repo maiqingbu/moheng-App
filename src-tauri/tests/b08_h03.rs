@@ -580,6 +580,30 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     let projection =
         query_production_center_impl(&state, json!({"projectId":"p-b10-root"})).unwrap();
     assert_eq!(projection["creativeSkills"]["packageVersion"], "1.2.0");
+    assert_eq!(
+        projection["creativeSkills"]["loading"]["selectedFullTextLoads"],
+        2
+    );
+    assert_eq!(
+        projection["creativeSkills"]["loading"]["unselectedFullTextLoads"],
+        0
+    );
+    assert!(
+        projection["creativeSkills"]["invocations"][0]["loadedSkillTextRef"]
+            .as_str()
+            .unwrap()
+            .ends_with("/SKILL.md")
+    );
+    assert_eq!(
+        projection["creativeSkills"]["invocations"][0]["createdAt"],
+        NOW
+    );
+    assert!(
+        projection["creativeSkills"]["invocations"][0]["methodRefs"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("/SKILL.md")
+    );
     assert_eq!(projection["quality"]["softOnly"], true);
     assert_eq!(
         projection["quality"]["modelProvenance"]["evaluatorCalls"],
