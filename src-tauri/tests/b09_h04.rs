@@ -796,15 +796,22 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
 #[test]
 fn b09_bounded_lifecycle_query_performance_is_measured_and_enforced() {
     let fixture = fixture();
+    VolumeLifecycleOwner::rebuild_planning_state(
+        &fixture.connection,
+        "p-b09",
+        &fixture.volume_id,
+        NOW,
+    )
+    .unwrap();
     let mut samples = Vec::with_capacity(30);
     for _ in 0..30 {
         let started = Instant::now();
-        let projection = VolumeLifecycleOwner::rebuild_planning_state(
+        let projection = ai_novel_production_system_core::repositories::volume_lifecycle::VolumeLifecycleRepository::planning_projection(
             &fixture.connection,
             "p-b09",
             &fixture.volume_id,
-            NOW,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(projection["volumeId"], fixture.volume_id);
         samples.push(started.elapsed().as_secs_f64() * 1000.0);

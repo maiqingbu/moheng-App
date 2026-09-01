@@ -1047,6 +1047,7 @@ fn apply_next_volume_handoff(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_artifact(
     project_id: &str,
     artifact_id: &str,

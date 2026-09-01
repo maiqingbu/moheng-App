@@ -71,6 +71,7 @@ impl VolumeLifecycleRepository {
         Ok(updated == 1)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_planning_projection(
         connection: &Connection,
         project_id: &str,
@@ -161,7 +162,6 @@ impl VolumeLifecycleRepository {
             }))
         })
         .transpose()
-        .map_err(Into::into)
     }
 
     pub fn update_plan_index(
@@ -257,6 +257,7 @@ impl VolumeLifecycleRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_route_replan(
         connection: &Connection,
         replan_id: &str,
@@ -280,6 +281,7 @@ impl VolumeLifecycleRepository {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_volume_close(
         connection: &Connection,
         close_id: &str,
@@ -316,6 +318,7 @@ impl VolumeLifecycleRepository {
             .map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_next_volume(
         connection: &Connection,
         project_id: &str,
@@ -335,6 +338,7 @@ impl VolumeLifecycleRepository {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_handoff(
         connection: &Connection,
         handoff_id: &str,

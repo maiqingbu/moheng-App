@@ -68,14 +68,25 @@ if (before.dirtyPaths.length === 0) {
   }
 }
 
-const packagePath = path.join(os.tmpdir(), `moheng-b09-h04-source-${before.commit.slice(0, 12)}.zip`)
-const archive = spawnSync('git', ['archive', '--format=zip', '-o', packagePath, 'HEAD'], { cwd: root, encoding: 'utf8' })
-const zipTest = archive.status === 0 ? spawnSync('unzip', ['-t', packagePath], { encoding: 'utf8' }) : { status: 1, stdout: '', stderr: 'git archive failed' }
-const zipList = archive.status === 0 ? spawnSync('unzip', ['-Z1', packagePath], { encoding: 'utf8' }) : { status: 1, stdout: '' }
-const forbiddenEntries = (zipList.stdout ?? '').split('\n').filter(entry => /(^|\/)(?:\.git|node_modules|target|dist)(?:\/|$)|\.db(?:$|[-.])|(?:^|\/)(?:evidence|reports?)\//i.test(entry))
-const packageSmoke = archive.status === 0 && zipTest.status === 0 && forbiddenEntries.length === 0
-fs.writeFileSync(path.join(evidence, 'package_smoke.log'), `${archive.stdout ?? ''}${archive.stderr ?? ''}${zipTest.stdout ?? ''}${zipTest.stderr ?? ''}\nforbiddenEntries=${forbiddenEntries.length}\n`)
-try { fs.rmSync(packagePath, { force: true }) } catch {}
+const sourceStage = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b09-h04-source-stage-'))
+const archive = spawnSync('git', ['archive', '--format=tar', '--prefix=ai-novel-production-system/', 'HEAD'], { cwd: root, encoding: 'buffer' })
+const extract = archive.status === 0 ? spawnSync('tar', ['-xf', '-', '-C', sourceStage], { input: archive.stdout, encoding: 'utf8' }) : { status: 1, stdout: '', stderr: 'git archive failed' }
+const sourceRoot = path.join(sourceStage, 'ai-novel-production-system')
+// Historical B01-B08 evidence is not part of the source-only payload. B09
+// evidence is overlaid by the final package step after this smoke check.
+try { fs.rmSync(path.join(sourceRoot, 'evidence'), { recursive: true, force: true }) } catch {}
+const sourceEntries = []
+const walkStage = directory => {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name)
+    if (entry.isDirectory()) walkStage(target)
+    else sourceEntries.push(path.relative(sourceStage, target))
+  }
+}
+if (fs.existsSync(sourceRoot)) walkStage(sourceRoot)
+const forbiddenEntries = sourceEntries.filter(entry => /(^|\/)(?:\.git|node_modules|target|dist)(?:\/|$)|\.db(?:$|[-.])|(?:^|\/)(?:evidence|reports?)\//i.test(entry))
+const packageSmoke = archive.status === 0 && extract.status === 0 && fs.existsSync(sourceRoot) && forbiddenEntries.length === 0
+fs.writeFileSync(path.join(evidence, 'package_smoke.log'), `${archive.stderr ?? ''}${extract.stdout ?? ''}${extract.stderr ?? ''}\nforbiddenEntries=${forbiddenEntries.length}\nsourceRoot=${sourceRoot}\n`)
 
 const marker = (result, pattern) => result.status === 'PASS' && pattern.test(result.output)
 const gate = (status, source, actual = {}) => ({ status: status ? 'PASS' : 'FAIL', source, blocking: true, ...actual })
