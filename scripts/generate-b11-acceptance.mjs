@@ -45,6 +45,7 @@ export const ENGINEERING_GATES = [
   'cargo_check',
   'cargo_clippy',
   'architecture',
+  'base_architecture',
   'module_boundary',
   'm0a',
 ]
@@ -60,6 +61,7 @@ export const RELEASE_GATES = [
   'source_binding',
   'package_smoke',
   'fresh_package_architecture',
+  'fresh_package_base_architecture',
   'fresh_package_module_boundary',
   'fresh_package_generator',
   'fresh_package_node',

@@ -13,7 +13,7 @@ const library = useProjectLibraryStore()
 const id = computed(() => store.currentProjectId ?? (typeof route.params.id === 'string' ? route.params.id : ''))
 const inWorkspace = computed(() => route.meta.scope === 'project' && !!id.value)
 
-type NavItem = { label:string; icon:string; to:string; match:string; count?:number }
+type NavItem = { label:string; icon:string; to:string; match:string; count?:number; disabled?:boolean }
 const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '总览', icon: '◫', to: `/projects/${id.value}`, match: 'project-overview' },
   { label: '市场与平台策略', icon: '↗', to: `/projects/${id.value}/market`, match: 'market' },
@@ -25,7 +25,9 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '卷管理', icon: '▥', to: `/projects/${id.value}/volumes`, match: 'volumes' },
   { label: '决策收件箱', icon: '⌁', to: `/projects/${id.value}/decisions`, match: 'decisions', count: store.pendingDecisionCount },
   { label: '成品阅读', icon: '▤', to: `/projects/${id.value}/read`, match: 'read' },
-  { label: '作品图谱', icon: '⌘', to: `/projects/${id.value}/graph`, match: 'graph' }
+  { label: '作品图谱', icon: '⌘', to: `/projects/${id.value}/graph`, match: 'graph' },
+  { label: '长篇健康', icon: '♡', to: '', match: 'health', disabled: true },
+  { label: '版本与变更记录', icon: '↺', to: '', match: 'history', disabled: true }
 ] : [])
 </script>
 
@@ -45,11 +47,18 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
 
       <nav v-if="workspaceNav.length" class="nav-group" aria-label="作品工作区">
         <div class="nav-label">当前作品</div>
-        <RouterLink v-for="item in workspaceNav" :key="item.match" :to="item.to" class="nav-item" :class="{active: route.name === item.match || (item.match === 'volumes' && route.name === 'volume-workspace')}">
-          <span class="nav-icon">{{ item.icon }}</span>
-          <span>{{ item.label }}</span>
-          <span v-if="item.count" class="nav-count">{{ item.count }}</span>
-        </RouterLink>
+        <template v-for="item in workspaceNav" :key="item.match">
+          <RouterLink v-if="!item.disabled" :to="item.to" class="nav-item" :class="{active: route.name === item.match || (item.match === 'volumes' && route.name === 'volume-workspace')}">
+            <span class="nav-icon">{{ item.icon }}</span>
+            <span>{{ item.label }}</span>
+            <span v-if="item.count" class="nav-count">{{ item.count }}</span>
+          </RouterLink>
+          <div v-else class="nav-item disabled" aria-disabled="true">
+            <span class="nav-icon">{{ item.icon }}</span>
+            <span>{{ item.label }}</span>
+            <span class="nav-count neutral">尚未开放</span>
+          </div>
+        </template>
       </nav>
 
       <nav class="nav-group">

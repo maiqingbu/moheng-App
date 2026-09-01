@@ -351,7 +351,7 @@ for (let index = 0; index < NEGATIVE_BLOCKING_GATES.length; index += 1) {
 for (const name of R2_GLOBAL_BLOCKING_GATES) setGate(gates, name, architectureReport.globalGates?.[name] === 'PASS', 'B11_GLOBAL_GATES.json')
 const historical = { b05_regression: b05, b06_h01_regression: b06, b07_h02_regression: b07, b08_h03_regression: b08, r2_alignment_regression: r2, p01_regression: p01, b09_h04_regression: b09, b10_regression: b10 }
 for (const name of HISTORICAL_REGRESSION_GATES) setGate(gates, name, resultPass(historical[name]), historical[name].log)
-const engineering = { node, vitest, contracts, typecheck, build, cargo_all_targets: cargoAll, cargo_fmt: cargoFmt, cargo_check: cargoCheck, cargo_clippy: cargoClippy, architecture, module_boundary: moduleBoundary, m0a }
+const engineering = { node, vitest, contracts, typecheck, build, cargo_all_targets: cargoAll, cargo_fmt: cargoFmt, cargo_check: cargoCheck, cargo_clippy: cargoClippy, architecture, base_architecture: baseArchitecture, module_boundary: moduleBoundary, m0a }
 for (const name of ENGINEERING_GATES) setGate(gates, name, resultPass(engineering[name]), engineering[name].log)
 const b11Engineering = { b11_project_entry: b11Project, b11_negative_matrix: b11Negative, b11_product_ux: b11Ux, b11_assistant_presentation: b11AssistantPresentation, b11_capability_parity: b11CapabilityParity, b11_language_scan: architecture }
 for (const name of B11_ENGINEERING_GATES) setGate(gates, name, resultPass(b11Engineering[name]), b11Engineering[name].log)
@@ -366,6 +366,8 @@ writeJson('B11_USER_VISIBLE_STRING_INVENTORY.json', architectureReport.language 
 writeJson('B11_CHINESE_LANGUAGE_SCAN.json', { schema: 'b11-chinese-language-scan-r1', status: architectureReport.language?.status ?? 'FAIL', leaks: architectureReport.language?.leaks ?? [], scannedFileCount: architectureReport.language?.scannedFileCount ?? 0 })
 writeJson('B11_INTERNAL_IDENTIFIER_LEAKAGE.json', { schema: 'b11-internal-identifier-leakage-r1', status: architectureReport.language?.status ?? 'FAIL', presentationLeaks: architectureReport.language?.presentationLeaks ?? [], source: 'template-visible-text-and-typed-presentation-scan' })
 writeJson('B11_UI_CAPABILITY_PARITY.json', { ...capabilityParityReport, sourceTest: b11CapabilityParity.log, status: capabilityParityPass ? 'PASS' : 'FAIL' })
+writeJson('B11_FROZEN_IA_COMPATIBILITY.json', { schema: 'b11-frozen-ia-compatibility-r1', ...capabilityParityReport.frozenIa, noFutureUsableRoute: capabilityParityReport.futureRouteLeaks.length === 0, status: capabilityParityReport.futureRouteLeaks.length === 0 ? 'PASS' : 'FAIL', sourceTest: b11CapabilityParity.log })
+writeJson('B11_BASE_ARCHITECTURE.json', { schema: 'b11-base-architecture-r1', status: baseArchitecture.status, exitCode: baseArchitecture.exitCode, log: baseArchitecture.log, blocking: true })
 writeJson('B11_ASSISTANT_REPAIR_CLASSIFICATION.json', { schema: 'b11-assistant-repair-classification-r1', actionClasses: ['EXECUTABLE', 'PROPOSAL_ONLY', 'NO_ACTION'], questionCausality: rust('repairQuestion'), groundedDiagnosis: rust('repairEvidence'), failClosed: rust('repairClassification'), status: assistantClassificationPass ? 'PASS' : 'FAIL', sourceTest: b11Project.log })
 writeJson('B11_ASSISTANT_EVIDENCE_DRILLDOWN.json', { schema: 'b11-assistant-evidence-drilldown-r1', fields: ['source', 'record', 'currentStatus', 'related', 'recordedAt'], noCountOnlySummary: evidenceDrilldownPass, status: evidenceDrilldownPass ? 'PASS' : 'FAIL', sourceTest: b11AssistantPresentation.log })
 writeJson('B11_SEMANTIC_CAUSALITY.json', { schema: 'b11-semantic-causality-r1', idea: rust('ideaCausality'), market: rust('marketCausality'), regeneration: rust('regenerateCausality'), candidateMerge: rust('mergeCausality'), status: semanticCausalityPass ? 'PASS' : 'FAIL', sourceTest: b11Project.log })
@@ -400,7 +402,7 @@ writeJson('B11_PRODUCT_UX_MARKET_E2E.json', { schema: 'b11-product-ux-market-e2e
 writeJson('B11_PRODUCT_UX_ASSISTANT_E2E.json', { schema: 'b11-product-ux-assistant-e2e-r1', query: rust('query') && ux('assistant'), status: rust('query') && ux('assistant') ? 'PASS' : 'FAIL', sourceTest: b11Project.log })
 writeJson('B11_PRODUCT_UX_REPAIR_E2E.json', { schema: 'b11-product-ux-repair-e2e-r1', repair: rust('repair') && ux('assistant'), status: rust('repair') && ux('assistant') ? 'PASS' : 'FAIL', sourceTest: b11Project.log })
 writeJson('B11_UI_TRUTHFULNESS.json', { schema: 'b11-ui-truthfulness-r1', noFormalDemoFallback: architectureReport.checks?.frontendDemoFailClosed === 'PASS', realActions: ux('entry') && ux('assistant'), status: architectureReport.checks?.frontendDemoFailClosed === 'PASS' && ux('entry') && ux('assistant') ? 'PASS' : 'FAIL', sourceTest: b11Ux.log })
-writeJson('B11_REGRESSION.json', { schema: 'b11-regression-r1', frozenBatches: { B05: b05.status, B06_H01: b06.status, B07_H02: b07.status, B08_H03: b08.status, R2_ALIGNMENT: r2.status, P01: p01.status, B09_H04: b09.status, B10: b10.status }, status: [b05, b06, b07, b08, r2, p01, b09, b10].every(resultPass) ? 'PASS' : 'FAIL' })
+writeJson('B11_REGRESSION.json', { schema: 'b11-regression-r1', frozenBatches: { B05: b05.status, B06_H01: b06.status, B07_H02: b07.status, B08_H03: b08.status, R2_ALIGNMENT: r2.status, P01: p01.status, B09_H04: b09.status, B10: b10.status }, baseArchitecture: { status: baseArchitecture.status, exitCode: baseArchitecture.exitCode, log: baseArchitecture.log }, status: [b05, b06, b07, b08, r2, p01, b09, b10, baseArchitecture].every(resultPass) ? 'PASS' : 'FAIL' })
 
 for (const name of RELEASE_GATES) setGate(gates, name, false, 'pending-release-check')
 setGate(gates, 'source_binding', sourceBinding, 'B11_SOURCE_BINDING.json', sourceBindingReport)
@@ -435,14 +437,16 @@ const receiverReport = () => ({
 
 const freshArchitecture = run('fresh_package_architecture', 'node', ['scripts/verify-b11-architecture.mjs'], sourceStage.sourceRoot)
 const freshArchitectureReport = parseJsonOutput(freshArchitecture.output)
+const freshBaseArchitecture = run('fresh_package_base_architecture', 'node', ['scripts/verify-architecture.mjs'], sourceStage.sourceRoot)
 const freshModuleBoundary = run('fresh_package_module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'], sourceStage.sourceRoot)
 const freshNode = run('fresh_package_node', 'node', ['--test', 'tests/b11-acceptance-generator.test.mjs', 'tests/b11-negative-matrix.test.mjs', 'tests/b11-product-ux.test.mjs', 'tests/b11-capability-parity.test.mjs'], sourceStage.sourceRoot)
 setGate(gates, 'fresh_package_architecture', resultPass(freshArchitecture), freshArchitecture.log)
+setGate(gates, 'fresh_package_base_architecture', resultPass(freshBaseArchitecture), freshBaseArchitecture.log)
 setGate(gates, 'fresh_package_module_boundary', resultPass(freshModuleBoundary), freshModuleBoundary.log)
 setGate(gates, 'fresh_package_node', resultPass(freshNode), freshNode.log)
 setGate(gates, 'fresh_package_language', freshArchitectureReport?.language?.status === 'PASS', freshArchitecture.log)
 setGate(gates, 'fresh_package_generator', false, 'fresh_package_generator.log', { selfCheckPending: true })
-writeJson('B11_PACKAGE_SMOKE.json', { schema: 'b11-package-smoke-r1', sourceOnly: true, archiveStatus: sourceStage.archive.status, extractStatus: sourceStage.extracted.status, forbiddenEntries, unsafeEntries, freshReceiver: { architecture: freshArchitecture.status, moduleBoundary: freshModuleBoundary.status, node: freshNode.status, language: freshArchitectureReport?.language?.status ?? 'FAIL' }, status: sourceOnlyPackagePass && resultPass(freshArchitecture) && resultPass(freshModuleBoundary) && resultPass(freshNode) && freshArchitectureReport?.language?.status === 'PASS' ? 'PASS' : 'FAIL' })
+writeJson('B11_PACKAGE_SMOKE.json', { schema: 'b11-package-smoke-r1', sourceOnly: true, archiveStatus: sourceStage.archive.status, extractStatus: sourceStage.extracted.status, forbiddenEntries, unsafeEntries, freshReceiver: { architecture: freshArchitecture.status, baseArchitecture: freshBaseArchitecture.status, moduleBoundary: freshModuleBoundary.status, node: freshNode.status, language: freshArchitectureReport?.language?.status ?? 'FAIL' }, status: sourceOnlyPackagePass && resultPass(freshArchitecture) && resultPass(freshBaseArchitecture) && resultPass(freshModuleBoundary) && resultPass(freshNode) && freshArchitectureReport?.language?.status === 'PASS' ? 'PASS' : 'FAIL' })
 copyEvidenceTo(receiverEvidence)
 fs.writeFileSync(path.join(receiverEvidence, 'gate-results.json'), `${JSON.stringify(receiverReport(), null, 2)}\n`)
 const freshGenerator = run('fresh_package_generator', 'node', ['scripts/generate-b11-acceptance.mjs'], sourceStage.sourceRoot, { B11_EVIDENCE_DIR: receiverEvidence, B11_GENERATOR_SELF_CHECK: '1' })
@@ -451,10 +455,10 @@ setGate(gates, 'fresh_package_generator', resultPass(freshGenerator) && /READY_F
 const preflightZip = path.join(os.tmpdir(), `moheng-b11-${before.commit.slice(0, 7)}-preflight.zip`)
 spawnSync('zip', ['-qr', preflightZip, path.basename(sourceStage.sourceRoot)], { cwd: sourceStage.stage, encoding: 'utf8' })
 const preflightZipTest = spawnSync('unzip', ['-t', preflightZip], { encoding: 'utf8' })
-const packageSmoke = sourceOnlyPackagePass && resultPass(freshArchitecture) && resultPass(freshModuleBoundary) && resultPass(freshNode) && freshArchitectureReport?.language?.status === 'PASS' && preflightZipTest.status === 0
+const packageSmoke = sourceOnlyPackagePass && resultPass(freshArchitecture) && resultPass(freshBaseArchitecture) && resultPass(freshModuleBoundary) && resultPass(freshNode) && freshArchitectureReport?.language?.status === 'PASS' && preflightZipTest.status === 0
 setGate(gates, 'package_smoke', packageSmoke, 'B11_PACKAGE_SMOKE.json', { forbiddenEntries: forbiddenEntries.length, unsafeEntries: unsafeEntries.length, zipIntegrity: preflightZipTest.status === 0 })
 
-writeJson('B11_PACKAGE_SMOKE.json', { schema: 'b11-package-smoke-r1', sourceOnly: true, archiveStatus: sourceStage.archive.status, extractStatus: sourceStage.extracted.status, forbiddenEntries, unsafeEntries, zipIntegrity: preflightZipTest.status === 0, freshReceiver: { architecture: freshArchitecture.status, moduleBoundary: freshModuleBoundary.status, generator: freshGenerator.status, node: freshNode.status, language: freshArchitectureReport?.language?.status ?? 'FAIL' }, status: packageSmoke ? 'PASS' : 'FAIL' })
+writeJson('B11_PACKAGE_SMOKE.json', { schema: 'b11-package-smoke-r1', sourceOnly: true, archiveStatus: sourceStage.archive.status, extractStatus: sourceStage.extracted.status, forbiddenEntries, unsafeEntries, zipIntegrity: preflightZipTest.status === 0, freshReceiver: { architecture: freshArchitecture.status, baseArchitecture: freshBaseArchitecture.status, moduleBoundary: freshModuleBoundary.status, generator: freshGenerator.status, node: freshNode.status, language: freshArchitectureReport?.language?.status ?? 'FAIL' }, status: packageSmoke ? 'PASS' : 'FAIL' })
 copyEvidenceTo(receiverEvidence)
 fs.writeFileSync(path.join(receiverEvidence, 'gate-results.json'), `${JSON.stringify(receiverReport(), null, 2)}\n`)
 

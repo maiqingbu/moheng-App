@@ -34,8 +34,24 @@ export function inspectB11CapabilityParity(projectRoot = root) {
   const missingHandlers = invokedCommands
     .filter(command => !registeredCommands.has(command))
     .map(command => ({ command, expectedHandler: command }))
-  const futureRouteLeaks = ['/health', '/history', 'LongFormHealth', 'HistoryCenter']
-    .filter(marker => router.includes(marker) || shell.includes(marker) || overview.includes(marker))
+  const healthRoute = router.split('\n').find(line => line.includes("/projects/:id/health")) ?? ''
+  const historyRoute = router.split('\n').find(line => line.includes("/projects/:id/history")) ?? ''
+  const frozenIa = {
+    healthRouteExists: healthRoute.length > 0,
+    historyRouteExists: historyRoute.length > 0,
+    healthRouteUnavailable: /UnavailableFeature/.test(healthRoute) && !/LongFormHealth|query_book_health/.test(healthRoute),
+    historyRouteUnavailable: /UnavailableFeature/.test(historyRoute) && !/HistoryCenter|change_request_apply|retcon_apply/.test(historyRoute),
+    healthSidebarPreserved: /长篇健康/.test(shell) && /尚未开放/.test(shell) && /disabled/.test(shell),
+    historySidebarPreserved: /版本与变更记录/.test(shell) && /尚未开放/.test(shell) && /disabled/.test(shell),
+  }
+  const futureRouteLeaks = [
+    frozenIa.healthRouteExists && !frozenIa.healthRouteUnavailable ? 'health route is executable' : null,
+    frozenIa.historyRouteExists && !frozenIa.historyRouteUnavailable ? 'history route is executable' : null,
+    !frozenIa.healthRouteExists ? 'health route missing' : null,
+    !frozenIa.historyRouteExists ? 'history route missing' : null,
+    !frozenIa.healthSidebarPreserved ? 'health sidebar item missing or enabled' : null,
+    !frozenIa.historySidebarPreserved ? 'history sidebar item missing or enabled' : null,
+  ].filter(Boolean)
   const unsupportedMarketActions = ['market_refresh', 'market_pulse_refresh']
     .filter(marker => creation.includes(marker) || market.includes(marker))
   const formalUiActions = {
@@ -63,6 +79,7 @@ export function inspectB11CapabilityParity(projectRoot = root) {
     missingHandlers,
     formalUiActions,
     missingFormalActions,
+    frozenIa,
     futureRouteLeaks,
     unsupportedMarketActions,
   }
