@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const baseline = '6992b544f59f385160e3aa2f34f2e206ae715e59'
+const sourceStartCommit = 'e964546712b2fe620edbdf3c7d393d771f02de9c'
 const frozenMigrationHashes = {
   'src-tauri/migrations/0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
   'src-tauri/migrations/0002_project_authority.sql': '7396fe1ec7769a898d423c97c3d063d7a64c3dc217de3967332bd25b84864924',
@@ -36,8 +37,10 @@ const ui = read('src/ui/pages/VolumeWorkspace.vue')
 const migration = read('src-tauri/migrations/0010_b09_h04_volume_lifecycle.sql')
 const rust = [lifecycle, repository, commands, repair, harness, production].join('\n')
 
-const sourceBindingPass = sourceBinding?.startCommit === baseline
+const sourceBindingPass = sourceBinding?.startCommit === sourceStartCommit
   && sourceBinding?.startCommitIsAncestor === true
+  && sourceBinding?.baselineCommit === baseline
+  && sourceBinding?.baselineIsAncestor === true
   && typeof sourceBinding?.sourceCommit === 'string'
   && sourceBinding.sourceCommit === sourceBinding.evidenceSourceCommit
   && sourceBinding.sourceCommit === sourceBinding.sourceCommitAfter
@@ -90,6 +93,7 @@ const failed = Object.entries(checks).filter(([, pass]) => !pass).map(([name]) =
 const result = {
   schema: 'b09-h04-architecture-r1',
   baseline,
+  sourceStartCommit,
   hasGit,
   sourceBinding: sourceBinding ?? null,
   status: failed.length === 0 ? 'PASS' : 'FAIL',

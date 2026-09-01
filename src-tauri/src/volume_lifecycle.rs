@@ -280,6 +280,22 @@ fn current_intent(
     Ok((intent_ref, intent))
 }
 
+fn resolved_goal_contracts(
+    connection: &Connection,
+    project_id: &str,
+    refs: &[ArtifactRef],
+) -> Result<Vec<Value>, String> {
+    refs.iter()
+        .map(|reference| {
+            let payload =
+                NarrativeRepository::artifact_payload_by_ref(connection, project_id, reference)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("REPLAN_GOAL_NOT_FOUND:{}", reference.artifact_id))?;
+            Ok(json!({"ref": reference, "payload": payload}))
+        })
+        .collect()
+}
+
 fn validate_route_reservations(
     connection: &Connection,
     project_id: &str,
@@ -352,6 +368,8 @@ fn compile_route_replan_input(
     let (route_ref, route) = current_route(connection, &request.project_id, &request.volume_id)?;
     planning::validate_volume_route(&route)?;
     let (intent_ref, intent) = current_intent(connection, &request.project_id, &route)?;
+    let goal_contracts =
+        resolved_goal_contracts(connection, &request.project_id, &goal_contract_refs)?;
     validate_route_reservations(
         connection,
         &request.project_id,
@@ -405,7 +423,9 @@ fn compile_route_replan_input(
         "volumeId": request.volume_id,
         "projectRevision": current_revision,
         "currentGoal": goal_contract_refs,
-        "currentRoute": {"ref": route_ref, "payload": route},
+        "goalContracts": goal_contracts,
+        "currentIntent": {"ref": intent_ref.clone(), "payload": intent},
+        "currentRoute": {"ref": route_ref.clone(), "payload": route},
         "actualReality": {
             "stateDigest": actual_reality_digest,
             "taskReality": planning_state.get("taskReality").cloned().unwrap_or_else(|| json!([])),
@@ -426,23 +446,304 @@ fn compile_route_replan_input(
     }))
 }
 
-fn derive_route_candidate(compiled: &Value) -> Result<(Value, i64), String> {
-    let mut candidate = compiled
+fn responsibility_refs_from_input(input: &Value) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    if let Some(items) = input
+        .get("unresolvedResponsibilities")
+        .and_then(Value::as_array)
+    {
+        for item in items {
+            if let Some(reference) = item
+                .as_str()
+                .or_else(|| item.get("threadRef").and_then(Value::as_str))
+            {
+                refs.insert(reference.to_string());
+            }
+        }
+    }
+    refs.into_iter().collect()
+}
+
+fn compiled_responsibility_refs(compiled: &Value) -> Vec<String> {
+    compiled
+        .get("compiledInput")
+        .map(responsibility_refs_from_input)
+        .unwrap_or_else(|| responsibility_refs_from_input(compiled))
+}
+
+fn next_volume_goal_constraints(compiled_input: &Value) -> Vec<Value> {
+    let current_intent_id = compiled_input
+        .pointer("/currentIntent/ref/artifactId")
+        .and_then(Value::as_str);
+    let mut goals = Vec::new();
+    if let Some(contracts) = compiled_input
+        .get("goalContracts")
+        .and_then(Value::as_array)
+    {
+        for contract in contracts {
+            if contract.pointer("/ref/artifactId").and_then(Value::as_str) == current_intent_id {
+                continue;
+            }
+            if let Some(items) = contract
+                .get("payload")
+                .and_then(|payload| payload.get("mustAchieve"))
+                .and_then(Value::as_array)
+            {
+                goals.extend(items.iter().cloned());
+            }
+        }
+    }
+    goals
+}
+
+fn compiled_goal_descriptions(compiled: &Value) -> Vec<(String, String)> {
+    let mut goals = Vec::new();
+    if let Some(contracts) = compiled
+        .pointer("/compiledInput/goalContracts")
+        .and_then(Value::as_array)
+    {
+        for contract in contracts {
+            if let Some(items) = contract
+                .get("payload")
+                .and_then(|payload| payload.get("mustAchieve"))
+                .and_then(Value::as_array)
+            {
+                for item in items {
+                    let Some(id) = item.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(description) = item.get("description").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    goals.push((id.to_string(), description.to_string()));
+                }
+            }
+        }
+    }
+    goals
+}
+
+fn compiled_task_status(compiled: &Value, task_id: &str) -> String {
+    compiled
+        .pointer("/compiledInput/actualReality/taskReality")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|task| task.get("taskId").and_then(Value::as_str) == Some(task_id))
+        .and_then(|task| task.get("status").and_then(Value::as_str))
+        .unwrap_or("NOT_STARTED")
+        .to_string()
+}
+
+fn derived_route_capacity(current: &Value, compiled: &Value) -> Value {
+    let Some(current_budget) = current.get("capacityBudget").and_then(Value::as_object) else {
+        return json!({});
+    };
+    let current_min = current_budget
+        .get("minChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    let current_preferred = current_budget
+        .get("preferredChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(current_min);
+    let current_max = current_budget
+        .get("maxChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(current_preferred);
+    let remaining = compiled
+        .pointer("/compiledInput/planningState/remainingChapterCapacity")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            compiled
+                .pointer("/compiledInput/planningState/planningPressure/remainingChapterCapacity")
+                .and_then(Value::as_i64)
+        })
+        .unwrap_or(current_max);
+    let derived_max = current_max.min(remaining.saturating_add(1).max(1)).max(1);
+    let derived_preferred = current_preferred.min(derived_max).max(1);
+    let derived_min = current_min.min(derived_preferred).max(1);
+    json!({
+        "minChapters": derived_min,
+        "preferredChapters": derived_preferred,
+        "maxChapters": derived_max,
+    })
+}
+
+fn route_semantics_equal(left: &Value, right: &Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    if let Some(object) = left.as_object_mut() {
+        object.remove("routeVersion");
+        object.remove("routeInvariants");
+    }
+    if let Some(object) = right.as_object_mut() {
+        object.remove("routeVersion");
+        object.remove("routeInvariants");
+    }
+    left == right
+}
+
+fn derive_route_candidate(compiled: &Value) -> Result<(Value, i64, bool), String> {
+    let current_route = compiled
         .pointer("/compiledInput/currentRoute/payload")
         .cloned()
         .ok_or("REPLAN_COMPILED_ROUTE_MISSING")?;
-    let previous_version = candidate
+    let previous_route = current_route.clone();
+    let previous_version = current_route
         .get("routeVersion")
         .and_then(Value::as_i64)
         .ok_or("VOLUME_PLAN_ROUTE_VERSION_REQUIRED")?;
     let route_version = previous_version + 1;
+
+    let responsibilities = compiled_responsibility_refs(compiled);
+    let goals = compiled_goal_descriptions(compiled);
+    let had_current_tasks = current_route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| !tasks.is_empty());
+    let mut candidate = json!({
+        "payloadSchema": current_route
+            .get("payloadSchema")
+            .cloned()
+            .unwrap_or_else(|| json!("volume-plan.r1")),
+        "volumeIntentRef": current_route
+            .get("volumeIntentRef")
+            .cloned()
+            .ok_or("VOLUME_PLAN_INTENT_REF_REQUIRED")?,
+        "routeVersion": route_version,
+        "tasks": [],
+        "routeInvariants": current_route
+            .get("routeInvariants")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "requiredExitConditions": current_route
+            .get("requiredExitConditions")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "capacityBudget": current_route
+            .get("capacityBudget")
+            .cloned()
+            .ok_or("VOLUME_PLAN_CAPACITY_REQUIRED")?,
+    });
+    if let Some(climax_reservation) = current_route.get("climaxReservation") {
+        candidate["climaxReservation"] = climax_reservation.clone();
+    }
+    let mut tasks = Vec::new();
+    for task in current_route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let task_id = task
+            .get("taskId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if compiled_task_status(compiled, &task_id) == "SATISFIED" {
+            continue;
+        }
+        let mut task = task;
+        let mut continuity = task
+            .get("continuityThreadRefs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut continuity_refs = continuity
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>();
+        for reference in &responsibilities {
+            if continuity_refs.insert(reference.clone()) {
+                continuity.push(json!(reference));
+            }
+        }
+        task["continuityThreadRefs"] = Value::Array(continuity);
+        let original_objective = task
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("推进当前路线")
+            .to_string();
+        let status = compiled_task_status(compiled, &task_id);
+        let mut objective = original_objective;
+        if status == "BLOCKED" && !objective.starts_with("解除阻塞后：") {
+            objective = format!("解除阻塞后：{objective}");
+        }
+        if let Some((_, description)) = goals.first() {
+            if !objective.contains(description) {
+                objective = format!("{objective}（目标：{description}）");
+            }
+        }
+        task["objective"] = json!(objective);
+        tasks.push(task);
+    }
+    if tasks.is_empty() && !had_current_tasks {
+        for (id, description) in &goals {
+            tasks.push(json!({
+                "taskId": format!("task:replan:{id}"),
+                "class": "REQUIRED",
+                "objective": description,
+                "dependsOnTaskIds": [],
+                "continuityThreadRefs": responsibilities.clone(),
+                "reservationRefs": [],
+                "completionPredicate": {"kind":"TASK_SATISFIED","value":format!("task:replan:{id}")},
+                "estimatedChapterCost": {"preferred":1},
+            }));
+        }
+    }
+    candidate["tasks"] = Value::Array(tasks.clone());
+    let mut exit_conditions = candidate
+        .get("requiredExitConditions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|condition| {
+            condition.get("kind").and_then(Value::as_str) != Some("TASK_SATISFIED")
+                || condition
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_none_or(|task_id| compiled_task_status(compiled, task_id) != "SATISFIED")
+        })
+        .collect::<Vec<_>>();
+    let exit_task_ids = exit_conditions
+        .iter()
+        .filter_map(|condition| {
+            (condition.get("kind").and_then(Value::as_str) == Some("TASK_SATISFIED"))
+                .then(|| condition.get("value").and_then(Value::as_str))
+                .flatten()
+                .map(ToOwned::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    for task in &tasks {
+        let Some(task_id) = task.get("taskId").and_then(Value::as_str) else {
+            continue;
+        };
+        if !exit_task_ids.contains(task_id) {
+            exit_conditions.push(json!({"kind":"TASK_SATISFIED","value":task_id}));
+        }
+    }
+    candidate["requiredExitConditions"] = Value::Array(exit_conditions);
+    candidate["capacityBudget"] = derived_route_capacity(&candidate, compiled);
     candidate["routeVersion"] = json!(route_version);
     let mut invariants = candidate
         .get("routeInvariants")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    invariants.push(json!("B09_REPLAN_DERIVED_FROM_COMPILED_INPUT"));
+    for invariant in [
+        "B09_REPLAN_DERIVED_FROM_COMPILED_INPUT",
+        "B09_REPLAN_INPUT_DRIVEN",
+    ] {
+        if !invariants
+            .iter()
+            .any(|item| item.as_str() == Some(invariant))
+        {
+            invariants.push(json!(invariant));
+        }
+    }
     candidate["routeInvariants"] = Value::Array(invariants);
     planning::validate_volume_route(&candidate)?;
     let intent_ref: ArtifactRef = serde_json::from_value(
@@ -453,7 +754,11 @@ fn derive_route_candidate(compiled: &Value) -> Result<(Value, i64), String> {
     )
     .map_err(|error| error.to_string())?;
     planning::validate_volume_route_reference(&candidate, &intent_ref)?;
-    Ok((candidate, route_version))
+    Ok((
+        candidate.clone(),
+        route_version,
+        !route_semantics_equal(&previous_route, &candidate),
+    ))
 }
 
 fn build_planning_state(
@@ -704,7 +1009,7 @@ fn apply_route_replan(
     request: &RouteReplanRequest,
 ) -> Result<Value, String> {
     let compiled = compile_route_replan_input(connection, request)?;
-    let (candidate, route_version) = derive_route_candidate(&compiled)?;
+    let (candidate, route_version, substantive_change) = derive_route_candidate(&compiled)?;
     let previous_ref: ArtifactRef = serde_json::from_value(
         compiled
             .get("previousRoute")
@@ -719,6 +1024,20 @@ fn apply_route_replan(
             .ok_or("REPLAN_INTENT_REF_MISSING")?,
     )
     .map_err(|error| error.to_string())?;
+    if !substantive_change {
+        return Ok(json!({
+            "replayed": false,
+            "classification": "NO_ROUTE_CHANGE_REQUIRED",
+            "newVersion": 0,
+            "routeVersion": route_version - 1,
+            "projectRevision": request.expected_revision + 1,
+            "receiptId": format!("project-receipt:{}", request.command_id),
+            "previousRoute": previous_ref,
+            "intent": intent_ref,
+            "compiledInputDigest": compiled["compiledInputDigest"],
+            "compiledInput": compiled["compiledInput"],
+        }));
+    }
     let artifact = make_artifact(
         &request.project_id,
         &previous_ref.artifact_id,
@@ -1033,6 +1352,8 @@ fn apply_next_volume_handoff(
         100,
     )
     .map_err(|error| error.to_string())?;
+    let goal_contracts =
+        resolved_goal_contracts(connection, &request.project_id, &goal_contract_refs)?;
     let canon_facts =
         VolumeLifecycleRepository::current_canon_facts(connection, &request.project_id, 100)
             .map_err(|error| error.to_string())?;
@@ -1060,26 +1381,20 @@ fn apply_next_volume_handoff(
         "toVolumeId": request.next_volume_id,
         "projectRevision": request.expected_revision,
         "currentGoal": goal_contract_refs.clone(),
+        "goalContracts": goal_contracts,
+        "currentIntent": {"ref": current_intent_ref.clone(), "payload": current_intent_payload.clone()},
         "currentRoute": current_route_ref.clone(),
         "canonFacts": canon_facts.clone(),
         "actualReality": current_planning_state.clone(),
         "capacity": current_planning_state.get("planningPressure").cloned().unwrap_or_else(|| json!({})),
-        "unresolvedResponsibilities": current_intent_payload.get("crossVolumeResponsibilityRefs").cloned().unwrap_or_else(|| json!([])),
+        "unresolvedResponsibilities": current_planning_state.get("unresolvedResponsibilities").cloned().unwrap_or_else(|| json!([])),
         "futureReservations": current_intent_payload.get("futureReservationRefs").cloned().unwrap_or_else(|| json!([])),
         "volumeExitState": {"ref": current_exit_ref.clone(), "payload": current_exit_payload.clone()},
         "exactEvidenceRefs": current_exit_payload.get("handoffEvidenceRefs").cloned().unwrap_or_else(|| json!([])),
     });
     let compiled_input_digest =
         sha256_canonical(&compiled_input).map_err(|error| error.to_string())?;
-    let next_intent_payload = compile_next_volume_intent(
-        &request.next_volume_id,
-        &request.title,
-        &request.current_volume_id,
-        request.chapter_start,
-        request.chapter_end,
-        request.target_words,
-        &current_intent_payload,
-    )?;
+    let next_intent_payload = compile_next_volume_intent(&compiled_input, request)?;
     let next_task_ids = next_intent_payload
         .get("mustAchieve")
         .and_then(Value::as_array)
@@ -1089,6 +1404,7 @@ fn apply_next_volume_handoff(
         .map(|id| format!("task:{id}"))
         .collect::<Vec<_>>();
     let next_route_payload = compile_next_volume_route(
+        &compiled_input,
         &next_intent_payload,
         &next_task_ids,
         request.chapter_start,
@@ -1255,64 +1571,153 @@ fn apply_next_volume_handoff(
 }
 
 fn compile_next_volume_intent(
-    next_volume_id: &str,
-    title: &str,
-    previous_volume_id: &str,
-    chapter_start: i64,
-    chapter_end: i64,
-    target_words: i64,
-    current_intent: &Value,
+    compiled_input: &Value,
+    request: &NextVolumeHandoffRequest,
 ) -> Result<Value, String> {
-    let responsibilities = current_intent
-        .get("crossVolumeResponsibilityRefs")
+    let responsibilities = responsibility_refs_from_input(compiled_input);
+    let mut must_achieve = next_volume_goal_constraints(compiled_input);
+    if let Some(remaining_tasks) = compiled_input
+        .pointer("/volumeExitState/payload/remainingTaskIds")
+        .and_then(Value::as_array)
+    {
+        for (index, task) in remaining_tasks.iter().enumerate() {
+            if let Some(task_id) = task.as_str() {
+                must_achieve.push(json!({
+                    "id": format!("goal:{}:exit:{index}", request.next_volume_id),
+                    "description": format!("承接退出状态中的未完成任务 {task_id}"),
+                }));
+            }
+        }
+    }
+    for (index, responsibility) in responsibilities.iter().enumerate() {
+        must_achieve.push(json!({
+            "id": format!("goal:{}:responsibility:{index}", request.next_volume_id),
+            "description": format!("在下一卷继续推进跨卷责任 {responsibility}"),
+        }));
+    }
+    if must_achieve.is_empty() {
+        must_achieve.push(json!({
+            "id": format!("goal:{}:entry", request.next_volume_id),
+            "description": "建立下一卷入口并推进当前主线",
+        }));
+    }
+
+    let current_must_not_break = compiled_input
+        .pointer("/currentIntent/payload/mustNotBreak")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let must_achieve = if responsibilities.is_empty() {
-        vec![json!({
-            "id": format!("goal:{next_volume_id}:entry"),
-            "description": "建立下一卷入口并推进当前主线",
-        })]
-    } else {
-        responsibilities
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| {
-                item.as_str().map(|responsibility| {
-                    json!({
-                        "id": format!("goal:{next_volume_id}:responsibility:{index}"),
-                        "description": format!("在下一卷继续推进跨卷责任 {responsibility}"),
-                    })
-                })
+    let mut must_not_break = current_must_not_break;
+    if let Some(canon_facts) = compiled_input.get("canonFacts").and_then(Value::as_array) {
+        for fact in canon_facts {
+            let Some(fact_id) = fact.get("factId").and_then(Value::as_str) else {
+                continue;
+            };
+            let predicate = fact
+                .get("predicate")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let object = fact
+                .get("object")
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "null".into());
+            must_not_break.push(json!({
+                "id": format!("canon:{fact_id}"),
+                "description": format!("保持 Canon {predicate} = {object}"),
+            }));
+        }
+    }
+    let future_reservations = compiled_input
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let future_reservation_refs = future_reservations
+        .iter()
+        .filter_map(|item| {
+            item.as_str().map(ToOwned::to_owned).or_else(|| {
+                item.get("reservationId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
             })
-            .collect()
-    };
-    let task_ids = must_achieve
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .map(|id| format!("task:{id}"))
+        })
         .collect::<Vec<_>>();
-    let required_exit_conditions = task_ids
+    for reservation in &future_reservation_refs {
+        must_not_break.push(json!({
+            "id": format!("reservation:{reservation}"),
+            "description": format!("保护未来保留项 {reservation}，不得提前消耗"),
+        }));
+    }
+    let exact_evidence = compiled_input
+        .get("exactEvidenceRefs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (index, evidence) in exact_evidence.iter().enumerate() {
+        let label = evidence
+            .get("artifactId")
+            .and_then(Value::as_str)
+            .or_else(|| evidence.get("ref").and_then(Value::as_str))
+            .unwrap_or("unknown-evidence");
+        must_not_break.push(json!({
+            "id": format!("exit-evidence:{index}"),
+            "description": format!("保留退出证据 {label} 供下一卷回溯"),
+        }));
+    }
+
+    let exit_ref = compiled_input.pointer("/volumeExitState/ref").cloned();
+    let reality_digest = compiled_input
+        .pointer("/actualReality/stateDigest")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let semantic_digest = sha256_canonical(&json!({
+        "goal": next_volume_goal_constraints(compiled_input),
+        "canon": compiled_input.get("canonFacts"),
+        "responsibilities": responsibilities.clone(),
+        "reservations": future_reservation_refs.clone(),
+        "exit": compiled_input.get("volumeExitState"),
+        "evidence": exact_evidence.clone(),
+    }))
+    .map_err(|error| error.to_string())?;
+    let mut entry_conditions = vec![
+        json!({"kind":"PREVIOUS_VOLUME_CLOSED","value":request.current_volume_id}),
+        json!({"kind":"PREVIOUS_VOLUME_EXIT_BOUND","value":exit_ref}),
+    ];
+    if !reality_digest.is_empty() {
+        entry_conditions.push(json!({
+            "kind":"PREVIOUS_VOLUME_REALITY_BOUND",
+            "value":reality_digest,
+        }));
+    }
+    for evidence in &exact_evidence {
+        entry_conditions.push(json!({
+            "kind":"EXIT_EVIDENCE_BOUND",
+            "value":evidence,
+        }));
+    }
+    let required_exit_conditions = must_achieve
         .iter()
-        .map(|task_id| json!({"kind":"TASK_SATISFIED","value":task_id}))
+        .filter_map(|goal| goal.get("id").and_then(Value::as_str))
+        .map(|id| json!({"kind":"TASK_SATISFIED","value":format!("task:{id}")}))
         .collect::<Vec<_>>();
     let payload = json!({
         "payloadSchema": "volume-intent.r1",
-        "volumeFunction": format!("{title}：新入口与跨卷责任推进"),
-        "entryConditions": [{"kind":"PREVIOUS_VOLUME_CLOSED","value":previous_volume_id}],
+        "volumeFunction": format!("{}：新入口与跨卷责任推进（依据 {semantic_digest}）", request.title),
+        "entryConditions": entry_conditions,
         "mustAchieve": must_achieve,
-        "mustNotBreak": current_intent.get("mustNotBreak").cloned().unwrap_or_else(|| json!([])),
+        "mustNotBreak": must_not_break,
         "requiredExitConditions": required_exit_conditions,
-        "futureReservationRefs": current_intent.get("futureReservationRefs").cloned().unwrap_or_else(|| json!([])),
-        "crossVolumeResponsibilityRefs": current_intent.get("crossVolumeResponsibilityRefs").cloned().unwrap_or_else(|| json!([])),
-        "targetChapterRange": {"min":1,"preferred":(chapter_end - chapter_start + 1).max(1),"max":(chapter_end - chapter_start + 1).max(1)},
-        "targetWordRange": {"preferred":target_words.max(1)},
+        "futureReservationRefs": future_reservation_refs,
+        "crossVolumeResponsibilityRefs": responsibilities,
+        "targetChapterRange": {"min":1,"preferred":(request.chapter_end - request.chapter_start + 1).max(1),"max":(request.chapter_end - request.chapter_start + 1).max(1)},
+        "targetWordRange": {"preferred":request.target_words.max(1)},
     });
     planning::validate_volume_intent(&payload)?;
     Ok(payload)
 }
 
 fn compile_next_volume_route(
+    compiled_input: &Value,
     intent: &Value,
     task_ids: &[String],
     chapter_start: i64,
@@ -1324,11 +1729,7 @@ fn compile_next_volume_route(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let responsibilities = intent
-        .get("crossVolumeResponsibilityRefs")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let responsibilities = responsibility_refs_from_input(compiled_input);
     let tasks = task_ids
         .iter()
         .enumerate()
@@ -1338,17 +1739,12 @@ fn compile_next_volume_route(
                 .and_then(|item| item.get("description"))
                 .and_then(Value::as_str)
                 .unwrap_or("推进下一卷入口");
-            let continuity_refs = responsibilities
-                .get(index)
-                .cloned()
-                .map(|value| vec![value])
-                .unwrap_or_default();
             json!({
                 "taskId": task_id,
                 "class": "REQUIRED",
                 "objective": objective,
                 "dependsOnTaskIds": [],
-                "continuityThreadRefs": continuity_refs,
+                "continuityThreadRefs": responsibilities.clone(),
                 "reservationRefs": [],
                 "completionPredicate": {"kind":"TASK_SATISFIED","value":task_id},
                 "estimatedChapterCost": {"preferred":1},
@@ -1360,14 +1756,69 @@ fn compile_next_volume_route(
         .map(|task_id| json!({"kind":"TASK_SATISFIED","value":task_id}))
         .collect::<Vec<_>>();
     let span = (chapter_end - chapter_start + 1).max(1);
+    let remaining_capacity = compiled_input
+        .pointer("/actualReality/remainingChapterCapacity")
+        .and_then(Value::as_i64)
+        .unwrap_or(span);
+    let max_chapters = span.min(remaining_capacity.saturating_add(1).max(1)).max(1);
+    let preferred_chapters = span.min(max_chapters).max(1);
+    let mut invariants = vec![json!("B09_NEXT_VOLUME_ROUTE_DERIVED")];
+    if compiled_input
+        .get("canonFacts")
+        .and_then(Value::as_array)
+        .is_some_and(|facts| !facts.is_empty())
+    {
+        invariants.push(json!("B09_NEXT_VOLUME_CANON_BOUND"));
+    }
+    if !next_volume_goal_constraints(compiled_input).is_empty() {
+        invariants.push(json!("B09_NEXT_VOLUME_GOAL_BOUND"));
+    }
+    if !responsibilities.is_empty() {
+        invariants.push(json!("B09_NEXT_VOLUME_RESPONSIBILITY_BOUND"));
+    }
+    if let Some(reservations) = compiled_input
+        .get("futureReservations")
+        .and_then(Value::as_array)
+    {
+        for reservation in reservations {
+            if let Some(reference) = reservation
+                .as_str()
+                .or_else(|| reservation.get("reservationId").and_then(Value::as_str))
+            {
+                invariants.push(json!(format!(
+                    "B09_FUTURE_RESERVATION_PROTECTED:{reference}"
+                )));
+            }
+        }
+    }
+    if compiled_input
+        .get("exactEvidenceRefs")
+        .and_then(Value::as_array)
+        .is_some_and(|evidence| !evidence.is_empty())
+    {
+        invariants.push(json!("B09_NEXT_VOLUME_EXIT_EVIDENCE_BOUND"));
+        for (index, evidence) in compiled_input["exactEvidenceRefs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let label = evidence
+                .get("artifactId")
+                .and_then(Value::as_str)
+                .or_else(|| evidence.get("ref").and_then(Value::as_str))
+                .unwrap_or("unknown-evidence");
+            invariants.push(json!(format!("B09_EXIT_EVIDENCE_BOUND:{index}:{label}")));
+        }
+    }
     let payload = json!({
         "payloadSchema": "volume-plan.r1",
         "volumeIntentRef": Value::Null,
         "routeVersion": 1,
         "tasks": tasks,
-        "routeInvariants": ["B09_NEXT_VOLUME_ROUTE_DERIVED"],
+        "routeInvariants": invariants,
         "requiredExitConditions": required_exit_conditions,
-        "capacityBudget": {"minChapters":1,"preferredChapters":span,"maxChapters":span},
+        "capacityBudget": {"minChapters":1,"preferredChapters":preferred_chapters,"maxChapters":max_chapters},
     });
     Ok(payload)
 }

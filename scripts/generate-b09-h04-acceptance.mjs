@@ -3,7 +3,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-export const START_COMMIT = '6992b544f59f385160e3aa2f34f2e206ae715e59'
+export const START_COMMIT = 'e964546712b2fe620edbdf3c7d393d771f02de9c'
+export const FROZEN_BASELINE_COMMIT = '6992b544f59f385160e3aa2f34f2e206ae715e59'
 
 export const B09_BLOCKING_GATES = Array.from({ length: 22 }, (_, index) => `B09-A${String(index + 1).padStart(2, '0')}`)
 export const H04_BLOCKING_GATES = Array.from({ length: 12 }, (_, index) => `H04-A${String(index + 1).padStart(2, '0')}`)
@@ -25,7 +26,7 @@ export const GLOBAL_BLOCKING_GATES = [
   'baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary',
   'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt',
   'cargo_check', 'cargo_clippy', 'b02_regression', 'b03_regression', 'b05_regression',
-  'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'm0a',
+  'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'r2_alignment', 'm0a',
   'source_binding', 'package_smoke', 'fresh_package_architecture',
 ]
 export const REQUIRED_BLOCKING_GATES = [...B09_BLOCKING_GATES, ...H04_BLOCKING_GATES, ...GLOBAL_BLOCKING_GATES]
@@ -35,6 +36,8 @@ function sourceBindingPass(report) {
   return binding === 'PASS'
     && report.startCommit === START_COMMIT
     && report.startCommitIsAncestor === true
+    && report.baselineCommit === FROZEN_BASELINE_COMMIT
+    && report.baselineIsAncestor === true
     && typeof report.sourceCommit === 'string'
     && report.sourceCommit === report.evidenceSourceCommit
     && report.sourceCommit === report.sourceCommitAfter

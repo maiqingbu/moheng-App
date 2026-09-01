@@ -1,10 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { B09_BLOCKING_GATES, H04_BLOCKING_GATES, H04_GATE_DEFINITIONS, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b09-h04-acceptance.mjs'
+import { B09_BLOCKING_GATES, FROZEN_BASELINE_COMMIT, H04_BLOCKING_GATES, H04_GATE_DEFINITIONS, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b09-h04-acceptance.mjs'
 
 const passing = () => ({
   startCommit: START_COMMIT,
   startCommitIsAncestor: true,
+  baselineCommit: FROZEN_BASELINE_COMMIT,
+  baselineIsAncestor: true,
   sourceCommit: 'final',
   evidenceSourceCommit: 'final',
   sourceCommitAfter: 'final',
@@ -22,7 +24,7 @@ test('B09/H04 acceptance contains the complete functional and global matrix', ()
 })
 
 test('H04 gate ids retain the frozen meanings and source binding requires the start commit', () => {
-  assert.equal(START_COMMIT, '6992b544f59f385160e3aa2f34f2e206ae715e59')
+  assert.equal(START_COMMIT, 'e964546712b2fe620edbdf3c7d393d771f02de9c')
   assert.deepEqual(H04_GATE_DEFINITIONS, {
     'H04-A01': 'No Fourth Harness',
     'H04-A02': 'Cross-volume Bounded Read',

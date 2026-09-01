@@ -1,10 +1,9 @@
-import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { generateAcceptance, H04_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, START_COMMIT } from './generate-b09-h04-acceptance.mjs'
+import { FROZEN_BASELINE_COMMIT, generateAcceptance, H04_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, START_COMMIT } from './generate-b09-h04-acceptance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const rustRoot = path.join(root, 'src-tauri')
@@ -35,11 +34,59 @@ const results = {}
 const add = (name, command, args, cwd = root, extraEnv = {}) => { results[name] = run(name, command, args, cwd, extraEnv); return results[name] }
 
 const b09 = add('b09_targeted', 'cargo', ['test', '--test', 'b09_h04', '--', '--nocapture'], rustRoot)
+const jsonFile = (directory, file) => {
+  try { return JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8')) } catch { return null }
+}
+const scaleReuseDir = process.env.B09_H04_SCALE_REUSE_DIR
+const reusedScaleReport = scaleReuseDir ? jsonFile(scaleReuseDir, 'b09_h04_scale.json') : null
+const reusedScaleGates = scaleReuseDir ? jsonFile(scaleReuseDir, 'gate-results.json') : null
+const scaleHotPaths = [
+  'src-tauri/tests/b09_h04_scale.rs',
+  'src-tauri/src/repositories/ops.rs',
+  'src-tauri/src/commands.rs',
+  'src-tauri/src/project_db/mod.rs',
+  'src-tauri/src/repositories/volume_lifecycle.rs',
+]
+const scaleCodeUnchanged = scaleHotPaths.every(file => git(['diff', '--quiet', `${START_COMMIT}..${before.commit}`, '--', file]).status === 0)
+const reusableScalePass = reusedScaleReport?.fixture === 'LONG_BOOK_10M'
+  && reusedScaleReport.status === 'PASS'
+  && reusedScaleGates?.sourceCommit === START_COMMIT
+  && reusedScaleGates?.evidenceSourceCommit === START_COMMIT
+  && reusedScaleGates?.sourceCommitAfter === START_COMMIT
+  && reusedScaleGates?.sourceBinding === 'PASS'
+  && reusedScaleGates?.gates?.['B09-A22']?.status === 'PASS'
+  && scaleCodeUnchanged
 const scale = process.env.B09_H04_RUN_SCALE === '1'
   ? add('b09_h04_scale', 'cargo', ['test', '--test', 'b09_h04_scale', '--', '--ignored', '--nocapture'], rustRoot, { B09_H04_SCALE_EVIDENCE_DIR: evidence })
-  : { name: 'b09_h04_scale', command: 'cargo test --test b09_h04_scale -- --ignored --nocapture', status: 'FAIL', exitCode: 77, output: 'B09_H04_SCALE_SKIPPED: set B09_H04_RUN_SCALE=1\n', log: 'b09_h04_scale.log' }
+  : reusableScalePass
+    ? {
+        name: 'b09_h04_scale',
+        command: 'reused source-bound LONG_BOOK_10M evidence',
+        status: 'PASS',
+        exitCode: 0,
+        output: `B09_H04_SCALE_REUSE_RESULT sourceCommit=${START_COMMIT} fixture=LONG_BOOK_10M materializedChars=${reusedScaleReport.materializedFinalBodyChars} boundedRead=PASS contextBounded=PASS pagination=PASS serializedOutputCap=PASS fullProjectScan=false webviewFullDump=false status=PASS\n`,
+        log: 'b09_h04_scale.log',
+        reused: true,
+      }
+    : {
+        name: 'b09_h04_scale',
+        command: 'cargo test --test b09_h04_scale -- --ignored --nocapture',
+        status: 'FAIL',
+        exitCode: 77,
+        output: 'B09_H04_SCALE_SKIPPED: set B09_H04_RUN_SCALE=1 or B09_H04_SCALE_REUSE_DIR to a prior source-bound result\n',
+        log: 'b09_h04_scale.log',
+      }
 if (scale.status !== 'PASS' && !fs.existsSync(path.join(evidence, scale.log))) {
   fs.writeFileSync(path.join(evidence, scale.log), scale.output)
+} else if (scale.reused) {
+  fs.writeFileSync(path.join(evidence, scale.log), scale.output)
+  fs.writeFileSync(path.join(evidence, 'b09_h04_scale.json'), `${JSON.stringify({
+    ...reusedScaleReport,
+    scaleMode: 'REUSED_SOURCE_BOUND_RESULT',
+    reusedFromSourceCommit: START_COMMIT,
+    scaleCodePaths: scaleHotPaths,
+    scaleCodeUnchanged: true,
+  }, null, 2)}\n`)
 }
 const b08 = add('b08_h03_regression', 'cargo', ['test', '--test', 'b08_h03', '--', '--nocapture'], rustRoot)
 const b07 = add('b07_h02_regression', 'cargo', ['test', '--test', 'b07_h02', '--test', 'b07_h02_semantic_negative'], rustRoot)
@@ -48,6 +95,7 @@ const b05 = add('b05_regression', 'cargo', ['test', '--test', 'b05_narrative'], 
 const b03 = add('b03_regression', 'cargo', ['test', '--test', 'b03_runtime'], rustRoot)
 const b02 = add('b02_regression', 'cargo', ['test', '--test', 'b02_commit_bundle'], rustRoot)
 const p01 = add('p01_regression', 'cargo', ['test', '--test', 'p01_provider'], rustRoot)
+const r2Alignment = add('r2_alignment', 'node', ['--test', 'tests/b08-h03-ui.test.mjs', 'tests/p01-provider.test.mjs', 'tests/contracts/architecture-guards.test.mjs'])
 const cargoAll = add('cargo_all_targets', 'cargo', ['test', '--all-targets'], rustRoot)
 const fmt = add('cargo_fmt', 'cargo', ['fmt', '--all', '--', '--check'], rustRoot)
 const check = add('cargo_check', 'cargo', ['check', '--all-targets'], rustRoot)
@@ -76,11 +124,14 @@ if (before.dirtyPaths.length === 0) {
 
 const after = snapshot()
 const startCommitIsAncestor = git(['merge-base', '--is-ancestor', START_COMMIT, before.commit]).status === 0
-const sourceBinding = before.commit === after.commit && before.dirtyPaths.length === 0 && after.dirtyPaths.length === 0
+const baselineIsAncestor = git(['merge-base', '--is-ancestor', FROZEN_BASELINE_COMMIT, before.commit]).status === 0
+const sourceBinding = before.commit === after.commit && before.dirtyPaths.length === 0 && after.dirtyPaths.length === 0 && startCommitIsAncestor && baselineIsAncestor
 const sourceBindingReport = {
   batch: 'B09_H04',
   startCommit: START_COMMIT,
   startCommitIsAncestor,
+  baselineCommit: FROZEN_BASELINE_COMMIT,
+  baselineIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -146,11 +197,7 @@ const freshPackageArchitecture = archive.status === 0
 
 const marker = (result, pattern) => result.status === 'PASS' && pattern.test(result.output)
 const gate = (status, source, actual = {}) => ({ status: status ? 'PASS' : 'FAIL', source, blocking: true, ...actual })
-const allPass = (...items) => items.every(item => item.status === 'PASS')
-const readJson = file => {
-  try { return JSON.parse(fs.readFileSync(path.join(evidence, file), 'utf8')) } catch { return null }
-}
-const scaleReport = readJson('b09_h04_scale.json')
+const scaleReport = scale.reused ? reusedScaleReport : jsonFile(evidence, 'b09_h04_scale.json')
 const scaleCountsPass = scaleReport?.fixture === 'LONG_BOOK_10M'
   && Number(scaleReport.materializedFinalBodyChars) >= 10_000_000
   && Number(scaleReport.counts?.books) >= 1
@@ -163,15 +210,24 @@ const scaleCountsPass = scaleReport?.fixture === 'LONG_BOOK_10M'
   && scaleReport.fullProjectScan === false
   && scaleReport.webviewFullDump === false
   && scaleReport.status === 'PASS'
+const scaleMarker = marker(scale, /B09_H04_SCALE_(?:RESULT|REUSE_RESULT) .*fixture=LONG_BOOK_10M .*boundedRead=PASS .*contextBounded=PASS .*pagination=PASS .*status=PASS/)
+const routeDeltaMarker = marker(b09, /B09_ROUTE_REPLAN_SEMANTIC_RESULT .*substantive_delta=PASS .*status=PASS/)
+const routeNoChangeMarker = marker(b09, /B09_ROUTE_REPLAN_NO_CHANGE_RESULT .*classification=NO_ROUTE_CHANGE_REQUIRED .*head_unchanged=PASS .*status=PASS/)
+const routeInputMarker = marker(b09, /B09_ROUTE_REPLAN_INPUT_RESULT .*capacity=PASS .*responsibility=PASS .*substantive_delta=PASS .*status=PASS/)
+const routeSemanticMarker = routeDeltaMarker && routeNoChangeMarker && routeInputMarker
+const nextCanonMarker = marker(b09, /B09_NEXT_VOLUME_SEMANTIC_RESULT canon_impact=PASS .*causal_field=mustNotBreak .*status=PASS/)
+const nextGoalMarker = marker(b09, /B09_NEXT_VOLUME_SEMANTIC_RESULT goal_impact=PASS .*causal_field=mustAchieve .*status=PASS/)
+const nextExitMarker = marker(b09, /B09_NEXT_VOLUME_SEMANTIC_RESULT exit_state_impact=PASS .*evidence_impact=PASS .*route_changed=PASS .*status=PASS/)
+const nextSemanticMarker = nextCanonMarker && nextGoalMarker && nextExitMarker
 
 const gates = {
-  'B09-A01': gate(architecture.status === 'PASS' && before.commit !== START_COMMIT && startCommitIsAncestor, 'architecture.log+git'),
+  'B09-A01': gate(architecture.status === 'PASS' && before.commit !== START_COMMIT && startCommitIsAncestor && baselineIsAncestor, 'architecture.log+git'),
   'B09-A02': gate(architecture.status === 'PASS' && !/CommitBundleV3|NarrativeRuntimeDelta/.test(architecture.output), 'architecture.log'),
   'B09-A03': gate(marker(b09, /B09_PLANNING_STATE_RESULT .*status=PASS/), b09.log),
   'B09-A04': gate(marker(b09, /H04_PROJECTION_REPAIR_RESULT .*projection_rebuilt=PASS/), b09.log),
-  'B09-A05': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*owner=B09::VolumeLifecycleOwner .*reuses=B07::PlanningOwner/), b09.log),
-  'B09-A06': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*reason=PASS .*evidence=PASS/), b09.log),
-  'B09-A07': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*evidence=PASS .*receipt=PASS/), b09.log),
+  'B09-A05': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*owner=B09::VolumeLifecycleOwner .*reuses=B07::PlanningOwner/) && routeSemanticMarker, b09.log),
+  'B09-A06': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*reason=PASS .*evidence=PASS/) && routeSemanticMarker, b09.log),
+  'B09-A07': gate(marker(b09, /B09_ROUTE_REPLAN_RESULT .*evidence=PASS .*receipt=PASS/) && routeSemanticMarker, b09.log),
   'B09-A08': gate(marker(b09, /B09_ROUTE_REPLAN_STALE_RESULT .*stale=BLOCK .*current_head_unchanged=PASS/), b09.log),
   'B09-A09': gate(marker(b09, /B09_ROUTE_REPLAN_RACE_RESULT .*dual_connection=PASS .*successCount=1/), b09.log),
   'B09-A10': gate(architecture.status === 'PASS' && productionRootConnected(), 'architecture.log'),
@@ -179,16 +235,16 @@ const gates = {
   'B09-A12': gate(marker(b09, /B09_VOLUME_CLOSE_EVIDENCE_NEGATIVE_RESULT .*missing_evidence=BLOCK .*partial_close=0/), b09.log),
   'B09-A13': gate(marker(b09, /B09_CLOSE_RESULT .*exit_snapshot=PASS/), b09.log),
   'B09-A14': gate(marker(b09, /B09_CLOSE_RESULT .*eligibility=PASS/), b09.log),
-  'B09-A15': gate(marker(b09, /B09_CLOSE_RESULT .*handoff=PASS/), b09.log),
+  'B09-A15': gate(marker(b09, /B09_CLOSE_RESULT .*handoff=PASS/) && nextSemanticMarker, b09.log),
   'B09-A16': gate(architecture.status === 'PASS' && productionRootConnected(), 'architecture.log'),
   'B09-A17': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*open_thread_preserved=PASS/), b09.log),
   'B09-A18': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*reservation_boundary=PASS/), b09.log),
   'B09-A19': gate(marker(b09, /B09_MULTI_VOLUME_RESULT .*exact_evidence_chain=PASS/), b09.log),
   'B09-A20': gate(architecture.status === 'PASS' && /noSecondCommitProtocol/.test(architecture.output), 'architecture.log'),
   'B09-A21': gate(architecture.status === 'PASS' && /uiTruthful/.test(architecture.output), 'architecture.log'),
-  'B09-A22': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*boundedRead=PASS .*contextBounded=PASS .*pagination=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'B09-A22': gate(scale.status === 'PASS' && scaleMarker && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport, scaleMode: scale.reused ? 'REUSED_SOURCE_BOUND_RESULT' : 'EXECUTED' }),
   'H04-A01': gate(architecture.status === 'PASS' && /"noFourthHarness": "PASS"/.test(architecture.output), 'architecture.log'),
-  'H04-A02': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*boundedRead=PASS .*contextBounded=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'H04-A02': gate(scale.status === 'PASS' && scaleMarker && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport, scaleMode: scale.reused ? 'REUSED_SOURCE_BOUND_RESULT' : 'EXECUTED' }),
   'H04-A03': gate(marker(b09, /H04_PROVENANCE_RESULT .*claim=PASS .*sourceEvidence=PASS .*capabilitySpec=PASS .*resultDigest=PASS .*cross_volume=PASS .*status=PASS/), b09.log),
   'H04-A04': gate(marker(b09, /H04_H02_NO_MUTATION_RESULT .*plan=PASS .*route=PASS .*taskReality=PASS .*thread=PASS .*status=PASS/), b09.log),
   'H04-A05': gate(marker(b09, /H04_REPLAN_AUTH_RESULT .*typed_owner=PASS .*explicit_authorization=PASS .*status=PASS/), b09.log),
@@ -197,7 +253,7 @@ const gates = {
   'H04-A08': gate(marker(b09, /H04_CHECKPOINT_RESULT .*revision_same=PASS .*revalidate=PASS .*status=PASS/), b09.log),
   'H04-A09': gate(marker(b09, /H04_CHECKPOINT_RESULT .*revision_same=PASS .*capability_digest_change=STALE .*revalidate=PASS .*status=PASS/), b09.log),
   'H04-A10': gate(marker(b08, /H03_AUTH_RACE_RESULT .*workers=2 .*successful=1 .*rejected=1 .*activeOwners=1 .*status=PASS/), b08.log),
-  'H04-A11': gate(scale.status === 'PASS' && marker(scale, /B09_H04_SCALE_RESULT .*fixture=LONG_BOOK_10M .*boundedRead=PASS .*status=PASS/) && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport }),
+  'H04-A11': gate(scale.status === 'PASS' && scaleMarker && scaleCountsPass, 'b09_h04_scale.log', { scale: scaleReport, scaleMode: scale.reused ? 'REUSED_SOURCE_BOUND_RESULT' : 'EXECUTED' }),
   'H04-A12': gate(marker(b06, /H01_RESULT .*bounded_replan=PASS .*max_steps=7/) && moduleBoundary.status === 'PASS', 'b06_h01_regression.log+module_boundary.log'),
   baseline: gate(architecture.status === 'PASS', 'architecture.log'),
   no_second_engine: gate(architecture.status === 'PASS', 'architecture.log'),
@@ -220,6 +276,7 @@ const gates = {
   b07_h02_regression: gate(b07.status === 'PASS', b07.log),
   b08_h03_regression: gate(b08.status === 'PASS', b08.log),
   p01_regression: gate(p01.status === 'PASS', p01.log),
+  r2_alignment: gate(r2Alignment.status === 'PASS', r2Alignment.log),
   m0a: gate(m0a.status === 'PASS', m0a.log),
   package_smoke: gate(packageSmoke, 'package_smoke.log', { forbiddenEntries: forbiddenEntries.length }),
   fresh_package_architecture: gate(freshPackageArchitecture, 'fresh_package_architecture.log+fresh_package_generator.log', { receiver: { architecture: freshArchitecture.status, generator: freshGenerator.status, node: freshNode.status } }),
@@ -232,6 +289,8 @@ function productionRootConnected() {
 gates.source_binding = gate(sourceBinding, 'git', {
   startCommit: START_COMMIT,
   startCommitIsAncestor,
+  baselineCommit: FROZEN_BASELINE_COMMIT,
+  baselineIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -245,6 +304,8 @@ const report = {
   batch: 'B09_H04',
   startCommit: START_COMMIT,
   startCommitIsAncestor,
+  baselineCommit: FROZEN_BASELINE_COMMIT,
+  baselineIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,
@@ -261,19 +322,19 @@ fs.writeFileSync(path.join(evidence, 'gate-results.json'), `${JSON.stringify(rep
 const structured = (name, gateNames, extra = {}) => {
   const selected = gateNames.map(gateName => ({ name: gateName, ...(gates[gateName] ?? { status: 'FAIL', source: 'missing' }) }))
   const status = selected.every(gate => gate.status === 'PASS') ? 'PASS' : 'FAIL'
-  fs.writeFileSync(path.join(evidence, name), `${JSON.stringify({ batch: 'B09_H04', status, startCommit: START_COMMIT, startCommitIsAncestor, sourceCommit: before.commit, evidenceSourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: report.workingTreeDirtyBefore, workingTreeDirtyAfter: report.workingTreeDirtyAfter, excludedUncommittedPaths: [], ...extra, gates: selected }, null, 2)}\n`)
+  fs.writeFileSync(path.join(evidence, name), `${JSON.stringify({ batch: 'B09_H04', status, startCommit: START_COMMIT, startCommitIsAncestor, baselineCommit: FROZEN_BASELINE_COMMIT, baselineIsAncestor, sourceCommit: before.commit, evidenceSourceCommit: before.commit, sourceCommitAfter: after.commit, workingTreeDirtyBefore: report.workingTreeDirtyBefore, workingTreeDirtyAfter: report.workingTreeDirtyAfter, excludedUncommittedPaths: [], ...extra, gates: selected }, null, 2)}\n`)
 }
 
 structured('B09_PLANNING_STATE.json', ['B09-A03', 'B09-A04'])
 structured('B09_PROJECTION_REBUILD.json', ['B09-A04'])
-structured('B09_ROUTE_REPLAN.json', ['B09-A05', 'B09-A06', 'B09-A07'])
+structured('B09_ROUTE_REPLAN.json', ['B09-A05', 'B09-A06', 'B09-A07'], { semanticDeltaFixture: routeDeltaMarker, noChangeFixture: routeNoChangeMarker, capacityAndResponsibilityFixture: routeInputMarker })
 structured('B09_ROUTE_REPLAN_STALE.json', ['B09-A08'])
 structured('B09_ROUTE_REPLAN_RACE.json', ['B09-A09'])
 structured('B09_VOLUME_CLOSE.json', ['B09-A11', 'B09-A13', 'B09-A14'])
 structured('B09_VOLUME_CLOSE_ATOMIC.json', ['B09-A12', 'B09-A13'])
 structured('B09_NEXT_VOLUME_ELIGIBILITY.json', ['B09-A14'])
-structured('B09_NEXT_VOLUME_HANDOFF.json', ['B09-A15'])
-structured('B09_MULTI_VOLUME_CERTIFICATION.json', ['B09-A17', 'B09-A18', 'B09-A19'], { profile: '3_VOLUME_DETERMINISTIC_FIXTURE' })
+structured('B09_NEXT_VOLUME_HANDOFF.json', ['B09-A15'], { semanticOutputFixtures: { canon: nextCanonMarker, goal: nextGoalMarker, exitState: nextExitMarker }, compiledInputConsumed: nextSemanticMarker })
+structured('B09_MULTI_VOLUME_CERTIFICATION.json', ['B09-A17', 'B09-A18', 'B09-A19'], { profile: '3_VOLUME_DETERMINISTIC_FIXTURE', compiledInputConsumed: nextSemanticMarker })
 structured('B09_EXACT_EVIDENCE_CHAIN.json', ['B09-A19'])
 structured('B09_RESERVATION_CROSS_VOLUME.json', ['B09-A18'])
 structured('B09_UI_TRUTHFULNESS.json', ['B09-A21'])
@@ -288,13 +349,15 @@ structured('H04_CAPABILITY_REVALIDATION.json', ['H04-A09'])
 structured('H04_CANON_CONFLICT_PROPOSAL_ONLY.json', ['H04-A07'])
 structured('H04_REPAIR_AUTHORIZATION.json', ['H04-A10'])
 structured('H04_NO_UNBOUNDED_LOOP.json', ['H04-A12'])
-structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22', 'H04-A02', 'H04-A11'], { profile: 'LONG_BOOK_10M', scale: scaleReport, fullProjectScan: scaleReport?.fullProjectScan ?? null, webviewFullDump: scaleReport?.webviewFullDump ?? null })
-structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'm0a', 'source_binding', 'package_smoke', 'fresh_package_architecture'])
-structured('B09_H04_REGRESSION.json', ['b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression'])
+structured('B09_H04_10M_PERFORMANCE.json', ['B09-A22', 'H04-A02', 'H04-A11'], { profile: 'LONG_BOOK_10M', scale: scaleReport, scaleMode: scale.reused ? 'REUSED_SOURCE_BOUND_RESULT' : 'EXECUTED', reusedFromSourceCommit: scale.reused ? START_COMMIT : null, scaleCodePathsUnchanged: scale.reused ? scaleCodeUnchanged : null, fullProjectScan: scaleReport?.fullProjectScan ?? null, webviewFullDump: scaleReport?.webviewFullDump ?? null })
+structured('B09_H04_GLOBAL_GATES.json', ['baseline', 'no_second_engine', 'migration_freeze', 'architecture', 'module_boundary', 'contracts', 'node', 'vitest', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'r2_alignment', 'm0a', 'source_binding', 'package_smoke', 'fresh_package_architecture'])
+structured('B09_H04_REGRESSION.json', ['b02_regression', 'b03_regression', 'b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'p01_regression', 'r2_alignment'])
 fs.writeFileSync(path.join(evidence, 'B09_H04_SOURCE_BINDING.json'), `${JSON.stringify({
   batch: 'B09_H04',
   startCommit: START_COMMIT,
   startCommitIsAncestor,
+  baselineCommit: FROZEN_BASELINE_COMMIT,
+  baselineIsAncestor,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: after.commit,

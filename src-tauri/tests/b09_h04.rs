@@ -1228,6 +1228,16 @@ fn b09_three_volume_fixture_carries_boundary_state_and_rebuilds_deterministicall
     let next_route: Value = serde_json::from_str(&next_route_payload).unwrap();
     assert_ne!(old_intent["volumeFunction"], next_intent["volumeFunction"]);
     assert_ne!(old_route["tasks"], next_route["tasks"]);
+    assert!(next_route["tasks"][0]["continuityThreadRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference == "thread:b09:promise"));
+    assert!(next_route["routeInvariants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|invariant| invariant == "B09_FUTURE_RESERVATION_PROTECTED:reservation:b09:v4"));
     assert_eq!(
         next_intent["futureReservationRefs"],
         json!(["reservation:b09:v4"])
@@ -1385,7 +1395,10 @@ fn b09_route_replan_changes_semantics_when_task_reality_changes() {
     );
     assert_ne!(previous["tasks"], candidate["tasks"]);
     assert!(candidate["tasks"].as_array().unwrap().is_empty());
-    assert_ne!(previous["requiredExitConditions"], candidate["requiredExitConditions"]);
+    assert_ne!(
+        previous["requiredExitConditions"],
+        candidate["requiredExitConditions"]
+    );
     println!("B09_ROUTE_REPLAN_SEMANTIC_RESULT task_reality=PASS substantive_delta=PASS exit_gap=PASS status=PASS");
 }
 
@@ -1449,6 +1462,40 @@ fn b09_route_replan_uses_capacity_and_responsibility_in_route_semantics() {
 }
 
 #[test]
+fn b09_route_replan_changes_blocked_task_objective_and_exit_plan() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"BLOCKED","evidenceRefs":[],"remainingConditions":["dependency"]}).to_string()],
+        )
+        .unwrap();
+    VolumeLifecycleOwner::replan_volume_route(
+        &fixture.connection,
+        replan_request(0, "b09-replan-blocked"),
+    )
+    .unwrap();
+    let candidate = current_payload_for_scope(
+        &fixture.connection,
+        "VolumePlan",
+        &scope("VOLUME", Some(("volumeId", &fixture.volume_id))),
+    );
+    assert!(candidate["tasks"][0]["objective"]
+        .as_str()
+        .unwrap()
+        .starts_with("解除阻塞后："));
+    assert_eq!(
+        candidate["requiredExitConditions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    println!("B09_ROUTE_REPLAN_SEMANTIC_RESULT blocked_task=PASS substantive_delta=PASS exit_gap=PASS status=PASS");
+}
+
+#[test]
 fn b09_next_volume_intent_changes_when_canon_changes() {
     fn next_intent(with_canon: bool) -> Value {
         let fixture = fixture();
@@ -1468,7 +1515,15 @@ fn b09_next_volume_intent_changes_when_canon_changes() {
                 )
                 .unwrap();
         }
-        complete_and_handoff(&fixture, if with_canon { "b09-canon-semantic" } else { "b09-base-semantic" }).0
+        complete_and_handoff(
+            &fixture,
+            if with_canon {
+                "b09-canon-semantic"
+            } else {
+                "b09-base-semantic"
+            },
+        )
+        .0
     }
     let without = next_intent(false);
     let with = next_intent(true);
