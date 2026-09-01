@@ -17,6 +17,7 @@ use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::io::Write;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -177,6 +178,23 @@ fn local_provider_server(status: u16, body: &'static str, delay: Duration) -> St
         let _ = stream.write_all(response.as_bytes());
     });
     format!("http://{address}")
+}
+
+fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        observed_calls.fetch_add(1, Ordering::SeqCst);
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (format!("http://{address}"), calls)
 }
 
 #[test]
@@ -425,6 +443,12 @@ fn p01_formal_raw_persist_failure_never_invokes_parse_or_authority_mutation() {
     );
     assert_eq!(
         connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM model_usage", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
             .query_row::<i64, _, _>("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
             .unwrap(),
         0
@@ -592,4 +616,88 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
         Err(error) if error.contains("budget hard limit")
     ));
     assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
+    let (_temp, _manager, connection) = formal_project();
+    seed_formal_budget(&connection, "budget:p01:real", 3, 20);
+    let body = r#"{"id":"req:local","choices":[{"message":{"content":"{\"body\":\"ok\"}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
+    let (endpoint, calls) = local_provider_server_with_calls(200, body);
+    let secrets = MemorySecretStore::new();
+    secrets.put("fixture", "fixture-token-real-http").unwrap();
+    let gateway = ConfiguredProductionGateway::new(
+        ProviderConfig {
+            provider_id: "fixture".into(),
+            model_id: "fixture-model".into(),
+            endpoint: endpoint.clone(),
+            enabled: true,
+            timeout_ms: 2_000,
+        },
+        Arc::new(OpenAiCompatibleProvider::new(endpoint)),
+        Arc::new(secrets),
+    );
+    let spec = formal_spec("real-openai-usage", Some("budget:p01:real"), 1);
+    let outcome = execute_production_model(
+        &connection,
+        &gateway,
+        &spec,
+        "RENDER_CHAPTER",
+        json!({"prompt":"real usage"}),
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(outcome.parsed, Some(json!({"body":"ok"})));
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT raw_response FROM model_responses WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        body
+    );
+    assert_eq!(
+        connection
+            .query_row::<(i64, i64, i64), _, _>(
+                "SELECT input_tokens, output_tokens, total_tokens FROM model_usage WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap(),
+        (5, 3, 8)
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM budget_reservations WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "SETTLED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT budget_id FROM model_cost_ledger WHERE model_run_id=?1 AND cost_type='ACTUAL'",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "budget:p01:real"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT json_extract(payload_json,'$.providerRequestId') FROM production_events WHERE event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "req:local"
+    );
 }
