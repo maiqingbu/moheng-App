@@ -1,0 +1,61 @@
+{
+  "schema": "m0e.batch-freeze.v1",
+  "freezeThrough": "B11",
+  "acceptedBaseline": "edadc96aba68fe89b8e1e453387eb6ffe3fd9968",
+  "acceptedStages": [
+    "B01",
+    "B02",
+    "B03",
+    "B04",
+    "B05",
+    "B06",
+    "H01",
+    "B07",
+    "H02",
+    "B08",
+    "H03",
+    "B09",
+    "H04",
+    "B10",
+    "B11"
+  ],
+  "frozenMigrations": [
+    "0001",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0006",
+    "0007",
+    "0008",
+    "0009",
+    "0010"
+  ],
+  "historicalAcceptanceRefs": [
+    "B01_FROZEN_PASS",
+    "B02_FROZEN_PASS",
+    "B03_FROZEN_PASS",
+    "B04_M0_COMPLETE",
+    "B05_FROZEN_PASS",
+    "B06_H01_FROZEN_PASS",
+    "B07_H02_FROZEN_PASS",
+    "B08_H03_FROZEN_PASS",
+    "B09_H04_FROZEN_PASS",
+    "B10_FROZEN_PASS",
+    "B11_FROZEN_PASS"
+  ],
+  "allowedReopenReasons": [
+    "B12_EXPLICIT_SCOPE",
+    "COMPATIBILITY_FIX",
+    "SOURCE_BOUND_EVIDENCE"
+  ],
+  "forbiddenReopenReasons": [
+    "B13_PRESTART",
+    "B14_PRESTART",
+    "B15_PRESTART",
+    "RC1_PRESTART",
+    "HISTORICAL_REDESIGN",
+    "SKILL_RUNTIME_INTEGRATION"
+  ],
+  "nextAuthorizedBatch": "B12"
+}
