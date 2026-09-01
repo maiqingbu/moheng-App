@@ -769,6 +769,7 @@ fn build_method_guidance(skill_texts: &[LoadedSkillText], resources: &[LoadedRes
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_invocation_provenance_at(
     invocation_id: &str,
     skill: &SkillMetadata,
@@ -1503,6 +1504,7 @@ pub fn enrich_chapter(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn enrich_chapter_with_policy(
     project_id: &str,
     chapter_id: &str,
