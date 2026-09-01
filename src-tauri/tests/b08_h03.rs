@@ -585,6 +585,17 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         projection["quality"]["modelProvenance"]["evaluatorCalls"],
         1
     );
+    assert_eq!(projection["quality"]["repair"]["status"], "REPAIRED");
+    assert_eq!(projection["quality"]["repair"]["transportCalls"], 0);
+    assert_eq!(projection["quality"]["recheckedDimensions"][0], "hook");
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='ChapterCandidate' AND version=2",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT json_extract(p.payload_json,'$.candidateRef.version') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ReviewReport'",
+        [], |row| row.get(0)
+    ).unwrap(), 2);
 }
 
 #[test]

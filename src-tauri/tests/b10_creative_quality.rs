@@ -1,11 +1,14 @@
 use ai_novel_production_system_core::creative_skills::{
     build_skill_task_context, create_invocation_provenance, default_taste_profile,
-    enforce_hard_quality_separation, evaluate_narrative_quality, load_registry,
+    enforce_hard_quality_separation, enrich_chapter_with_policy, evaluate_narrative_quality,
+    load_registry,
     normalize_skill_output, recheck_affected_dimensions, repair_candidate, select_creative_skills,
     RepairCandidateRequest, SkillSelectionRequest,
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use serde_json::json;
+
+const NOW: &str = "2026-09-01T23:00:00Z";
 
 fn candidate_ref(id: &str) -> ArtifactRef {
     ArtifactRef {
@@ -229,4 +232,155 @@ fn b10_repair_rechecks_only_affected_dimensions_before_hard_gate() {
     assert_eq!(rechecked.rechecked_dimensions, vec!["hook"]);
     assert!(rechecked.soft_only);
     assert_eq!(rechecked.model_provenance.evaluator_calls, 1);
+}
+
+fn plan_payload() -> serde_json::Value {
+    json!({
+        "chapterGoal": "推进冲突并留下一个未解决的问题",
+        "activeTaskRefs": ["task:b10:chapter"],
+        "continuityActions": []
+    })
+}
+
+#[test]
+fn b10_formal_loader_consumes_selected_skill_text_and_keeps_unselected_loads_zero() {
+    let opening = enrich_chapter_with_policy(
+        "project:b10",
+        "chapter:b10:loader",
+        7,
+        "artifact:context:7",
+        &plan_payload(),
+        "OPENING_BOOTSTRAP",
+        "S14",
+        vec!["S10".into()],
+        Vec::new(),
+        NOW,
+    )
+    .unwrap();
+    let long_form = enrich_chapter_with_policy(
+        "project:b10",
+        "chapter:b10:loader",
+        7,
+        "artifact:context:7",
+        &plan_payload(),
+        "LONG_FORM",
+        "S21",
+        vec!["S23".into()],
+        Vec::new(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(opening.loading.selected_full_text_loads, 2);
+    assert_eq!(opening.loading.unselected_full_text_loads, 0);
+    assert_eq!(opening.loaded_skill_texts.len(), 2);
+    assert!(opening
+        .loaded_skill_texts
+        .iter()
+        .all(|loaded| loaded.reference.ends_with("/SKILL.md") && loaded.digest.len() == 64));
+    assert!(opening
+        .invocations
+        .iter()
+        .all(|invocation| invocation.loaded_skill_text_ref.ends_with("/SKILL.md")
+            && invocation.loaded_skill_text_digest.len() == 64
+            && invocation.created_at == NOW
+            && invocation
+                .method_refs
+                .iter()
+                .any(|reference| reference.ends_with("/SKILL.md"))));
+    assert_ne!(opening.method_guidance, long_form.method_guidance);
+}
+
+#[test]
+fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
+    let enrichment = enrich_chapter_with_policy(
+        "project:b10",
+        "chapter:b10:resource",
+        7,
+        "artifact:context:7",
+        &plan_payload(),
+        "OPENING_BOOTSTRAP",
+        "S14",
+        vec!["S10".into()],
+        vec!["resources/operating_method.md".into()],
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(enrichment.loading.selected_resource_loads, 2);
+    assert_eq!(enrichment.loading.unselected_resource_loads, 0);
+    assert_eq!(enrichment.loaded_resources.len(), 2);
+    assert!(enrichment
+        .invocations
+        .iter()
+        .all(|invocation| invocation
+            .resource_refs
+            .iter()
+            .any(|reference| reference.ends_with("resources/operating_method.md"))
+            && invocation
+                .resource_digests
+                .iter()
+                .all(|digest| digest.as_str().unwrap().len() == 64)));
+}
+
+#[test]
+fn b10_quality_semantics_distinguish_agency_dialogue_repetition_and_hook() {
+    let profile = default_taste_profile(7);
+    let report = |body: &str| {
+        evaluate_narrative_quality(
+            &candidate_ref("candidate:b10:semantic"),
+            "project:b10",
+            7,
+            body,
+            &profile,
+            vec!["inv:b10:semantic".into()],
+        )
+        .unwrap()
+    };
+    let active = report("林舟决定推门，拔刀冲向守卫。门后传来脚步声，谁在那里？");
+    let passive = report("林舟被推倒在地，只能等待守卫决定他的命运。房间安静地结束了。");
+    assert_ne!(active.dimensions["agency"].score, passive.dimensions["agency"].score);
+    assert_ne!(active.dimensions["hook"].score, passive.dimensions["hook"].score);
+
+    let dialogue = report("“你来了。”林舟说。“我一直在等你。”对方回答。");
+    let exposition = report("所谓旧城，是一座建于三百年前的城池。城池的历史、制度与地理沿革如下。");
+    assert_ne!(dialogue.dimensions["dialogue"].score, exposition.dimensions["dialogue"].score);
+    assert_ne!(dialogue.dimensions["exposition"].score, exposition.dimensions["exposition"].score);
+
+    let repeated = report("门后传来脚步声。门后传来脚步声。门后传来脚步声。门后传来脚步声。");
+    let varied = report("雨停后，林舟看见远处的灯，决定沿着河岸寻找出口。");
+    assert_ne!(repeated.dimensions["repetition"].score, varied.dimensions["repetition"].score);
+}
+
+#[test]
+fn b10_quality_taste_profile_changes_interpretation_not_only_digest() {
+    let mut restrained = default_taste_profile(7);
+    restrained.profile["voice"] = json!("克制");
+    let mut ornate = default_taste_profile(7);
+    ornate.profile["voice"] = json!("华丽");
+    let body = "林舟停在门前，望着雨幕，决定推门。";
+    let restrained_report = evaluate_narrative_quality(
+        &candidate_ref("candidate:b10:taste"),
+        "project:b10",
+        7,
+        body,
+        &restrained,
+        vec![],
+    )
+    .unwrap();
+    let ornate_report = evaluate_narrative_quality(
+        &candidate_ref("candidate:b10:taste"),
+        "project:b10",
+        7,
+        body,
+        &ornate,
+        vec![],
+    )
+    .unwrap();
+    assert_ne!(
+        restrained_report.dimensions["voice"].score,
+        ornate_report.dimensions["voice"].score
+    );
+    assert_ne!(
+        restrained_report.dimensions["voice"].signal,
+        ornate_report.dimensions["voice"].signal
+    );
 }
