@@ -1,0 +1,49 @@
+{
+  "schema": "b11-prebatch-freeze-r1",
+  "freezeThrough": "B10",
+  "acceptedBaseline": "2f6ebc02ad999c43c322ea23b4e9d48148baee01",
+  "acceptedStages": [
+    "M0/B01-B04",
+    "B05",
+    "B06/H01",
+    "B07/H02",
+    "B08/H03",
+    "Post-B08/H03 R2 Alignment",
+    "P01",
+    "B09/H04",
+    "B10"
+  ],
+  "frozenMigrations": [
+    "0001_catalog.sql",
+    "0002_project_authority.sql",
+    "0003_project_command.sql",
+    "0004_project_longterm.sql",
+    "0005_m0c_commit_delta.sql",
+    "0006_m0e_ops.sql",
+    "0007_b05_narrative_foundation.sql",
+    "0008_h01_support_checkpoint.sql",
+    "0009_h03_repair_workflow.sql",
+    "0010_b09_h04_volume_lifecycle.sql"
+  ],
+  "historicalAcceptanceRefs": [
+    "evidence/B10/B10_ACCEPTANCE.json",
+    "evidence/B10/B10_SOURCE_BINDING.json",
+    "evidence/B10/B10_GLOBAL_GATES.json",
+    "evidence/B10/B10_PACKAGE_SMOKE.json"
+  ],
+  "allowedReopenReasons": [
+    "B11_PRODUCT_ENTRY_INTEGRATION",
+    "B11_TRUE_REGRESSION",
+    "R2_FROZEN_HARD_INVARIANT_VIOLATION",
+    "USER_SIGNED_CHANGE_INSTRUCTION"
+  ],
+  "forbiddenReopenReasons": [
+    "REVIEWER_PREFERENCE",
+    "STYLE_ONLY",
+    "TEST_ORGANIZATION_ONLY",
+    "OPPORTUNISTIC_REFACTOR"
+  ],
+  "nextAuthorizedBatch": "B11",
+  "doNotStart": ["B12", "B13", "B14", "B15", "RC1"],
+  "status": "PASS"
+}
