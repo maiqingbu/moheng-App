@@ -1,14 +1,19 @@
 use ai_novel_production_system_core::production::{
-    ConfiguredProductionGateway, ProductionModelGateway,
+    execute_production_model, ConfiguredProductionGateway, GatewayTransport, ProductionModelGateway,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::provider::OpenAiCompatibleProvider;
 use ai_novel_production_system_core::provider::{
-    ProviderAdapter, ProviderConfig, ProviderErrorKind, ProviderRequest, ProviderResponse,
-    ProviderUsage, ScriptedProvider,
+    ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind, ProviderRequest,
+    ProviderResponse, ProviderUsage, ScriptedProvider,
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
-use ai_novel_production_system_core::runtime::MemorySecretStore;
+use ai_novel_production_system_core::runtime::{
+    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError,
+};
+use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
+use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::io::Write;
 use std::net::TcpListener;
@@ -19,7 +24,7 @@ use std::time::Duration;
 #[test]
 fn p01_provider_adapter_maps_usage_and_typed_errors() {
     let provider = ScriptedProvider::new(Ok(ProviderResponse {
-        output: json!({"body":"ok"}),
+        raw_response: json!({"body":"ok"}).to_string(),
         usage: ProviderUsage {
             input_tokens: 11,
             output_tokens: 7,
@@ -73,7 +78,7 @@ fn p01_configured_gateway_requires_secret_and_never_returns_it() {
             timeout_ms: 1000,
         },
         Arc::new(ScriptedProvider::new(Ok(ProviderResponse {
-            output: json!({"ok":true}),
+            raw_response: json!({"ok":true}).to_string(),
             usage: ProviderUsage::default(),
             provider_request_id: None,
         }))),
@@ -82,10 +87,11 @@ fn p01_configured_gateway_requires_secret_and_never_returns_it() {
     let response = gateway
         .invoke("TEST_PROVIDER", &json!({"prompt":"ping"}))
         .unwrap();
-    assert_eq!(response.output["ok"], true);
+    assert_eq!(response.raw_response.as_deref(), Some(r#"{"ok":true}"#));
     assert!(!response
-        .output
-        .to_string()
+        .raw_response
+        .as_deref()
+        .unwrap_or_default()
         .contains("fixture-token-not-output"));
 }
 
@@ -191,9 +197,12 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
             "fixture-token-ephemeral",
         )
         .unwrap();
-    assert_eq!(response.output["ok"], true);
-    assert_eq!(response.usage.total_tokens, 8);
-    assert_eq!(response.provider_request_id.as_deref(), Some("req:local"));
+    assert_eq!(
+        response.raw_response,
+        r#"{"id":"req:local","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#
+    );
+    assert_eq!(response.usage, ProviderUsage::default());
+    assert_eq!(response.provider_request_id, None);
 
     let auth_endpoint = local_provider_server(401, r#"{"error":"unauthorized"}"#, Duration::ZERO);
     let auth_error = OpenAiCompatibleProvider::new(auth_endpoint)
@@ -222,4 +231,365 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
         )
         .unwrap_err();
     assert_eq!(timeout_error.kind, ProviderErrorKind::Timeout);
+}
+
+#[derive(Clone)]
+struct FormalProvider {
+    result: Result<ProviderResponse, ProviderError>,
+    calls: Arc<Mutex<usize>>,
+}
+
+impl FormalProvider {
+    fn success(raw_response: &str, calls: Arc<Mutex<usize>>) -> Self {
+        Self {
+            result: Ok(ProviderResponse {
+                raw_response: raw_response.into(),
+                usage: ProviderUsage {
+                    input_tokens: 5,
+                    output_tokens: 7,
+                    total_tokens: 12,
+                    provider_reported_cost_cents: Some(3),
+                    ..ProviderUsage::default()
+                },
+                provider_request_id: Some("p01-formal-request".into()),
+            }),
+            calls,
+        }
+    }
+
+    fn failure(kind: ProviderErrorKind, calls: Arc<Mutex<usize>>) -> Self {
+        Self {
+            result: Err(ProviderError::new(kind, "p01 formal provider fixture")),
+            calls,
+        }
+    }
+}
+
+impl ProviderAdapter for FormalProvider {
+    fn invoke(
+        &self,
+        _request: &ProviderRequest,
+        _secret: &str,
+    ) -> Result<ProviderResponse, ProviderError> {
+        *self.calls.lock().unwrap() += 1;
+        self.result.clone()
+    }
+}
+
+fn formal_project() -> (
+    tempfile::TempDir,
+    ProjectManager,
+    ai_novel_production_system_core::project_db::ProjectHandle,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("p01-formal", "P01 formal", "2026-08-28T00:00:00Z")
+        .unwrap();
+    (temp, manager, connection)
+}
+
+fn formal_spec(command: &str, budget_id: Option<&str>, predicted_cost_cents: i64) -> ModelRunSpec {
+    ModelRunSpec {
+        model_run_id: StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            &format!("p01-formal:{command}"),
+        )
+        .unwrap(),
+        job_id: None,
+        step_id: None,
+        provider: "fixture".into(),
+        model: "fixture-model".into(),
+        idempotency_key: format!("p01-formal-key:{command}"),
+        capability: "RENDER_CHAPTER".into(),
+        prompt_ref: None,
+        context_manifest_ref: None,
+        budget_id: budget_id.map(ToOwned::to_owned),
+        predicted_cost_cents,
+        attempt_no: 1,
+        repair_round: 0,
+    }
+}
+
+fn formal_gateway(provider: FormalProvider) -> (ConfiguredProductionGateway, Arc<Mutex<usize>>) {
+    let calls = Arc::clone(&provider.calls);
+    let secrets = MemorySecretStore::new();
+    secrets.put("fixture", "fixture-token-formal").unwrap();
+    let gateway = ConfiguredProductionGateway::new(
+        ProviderConfig {
+            provider_id: "fixture".into(),
+            model_id: "fixture-model".into(),
+            endpoint: "http://fixture.invalid".into(),
+            enabled: true,
+            timeout_ms: 1000,
+        },
+        Arc::new(provider),
+        Arc::new(secrets),
+    );
+    (gateway, calls)
+}
+
+#[test]
+fn p01_formal_provider_raw_response_persists_before_model_payload_parse() {
+    let (_temp, _manager, connection) = formal_project();
+    let raw = r#"{"id":"raw-formal","choices":[{"message":{"content":"not-json"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#;
+    let calls = Arc::new(Mutex::new(0));
+    let (gateway, calls) = formal_gateway(FormalProvider::success(raw, Arc::clone(&calls)));
+    let spec = formal_spec("raw", None, 1);
+
+    let error = execute_production_model(
+        &connection,
+        &gateway,
+        &spec,
+        "RENDER_CHAPTER",
+        json!({"prompt":"formal raw"}),
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap_err();
+    assert!(error.contains("P01_MODEL_PAYLOAD_INVALID"));
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT raw_response FROM model_responses WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        raw
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_parse_results WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "SCHEMA_INVALID"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "FAILED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id='p01-formal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn p01_formal_raw_persist_failure_never_invokes_parse_or_authority_mutation() {
+    let (_temp, _manager, connection) = formal_project();
+    let calls = Arc::new(Mutex::new(0));
+    let (gateway, calls) = formal_gateway(FormalProvider::success(
+        r#"{"body":"must-not-parse"}"#,
+        Arc::clone(&calls),
+    ));
+    let spec = formal_spec("raw-persist-fault", None, 1);
+    let mut transport = GatewayTransport::with_raw_persist_failure(
+        &gateway,
+        "RENDER_CHAPTER",
+        json!({"prompt":"fault"}),
+    );
+
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &spec, "2026-08-28T00:00:00Z",),
+        Err(RuntimeError::RawResponsePersistenceFailed)
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM model_responses", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM model_parse_results", [], |row| row
+                .get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn p01_formal_configured_gateway_timeout_preserves_unknown_remote_outcome() {
+    let (_temp, _manager, connection) = formal_project();
+    let calls = Arc::new(Mutex::new(0));
+    let (gateway, calls) = formal_gateway(FormalProvider::failure(
+        ProviderErrorKind::Timeout,
+        Arc::clone(&calls),
+    ));
+    let spec = formal_spec("timeout", None, 1);
+    assert!(execute_production_model(
+        &connection,
+        &gateway,
+        &spec,
+        "RENDER_CHAPTER",
+        json!({"prompt":"timeout"}),
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap_err()
+    .contains("UNKNOWN_REMOTE_OUTCOME"));
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome='OPEN'", [], |row| row.get(0)).unwrap(), 1);
+    let mut retry = GatewayTransport::new(&gateway, "RENDER_CHAPTER", json!({"prompt":"retry"}));
+    assert!(matches!(
+        DurableModelRunner::retry(&connection, &mut retry, &spec, "2026-08-28T00:00:01Z"),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
+fn p01_formal_configured_gateway_unknown_outcome_preserves_decision_boundary() {
+    let (_temp, _manager, connection) = formal_project();
+    let calls = Arc::new(Mutex::new(0));
+    let (gateway, calls) = formal_gateway(FormalProvider::failure(
+        ProviderErrorKind::UnknownRemoteOutcome,
+        Arc::clone(&calls),
+    ));
+    let spec = formal_spec("unknown", None, 1);
+    assert!(execute_production_model(
+        &connection,
+        &gateway,
+        &spec,
+        "RENDER_CHAPTER",
+        json!({"prompt":"unknown"}),
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap_err()
+    .contains("UNKNOWN_REMOTE_OUTCOME"));
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM decisions WHERE decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome='OPEN'", [], |row| row.get(0)).unwrap(), 1);
+}
+
+fn seed_formal_budget(connection: &Connection, budget_id: &str, hard_max: i64, cost_budget: i64) {
+    connection.execute("INSERT OR IGNORE INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:p01:budget','p01-formal',1,'Book','ACTIVE','2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", []).unwrap();
+    connection.execute("INSERT OR IGNORE INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:p01:budget','p01-formal','book:p01:budget',1,'Volume','PLANNING',1,1,1000,'2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", []).unwrap();
+    connection.execute("INSERT OR IGNORE INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:p01:budget','p01-formal','volume:p01:budget',1,'Chapter','NORMAL','PLANNED',0,'2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", []).unwrap();
+    connection.execute("INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,'p01-formal','chapter:p01:budget','NORMAL',?2,?3,'2026-08-28T00:00:00Z')", libsql_rusqlite::params![budget_id, hard_max, cost_budget]).unwrap();
+}
+
+#[test]
+fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cost() {
+    let (_temp, _manager, connection) = formal_project();
+    seed_formal_budget(&connection, "budget:p01:hard", 1, 0);
+    connection.execute("INSERT INTO budget_reservations(reservation_id,project_id,budget_ref,reserved_cents,settled_cents,status,created_at,settled_at) VALUES ('reservation:p01:existing','p01-formal','budget:p01:hard',1,1,'OVER_LIMIT','2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", []).unwrap();
+    let calls = Arc::new(Mutex::new(0));
+    let (gateway, calls) = formal_gateway(FormalProvider::success(
+        r#"{"body":"must-not-send"}"#,
+        Arc::clone(&calls),
+    ));
+    let blocked = formal_spec("budget-blocked", Some("budget:p01:hard"), 1);
+    assert!(matches!(
+        execute_production_model(
+            &connection,
+            &gateway,
+            &blocked,
+            "PLAN_STRATEGY",
+            json!({"prompt":"blocked"}),
+            "2026-08-28T00:00:00Z",
+        ),
+        Err(error) if error.contains("budget hard limit")
+    ));
+    assert_eq!(*calls.lock().unwrap(), 0);
+
+    connection
+        .execute(
+            "DELETE FROM budget_reservations WHERE reservation_id='reservation:p01:existing'",
+            [],
+        )
+        .unwrap();
+    connection.execute("UPDATE chapter_production_budgets SET hard_max_model_runs=3,cost_budget_cents=20 WHERE budget_id='budget:p01:hard'", []).unwrap();
+    let successful = formal_spec("budget-success", Some("budget:p01:hard"), 4);
+    execute_production_model(
+        &connection,
+        &gateway,
+        &successful,
+        "RENDER_CHAPTER",
+        json!({"prompt":"success"}),
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap();
+    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT budget_ref FROM budget_reservations WHERE model_run_id=?1",
+                [&successful.model_run_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "budget:p01:hard"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM budget_reservations WHERE model_run_id=?1",
+                [&successful.model_run_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "SETTLED"
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT cost_cents FROM model_cost_ledger WHERE model_run_id=?1 AND cost_type='ACTUAL'", [&successful.model_run_id], |row| row.get(0)).unwrap(), 3);
+
+    let spent_id =
+        StableIdentityFactory::from_command(StableIdKind::ModelRun, "p01-formal:spent").unwrap();
+    connection.execute("INSERT INTO model_runs(model_run_id,project_id,provider,model,idempotency_key,capability,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES (?1,'p01-formal','fixture','fixture-model','p01-formal-spent','RENDER_CHAPTER',15,15,'COMPLETED','2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
+    connection.execute("INSERT INTO model_usage(usage_id,project_id,model_run_id,input_tokens,output_tokens,total_tokens,latency_ms,cost_cents,recorded_at) VALUES ('usage:p01:spent','p01-formal',?1,1,1,2,1,15,'2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
+    connection.execute("INSERT INTO model_cost_ledger(ledger_id,project_id,model_run_id,budget_id,cost_cents,token_total,cost_type,created_at) VALUES ('ledger:p01:spent','p01-formal',?1,'budget:p01:hard',15,2,'ACTUAL','2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
+    let cost_blocked = formal_spec("budget-cost-blocked", Some("budget:p01:hard"), 4);
+    assert!(matches!(
+        execute_production_model(
+            &connection,
+            &gateway,
+            &cost_blocked,
+            "AUDIT_EXTRACT",
+            json!({"prompt":"cost blocked"}),
+            "2026-08-28T00:00:00Z",
+        ),
+        Err(error) if error.contains("budget hard limit")
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
 }

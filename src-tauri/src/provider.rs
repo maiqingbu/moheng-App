@@ -117,7 +117,10 @@ pub struct ProviderUsage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderResponse {
-    pub output: Value,
+    /// Exact provider response body.  The production gateway passes this
+    /// through unchanged so the durable model runner can persist it before
+    /// any provider-envelope or model-payload parsing occurs.
+    pub raw_response: String,
     pub usage: ProviderUsage,
     pub provider_request_id: Option<String>,
 }
@@ -292,12 +295,6 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 "provider connection failed",
             ));
         }
-        let body_value: Value = serde_json::from_str(body.trim()).map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::MalformedResponse,
-                "provider response is not JSON",
-            )
-        })?;
         if status == 401 || status == 403 {
             return Err(ProviderError::new(
                 ProviderErrorKind::Authentication,
@@ -322,44 +319,15 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 "provider rejected request",
             ));
         }
-        let choice = body_value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ProviderError::new(
-                    ProviderErrorKind::MalformedResponse,
-                    "provider content missing",
-                )
-            })?;
-        let output = serde_json::from_str(choice).unwrap_or_else(|_| json!({"text":choice}));
-        let usage = body_value
-            .get("usage")
-            .map(|usage| ProviderUsage {
-                input_tokens: usage
-                    .get("prompt_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                output_tokens: usage
-                    .get("completion_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                cached_tokens: usage
-                    .pointer("/prompt_tokens_details/cached_tokens")
-                    .and_then(Value::as_i64),
-                total_tokens: usage
-                    .get("total_tokens")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0),
-                provider_reported_cost_cents: None,
-            })
-            .unwrap_or_default();
+        // `curl --write-out` adds the status delimiter, not part of the
+        // provider body.  Remove only that delimiter's leading newline; do
+        // not trim the provider payload, because its exact bytes are the
+        // durable replay/audit input.
+        let raw_response = body.strip_suffix('\n').unwrap_or(body).to_string();
         Ok(ProviderResponse {
-            output,
-            usage,
-            provider_request_id: body_value
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+            raw_response,
+            usage: ProviderUsage::default(),
+            provider_request_id: None,
         })
     }
 }

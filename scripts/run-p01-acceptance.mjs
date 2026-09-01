@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const rustRoot = path.join(root, 'src-tauri')
 const evidence = process.env.P01_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-p01-evidence.'))
 fs.mkdirSync(evidence, { recursive: true })
-const startCommit = 'bc1878bce9613a7ffb184227531372177d72bdeb'
+const startCommit = '2a4ba9ba0282b796a3980a3c69a6d8faef3e4849'
 const beforeCommit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim()
 const dirtyBefore = spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).stdout.trim().length > 0
 function run(name, command, args, cwd = root) {
@@ -48,9 +48,9 @@ const gates = {
   'P01-A03': { status: has(p01, 'test p01_configured_gateway_requires_secret_and_never_returns_it') && !/UnavailableProductionGateway/.test(fs.readFileSync(path.join(root, 'src-tauri/src/commands.rs'), 'utf8')), source: 'p01_targeted.log+commands.rs' },
   'P01-A04': { status: has(p01, 'test p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_error'), source: 'p01_targeted.log' },
   'P01-A05': { status: has(p01, 'test p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout'), source: 'p01_targeted.log' },
-  'P01-A06': { status: has(p01, 'test p01_provider_settings_are_non_secret_and_budget_gate_precedes_invocation'), source: 'p01_targeted.log' },
-  'P01-A07': { status: has(b03, 'b03_parse_failure_keeps_raw_response'), source: 'b03_regression.log' },
-  'P01-A08': { status: has(b03, 'b03_timeout_is_unknown_remote_outcome'), source: 'b03_regression.log' },
+  'P01-A06': { status: has(p01, 'test p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cost'), source: 'p01_targeted.log' },
+  'P01-A07': { status: has(p01, 'test p01_formal_provider_raw_response_persists_before_model_payload_parse') && has(p01, 'test p01_formal_raw_persist_failure_never_invokes_parse_or_authority_mutation'), source: 'p01_targeted.log' },
+  'P01-A08': { status: has(p01, 'test p01_formal_configured_gateway_timeout_preserves_unknown_remote_outcome') && has(p01, 'test p01_formal_configured_gateway_unknown_outcome_preserves_decision_boundary'), source: 'p01_targeted.log' },
   'P01-A09': { status: has(p01, 'test p01_provider_adapter_maps_usage_and_typed_errors'), source: 'p01_targeted.log' },
   'P01-A10': { status: has(p01, 'test p01_configured_gateway_requires_secret_and_never_returns_it') && has(node, 'P01 provider errors and capability truthfulness are typed'), source: 'p01_targeted.log+node.log' },
   'P01-A11': { status: architecture.status === 'PASS' && node.status === 'PASS', source: 'architecture.log+node.log' },
@@ -66,7 +66,35 @@ const gates = {
   cargo_all_targets: { status: allTargets.status === 'PASS', source: 'cargo_all_targets.log' }, cargo_fmt: { status: fmt.status === 'PASS', source: 'cargo_fmt.log' }, cargo_check: { status: check.status === 'PASS', source: 'cargo_check.log' }, cargo_clippy: { status: clippy.status === 'PASS', source: 'cargo_clippy.log' }, architecture: { status: architecture.status === 'PASS', source: 'architecture.log' }, module_boundary: { status: boundary.status === 'PASS', source: 'module_boundary.log' }, m0a: { status: m0a.status === 'PASS', source: 'm0a.log' }, source_binding: { status: sourceBinding ? 'PASS' : 'FAIL', source: 'git' },
 }
 for (const gate of Object.values(gates)) gate.status = gate.status === true || gate.status === 'PASS' ? 'PASS' : 'FAIL'
-fs.writeFileSync(path.join(evidence, 'P01_SOURCE_BINDING.json'), `${JSON.stringify({ startCommit, sourceCommit: beforeCommit, evidenceSourceCommit: beforeCommit, sourceCommitAfter: current, workingTreeDirtyBefore: dirtyBefore, workingTreeDirtyAfter: dirtyAfter, excludedUncommittedPaths: [], sourceBinding: sourceBinding ? 'PASS' : 'FAIL' }, null, 2)}\n`)
-fs.writeFileSync(path.join(evidence, 'P01_ACCEPTANCE.json'), `${JSON.stringify({ schema: 'moheng-v2.1-p01-acceptance-r1', status: Object.values(gates).every(gate => gate.status === 'PASS') ? 'PASS' : 'FAIL', sourceCommit: beforeCommit, gates }, null, 2)}\n`)
-console.log(`P01 gates: ${Object.values(gates).filter(gate => gate.status === 'PASS').length}/${Object.keys(gates).length} PASS; sourceBinding=${sourceBinding ? 'PASS' : 'FAIL'}; evidence=${evidence}`)
-if (Object.values(gates).some(gate => gate.status !== 'PASS')) process.exitCode = 1
+const allGatesPass = Object.values(gates).every(gate => gate.status === 'PASS')
+const evidenceBinding = {
+  startCommit,
+  sourceCommit: beforeCommit,
+  evidenceSourceCommit: beforeCommit,
+  sourceCommitAfter: current,
+  workingTreeDirtyBefore: dirtyBefore,
+  workingTreeDirtyAfter: dirtyAfter,
+  excludedUncommittedPaths: [],
+  sourceBinding: sourceBinding ? 'PASS' : 'FAIL',
+}
+fs.writeFileSync(path.join(evidence, 'P01_SOURCE_BINDING.json'), `${JSON.stringify(evidenceBinding, null, 2)}\n`)
+const formalEvidence = (test, pass, extra = {}) => ({
+  schema: 'moheng-v2.1-p01-formal-evidence-r1',
+  status: sourceBinding && pass ? 'PASS' : 'FAIL',
+  sourceCommit: beforeCommit,
+  evidenceSourceCommit: beforeCommit,
+  sourceCommitAfter: current,
+  workingTreeDirtyBefore: dirtyBefore,
+  workingTreeDirtyAfter: dirtyAfter,
+  excludedUncommittedPaths: [],
+  test,
+  log: 'p01_targeted.log',
+  ...extra,
+})
+fs.writeFileSync(path.join(evidence, 'P01_FORMAL_RAW_RESPONSE.json'), `${JSON.stringify(formalEvidence('p01_formal_provider_raw_response_persists_before_model_payload_parse', gates['P01-A07'].status === 'PASS', { rawPersistFaultTest: 'p01_formal_raw_persist_failure_never_invokes_parse_or_authority_mutation' }), null, 2)}\n`)
+fs.writeFileSync(path.join(evidence, 'P01_FORMAL_UNKNOWN_REMOTE_OUTCOME.json'), `${JSON.stringify(formalEvidence('p01_formal_configured_gateway_timeout_preserves_unknown_remote_outcome', gates['P01-A08'].status === 'PASS', { uncertainOutcomeTest: 'p01_formal_configured_gateway_unknown_outcome_preserves_decision_boundary' }), null, 2)}\n`)
+fs.writeFileSync(path.join(evidence, 'P01_FORMAL_BUDGET_BINDING.json'), `${JSON.stringify(formalEvidence('p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cost', gates['P01-A06'].status === 'PASS', { budgetAuthority: 'chapter_production_budgets' }), null, 2)}\n`)
+const status = allGatesPass ? 'READY_FOR_REACCEPTANCE' : 'FAIL'
+fs.writeFileSync(path.join(evidence, 'P01_ACCEPTANCE.json'), `${JSON.stringify({ schema: 'moheng-v2.1-p01-acceptance-r1', status, sourceCommit: beforeCommit, evidenceSourceCommit: beforeCommit, sourceCommitAfter: current, workingTreeDirtyBefore: dirtyBefore, workingTreeDirtyAfter: dirtyAfter, excludedUncommittedPaths: [], gates }, null, 2)}\n`)
+console.log(`P01 gates: ${Object.values(gates).filter(gate => gate.status === 'PASS').length}/${Object.keys(gates).length} PASS; status=${status}; sourceBinding=${sourceBinding ? 'PASS' : 'FAIL'}; evidence=${evidence}`)
+if (!allGatesPass) process.exitCode = 1

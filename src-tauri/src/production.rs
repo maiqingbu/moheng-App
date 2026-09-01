@@ -13,10 +13,14 @@ use crate::generated::types::{
 };
 use crate::hash::sha256_canonical;
 use crate::project_db::ProjectManager;
-use crate::provider::{OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderRequest};
+use crate::provider::{
+    OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
+    ProviderRequest, ProviderResponse,
+};
 use crate::repositories::runtime::{
-    DurableJobService, DurableModelRunner, JobSpec, ModelRunSpec, ModelTransport,
-    OsKeychainSecretStore, SecretStore, TransportFailure, TransportResponse, TransportUsage,
+    DurableJobService, DurableModelRunner, JobSpec, ModelRunOutcome, ModelRunSpec, ModelTransport,
+    OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure, TransportResponse,
+    TransportUsage,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -37,6 +41,10 @@ const STAGES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
     pub output: Value,
+    /// Exact provider body for configured gateways.  Deterministic local
+    /// gateways leave this unset and use `output` as their already-structured
+    /// transport value.
+    pub raw_response: Option<String>,
     pub usage: TransportUsage,
 }
 
@@ -44,6 +52,7 @@ impl ProductionModelResponse {
     pub fn deterministic(output: Value) -> Self {
         Self {
             output,
+            raw_response: None,
             usage: TransportUsage {
                 input_tokens: 1,
                 output_tokens: 1,
@@ -65,11 +74,31 @@ pub trait ProductionModelGateway: Send + Sync {
         format!("production:{capability}")
     }
 
+    /// Bounded provider/model cost policy used by the existing Budget
+    /// Authority.  A production stage may not silently become an unpriced,
+    /// zero-cost model run.
+    fn predicted_cost_cents(&self, _capability: &str) -> i64 {
+        1
+    }
+
     fn fault_injection(&self) -> Option<&str> {
         None
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
+
+    /// Preserve uncertainty from the configured provider until the durable
+    /// runtime can apply its UNKNOWN_REMOTE_OUTCOME contract.  Legacy
+    /// deterministic gateways keep the compatibility fallback to confirmed
+    /// unavailability.
+    fn invoke_typed(
+        &self,
+        capability: &str,
+        input: &Value,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        self.invoke(capability, input)
+            .map_err(|_| TransportFailure::Unavailable)
+    }
 }
 
 pub struct UnavailableProductionGateway;
@@ -124,6 +153,67 @@ impl ConfiguredProductionGateway {
         gateway.settings_paths = Some(paths);
         gateway
     }
+
+    fn invoke_provider(
+        &self,
+        capability: &str,
+        input: &Value,
+    ) -> Result<ProviderResponse, ProviderError> {
+        let config = self
+            .settings_paths
+            .as_ref()
+            .and_then(|paths| {
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths).ok()
+            })
+            .and_then(|settings| ProviderConfig::from_settings(&settings).ok())
+            .unwrap_or_else(|| self.config.clone());
+        if !config.enabled {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Configuration,
+                "provider is not configured",
+            ));
+        }
+        let secret = self.secret_store.get(&config.provider_id).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "provider secret unavailable",
+            )
+        })?;
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| input.to_string());
+        let request = ProviderRequest {
+            capability: capability.into(),
+            model_id: config.model_id,
+            prompt,
+            timeout_ms: config.timeout_ms,
+        };
+        if self.settings_paths.is_some() {
+            OpenAiCompatibleProvider::new(config.endpoint).invoke(&request, &secret)
+        } else {
+            self.adapter.invoke(&request, &secret)
+        }
+    }
+
+    fn response_from_provider(response: ProviderResponse) -> ProductionModelResponse {
+        ProductionModelResponse {
+            // Configured providers are deliberately not parsed here.  The
+            // exact body travels through GatewayTransport and is parsed only
+            // after DurableModelRunner has persisted it.
+            output: Value::Null,
+            raw_response: Some(response.raw_response),
+            usage: TransportUsage {
+                input_tokens: response.usage.input_tokens,
+                output_tokens: response.usage.output_tokens,
+                cached_tokens: response.usage.cached_tokens,
+                provider_reported_cost_cents: response.usage.provider_reported_cost_cents,
+                latency_ms: 0,
+                provider_request_id: response.provider_request_id,
+            },
+        }
+    }
 }
 
 impl ProductionModelGateway for ConfiguredProductionGateway {
@@ -136,73 +226,126 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        let config = self
-            .settings_paths
-            .as_ref()
-            .and_then(|paths| {
-                crate::repositories::provider::ProviderSettingsRepository::read_global(paths).ok()
+        self.invoke_provider(capability, input)
+            .map(Self::response_from_provider)
+            .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))
+    }
+
+    fn invoke_typed(
+        &self,
+        capability: &str,
+        input: &Value,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        self.invoke_provider(capability, input)
+            .map(Self::response_from_provider)
+            .map_err(|error| match error.kind {
+                ProviderErrorKind::Timeout => TransportFailure::Timeout,
+                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
+                _ => TransportFailure::Unavailable,
             })
-            .and_then(|settings| ProviderConfig::from_settings(&settings).ok())
-            .unwrap_or_else(|| self.config.clone());
-        if !config.enabled {
-            return Err("P01_PROVIDER_NOT_CONFIGURED".into());
-        }
-        let secret = self
-            .secret_store
-            .get(&config.provider_id)
-            .map_err(|error| format!("P01_AUTHENTICATION_ERROR:{error}"))?;
-        let prompt = input
-            .get("prompt")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| input.to_string());
-        let request = ProviderRequest {
-            capability: capability.into(),
-            model_id: config.model_id.clone(),
-            prompt,
-            timeout_ms: config.timeout_ms,
-        };
-        let response = if self.settings_paths.is_some() {
-            OpenAiCompatibleProvider::new(config.endpoint).invoke(&request, &secret)
-        } else {
-            self.adapter.invoke(&request, &secret)
-        }
-        .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))?;
-        Ok(ProductionModelResponse {
-            output: response.output,
-            usage: TransportUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                cached_tokens: response.usage.cached_tokens,
-                provider_reported_cost_cents: response.usage.provider_reported_cost_cents,
-                latency_ms: 0,
-                provider_request_id: response.provider_request_id,
-            },
-        })
     }
 }
 
-struct GatewayTransport<'a> {
+pub struct GatewayTransport<'a> {
     gateway: &'a dyn ProductionModelGateway,
     capability: &'a str,
     input: Value,
+    raw_persist_failure: bool,
+}
+
+impl<'a> GatewayTransport<'a> {
+    pub fn new(gateway: &'a dyn ProductionModelGateway, capability: &'a str, input: Value) -> Self {
+        Self {
+            gateway,
+            capability,
+            input,
+            raw_persist_failure: false,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_raw_persist_failure(
+        gateway: &'a dyn ProductionModelGateway,
+        capability: &'a str,
+        input: Value,
+    ) -> Self {
+        Self {
+            gateway,
+            capability,
+            input,
+            raw_persist_failure: true,
+        }
+    }
 }
 
 impl ModelTransport for GatewayTransport<'_> {
+    fn before_raw_persist(
+        &mut self,
+        _connection: &libsql_rusqlite::Connection,
+        _spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        if self.raw_persist_failure {
+            return Err(RuntimeError::RawResponsePersistenceFailed);
+        }
+        Ok(())
+    }
+
     fn send(
         &mut self,
         _spec: &ModelRunSpec,
         _credential: &str,
     ) -> Result<TransportResponse, TransportFailure> {
-        let response = self
-            .gateway
-            .invoke(self.capability, &self.input)
-            .map_err(|_| TransportFailure::Unavailable)?;
+        let response = self.gateway.invoke_typed(self.capability, &self.input)?;
         Ok(TransportResponse {
-            raw_response: response.output.to_string(),
+            raw_response: response
+                .raw_response
+                .unwrap_or_else(|| response.output.to_string()),
             usage: response.usage,
         })
     }
+}
+
+fn parse_provider_model_payload(value: Value) -> Result<Value, String> {
+    let Some(choices) = value.get("choices") else {
+        return Ok(value);
+    };
+    if !choices.is_array() {
+        return Err("P01_MODEL_PAYLOAD_INVALID:provider choices must be an array".into());
+    }
+    let content = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "P01_MODEL_PAYLOAD_INVALID:provider content missing".to_string())?;
+    serde_json::from_str(content).map_err(|error| format!("P01_MODEL_PAYLOAD_INVALID:{error}"))
+}
+
+/// Execute one model stage through the formal configured production
+/// composition.  DurableModelRunner persists the exact transport body first;
+/// only the returned, durably parsed envelope is converted into the model
+/// payload used by Plan/Render/Audit owners.
+pub fn execute_production_model(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: Value,
+    now: &str,
+) -> Result<ModelRunOutcome, String> {
+    let mut transport = GatewayTransport::new(gateway, capability, input);
+    DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
+    let mut outcome = DurableModelRunner::execute(connection, &mut transport, spec, now)
+        .map_err(|error| error.to_string())?;
+    if let Some(parsed) = outcome.parsed.take() {
+        outcome.parsed = Some(match parse_provider_model_payload(parsed) {
+            Ok(payload) => payload,
+            Err(error) => {
+                DurableModelRunner::mark_model_payload_parse_failure(connection, spec, &error, now)
+                    .map_err(|runtime_error| runtime_error.to_string())?;
+                return Err(error);
+            }
+        });
+    }
+    Ok(outcome)
 }
 
 fn require(value: &Value, path: &str) -> Result<String, String> {
@@ -474,6 +617,9 @@ pub fn run_chapter_production(
     if chapter_volume.is_none() {
         return Err("B08_CHAPTER_NOT_FOUND".into());
     }
+    let production_budget_id =
+        DurableModelRunner::chapter_budget_id(connection, &project_id, &chapter_id)
+            .map_err(|_| "B08_PRODUCTION_BUDGET_REQUIRED".to_string())?;
     let policy = request
         .pointer("/payload/gatePolicyRef")
         .cloned()
@@ -614,8 +760,8 @@ pub fn run_chapter_production(
             capability: "PLAN_STRATEGY".into(),
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
-            budget_id: None,
-            predicted_cost_cents: 0,
+            budget_id: Some(production_budget_id.clone()),
+            predicted_cost_cents: gateway.predicted_cost_cents("PLAN_STRATEGY").max(1),
             attempt_no: 1,
             repair_round: 0,
         };
@@ -629,15 +775,14 @@ pub fn run_chapter_production(
             "activeTaskRefs":compiler_input.active_task_refs,
             "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>()
         });
-        let mut planning_transport = GatewayTransport {
+        let planning_result = execute_production_model(
+            connection,
             gateway,
-            capability: "PLAN_STRATEGY",
-            input: planning_input,
-        };
-        DurableModelRunner::prepare(connection, &planning_spec, &now).map_err(|e| e.to_string())?;
-        let planning_result =
-            DurableModelRunner::execute(connection, &mut planning_transport, &planning_spec, &now)
-                .map_err(|e| e.to_string())?;
+            &planning_spec,
+            "PLAN_STRATEGY",
+            planning_input,
+            &now,
+        )?;
         let plan_payload = planning_result
             .parsed
             .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
@@ -736,20 +881,19 @@ pub fn run_chapter_production(
         capability: "RENDER_CHAPTER".into(),
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
-        budget_id: None,
-        predicted_cost_cents: 0,
+        budget_id: Some(production_budget_id.clone()),
+        predicted_cost_cents: gateway.predicted_cost_cents("RENDER_CHAPTER").max(1),
         attempt_no: 1,
         repair_round: 0,
     };
-    let mut render_transport = GatewayTransport {
+    let render_result = execute_production_model(
+        connection,
         gateway,
-        capability: "RENDER_CHAPTER",
-        input: json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload}),
-    };
-    DurableModelRunner::prepare(connection, &render_spec, &now).map_err(|e| e.to_string())?;
-    let render_result =
-        DurableModelRunner::execute(connection, &mut render_transport, &render_spec, &now)
-            .map_err(|e| e.to_string())?;
+        &render_spec,
+        "RENDER_CHAPTER",
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload}),
+        &now,
+    )?;
     let body = render_result
         .parsed
         .and_then(|value| {
@@ -792,20 +936,19 @@ pub fn run_chapter_production(
         capability: "AUDIT_EXTRACT".into(),
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
-        budget_id: None,
-        predicted_cost_cents: 0,
+        budget_id: Some(production_budget_id),
+        predicted_cost_cents: gateway.predicted_cost_cents("AUDIT_EXTRACT").max(1),
         attempt_no: 1,
         repair_round: 0,
     };
-    let mut audit_transport = GatewayTransport {
+    let audit_result = execute_production_model(
+        connection,
         gateway,
-        capability: "AUDIT_EXTRACT",
-        input: json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":reference(&candidate),"body":body}),
-    };
-    DurableModelRunner::prepare(connection, &audit_spec, &now).map_err(|e| e.to_string())?;
-    let audit_result =
-        DurableModelRunner::execute(connection, &mut audit_transport, &audit_spec, &now)
-            .map_err(|e| e.to_string())?;
+        &audit_spec,
+        "AUDIT_EXTRACT",
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":reference(&candidate),"body":body}),
+        &now,
+    )?;
     let audit_payload = audit_result
         .parsed
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;

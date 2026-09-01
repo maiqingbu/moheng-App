@@ -39,6 +39,8 @@ pub enum RuntimeError {
 pub enum TransportFailure {
     #[error("timeout")]
     Timeout,
+    #[error("unknown remote outcome")]
+    UnknownRemoteOutcome,
     #[error("unavailable")]
     Unavailable,
 }
@@ -647,6 +649,24 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    /// Resolve the chapter's existing Budget Authority binding.  Production
+    /// model stages must use this lookup rather than creating an unscoped
+    /// reservation or accepting a caller-provided budget id.
+    pub fn chapter_budget_id(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<String, RuntimeError> {
+        connection
+            .query_row(
+                "SELECT budget_id FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RuntimeError::BudgetHardLimit)
+    }
+
     pub fn prepare(
         connection: &Connection,
         spec: &ModelRunSpec,
@@ -667,6 +687,27 @@ impl DurableModelRunner {
         now: &str,
     ) -> Result<ModelRunOutcome, RuntimeError> {
         Self::execute_with_budget_mode(connection, transport, spec, now, false)
+    }
+
+    /// Record a failure discovered while parsing a provider envelope's model
+    /// payload.  The raw response has already been durably stored at this
+    /// point, so replay/audit remains possible while the failed payload cannot
+    /// be mistaken for an authority-ready result.
+    pub fn mark_model_payload_parse_failure(
+        connection: &Connection,
+        spec: &ModelRunSpec,
+        error_message: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE model_parse_results SET status='SCHEMA_INVALID', parsed_json=NULL, error_message=?1, created_at=?2 WHERE model_run_id=?3",
+            libsql_rusqlite::params![error_message, now, spec.model_run_id],
+        )?;
+        connection.execute(
+            "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
+            libsql_rusqlite::params![now, spec.model_run_id],
+        )?;
+        Ok(())
     }
 
     fn execute_with_budget_mode<T: ModelTransport>(
@@ -710,7 +751,7 @@ impl DurableModelRunner {
         let credential = transport.credential().to_owned();
         let response = match transport.send(spec, &credential) {
             Ok(response) => response,
-            Err(TransportFailure::Timeout) => {
+            Err(TransportFailure::Timeout | TransportFailure::UnknownRemoteOutcome) => {
                 mark_unknown_remote_outcome(connection, spec, now)?;
                 return Err(RuntimeError::UnknownRemoteOutcome);
             }
