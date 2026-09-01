@@ -210,7 +210,7 @@ export function inspectB11Architecture(projectRoot = root) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1]?.endsWith('verify-b11-architecture.mjs')) {
   const result = inspectB11Architecture()
   console.log(JSON.stringify(result, null, 2))
   if (result.status !== 'PASS') process.exitCode = 1

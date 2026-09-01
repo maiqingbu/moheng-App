@@ -129,7 +129,7 @@ export function generateAcceptance(evidenceDir = process.env.B11_EVIDENCE_DIR ??
   return acceptance
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1]?.endsWith('generate-b11-acceptance.mjs')) {
   const result = generateAcceptance()
   console.log(`B11 acceptance generated: ${result.status}; missing=${result.missingGates.length}; failed=${result.failedGates.length}; missingGates=${result.missingGates.join(',')}`)
   if (result.status !== 'READY_FOR_ACCEPTANCE') process.exitCode = 1
