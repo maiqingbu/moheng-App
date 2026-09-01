@@ -131,6 +131,93 @@ fn replan_request(expected_revision: i64, command: &str) -> RouteReplanRequest {
     }
 }
 
+fn current_payload_for_scope(
+    connection: &Connection,
+    artifact_type: &str,
+    scope_key: &str,
+) -> Value {
+    let raw: String = connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b09' AND h.artifact_type=?1 AND h.scope_key=?2",
+            libsql_rusqlite::params![artifact_type, scope_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn complete_and_handoff(fixture: &Fixture, command: &str) -> (Value, Value) {
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    VolumeLifecycleOwner::close_volume(
+        &fixture.connection,
+        VolumeCloseRequest {
+            project_id: "p-b09".into(),
+            volume_id: fixture.volume_id.clone(),
+            expected_revision: 0,
+            command_id: format!("{command}-close"),
+            idempotency_key: format!("key:{command}-close"),
+            reason: "完成下一卷编译输入收口".into(),
+            fault_injection: None,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    VolumeLifecycleOwner::handoff_next_volume(
+        &fixture.connection,
+        NextVolumeHandoffRequest {
+            project_id: "p-b09".into(),
+            current_volume_id: fixture.volume_id.clone(),
+            next_volume_id: "volume:b09:2".into(),
+            expected_revision: 1,
+            command_id: format!("{command}-handoff"),
+            idempotency_key: format!("key:{command}-handoff"),
+            title: "第二卷".into(),
+            chapter_start: 4,
+            chapter_end: 6,
+            target_words: 3000,
+            now: NOW.into(),
+        },
+    )
+    .unwrap();
+    let volume_scope = scope("VOLUME", Some(("volumeId", "volume:b09:2")));
+    (
+        current_payload_for_scope(&fixture.connection, "VolumeIntent", &volume_scope),
+        current_payload_for_scope(&fixture.connection, "VolumePlan", &volume_scope),
+    )
+}
+
+fn insert_book_goal(fixture: &Fixture, description: &str) {
+    insert_committed_artifact(
+        &fixture.connection,
+        "p-b09",
+        &format!("book-plan:{description}"),
+        "BookPlan",
+        "PROJECT",
+        &scope("PROJECT", None),
+        &json!({
+            "planningMaturity": "APPROVED",
+            "mustAchieve": [{"id":"book-goal","description":description}],
+            "futureReservations": [],
+        }),
+    );
+}
+
+fn insert_extra_handoff_evidence(fixture: &Fixture) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO canon_evidence(evidence_id,project_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:b09:chapter:2','p-b09','chapter:b09:2','plan:b09:1',1,'ROUTE_INPUT',?1)",
+            [NOW],
+        )
+        .unwrap();
+}
+
 #[test]
 fn b09_planning_state_rebuild_is_deterministic_revision_bound_and_reality_derived() {
     let fixture = fixture();
@@ -1269,4 +1356,168 @@ fn b09_bounded_lifecycle_query_performance_is_measured_and_enforced() {
     let p95 = samples[index];
     assert!(p95 <= 250.0, "bounded lifecycle projection p95={p95}ms");
     println!("B09_EQUIVALENT_PERFORMANCE_RESULT profile=3_VOLUME_BOUNDED_EQUIVALENT samples=30 p95Ms={p95:.3} thresholdMs=250 bounded=PASS status=PASS");
+}
+
+#[test]
+fn b09_route_replan_changes_semantics_when_task_reality_changes() {
+    let fixture = fixture();
+    let previous = current_payload_for_scope(
+        &fixture.connection,
+        "VolumePlan",
+        &scope("VOLUME", Some(("volumeId", &fixture.volume_id))),
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    VolumeLifecycleOwner::replan_volume_route(
+        &fixture.connection,
+        replan_request(0, "b09-replan-task-reality"),
+    )
+    .unwrap();
+    let candidate = current_payload_for_scope(
+        &fixture.connection,
+        "VolumePlan",
+        &scope("VOLUME", Some(("volumeId", &fixture.volume_id))),
+    );
+    assert_ne!(previous["tasks"], candidate["tasks"]);
+    assert!(candidate["tasks"].as_array().unwrap().is_empty());
+    assert_ne!(previous["requiredExitConditions"], candidate["requiredExitConditions"]);
+    println!("B09_ROUTE_REPLAN_SEMANTIC_RESULT task_reality=PASS substantive_delta=PASS exit_gap=PASS status=PASS");
+}
+
+#[test]
+fn b09_route_replan_returns_no_change_without_fake_version_only_side_effect() {
+    let fixture = fixture();
+    let first = VolumeLifecycleOwner::replan_volume_route(
+        &fixture.connection,
+        replan_request(0, "b09-replan-no-change-first"),
+    )
+    .unwrap();
+    assert_eq!(first["routeVersion"], 2);
+    let second = VolumeLifecycleOwner::replan_volume_route(
+        &fixture.connection,
+        replan_request(1, "b09-replan-no-change-second"),
+    )
+    .unwrap();
+    assert_eq!(second["classification"], "NO_ROUTE_CHANGE_REQUIRED");
+    assert_eq!(second["routeVersion"], 2);
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<i64, _, _>(
+                "SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1",
+                [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        2
+    );
+    println!("B09_ROUTE_REPLAN_NO_CHANGE_RESULT classification=NO_ROUTE_CHANGE_REQUIRED newVersion=0 head_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn b09_route_replan_uses_capacity_and_responsibility_in_route_semantics() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute(
+            "UPDATE chapters SET status='COMMITTED' WHERE project_id='p-b09' AND chapter_id IN ('chapter:b09:1','chapter:b09:2')",
+            [],
+        )
+        .unwrap();
+    VolumeLifecycleOwner::replan_volume_route(
+        &fixture.connection,
+        replan_request(0, "b09-replan-pressure"),
+    )
+    .unwrap();
+    let candidate = current_payload_for_scope(
+        &fixture.connection,
+        "VolumePlan",
+        &scope("VOLUME", Some(("volumeId", &fixture.volume_id))),
+    );
+    assert_eq!(candidate["capacityBudget"]["maxChapters"], 2);
+    assert!(candidate["tasks"][0]["continuityThreadRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference == "thread:b09:promise"));
+    println!("B09_ROUTE_REPLAN_INPUT_RESULT capacity=PASS responsibility=PASS substantive_delta=PASS status=PASS");
+}
+
+#[test]
+fn b09_next_volume_intent_changes_when_canon_changes() {
+    fn next_intent(with_canon: bool) -> Value {
+        let fixture = fixture();
+        if with_canon {
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:b09:semantic','p-b09','Semantic','PERSON',?1,?1)",
+                    [NOW],
+                )
+                .unwrap();
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,source_chapter_id,authority_level,created_at,updated_at) VALUES ('fact:b09:semantic','p-b09','entity:b09:semantic','identity','{\"value\":\"new canon\"}','plan:b09:1',1,'chapter:b09:1','B',?1,?1)",
+                    [NOW],
+                )
+                .unwrap();
+        }
+        complete_and_handoff(&fixture, if with_canon { "b09-canon-semantic" } else { "b09-base-semantic" }).0
+    }
+    let without = next_intent(false);
+    let with = next_intent(true);
+    assert_ne!(without["mustNotBreak"], with["mustNotBreak"]);
+    assert!(with["mustNotBreak"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["description"].as_str().unwrap().contains("identity")));
+    println!("B09_NEXT_VOLUME_SEMANTIC_RESULT canon_impact=PASS output_changed=PASS causal_field=mustNotBreak status=PASS");
+}
+
+#[test]
+fn b09_next_volume_intent_changes_when_goal_changes() {
+    fn next_intent(goal: &str) -> Value {
+        let fixture = fixture();
+        insert_book_goal(&fixture, goal);
+        complete_and_handoff(&fixture, &format!("b09-goal-{}", goal.len())).0
+    }
+    let first = next_intent("推进主线 A");
+    let second = next_intent("推进主线 B");
+    assert_ne!(first["mustAchieve"], second["mustAchieve"]);
+    assert!(second["mustAchieve"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["description"] == "推进主线 B"));
+    println!("B09_NEXT_VOLUME_SEMANTIC_RESULT goal_impact=PASS output_changed=PASS causal_field=mustAchieve status=PASS");
+}
+
+#[test]
+fn b09_next_volume_intent_changes_when_exit_evidence_changes() {
+    fn next_outputs(with_extra_evidence: bool) -> (Value, Value) {
+        let fixture = fixture();
+        if with_extra_evidence {
+            insert_extra_handoff_evidence(&fixture);
+        }
+        complete_and_handoff(
+            &fixture,
+            if with_extra_evidence {
+                "b09-exit-evidence-extra"
+            } else {
+                "b09-exit-evidence-base"
+            },
+        )
+    }
+    let base = next_outputs(false);
+    let extra = next_outputs(true);
+    assert_ne!(base.0["entryConditions"], extra.0["entryConditions"]);
+    assert_ne!(base.1["routeInvariants"], extra.1["routeInvariants"]);
+    println!("B09_NEXT_VOLUME_SEMANTIC_RESULT exit_state_impact=PASS evidence_impact=PASS route_changed=PASS status=PASS");
 }
