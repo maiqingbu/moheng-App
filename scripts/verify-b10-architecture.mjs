@@ -13,6 +13,7 @@ export function inspectB10Architecture(projectRoot = root) {
   const production = readFrom('src-tauri/src/production.rs')
   const commands = readFrom('src-tauri/src/commands.rs')
   const repair = readFrom('src-tauri/src/repair.rs')
+  const harness = readFrom('src-tauri/src/harness/mod.rs')
   const projection = readFrom('src-tauri/src/repositories/production.rs')
   const ui = readFrom('src/ui/pages/ProductionCenter.vue')
   const registry = JSON.parse(readFrom('creative-skills/v1.2.0/registry.json'))
@@ -41,12 +42,32 @@ export function inspectB10Architecture(projectRoot = root) {
     noProductionPersistenceSql: !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(production),
     repairOwnerRemainsExplicit: /TypedRepairOwner|repair_authorize|repair_execute/.test(repair),
   }
+  const globalGates = {
+    second_authority: !/SecondAuthority|secondAuthorityOwner|AuthorityV2/i.test(source),
+    second_production_path: !secondProductionPath,
+    commit_bundle_v3: !/CommitBundleV3/i.test(source),
+    narrative_runtime_delta: !/NarrativeRuntimeDelta/i.test(source),
+    sql_outside_approved_owner: !sqlOutsideCreative && !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(production),
+    skill_direct_db_query: !sqlOutsideCreative,
+    harness_arbitrary_write: !/Command::new|std::process::Command|git\s+(?:reset|checkout|commit)|\b(?:INSERT|UPDATE|DELETE)\s+FROM/i.test(harness),
+    p3_permanent_authority: !/Skill[^\n]*(?:P3|AUTHORIZATION|consume)/i.test(source),
+    future_reservation_bypass: !/Skill[^\n]*futureReservation|bypass[^\n]*reservation/i.test(source),
+    plan_writes_reality: !/Skill[^\n]*(?:TASK_REALITY_WRITE|write.*reality)/i.test(source),
+    candidate_visible_as_final: !/Skill[^\n]*(?:FinalChapter|canonical head)/i.test(source),
+    ui_local_truth: /query_production_center|creativeSkills|quality/.test(`${projection}\n${ui}`),
+    unbounded_project_context: /SKILL_CONTEXT_UNBOUNDED_INPUT/.test(source) && /MAX_CONTEXT_BYTES/.test(source),
+    fake_provider_demo_formal_path: !/browser-demo|mockProduction|demoPort/.test(production),
+    future_batch_owner_early: !/B11|B12|B13|B14|B15|RC1|EndgameOwner|CompletionGate/i.test(source),
+  }
   const missingGates = Object.entries(gates).filter(([, passed]) => !passed).map(([name]) => name)
+  const missingGlobalGates = Object.entries(globalGates).filter(([, passed]) => !passed).map(([name]) => name)
+  const allMissingGates = [...missingGates, ...missingGlobalGates]
   return {
     schema: 'b10-architecture-r1',
-    status: missingGates.length === 0 ? 'PASS' : 'FAIL',
-    missingGates,
+    status: allMissingGates.length === 0 ? 'PASS' : 'FAIL',
+    missingGates: allMissingGates,
     gates,
+    globalGates,
     registry: { version: registry.version, skillCount: registry.skillCount },
   }
 }

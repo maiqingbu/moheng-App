@@ -26,7 +26,8 @@
     "verify:b07-h02": "export B07_H02_EVIDENCE_DIR=\"${B07_H02_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b07-h02-evidence.XXXXXX)}\" && node scripts/run-b07-h02-evidence-gates.mjs && node scripts/generate-b07-h02-acceptance.mjs",
     "verify:b08-h03": "export B08_H03_EVIDENCE_DIR=\"${B08_H03_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b08-h03-evidence.XXXXXX)}\" && node scripts/run-b08-h03-evidence-gates.mjs && node scripts/assemble-b08-h03-evidence.mjs && node scripts/generate-b08-h03-acceptance.mjs",
     "verify:b05": "export B05_EVIDENCE_DIR=\"${B05_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b05-evidence.XXXXXX)}\" && node scripts/run-b05-evidence-gates.mjs && node scripts/assemble-b05-evidence.mjs && node scripts/generate-b05-acceptance.mjs",
-    "verify:b09-h04": "node scripts/run-b09-h04-evidence-gates.mjs"
+    "verify:b09-h04": "node scripts/run-b09-h04-evidence-gates.mjs",
+    "verify:b10": "node scripts/run-b10-evidence-gates.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",
