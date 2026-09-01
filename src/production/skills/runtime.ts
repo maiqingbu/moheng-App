@@ -552,6 +552,8 @@ export interface QualityReport {
   runtimeChecks: RuntimeCheckRequest[]
   softAssessment: { readerDesire: 'SOFT'; qualityScore: number }
   modelProvenance: { evaluator: string; evaluatorCalls: number; provider: string; model: string }
+  invocationRefs: string[]
+  recheckedDimensions: string[]
   digest: string
   softOnly: true
 }
@@ -587,9 +589,43 @@ export function evaluateNarrativeQuality(input: {
     runtimeChecks: [],
     softAssessment: { readerDesire: 'SOFT' as const, qualityScore },
     modelProvenance: { evaluator: 'B10::MergedNarrativeEvaluator', evaluatorCalls: 1, provider: 'deterministic', model: 'quality-rules-v1' },
+    invocationRefs: [...input.invocationRefs],
+    recheckedDimensions: [],
     softOnly: true as const,
   }
   return { ...base, digest: stableFingerprint({ ...base, invocationRefs: [...input.invocationRefs] }) }
+}
+
+export function recheckAffectedDimensions(
+  prior: QualityReport,
+  repairedBody: string,
+  tasteProfile: TasteProfile,
+  affectedDimensions: readonly string[],
+): QualityReport {
+  const affected = [...new Set(affectedDimensions)].sort()
+  if (affected.some(dimension => !(dimension in prior.dimensions))) throw new Error('SKILL_AFFECTED_DIMENSION_INVALID')
+  const fresh = evaluateNarrativeQuality({
+    candidateRef: prior.candidateRef,
+    projectId: prior.projectId,
+    revision: prior.revision,
+    body: repairedBody,
+    tasteProfile,
+    invocationRefs: prior.invocationRefs,
+  })
+  const dimensions = { ...prior.dimensions }
+  for (const dimension of affected) dimensions[dimension as keyof typeof dimensions] = fresh.dimensions[dimension as keyof typeof dimensions]
+  const findings = [
+    ...prior.findings.filter(finding => !affected.includes(finding.dimension)),
+    ...fresh.findings.filter(finding => affected.includes(finding.dimension)),
+  ]
+  const next: QualityReport = {
+    ...prior,
+    dimensions,
+    findings,
+    repairableDimensions: findings.filter(finding => finding.repairable).map(finding => finding.dimension),
+    recheckedDimensions: affected,
+  }
+  return { ...next, digest: stableFingerprint({ ...next, digest: undefined }) }
 }
 
 export function enforceHardQualitySeparation(input: { quality: QualityReport; hardGate: { passed: boolean; reason?: string } }): {

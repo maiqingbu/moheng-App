@@ -9,6 +9,7 @@ import {
   evaluateNarrativeQuality,
   enforceHardQualitySeparation,
   normalizeSkillOutput,
+  recheckAffectedDimensions,
   repairCandidate,
   selectCreativeSkills,
   type SkillBundleSource,
@@ -173,6 +174,18 @@ describe('B10 Creative Skill Runtime', () => {
     expect(Object.keys(report.dimensions)).toEqual(expect.arrayContaining(['agency', 'desire', 'hook', 'pacing', 'voice', 'dialogue', 'subtext', 'repetition', 'exposition', 'emotionalPayoff']))
     expect(report.softOnly).toBe(true)
     expect(report.modelProvenance.evaluatorCalls).toBe(1)
+  })
+
+  it('rechecks only the affected quality dimensions after a CandidatePatch', () => {
+    const tasteProfile = createTasteProfile({ version: 'taste.v1', profile: {}, provenance: { source: 'user', revision: 7 } })
+    const report = evaluateNarrativeQuality({
+      candidateRef: { artifactId: 'candidate:recheck', version: 1, payloadHash: 'e'.repeat(64) },
+      projectId: 'project:b10', revision: 7, body: '短文本', tasteProfile, invocationRefs: ['inv:recheck'],
+    })
+    const rechecked = recheckAffectedDimensions(report, '他停在门前，听见门后的脚步声。', tasteProfile, ['hook'])
+    expect(rechecked.recheckedDimensions).toEqual(['hook'])
+    expect(rechecked.softOnly).toBe(true)
+    expect(rechecked.modelProvenance.evaluatorCalls).toBe(1)
   })
 
   it('lets HARD gate state dominate quality without turning quality into a hard gate', () => {

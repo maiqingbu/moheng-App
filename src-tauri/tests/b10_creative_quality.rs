@@ -1,8 +1,8 @@
 use ai_novel_production_system_core::creative_skills::{
     build_skill_task_context, create_invocation_provenance, default_taste_profile,
     enforce_hard_quality_separation, evaluate_narrative_quality, load_registry,
-    normalize_skill_output, repair_candidate, select_creative_skills, RepairCandidateRequest,
-    SkillSelectionRequest, recheck_affected_dimensions,
+    normalize_skill_output, recheck_affected_dimensions, repair_candidate, select_creative_skills,
+    RepairCandidateRequest, SkillSelectionRequest,
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use serde_json::json;

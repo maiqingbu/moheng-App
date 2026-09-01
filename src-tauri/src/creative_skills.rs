@@ -643,6 +643,7 @@ pub struct NarrativeQualityReport {
     pub soft_assessment: Value,
     pub model_provenance: QualityModelProvenance,
     pub invocation_refs: Vec<String>,
+    pub rechecked_dimensions: Vec<String>,
     pub digest: String,
     pub soft_only: bool,
 }
@@ -721,6 +722,7 @@ pub fn evaluate_narrative_quality(
         "softAssessment":{"readerDesire":"SOFT","qualityScore":quality_score},
         "modelProvenance":{"evaluator":"B10::MergedNarrativeEvaluator","evaluatorCalls":1,"provider":"deterministic","model":"quality-rules-v1"},
         "invocationRefs":invocation_refs,
+        "recheckedDimensions":[],
         "softOnly":true
     });
     Ok(NarrativeQualityReport {
@@ -745,9 +747,65 @@ pub fn evaluate_narrative_quality(
             model: "quality-rules-v1".into(),
         },
         invocation_refs,
+        rechecked_dimensions: Vec::new(),
         digest: sha256_canonical(&base).map_err(|error| error.to_string())?,
         soft_only: true,
     })
+}
+
+/// Re-evaluates only dimensions affected by a bounded CandidatePatch. The
+/// result remains a soft report and must still pass the existing B08 HARD gate.
+pub fn recheck_affected_dimensions(
+    prior: &NarrativeQualityReport,
+    repaired_body: &str,
+    taste_profile: &NarrativeTasteProfile,
+    affected_dimensions: Vec<String>,
+) -> Result<NarrativeQualityReport, String> {
+    let mut affected = affected_dimensions;
+    affected.sort();
+    affected.dedup();
+    if affected
+        .iter()
+        .any(|dimension| !prior.dimensions.contains_key(dimension))
+    {
+        return Err("SKILL_AFFECTED_DIMENSION_INVALID".into());
+    }
+    let fresh = evaluate_narrative_quality(
+        &prior.candidate_ref,
+        &prior.project_id,
+        prior.revision,
+        repaired_body,
+        taste_profile,
+        prior.invocation_refs.clone(),
+    )?;
+    let mut result = prior.clone();
+    for dimension in &affected {
+        if let Some(value) = fresh.dimensions.get(dimension) {
+            result.dimensions.insert(dimension.clone(), value.clone());
+        }
+    }
+    result.rechecked_dimensions = affected.clone();
+    result.findings = result
+        .findings
+        .into_iter()
+        .filter(|finding| !affected.contains(&finding.dimension))
+        .chain(
+            fresh
+                .findings
+                .into_iter()
+                .filter(|finding| affected.contains(&finding.dimension)),
+        )
+        .collect();
+    result.repairable_dimensions = result
+        .findings
+        .iter()
+        .filter(|finding| finding.repairable)
+        .map(|finding| finding.dimension.clone())
+        .collect();
+    let mut digest_input = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+    digest_input["digest"] = Value::String(String::new());
+    result.digest = sha256_canonical(&digest_input).map_err(|error| error.to_string())?;
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
