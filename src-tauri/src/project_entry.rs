@@ -71,6 +71,7 @@ fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn artifact(
     project_id: &str,
     artifact_id: String,
@@ -101,6 +102,7 @@ fn artifact(
     .map_err(|error| format!("B11_ARTIFACT_INVALID:{error}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bundle(
     project_id: &str,
     command_id: &str,
@@ -161,6 +163,7 @@ fn pitch_templates() -> [(&'static str, &'static str, &'static str, &'static str
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pitch_payload(
     kind: EntryKind,
     variant: &str,
@@ -574,7 +577,9 @@ pub fn commit_selection(
     if selected_ids.is_empty() || selected_ids.len() > 2 {
         return Err("B11_SELECTION_COUNT_INVALID".into());
     }
-    let unique_ids = selected_ids.iter().collect::<std::collections::BTreeSet<_>>();
+    let unique_ids = selected_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
     if unique_ids.len() != selected_ids.len() {
         return Err("B11_SELECTION_DUPLICATE".into());
     }
@@ -1113,8 +1118,7 @@ pub fn assistant_repair_plan(
     now: &str,
 ) -> Result<Value, String> {
     let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
-        connection,
-        project_id,
+        connection, project_id,
     )
     .map_err(|error| error.to_string())?;
     let operation: crate::repair::RepairOperation = serde_json::from_value(json!({

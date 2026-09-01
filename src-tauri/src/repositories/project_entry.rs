@@ -200,6 +200,7 @@ pub fn canonical_head_ref(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ensure_opening_topology(
     connection: &Connection,
     project_id: &str,

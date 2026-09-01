@@ -3794,7 +3794,14 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             } else {
                 crate::project_entry::EntryKind::Idea
             };
-            crate::project_entry::validate_initial_request(&request, entry_kind)?;
+            let b11_entry = command_type == "project_create_from_market"
+                || request
+                    .pointer("/payload/idea")
+                    .and_then(Value::as_str)
+                    .is_some_and(|idea| !idea.trim().is_empty());
+            if b11_entry {
+                crate::project_entry::validate_initial_request(&request, entry_kind)?;
+            }
             let id = stable_project_id(command_id)?;
             if let Some(replayed) = replayed_project_command(state, &id, idempotency_key, &digest)?
             {
@@ -3812,15 +3819,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|error| error.to_string())?,
                 Err(error) => return Err(error.to_string()),
             };
-            let entry_receipt = crate::project_entry::commit_initial(
-                &handle,
-                &id,
-                command_id,
-                idempotency_key,
-                requested_at,
-                &request,
-                entry_kind,
-            )?;
+            let entry_receipt = if b11_entry {
+                Some(crate::project_entry::commit_initial(
+                    &handle,
+                    &id,
+                    command_id,
+                    idempotency_key,
+                    requested_at,
+                    &request,
+                    entry_kind,
+                )?)
+            } else {
+                None
+            };
             drop(handle);
             let project_receipt = outcome_receipt(
                 state
@@ -3842,8 +3853,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|error| error.to_string())?,
             );
             let mut response = project_command_response(&project_receipt);
-            response["entryReceipt"] =
-                serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
+            if let Some(entry_receipt) = entry_receipt {
+                response["entryReceipt"] =
+                    serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
+            }
             Ok(response)
         }
         "project_rename" => {

@@ -27,6 +27,7 @@ const routeReplans = computed(() => lifecycle.value?.routeReplans ?? [])
 const lifecycleOwner = 'B09::VolumeLifecycleOwner'
 const exitSnapshotKind = 'VolumeExitState'
 const unresolvedLabel = 'OPEN / SUSPENDED'
+const handoffFields = ['fromVolumeId', 'toVolumeId', 'handoffStatus']
 const statusLabel = (value: unknown) => ({ READY: '已满足', BLOCKED: '待完成', OPEN: '进行中', SUSPENDED: '已挂起', CLOSED: '已关闭', UNKNOWN: '待确认', PASS: '已通过', FAIL: '未通过', NOT_STARTED: '未开始' } as Record<string, string>)[String(value)] ?? '待确认'
 const taskClassLabel = (value: string) => ({ REQUIRED: '必须完成', OPTIONAL: '可选安排', FLEXIBLE: '弹性安排', BLOCKED: '当前阻塞' } as Record<string, string>)[value] ?? '任务'
 

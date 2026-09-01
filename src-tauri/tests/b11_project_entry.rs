@@ -1,6 +1,6 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_market_strategy_impl, query_opening_ready_impl,
-    query_assistant_repair_plan_impl, query_project_overview_impl, query_story_directions_impl,
+    execute_command_impl, query_assistant_repair_plan_impl, query_market_strategy_impl,
+    query_opening_ready_impl, query_project_overview_impl, query_story_directions_impl,
     query_story_setup_impl, support_session_impl, KernelState,
 };
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
@@ -245,17 +245,24 @@ fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
         ["project"]["revision"]
         .as_i64()
         .unwrap();
-    let started = execute_command_impl(&state, json!({
-        "type":"opening_start_creating",
-        "commandId":"cmd:b11:opening-start",
-        "idempotencyKey":"cmd:b11:opening-start:key",
-        "projectId":project_id,
-        "expectedRevision":revision,
-        "requestedAt":NOW,
-        "payload":{}
-    })).unwrap();
+    let started = execute_command_impl(
+        &state,
+        json!({
+            "type":"opening_start_creating",
+            "commandId":"cmd:b11:opening-start",
+            "idempotencyKey":"cmd:b11:opening-start:key",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap();
     assert_eq!(started["finalStatus"], "committed");
-    assert_eq!(started["startCreating"]["productionRoot"], "B08::ChapterProductionRuntime");
+    assert_eq!(
+        started["startCreating"]["productionRoot"],
+        "B08::ChapterProductionRuntime"
+    );
 }
 
 #[test]
@@ -269,11 +276,14 @@ fn b11_assistant_repair_plan_uses_h03_authorization_and_postverify() {
     )
     .unwrap();
     assert_eq!(plan["targetAuthorityOwner"], "B04::ProjectionOwner");
-    assert_eq!(plan["expectedPostconditions"][0]["kind"], "projection_current");
+    assert_eq!(
+        plan["expectedPostconditions"][0]["kind"],
+        "projection_current"
+    );
     assert_eq!(plan["operationDigest"].as_str().unwrap().len(), 64);
 
-    let revision = query_project_overview_impl(&state, json!({"projectId":project_id}))
-        .unwrap()["project"]["revision"]
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap()
+        ["project"]["revision"]
         .as_i64()
         .unwrap();
     let plan_receipt = execute_command_impl(&state, json!({
@@ -306,24 +316,31 @@ fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explic
     let state = state();
     let created = execute_command_impl(&state, idea_request("cmd:b11:regenerate")).unwrap();
     let project_id = created["projectId"].as_str().unwrap().to_string();
-    let regenerated = execute_command_impl(&state, json!({
-        "type":"pitch_regenerate",
-        "commandId":"cmd:b11:regenerate:pitches",
-        "idempotencyKey":"cmd:b11:regenerate:pitches:key",
-        "projectId":project_id,
-        "expectedRevision":0,
-        "requestedAt":NOW,
-        "payload":{"adjustment":"让主角更早主动承担代价"}
-    })).unwrap();
+    let regenerated = execute_command_impl(
+        &state,
+        json!({
+            "type":"pitch_regenerate",
+            "commandId":"cmd:b11:regenerate:pitches",
+            "idempotencyKey":"cmd:b11:regenerate:pitches:key",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"adjustment":"让主角更早主动承担代价"}
+        }),
+    )
+    .unwrap();
     assert_eq!(regenerated["finalStatus"], "committed");
 
     let directions = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
-    ).unwrap();
+    )
+    .unwrap();
     let pitches = directions["pitches"].as_array().unwrap();
     assert_eq!(pitches.len(), 3);
-    assert!(pitches.iter().all(|pitch| pitch["generation"] == 2 && pitch["authoritative"] == false));
+    assert!(pitches
+        .iter()
+        .all(|pitch| pitch["generation"] == 2 && pitch["authoritative"] == false));
     assert!(directions["selectedPitchId"].is_null());
 
     let selected_ids = pitches
@@ -331,20 +348,25 @@ fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explic
         .take(2)
         .map(|pitch| pitch["id"].as_str().unwrap())
         .collect::<Vec<_>>();
-    let selected = execute_command_impl(&state, json!({
-        "type":"pitch_select",
-        "commandId":"cmd:b11:regenerate:merge",
-        "idempotencyKey":"cmd:b11:regenerate:merge:key",
-        "projectId":project_id,
-        "expectedRevision":1,
-        "requestedAt":NOW,
-        "payload":{"pitchIds":selected_ids,"mode":"combine"}
-    })).unwrap();
+    let selected = execute_command_impl(
+        &state,
+        json!({
+            "type":"pitch_select",
+            "commandId":"cmd:b11:regenerate:merge",
+            "idempotencyKey":"cmd:b11:regenerate:merge:key",
+            "projectId":project_id,
+            "expectedRevision":1,
+            "requestedAt":NOW,
+            "payload":{"pitchIds":selected_ids,"mode":"combine"}
+        }),
+    )
+    .unwrap();
     assert_eq!(selected["finalStatus"], "committed");
     let setup = query_story_setup_impl(
         &state,
         json!({"projectId":project_id,"scope":"story-setup"}),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(setup["selectedPitchIds"].as_array().unwrap().len(), 2);
     state.manager.with_read_connection(&project_id, NOW, |connection| {
         let decisions: i64 = connection.query_row(
@@ -365,7 +387,8 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
     let directions = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
-    ).unwrap();
+    )
+    .unwrap();
     let selected_pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
     execute_command_impl(&state, json!({
         "type":"pitch_select","commandId":"cmd:b11:assistant-query:select","idempotencyKey":"cmd:b11:assistant-query:select:key",
@@ -377,26 +400,48 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
         "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
         "payload":{"storyCore":{"protagonist":"被逐出宗门的炼丹师","desire":"证明废丹的价值","mechanism":"废丹让妖兽进化并留下代价","conflict":"宗门封锁秘密","readerPromise":"每次升级都伴随选择与代价","forbiddenReveals":[]}}
     })).unwrap();
-    let supported = support_session_impl(&state, json!({
-        "projectId":project_id,
-        "question":"当前作品的故事方向是什么？",
-        "mode":"INSPECT",
-        "scope":"PROJECT",
-        "requestedAt":NOW
-    })).unwrap();
+    let supported = support_session_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "question":"当前作品的故事方向是什么？",
+            "mode":"INSPECT",
+            "scope":"PROJECT",
+            "requestedAt":NOW
+        }),
+    )
+    .unwrap();
     assert_eq!(supported["plan"]["steps"].as_array().unwrap().len(), 2);
-    assert!(supported["plan"]["steps"].as_array().unwrap().iter().all(|step| step["status"] == "DONE"));
-    assert!(supported["receipt"]["sourceRefs"].as_array().unwrap().len() > 0);
+    assert!(supported["plan"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|step| step["status"] == "DONE"));
+    assert!(!supported["receipt"]["sourceRefs"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(supported["finding"]["supportStatus"], "SUPPORTED");
-    assert!(supported["evidenceLedger"].as_array().unwrap().iter().all(|item| item["truncated"] == false));
+    assert!(supported["evidenceLedger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["truncated"] == false));
 
-    let insufficient = support_session_impl(&state, json!({
-        "projectId":project_id,
-        "question":"这个作品具体哪一章已经兑现某个不存在的承诺？",
-        "mode":"DIAGNOSE",
-        "scope":"PROJECT",
-        "requestedAt":NOW
-    })).unwrap();
+    let insufficient = support_session_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "question":"这个作品具体哪一章已经兑现某个不存在的承诺？",
+            "mode":"DIAGNOSE",
+            "scope":"PROJECT",
+            "requestedAt":NOW
+        }),
+    )
+    .unwrap();
     assert_eq!(insufficient["finding"]["supportStatus"], "INSUFFICIENT");
-    assert!(insufficient["finding"]["sourceRefs"].as_array().unwrap().is_empty());
+    assert!(insufficient["finding"]["sourceRefs"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
