@@ -911,6 +911,8 @@ pub struct NarrativeQualityReport {
     pub model_provenance: QualityModelProvenance,
     pub invocation_refs: Vec<String>,
     pub rechecked_dimensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<Value>,
     pub digest: String,
     pub soft_only: bool,
 }
@@ -1232,6 +1234,7 @@ pub fn evaluate_narrative_quality(
         },
         invocation_refs,
         rechecked_dimensions: Vec::new(),
+        repair: None,
         digest: sha256_canonical(&base).map_err(|error| error.to_string())?,
         soft_only: true,
     })
@@ -1290,6 +1293,17 @@ pub fn recheck_affected_dimensions(
     digest_input["digest"] = Value::String(String::new());
     result.digest = sha256_canonical(&digest_input).map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+pub fn rebind_quality_candidate(
+    report: &mut NarrativeQualityReport,
+    candidate_ref: ArtifactRef,
+) -> Result<(), String> {
+    report.candidate_ref = candidate_ref;
+    let mut digest_input = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+    digest_input["digest"] = Value::String(String::new());
+    report.digest = sha256_canonical(&digest_input).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1388,7 +1402,8 @@ pub fn repair_candidate(request: RepairCandidateRequest) -> Result<RepairCandida
             skill_version: request.skill_version,
         });
     }
-    if request.context_tokens <= 0 || request.model_calls <= 0 {
+    let deterministic = request.model.starts_with("deterministic-");
+    if request.context_tokens <= 0 || (!deterministic && request.model_calls <= 0) {
         return Err("SKILL_REPAIR_BUDGET_INVALID".into());
     }
     let characters = request.body.chars().collect::<Vec<_>>();
@@ -1411,7 +1426,7 @@ pub fn repair_candidate(request: RepairCandidateRequest) -> Result<RepairCandida
         affected_dimensions: request.affected_dimensions,
         repair_run: request.repair_run,
         repair_run_limit: request.repair_run_limit,
-        transport_calls: 1,
+        transport_calls: if deterministic { 0 } else { 1 },
         reason: None,
         model: request.model,
         skill_id: request.skill_id,

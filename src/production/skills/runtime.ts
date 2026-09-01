@@ -546,8 +546,8 @@ export interface QualityReport {
   revision: number
   tasteProfileRef: string
   tasteProfileVersion: string
-  dimensions: Record<typeof QUALITY_DIMENSIONS[number], { score: number; severity: 'INFO' | 'WARN'; evidence: string[] }>
-  findings: Array<{ findingId: string; dimension: string; severity: 'INFO' | 'WARN'; evidence: string[]; repairable: boolean }>
+  dimensions: Record<typeof QUALITY_DIMENSIONS[number], { score: number; severity: 'INFO' | 'WARN'; evidence: string[]; signal: string; evidenceRanges: Array<{ start: number; end: number; quote: string }> }>
+  findings: Array<{ findingId: string; dimension: string; severity: 'INFO' | 'WARN'; evidence: string[]; repairable: boolean; reason: string; evidenceRanges: Array<{ start: number; end: number; quote: string }> }>
   repairableDimensions: string[]
   runtimeChecks: RuntimeCheckRequest[]
   softAssessment: { readerDesire: 'SOFT'; qualityScore: number }
@@ -566,16 +566,65 @@ export function evaluateNarrativeQuality(input: {
   tasteProfile: TasteProfile
   invocationRefs: readonly string[]
 }): QualityReport {
-  const lengthScore = Math.min(100, Math.max(20, Math.round(input.body.length * 1.5)))
-  const severity: 'INFO' | 'WARN' = input.body.trim().length < 20 ? 'WARN' : 'INFO'
-  const dimensions = Object.fromEntries(QUALITY_DIMENSIONS.map((dimension, index) => [dimension, {
-    score: Math.max(0, Math.min(100, lengthScore + (index % 3) - 1)),
-    severity,
-    evidence: input.body.trim().length > 0 ? [`body:${input.body.slice(0, 24)}`] : [],
-  }])) as QualityReport['dimensions']
-  const findings = severity === 'WARN'
-    ? [{ findingId: `quality:${input.candidateRef.artifactId}`, dimension: 'exposition', severity, evidence: [], repairable: true }]
-    : []
+  const countAny = (needles: string[]) => needles.reduce((count, needle) => count + [...input.body.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gu'))].length, 0)
+  const firstRange = (needles: string[]) => {
+    for (const needle of needles) {
+      const start = input.body.indexOf(needle)
+      if (start >= 0) return [{ start, end: start + [...needle].length, quote: needle }]
+    }
+    return []
+  }
+  const dimension = (score: number, signal: string, needles: string[]) => {
+    const bounded = Math.max(0, Math.min(100, Math.round(score)))
+    const evidenceRanges = firstRange(needles)
+    return {
+      score: bounded,
+      severity: (bounded < 45 ? 'WARN' : 'INFO') as 'INFO' | 'WARN',
+      evidence: evidenceRanges.length > 0 ? evidenceRanges.map(range => `${range.quote}:${range.start}-${range.end}`) : [`signal:${signal}`],
+      signal,
+      evidenceRanges,
+    }
+  }
+  const sentences = input.body.split(/[。！？!?]/u).map(sentence => sentence.trim()).filter(Boolean)
+  const sentenceCounts = new Map<string, number>()
+  for (const sentence of sentences) sentenceCounts.set(sentence, (sentenceCounts.get(sentence) ?? 0) + 1)
+  const duplicateSentences = [...sentenceCounts.values()].reduce((count, value) => count + Math.max(0, value - 1), 0)
+  const initiative = countAny(['决定', '选择', '推开', '拔刀', '冲向', '走向', '拒绝', '发誓', '主动', 'decide', 'choose'])
+  const passive = countAny(['被', '只能', '等待', '任由', '陷入', '被迫', 'passively'])
+  const desire = countAny(['想', '要', '必须', '希望', '渴望', '目标', '为了', 'want', 'must'])
+  const unresolved = countAny(['？', '?', '却', '突然', '门后', '谁', '为何', '秘密', '传来', '然而', '但'])
+  const closure = countAny(['结束', '完成', '关闭', '安静地结束', '终于平静'])
+  const actions = countAny(['推', '走', '跑', '拔', '抓', '打', '看', '打开', '冲', '决定'])
+  const dialoguePairs = (input.body.match(/“/gu)?.length ?? 0) + Math.floor((input.body.match(/"/gu)?.length ?? 0) / 2)
+  const subtext = countAny(['沉默', '没有说', '却笑', '眼神', '停顿', '其实', '不敢'])
+  const exposition = countAny(['所谓', '也就是说', '历史', '制度', '地理', '定义', '资料', '因为', '据说'])
+  const voice = typeof input.tasteProfile.profile.voice === 'string' ? input.tasteProfile.profile.voice : '默认'
+  const pacing = typeof input.tasteProfile.profile.pacing === 'string' ? input.tasteProfile.profile.pacing : '默认'
+  const sentenceVariation = sentences.slice(1).filter((sentence, index) => [...sentence].length !== [...sentences[index]].length).length
+  const emotion = countAny(['害怕', '愤怒', '痛', '笑', '哭', '失去', '终于', '代价', '心'])
+  const dimensions = {
+    agency: dimension(45 + Math.min(36, initiative * 12) - Math.min(45, passive * 15), `initiative=${initiative};passive=${passive}`, ['决定', '选择', '推开', '被', '只能']),
+    desire: dimension(35 + Math.min(60, desire * 15), `desireMarkers=${desire}`, ['想', '要', '必须', '希望', '目标', '为了']),
+    hook: dimension(42 + Math.min(48, unresolved * 12) - Math.min(36, closure * 18), `unresolved=${unresolved};closure=${closure}`, ['？', '?', '却', '突然', '门后', '传来', '结束']),
+    pacing: dimension(35 + Math.min(35, actions * 8) + Math.min(20, sentenceVariation * 5) + (pacing.includes('紧') ? 5 : 0), `sentences=${sentences.length};actions=${actions};variation=${sentenceVariation};profile=${pacing}`, ['推', '走', '跑', '突然']),
+    voice: dimension(48 + Math.min(12, (input.body.match(/，/gu)?.length ?? 0)) + (voice.includes('克制') ? 12 : voice.includes('华丽') ? -8 : 0), `tasteVoice=${voice}`, ['，', '。', '！', '？']),
+    dialogue: dimension(20 + Math.min(70, dialoguePairs * 22), `dialoguePairs=${dialoguePairs}`, ['“', '"', '说', '回答']),
+    subtext: dimension(35 + Math.min(60, subtext * 15), `subtextMarkers=${subtext}`, ['沉默', '没有说', '眼神', '其实', '不敢']),
+    repetition: dimension(100 - Math.min(85, duplicateSentences * 25), `sentences=${sentences.length};duplicateSentences=${duplicateSentences}`, ['门后传来脚步声', '重复']),
+    exposition: dimension(75 - Math.min(55, exposition * 12) - (dialoguePairs === 0 && input.body.length > 24 ? 12 : 0) + (dialoguePairs > 0 ? 8 : 0), `expositionMarkers=${exposition};dialoguePairs=${dialoguePairs}`, ['所谓', '历史', '制度', '地理', '也就是说', '资料']),
+    emotionalPayoff: dimension(35 + Math.min(35, emotion * 10) + Math.min(24, initiative * 8) + (closure > 0 ? 8 : 0), `emotionMarkers=${emotion};causalActions=${initiative};closure=${closure}`, ['终于', '代价', '决定', '笑', '哭', '失去']),
+  } satisfies QualityReport['dimensions']
+  const findings = Object.entries(dimensions)
+    .filter(([, item]) => item.score < 45)
+    .map(([dimensionName, item]) => ({
+      findingId: `quality:${input.candidateRef.artifactId}:${dimensionName}`,
+      dimension: dimensionName,
+      severity: item.severity,
+      evidence: item.evidence,
+      repairable: ['agency', 'hook', 'dialogue', 'pacing', 'repetition', 'exposition'].includes(dimensionName),
+      reason: item.signal,
+      evidenceRanges: item.evidenceRanges,
+    }))
   const qualityScore = Math.round(Object.values(dimensions).reduce((sum, item) => sum + item.score, 0) / QUALITY_DIMENSIONS.length)
   const base = {
     candidateRef: input.candidateRef,
@@ -687,7 +736,8 @@ export function repairCandidate(input: RepairCandidateInput): RepairCandidateRes
       reason: 'REPAIR_RUN_LIMIT',
     }
   }
-  if (input.contextTokens <= 0 || input.modelCalls <= 0) throw new Error('SKILL_REPAIR_BUDGET_INVALID')
+  const deterministic = input.model.startsWith('deterministic-')
+  if (input.contextTokens <= 0 || (!deterministic && input.modelCalls <= 0)) throw new Error('SKILL_REPAIR_BUDGET_INVALID')
   const characters = [...input.candidate.body]
   if (!Number.isInteger(input.patch.start) || !Number.isInteger(input.patch.end)
     || input.patch.start < 0 || input.patch.start > input.patch.end || input.patch.end > characters.length) {
@@ -706,7 +756,7 @@ export function repairCandidate(input: RepairCandidateInput): RepairCandidateRes
     affectedDimensions: [...input.affectedDimensions],
     repairRun: input.repairRun,
     repairRunLimit: input.repairRunLimit,
-    transportCalls: 1,
+    transportCalls: deterministic ? 0 : 1,
     model: input.model,
     skillId: input.skillId,
     skillVersion: input.skillVersion,

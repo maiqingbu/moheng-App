@@ -24,6 +24,8 @@ const NOW: &str = "2026-08-30T12:00:00Z";
 
 struct RecordingGateway;
 
+struct GoodQualityGateway;
+
 impl ProductionModelGateway for RecordingGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let output = match capability {
@@ -73,6 +75,23 @@ impl ProductionModelGateway for RecordingGateway {
             other => return Err(format!("unexpected capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
+    }
+}
+
+impl ProductionModelGateway for GoodQualityGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "RENDER_CHAPTER" {
+            response.output["body"] = json!("林舟终于决定推门，必须亲自面对门后的秘密。“你来了。”他说。“我一直在等你。”对方回答。门后传来一声轻响，谁在那里？");
+        }
+        if capability == "AUDIT_EXTRACT" {
+            response.output = json!({
+                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                "continuityCandidates":[],"taskProgressCandidates":[],
+                "revealedReservationRefs":[],"evidenceRanges":[]
+            });
+        }
+        Ok(response)
     }
 }
 
@@ -559,7 +578,7 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         json!({
             "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
             "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillResourcePaths":["resources/operating_method.md"]}
         }),
     )
     .unwrap();
@@ -588,6 +607,10 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         projection["creativeSkills"]["loading"]["unselectedFullTextLoads"],
         0
     );
+    assert_eq!(
+        projection["creativeSkills"]["loading"]["selectedResourceLoads"],
+        2
+    );
     assert!(
         projection["creativeSkills"]["invocations"][0]["loadedSkillTextRef"]
             .as_str()
@@ -613,13 +636,53 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     assert_eq!(projection["quality"]["repair"]["transportCalls"], 0);
     assert_eq!(projection["quality"]["recheckedDimensions"][0], "hook");
     assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='ChapterCandidate' AND version=2",
+        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch.status')='CANDIDATE'",
         [], |row| row.get(0)
     ).unwrap(), 1);
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT json_extract(p.payload_json,'$.candidateRef.version') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ReviewReport'",
         [], |row| row.get(0)
-    ).unwrap(), 2);
+    ).unwrap(), 1);
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT CASE WHEN json_extract(qp.payload_json,'$.repair.candidateAfter.artifactId') = json_extract(ap.payload_json,'$.candidateRef.artifactId') THEN 'BOUND' ELSE 'MISMATCH' END FROM artifacts q JOIN artifact_payloads qp ON qp.artifact_id=q.artifact_id AND qp.version=q.version JOIN artifacts a ON a.project_id=q.project_id AND a.artifact_type='ReviewReport' JOIN artifact_payloads ap ON ap.artifact_id=a.artifact_id AND ap.version=a.version WHERE q.project_id='p-b10-root' AND q.artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), "BOUND");
+}
+
+#[test]
+fn b10_formal_selected_method_content_changes_b08_enrichment_semantics() {
+    let run = |project_id: &str, primary: &str, support: &[&str]| {
+        let temp = tempfile::tempdir().unwrap();
+        let state = KernelState::with_production_gateway(
+            AppPaths::new(temp.path()),
+            Arc::new(RecordingGateway),
+        );
+        let connection = state.manager.create(project_id, "B10", NOW).unwrap();
+        let chapter_id = seed_chapter_and_gate(&connection, project_id);
+        drop(connection);
+        execute_command_impl(
+            &state,
+            json!({
+                "type":"production_start","commandId":format!("cmd:{project_id}:method"),"idempotencyKey":format!("key:{project_id}:method"),
+                "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","primarySkillId":primary,"supportSkillIds":support}
+            }),
+        )
+        .unwrap();
+        let connection = state.manager.open(project_id, "B10", NOW).unwrap();
+        connection
+            .query_row::<String, _, _>(
+                "SELECT json_extract(p.payload_json,'$.creativeEnrichment.methodGuidance') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id LIMIT 1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let ending = run("p-b10-method-ending", "S14", &["S10"]);
+    let pacing = run("p-b10-method-pacing", "S21", &["S23"]);
+    assert_ne!(ending, pacing);
+    assert!(ending.contains("methodDigest=") && ending.contains("/SKILL.md"));
+    assert!(pacing.contains("methodDigest=") && pacing.contains("/SKILL.md"));
 }
 
 #[test]
@@ -654,6 +717,76 @@ fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
     ).unwrap(), 0);
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b10-no-skill' AND artifact_type='FinalChapter'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+}
+
+#[test]
+fn b10_production_no_repair_path_is_explicit_and_does_not_create_a_patch() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(GoodQualityGateway),
+    );
+    let connection = state.manager.create("p-b10-no-repair", "B10", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-no-repair");
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b10:no-repair","idempotencyKey":"key:b10:no-repair",
+        "projectId":"p-b10-no-repair","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open("p-b10-no-repair", "B10", NOW).unwrap();
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), "NO_REPAIR");
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
+        [], |row| row.get(0)
+    ).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-no-repair' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+}
+
+#[test]
+fn b10_production_repair_limit_stops_before_a_final_commit_and_marks_escalation() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state.manager.create("p-b10-limit", "B10", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-limit");
+    drop(connection);
+
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b10:limit","idempotencyKey":"key:b10:limit",
+        "projectId":"p-b10-limit","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":1}
+    })).unwrap_err();
+    assert_eq!(error, "B10_REPAIR_LIMIT_REACHED:ESCALATE");
+    let connection = state.manager.open("p-b10-limit", "B10", NOW).unwrap();
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-limit' AND artifact_type='FinalChapter'",
+        [], |row| row.get(0)
+    ).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE project_id='p-b10-limit'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "FAILED"
+    );
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b10-limit' AND capability='RENDER_CHAPTER'",
         [], |row| row.get(0)
     ).unwrap(), 1);
 }

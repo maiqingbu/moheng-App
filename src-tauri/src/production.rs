@@ -609,6 +609,32 @@ fn block_for_recompile(
         .map_err(|error| error.to_string())
 }
 
+fn b10_repair_target(body: &str, repairable_dimensions: &[String]) -> Option<(String, String)> {
+    if repairable_dimensions
+        .iter()
+        .any(|dimension| dimension == "hook")
+    {
+        return Some(("hook".into(), "门后传来一声轻响。".into()));
+    }
+    if repairable_dimensions
+        .iter()
+        .any(|dimension| dimension == "dialogue")
+    {
+        return Some(("dialogue".into(), "“你还要继续吗？”他问。".into()));
+    }
+    if repairable_dimensions
+        .iter()
+        .any(|dimension| dimension == "exposition")
+    {
+        return Some((
+            "exposition".into(),
+            "他停了一下，把解释留到行动之后。".into(),
+        ));
+    }
+    let _ = body;
+    None
+}
+
 /// Execute one formal B08 chapter production run.  The function returns a
 /// blocked result when no committed GatePolicy is available; it never silently
 /// commits a candidate as final content.
@@ -1040,7 +1066,7 @@ pub fn run_chapter_production(
     });
     let mut candidate = artifact(
         &project_id,
-        candidate_id,
+        candidate_id.clone(),
         ArtifactType::ChapterCandidate,
         &chapter_id,
         candidate_payload,
@@ -1052,6 +1078,160 @@ pub fn run_chapter_production(
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
+    let original_candidate_ref = reference(&candidate);
+    let mut effective_candidate = candidate.clone();
+    let mut effective_body = body.clone();
+    let mut repaired_candidate = None;
+    let mut quality_report = None;
+    let mut repair_evidence = Value::Null;
+    if let Some(enrichment) = creative_enrichment.as_ref() {
+        let initial_report = crate::creative_skills::evaluate_narrative_quality(
+            &original_candidate_ref,
+            &project_id,
+            current_revision,
+            &body,
+            &enrichment.taste_profile,
+            enrichment
+                .invocations
+                .iter()
+                .map(|invocation| invocation.invocation_id.clone())
+                .collect(),
+        )
+        .map_err(|error| format!("B10_QUALITY_EVALUATION:{error}"))?;
+        let repair_limit = request
+            .pointer("/payload/repairRunLimit")
+            .and_then(Value::as_i64)
+            .unwrap_or(enrichment.context.budget.repair_runs);
+        if let Some((dimension, replacement)) =
+            b10_repair_target(&body, &initial_report.repairable_dimensions)
+        {
+            let patch = crate::creative_skills::repair_candidate(
+                crate::creative_skills::RepairCandidateRequest {
+                    candidate_ref: candidate.artifact_id.clone(),
+                    candidate_status: "CANDIDATE".into(),
+                    body: body.clone(),
+                    finding_refs: initial_report
+                        .findings
+                        .iter()
+                        .map(|finding| finding.finding_id.clone())
+                        .collect(),
+                    affected_dimensions: vec![dimension.clone()],
+                    start: body.chars().count(),
+                    end: body.chars().count(),
+                    replacement,
+                    skill_id: "S40".into(),
+                    skill_version: crate::creative_skills::CREATIVE_SKILLS_VERSION.into(),
+                    model: "deterministic-candidate-repair".into(),
+                    repair_run: 1,
+                    repair_run_limit: repair_limit,
+                    context_tokens: enrichment.context.budget.context_tokens,
+                    model_calls: 0,
+                },
+            )
+            .map_err(|error| format!("B10_CANDIDATE_REPAIR:{error}"))?;
+            if patch.status == "ADVISORY_ESCALATION" {
+                let _ = DurableJobService::transition_for_worker(
+                    connection,
+                    &project_id,
+                    &job_id,
+                    "FAILED",
+                    worker_id,
+                    &now,
+                );
+                let _ = DurableJobService::release_lease(connection, &project_id, &job_id, &now);
+                return Err("B10_REPAIR_LIMIT_REACHED:ESCALATE".into());
+            }
+            effective_body = patch.body.clone();
+            let mut repaired_payload = candidate.payload.clone();
+            repaired_payload["body"] = Value::String(effective_body.clone());
+            repaired_payload["bodyDigest"] = Value::String(
+                sha256_canonical(&json!(effective_body)).map_err(|error| error.to_string())?,
+            );
+            repaired_payload["candidatePatch"] = json!({
+                "kind":"CandidatePatch",
+                "status":"CANDIDATE",
+                "originalCandidateRef":original_candidate_ref.clone(),
+                "findingRefs":patch.finding_refs,
+                "affectedDimensions":[dimension.clone()],
+                "repairRun":patch.repair_run,
+                "repairRunLimit":patch.repair_run_limit,
+                "transportCalls":patch.transport_calls,
+                "owner":"B10::CandidateRepairOwner"
+            });
+            let repaired_candidate_id = StableIdentityFactory::from_command(
+                StableIdKind::Artifact,
+                &format!("{command_id}:candidate-repair:1"),
+            )?;
+            let mut repaired = artifact(
+                &project_id,
+                repaired_candidate_id,
+                ArtifactType::ChapterCandidate,
+                &chapter_id,
+                repaired_payload,
+                &command_id,
+                &job_id,
+                Some(&render_run_id),
+                &now,
+                vec![original_candidate_ref.clone()],
+            )?;
+            repaired.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
+            effective_candidate = repaired.clone();
+            repaired_candidate = Some(repaired);
+            let mut rechecked = crate::creative_skills::recheck_affected_dimensions(
+                &initial_report,
+                &effective_body,
+                &enrichment.taste_profile,
+                vec![dimension.clone()],
+            )
+            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
+            let effective_ref = reference(&effective_candidate);
+            crate::creative_skills::rebind_quality_candidate(
+                &mut rechecked,
+                effective_ref.clone(),
+            )?;
+            rechecked.repair = Some(json!({
+                "status":"REPAIRED",
+                "run":patch.repair_run,
+                "limit":patch.repair_run_limit,
+                "transportCalls":patch.transport_calls,
+                "candidateBefore":original_candidate_ref.clone(),
+                "candidateAfter":effective_ref,
+                "affectedDimensions":[dimension.clone()],
+                "recheckedDimensions":rechecked.rechecked_dimensions.clone(),
+                "escalation":Value::Null
+            }));
+            crate::creative_skills::rebind_quality_candidate(
+                &mut rechecked,
+                reference(&effective_candidate),
+            )?;
+            quality_report = Some(rechecked);
+            repair_evidence = json!({
+                "status":"REPAIRED",
+                "run":patch.repair_run,
+                "limit":patch.repair_run_limit,
+                "transportCalls":patch.transport_calls,
+                "effectiveCandidateRef":reference(&effective_candidate),
+                "affectedDimensions":[dimension.clone()]
+            });
+        } else {
+            let mut report = initial_report;
+            report.repair = Some(json!({
+                "status":"NO_REPAIR",
+                "run":0,
+                "limit":repair_limit,
+                "transportCalls":0,
+                "candidateBefore":original_candidate_ref.clone(),
+                "candidateAfter":original_candidate_ref.clone(),
+                "affectedDimensions":[],
+                "recheckedDimensions":[],
+                "escalation":Value::Null
+            }));
+            quality_report = Some(report);
+            repair_evidence =
+                json!({"status":"NO_REPAIR","run":0,"limit":repair_limit,"transportCalls":0});
+        }
+    }
+    let effective_candidate_ref = reference(&effective_candidate);
     let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
         if let Some(enrichment) = creative_enrichment.as_ref() {
             let taste_payload = serde_json::to_value(&enrichment.taste_profile)
@@ -1072,26 +1252,18 @@ pub fn run_chapter_production(
             )?;
             taste.provenance.created_by = "B10::NarrativeTasteProfileOwner".into();
             let taste_ref = reference(&taste);
-            let report = crate::creative_skills::evaluate_narrative_quality(
-                &reference(&candidate),
-                &project_id,
-                current_revision,
-                &body,
-                &enrichment.taste_profile,
-                enrichment
-                    .invocations
-                    .iter()
-                    .map(|invocation| invocation.invocation_id.clone())
-                    .collect(),
-            )
-            .map_err(|error| format!("B10_QUALITY_EVALUATION:{error}"))?;
-            let mut quality_payload = serde_json::to_value(&report)
+            let report = quality_report
+                .take()
+                .ok_or_else(|| "B10_QUALITY_REPORT_MISSING".to_string())?;
+            let report_value = serde_json::to_value(&report)
                 .map_err(|error| format!("B10_QUALITY_PAYLOAD:{error}"))?;
+            let mut quality_payload = report_value;
             quality_payload["payloadSchema"] = json!("narrative-quality-report.r1");
             quality_payload["invocationProvenance"] = serde_json::to_value(&enrichment.invocations)
                 .map_err(|error| format!("B10_INVOCATION_PAYLOAD:{error}"))?;
             quality_payload["skillSelection"] = serde_json::to_value(&enrichment.selection)
                 .map_err(|error| format!("B10_SELECTION_PAYLOAD:{error}"))?;
+            quality_payload["repairEvidence"] = repair_evidence.clone();
             let mut quality = artifact(
                 &project_id,
                 quality_report_id,
@@ -1102,7 +1274,7 @@ pub fn run_chapter_production(
                 &job_id,
                 None,
                 &now,
-                vec![reference(&candidate), taste_ref.clone()],
+                vec![effective_candidate_ref.clone(), taste_ref.clone()],
             )?;
             quality.provenance.created_by = "B10::NarrativeQualityOwner".into();
             let quality_ref = reference(&quality);
@@ -1136,7 +1308,7 @@ pub fn run_chapter_production(
         gateway,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":reference(&candidate),"body":body,"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -1148,7 +1320,7 @@ pub fn run_chapter_production(
         connection,
         &project_id,
         &chapter_id,
-        &body,
+        &effective_body,
         &plan_payload,
         &extraction,
     )?;
@@ -1157,12 +1329,12 @@ pub fn run_chapter_production(
         audit_id,
         ArtifactType::ReviewReport,
         &chapter_id,
-        json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":reference(&candidate),"audit":audit_payload}),
+        json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"audit":audit_payload}),
         &command_id,
         &job_id,
         Some(&audit_run_id),
         &now,
-        vec![reference(&candidate)],
+        vec![effective_candidate_ref.clone()],
     )?;
     audit.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
     update_stage(connection, &project_id, &job_id, "GATE", &now)?;
@@ -1251,7 +1423,7 @@ pub fn run_chapter_production(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":reference(&candidate),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":effective_candidate.payload["body"],"bodyDigest":effective_candidate.payload["bodyDigest"],"candidateRef":effective_candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":effective_candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -1262,7 +1434,7 @@ pub fn run_chapter_production(
         &job_id,
         Some(&render_run_id),
         &now,
-        vec![reference(&candidate), reference(&audit)],
+        vec![effective_candidate_ref.clone(), reference(&audit)],
     )?;
     final_artifact.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
     let task_states = extraction.task_progress_candidates.iter().map(|item| json!({
@@ -1318,7 +1490,7 @@ pub fn run_chapter_production(
             json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}})
         })
         .collect::<Vec<_>>();
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":reference(&candidate),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -1348,7 +1520,7 @@ pub fn run_chapter_production(
         json!({"artifactType":"ProductionReceipt","scope":chapter_scope(&chapter_id),"artifactId":receipt_artifact.artifact_id,"version":1,"payloadHash":receipt_artifact.payload_hash}),
     ];
     let mut bundle_artifacts = Vec::new();
-    let candidate_ref = reference(&candidate);
+    let candidate_ref = effective_candidate_ref.clone();
     let final_ref = reference(&final_artifact);
     let canon_delta = extraction.canon_candidates.iter().map(|item| json!({
         "factId":item.fact_id,
@@ -1388,19 +1560,17 @@ pub fn run_chapter_production(
         },
         "payloadJson":{"actualNarrative":true,"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version}
     })).collect::<Vec<_>>();
-    bundle_artifacts.extend([
-        candidate,
-        audit,
-        final_artifact,
-        exit_artifact,
-        receipt_artifact,
-    ]);
+    bundle_artifacts.push(candidate);
     if let Some(taste) = taste_artifact {
         bundle_artifacts.push(taste);
+    }
+    if let Some(repaired) = repaired_candidate {
+        bundle_artifacts.push(repaired);
     }
     if let Some(quality) = quality_artifact {
         bundle_artifacts.push(quality);
     }
+    bundle_artifacts.extend([audit, final_artifact, exit_artifact, receipt_artifact]);
     let dependency_source_hash = if gateway.fault_injection() == Some("dependency_source_hash") {
         "0".repeat(64)
     } else {

@@ -204,12 +204,16 @@ impl ProductionRepository {
             .get("repairableDimensions")
             .cloned()
             .unwrap_or_else(|| json!([]));
+        let repair_projection = quality
+            .get("repair")
+            .cloned()
+            .or_else(|| quality.get("repairEvidence").cloned())
+            .unwrap_or_else(|| {
+                json!({"status":"NO_REPAIR","run":0,"limit":repair_limit,"transportCalls":0,"scope":repair_scope,"escalation":Value::Null})
+            });
         let mut quality = quality;
         if let Some(object) = quality.as_object_mut() {
-            object.insert(
-                "repair".into(),
-                json!({"run":0,"limit":repair_limit,"scope":repair_scope,"escalation":Value::Null}),
-            );
+            object.entry("repair").or_insert(repair_projection);
         }
         let taste_profile = taste_profile_ref
             .as_ref()
