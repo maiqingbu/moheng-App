@@ -1935,6 +1935,8 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                     item.get("factId")
                         .or_else(|| item.get("eventId"))
                         .or_else(|| item.get("evidenceId"))
+                        .or_else(|| item.get("artifactId"))
+                        .or_else(|| item.get("sourceArtifactId"))
                         .or_else(|| item.get("threadId"))
                         .or_else(|| item.get("relationId"))
                         .or_else(|| item.get("obligationId"))
@@ -1954,6 +1956,8 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                         "modelRunId",
                         "receiptId",
                         "integrityRunId",
+                        "artifactId",
+                        "sourceArtifactId",
                         "factId",
                         "eventId",
                         "evidenceId",
@@ -1986,6 +1990,10 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
 pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let question = required_string(&request, "question")?;
+    let requested_at = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("1970-01-01T00:00:00Z");
     let mode = request
         .get("mode")
         .and_then(Value::as_str)
@@ -1999,7 +2007,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         .project_revision(project_id)
         .map_err(|e| e.to_string())?;
     let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
-    let mut plan = plan_support(&scope, question, "1970-01-01T00:00:00Z")?;
+    let mut plan = plan_support(&scope, question, requested_at)?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
@@ -2015,7 +2023,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     let mut evidence_found = false;
     state
         .manager
-        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+        .with_read_connection(project_id, requested_at, |connection| {
             let adapter = RepositoryReadAdapter {
                 connection,
                 project_id,
@@ -2070,8 +2078,8 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
                     result_digest: result.result_digest.clone(),
                     truncated: result.truncated,
                     bounds_applied: result.bounds_applied.clone(),
-                    started_at: "1970-01-01T00:00:00Z".into(),
-                    finished_at: "1970-01-01T00:00:00Z".into(),
+                    started_at: requested_at.into(),
+                    finished_at: requested_at.into(),
                     status: result.status.clone(),
                 });
                 calls.push(result);
@@ -2100,7 +2108,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
     let diagnostic_finding = if question.contains("知道") {
         state
             .manager
-            .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            .with_read_connection(project_id, requested_at, |connection| {
                 let entity_ids = request_strings(&request, "entityIds");
                 let entity_refs = entity_ids.iter().map(String::as_str).collect::<Vec<_>>();
                 let knowledge =
@@ -2228,11 +2236,11 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         requested_scope: requested_scope.into(),
         plan_steps: plan.steps.clone(),
         pending_authorization_ref: None,
-        created_at: "1970-01-01T00:00:00Z".into(),
+        created_at: requested_at.into(),
     };
     let handle = state
         .manager
-        .open(project_id, "", "1970-01-01T00:00:00Z")
+        .open(project_id, "", requested_at)
         .map_err(|e| e.to_string())?;
     crate::repositories::support::save_checkpoint(&handle, &checkpoint)
         .map_err(|e| e.to_string())?;
@@ -2251,8 +2259,8 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         finding_refs: vec![finding.finding_id.clone()],
         checkpoint_ref: Some(checkpoint.checkpoint_id),
         final_support_status: finding.support_status.clone(),
-        started_at: "1970-01-01T00:00:00Z".into(),
-        finished_at: "1970-01-01T00:00:00Z".into(),
+        started_at: requested_at.into(),
+        finished_at: requested_at.into(),
     };
     Ok(
         json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt}),

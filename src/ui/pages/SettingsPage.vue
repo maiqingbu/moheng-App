@@ -72,7 +72,7 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
         <section id="setting-privacy" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">隐私设置</h2><p class="card-subtitle">本地优先：项目正式数据只以本机权威数据库为准。</p></div></div>
           <div class="setting-grid"><label class="field"><span class="field-label">隐私模式</span><select v-model="form.privacyMode" class="select"><option value="local-first">本地优先</option><option value="balanced">平衡模式</option></select></label></div>
-          <div class="toggle-row"><div><strong>模型请求仅发送必要上下文</strong><div class="muted" style="font-size:11px">Context Compiler 只提供当前任务真正需要的作品信息。</div></div><button class="toggle" :class="{on:form.sendDraftOnly}" @click="form.sendDraftOnly=!form.sendDraftOnly" /></div>
+          <div class="toggle-row"><div><strong>模型请求仅发送必要内容</strong><div class="muted" style="font-size:11px">系统只提供当前任务真正需要的作品信息。</div></div><button class="toggle" :class="{on:form.sendDraftOnly}" @click="form.sendDraftOnly=!form.sendDraftOnly" /></div>
         </section>
 
         <section id="setting-export" class="setting-section">
@@ -85,7 +85,7 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div class="card-head"><div><h2 class="card-title">数据可靠性</h2><p class="card-subtitle">备份和完整性检查必须由后端作业执行；前端只提交命令并展示回执，不直接复制或改写权威数据库。</p></div></div>
           <div class="actions"><button class="btn" @click="backup">创建里程碑备份</button><button class="btn" @click="integrity">运行完整性检查</button></div>
           <CommandFeedback :state="backupState" /><CommandFeedback :state="integrityState" />
-          <div class="banner info" style="margin-top:12px"><div><div class="banner-title">可靠性基线</div><div class="banner-copy">正式实现应包含 SQLite 事务、崩溃恢复、quick_check、hash 验证、引用检查和只读恢复模式。</div></div></div>
+          <div class="banner info" style="margin-top:12px"><div><div class="banner-title">可靠性基线</div><div class="banner-copy">正式实现包含本机事务、崩溃恢复、快速检查、哈希验证、引用检查和只读恢复模式。</div></div></div>
         </section>
 
         <section id="setting-platform" class="setting-section">

@@ -146,7 +146,7 @@ for (const query of ['queryProjectOverview', 'queryChapterList', 'queryChapterFi
 }
 
 const appShell = read('ui/components/AppShell.vue')
-for (const label of ['总览', '市场与平台策略', '故事方向', 'AI 制片中心', '卷管理', '决策收件箱', '成品阅读', '作品图谱', '长篇健康', '版本 / 修改 / Retcon', '项目设置']) {
+for (const label of ['总览', '市场与平台策略', '故事方向', '创作中心', '卷管理', '决策收件箱', '成品阅读', '作品图谱', '长篇健康', '版本与变更记录', '项目设置']) {
   if (!appShell.includes(label)) errors.push(`侧栏缺少工作区：${label}`)
 }
 

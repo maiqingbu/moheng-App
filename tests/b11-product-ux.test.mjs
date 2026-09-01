@@ -35,3 +35,11 @@ test('B11 formal UI does not expose demo or engineering fallback text', () => {
   assert.doesNotMatch(shell, /浏览器演示适配器只用于 UI 验证/)
   assert.doesNotMatch(page, /PLAN_STALE|RepairPlan|operationDigest|sourceRefs|IPC_UNSUPPORTED|作为 AI/)
 })
+
+test('B11 market entry uses user-provided material instead of a fake global opportunity', () => {
+  const launch = read('src/ui/pages/CreationLaunch.vue')
+  assert.match(launch, /marketSource/)
+  assert.match(launch, /marketMaterial/)
+  assert.match(launch, /project_create_from_market/)
+  assert.doesNotMatch(launch, /marketOpportunityId:selectedMarket/)
+})
