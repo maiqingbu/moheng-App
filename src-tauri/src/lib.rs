@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod commands;
 pub mod commit;
+pub mod creative_skills;
 pub mod generated;
 pub mod harness;
 pub mod narrative;

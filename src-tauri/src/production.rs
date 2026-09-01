@@ -725,6 +725,14 @@ pub fn run_chapter_production(
         StableIdKind::Artifact,
         &format!("{command_id}:audit"),
     )?;
+    let taste_profile_id = StableIdentityFactory::from_command(
+        StableIdKind::Artifact,
+        &format!("{command_id}:taste-profile"),
+    )?;
+    let quality_report_id = StableIdentityFactory::from_command(
+        StableIdKind::Artifact,
+        &format!("{command_id}:quality-report"),
+    )?;
     let final_id = StableIdentityFactory::from_command(
         StableIdKind::Artifact,
         &format!("{command_id}:final"),
@@ -914,6 +922,34 @@ pub fn run_chapter_production(
         current_revision,
     )?;
 
+    // B10 is an enrichment/quality layer on the existing B08 composition
+    // root. Disabling it is an explicit compatibility path and still uses the
+    // exact same renderer, audit, CommitBundle and FinalChapter owners.
+    let creative_enrichment = if request
+        .pointer("/payload/skillsEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        Some(
+            crate::creative_skills::enrich_chapter(
+                &project_id,
+                &chapter_id,
+                current_revision,
+                &context_ref.artifact_id,
+                &plan_payload,
+                execution_mode,
+            )
+            .map_err(|error| format!("B10_SKILL_RUNTIME:{error}"))?,
+        )
+    } else {
+        None
+    };
+    let creative_enrichment_payload = creative_enrichment
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| format!("B10_SKILL_PAYLOAD:{error}"))?;
+
     update_stage(connection, &project_id, &job_id, "RENDER", &now)?;
     let render_spec = ModelRunSpec {
         model_run_id: render_run_id.clone(),
@@ -930,12 +966,16 @@ pub fn run_chapter_production(
         attempt_no: 1,
         repair_round: 0,
     };
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload});
+    if let Some(enrichment) = creative_enrichment_payload.clone() {
+        render_input["creativeEnrichment"] = enrichment;
+    }
     let render_result = execute_production_model(
         connection,
         gateway,
         &render_spec,
         "RENDER_CHAPTER",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload}),
+        render_input,
         &now,
     )?;
     let body = render_result
@@ -954,7 +994,8 @@ pub fn run_chapter_production(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":gateway.provider(),"model":gateway.model("RENDER_CHAPTER")}
+        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":gateway.provider(),"model":gateway.model("RENDER_CHAPTER")},
+        "creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null)
     });
     let mut candidate = artifact(
         &project_id,
@@ -969,6 +1010,70 @@ pub fn run_chapter_production(
         vec![plan_ref.clone(), context_ref.clone()],
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
+
+    let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
+        if let Some(enrichment) = creative_enrichment.as_ref() {
+            let taste_payload = serde_json::to_value(&enrichment.taste_profile)
+                .map_err(|error| format!("B10_TASTE_PAYLOAD:{error}"))?;
+            let mut taste_payload = taste_payload;
+            taste_payload["payloadSchema"] = json!("narrative-taste-profile.r1");
+            let mut taste = artifact(
+                &project_id,
+                taste_profile_id,
+                ArtifactType::NarrativeTasteProfile,
+                &chapter_id,
+                taste_payload,
+                &command_id,
+                &job_id,
+                None,
+                &now,
+                vec![context_ref.clone()],
+            )?;
+            taste.provenance.created_by = "B10::NarrativeTasteProfileOwner".into();
+            let taste_ref = reference(&taste);
+            let report = crate::creative_skills::evaluate_narrative_quality(
+                &reference(&candidate),
+                &project_id,
+                current_revision,
+                &body,
+                &enrichment.taste_profile,
+                enrichment
+                    .invocations
+                    .iter()
+                    .map(|invocation| invocation.invocation_id.clone())
+                    .collect(),
+            )
+            .map_err(|error| format!("B10_QUALITY_EVALUATION:{error}"))?;
+            let mut quality_payload = serde_json::to_value(&report)
+                .map_err(|error| format!("B10_QUALITY_PAYLOAD:{error}"))?;
+            quality_payload["payloadSchema"] = json!("narrative-quality-report.r1");
+            quality_payload["invocationProvenance"] = serde_json::to_value(&enrichment.invocations)
+                .map_err(|error| format!("B10_INVOCATION_PAYLOAD:{error}"))?;
+            quality_payload["skillSelection"] = serde_json::to_value(&enrichment.selection)
+                .map_err(|error| format!("B10_SELECTION_PAYLOAD:{error}"))?;
+            let mut quality = artifact(
+                &project_id,
+                quality_report_id,
+                ArtifactType::NarrativeQualityReport,
+                &chapter_id,
+                quality_payload,
+                &command_id,
+                &job_id,
+                None,
+                &now,
+                vec![reference(&candidate), taste_ref.clone()],
+            )?;
+            quality.provenance.created_by = "B10::NarrativeQualityOwner".into();
+            let quality_ref = reference(&quality);
+            (
+                Some(taste),
+                Some(quality),
+                Some(taste_ref),
+                Some(quality_ref),
+            )
+        } else {
+            (None, None, None, None)
+        };
     update_stage(connection, &project_id, &job_id, "AUDIT", &now)?;
     let audit_spec = ModelRunSpec {
         model_run_id: audit_run_id.clone(),
@@ -990,7 +1095,7 @@ pub fn run_chapter_production(
         gateway,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":reference(&candidate),"body":body}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":reference(&candidate),"body":body,"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -1105,7 +1210,7 @@ pub fn run_chapter_production(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":reference(&candidate),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":reference(&candidate),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -1172,7 +1277,7 @@ pub fn run_chapter_production(
             json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}})
         })
         .collect::<Vec<_>>();
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":reference(&candidate),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":reference(&candidate),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -1185,11 +1290,15 @@ pub fn run_chapter_production(
         &now,
         vec![reference(&final_artifact), reference(&exit_artifact)],
     )?;
+    let certificate_evidence = quality_artifact
+        .as_ref()
+        .map(|quality| vec![reference(&audit), reference(quality)])
+        .unwrap_or_else(|| vec![reference(&audit)]);
     let certificate = make_certificate(
         &project_id,
         policy_ref,
         reference(&final_artifact),
-        vec![reference(&audit)],
+        certificate_evidence,
         &now,
     )?;
     let heads = vec![
@@ -1245,6 +1354,12 @@ pub fn run_chapter_production(
         exit_artifact,
         receipt_artifact,
     ]);
+    if let Some(taste) = taste_artifact {
+        bundle_artifacts.push(taste);
+    }
+    if let Some(quality) = quality_artifact {
+        bundle_artifacts.push(quality);
+    }
     let dependency_source_hash = if gateway.fault_injection() == Some("dependency_source_hash") {
         "0".repeat(64)
     } else {

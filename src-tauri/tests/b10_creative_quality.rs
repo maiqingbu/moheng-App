@@ -65,7 +65,10 @@ fn b10_context_is_bounded_and_revision_bound() {
     )
     .unwrap();
     assert_eq!(context.project_revision, 7);
-    assert!(context.forbidden_capabilities.iter().any(|capability| capability == "COMMIT"));
+    assert!(context
+        .forbidden_capabilities
+        .iter()
+        .any(|capability| capability == "COMMIT"));
     assert_eq!(context.assert_fresh(7).unwrap(), "FRESH");
     assert_eq!(context.assert_fresh(8).unwrap_err(), "STALE/RECOMPILE");
 }
@@ -98,7 +101,11 @@ fn b10_invocation_provenance_separates_method_and_project_sources() {
     )
     .unwrap();
     let registry = load_registry().unwrap();
-    let skill = registry.skills.iter().find(|skill| skill.id == "S14").unwrap();
+    let skill = registry
+        .skills
+        .iter()
+        .find(|skill| skill.id == "S14")
+        .unwrap();
     let provenance = create_invocation_provenance(
         "inv:b10:1",
         skill,
@@ -127,8 +134,16 @@ fn b10_quality_is_one_merged_soft_report_and_hard_gate_still_wins() {
     )
     .unwrap();
     for dimension in [
-        "agency", "desire", "hook", "pacing", "voice", "dialogue", "subtext", "repetition",
-        "exposition", "emotionalPayoff",
+        "agency",
+        "desire",
+        "hook",
+        "pacing",
+        "voice",
+        "dialogue",
+        "subtext",
+        "repetition",
+        "exposition",
+        "emotionalPayoff",
     ] {
         assert!(report.dimensions.contains_key(dimension));
     }
@@ -191,4 +206,3 @@ fn b10_repair_is_candidate_only_and_stops_before_transport_at_limit() {
     assert_eq!(stopped.transport_calls, 0);
     assert_eq!(stopped.reason, Some("REPAIR_RUN_LIMIT".into()));
 }
-

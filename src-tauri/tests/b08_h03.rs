@@ -552,11 +552,15 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     let chapter_id = seed_chapter_and_gate(&connection, "p-b10-root");
     drop(connection);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
-        "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
-    })).unwrap();
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
+            "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
+        }),
+    )
+    .unwrap();
     assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open("p-b10-root", "B10", NOW).unwrap();
     assert_eq!(connection.query_row::<i64, _, _>(
@@ -568,7 +572,7 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         [], |row| row.get(0)
     ).unwrap(), "1.2.0");
     assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT json_array_length(json_extract(p.payload_json,'$.invocations')) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
+        "SELECT json_array_length(json_extract(p.payload_json,'$.invocationProvenance')) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
         [], |row| row.get(0)
     ).unwrap(), 2);
 }
