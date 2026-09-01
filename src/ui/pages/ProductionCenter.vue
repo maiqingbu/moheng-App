@@ -12,6 +12,8 @@ const production = computed(() => store.production)
 const lastCommand = ref('none')
 const commandState = computed(() => store.commandState(lastCommand.value))
 const repairDiagnosis = computed(() => JSON.stringify(production.value?.repair?.diagnosis ?? {}, null, 2))
+const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
+const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
 
 onMounted(() => void store.loadProduction())
 
@@ -27,6 +29,7 @@ async function startProduction() {
       executionMode: chapter.executionMode,
       entityIds: [],
       references: [],
+      skillsEnabled: true,
     },
   })
 }
@@ -118,6 +121,39 @@ async function executeRepair() {
         </section>
       </aside>
     </div>
+
+    <section v-if="production.creativeSkills || production.quality" class="card pad section">
+      <div class="card-head">
+        <div><h2 class="card-title">Creative Skills 与叙事质量</h2><p class="card-subtitle">Skill 只提供有界创作建议；Quality 与 ReaderDesire 是 SOFT 信号，HARD Gate 仍由 B08/B06–B09 权威执行。</p></div>
+        <span class="muted">{{ production.quality?.softOnly ? 'SOFT 质量评估' : '等待质量评估' }}</span>
+      </div>
+      <div v-if="production.creativeSkills" class="metric-grid">
+        <MetricCard label="Skill 包" :value="production.creativeSkills.packageVersion" :note="production.creativeSkills.packageDigest" />
+        <MetricCard label="Primary" :value="production.creativeSkills.selection?.primary?.id || '无'" :note="production.creativeSkills.selection?.primary?.nameZh || ''" />
+        <MetricCard label="Support" :value="String(production.creativeSkills.selection?.support?.length || 0)" note="默认最多 3 个" />
+        <MetricCard label="Invocation" :value="String(production.creativeSkills.invocations?.length || 0)" note="来自权威投影的 provenance" />
+      </div>
+      <div v-if="production.creativeSkills" class="task-row">
+        <strong>Context {{ production.creativeSkills.context?.projectRevision ?? '-' }} · {{ production.creativeSkills.context?.contextDigest || '无 digest' }}</strong>
+        <small class="muted">{{ production.creativeSkills.context?.boundedRefs?.length || 0 }} 个 bounded refs · {{ production.creativeSkills.context?.budget?.contextTokens || 0 }} tokens · {{ production.creativeSkills.context?.budget?.modelCalls || 0 }} model calls</small>
+      </div>
+      <div v-if="production.quality" class="quality-grid">
+        <div v-for="([dimension, item]) in qualityDimensions" :key="dimension" class="task-row">
+          <strong>{{ dimension }}</strong><span>{{ item.score }}/100 · {{ item.severity }}</span>
+        </div>
+      </div>
+      <div v-if="production.quality" class="task-row">
+        <strong>ReaderDesire：{{ production.quality.softAssessment?.readerDesire || 'SOFT' }}</strong>
+        <small class="muted">Taste {{ production.quality.tasteProfileVersion || production.tasteProfile?.version || '-' }} · merged evaluator calls {{ production.quality.modelProvenance?.evaluatorCalls || 0 }}</small>
+      </div>
+      <div v-if="production.quality?.repair" class="task-row">
+        <strong>Candidate 修复 {{ production.quality.repair.run }}/{{ production.quality.repair.limit }}</strong>
+        <small class="muted">scope: {{ production.quality.repair.scope.join('、') || '无' }} · {{ production.quality.repair.escalation || '未升级' }}</small>
+      </div>
+      <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
+        <strong>{{ finding.dimension }} · {{ finding.severity }}</strong><small class="muted">{{ finding.repairable ? '可做 Candidate 局部修复' : '仅供审阅' }}</small>
+      </div>
+    </section>
 
     <section v-if="production.repair" class="card pad section">
       <div class="card-head">

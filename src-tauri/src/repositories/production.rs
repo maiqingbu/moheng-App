@@ -166,6 +166,59 @@ impl ProductionRepository {
         };
         let candidate_ref = scoped_ref("ChapterCandidate", false);
         let final_ref = scoped_ref("FinalChapter", true);
+        let quality_ref = scoped_ref("NarrativeQualityReport", false);
+        let taste_profile_ref = scoped_ref("NarrativeTasteProfile", false);
+        let payload_for_ref = |reference: &Value| -> Option<Value> {
+            let artifact_id = reference.get("artifactId").and_then(Value::as_str)?;
+            let version = reference.get("version").and_then(Value::as_i64)?;
+            connection
+                .query_row(
+                    "SELECT payload_json FROM artifact_payloads WHERE artifact_id=?1 AND version=?2",
+                    libsql_rusqlite::params![artifact_id, version],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+        };
+        let creative_skills = candidate_ref
+            .as_ref()
+            .and_then(payload_for_ref)
+            .and_then(|payload| payload.get("creativeEnrichment").cloned())
+            .filter(|value| !value.is_null())
+            .unwrap_or(Value::Null);
+        let quality = quality_ref
+            .as_ref()
+            .and_then(payload_for_ref)
+            .map(|mut payload| {
+                payload["ref"] = quality_ref.clone().unwrap_or(Value::Null);
+                payload
+            })
+            .unwrap_or(Value::Null);
+        let repair_limit = creative_skills
+            .pointer("/context/budget/repairRuns")
+            .cloned()
+            .unwrap_or_else(|| json!(0));
+        let repair_scope = quality
+            .get("repairableDimensions")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let mut quality = quality;
+        if let Some(object) = quality.as_object_mut() {
+            object.insert(
+                "repair".into(),
+                json!({"run":0,"limit":repair_limit,"scope":repair_scope,"escalation":Value::Null}),
+            );
+        }
+        let taste_profile = taste_profile_ref
+            .as_ref()
+            .and_then(payload_for_ref)
+            .map(|mut payload| {
+                payload["ref"] = taste_profile_ref.clone().unwrap_or(Value::Null);
+                payload
+            })
+            .unwrap_or(Value::Null);
         let model_runs = if let Some((job_id, _, _, _)) = &job {
             let mut statement = connection.prepare(
                 "SELECT model_run_id,capability,provider,model,status FROM model_runs WHERE project_id=?1 AND job_id=?2 AND capability IN ('PLAN_STRATEGY','RENDER_CHAPTER','AUDIT_EXTRACT') ORDER BY created_at,model_run_id",
@@ -213,6 +266,8 @@ impl ProductionRepository {
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "gate":{"status":if final_ref.is_some() {"PASS"} else if stale_status=="PLAN_STALE" {"BLOCKED"} else {"PENDING"},"reason":if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED"} else {""}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
+            "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
+            "readerDesire":quality.get("softAssessment").cloned().unwrap_or(Value::Null),
             "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
     }

@@ -327,6 +327,55 @@ export interface SigningProjection {
   }
 }
 
+export interface CreativeSkillsProjection {
+  packageVersion: string
+  packageDigest: string
+  selection?: {
+    primary?: { id: string; nameZh?: string; role?: string; bundleDigest?: string }
+    support?: Array<{ id: string; nameZh?: string; role?: string; bundleDigest?: string }>
+  }
+  context?: {
+    contextDigest?: string
+    contextManifestRef?: string
+    projectRevision?: number
+    boundedRefs?: Array<{ kind: string; reference?: string }>
+    budget?: { contextTokens?: number; modelCalls?: number; repairRuns?: number }
+  }
+  invocations?: Array<{
+    invocationId?: string
+    skillId?: string
+    skillVersion?: string
+    role?: string
+    resourceRefs?: string[]
+    methodRefs?: string[]
+    projectContextRefs?: string[]
+    provider?: string
+    model?: string
+    outputDigest?: string
+  }>
+  proposal?: { kind?: string; status?: string; summary?: string; suggestions?: string[] }
+}
+
+export interface NarrativeQualityProjection {
+  ref?: { artifactId: string; version: number; payloadHash: string }
+  softOnly?: boolean
+  tasteProfileVersion?: string
+  dimensions?: Record<string, { score: number; severity: string; evidence: string[] }>
+  findings?: Array<{ findingId: string; dimension: string; severity: string; evidence: string[]; repairable: boolean }>
+  repairableDimensions?: string[]
+  modelProvenance?: { evaluator?: string; evaluatorCalls?: number; provider?: string; model?: string }
+  softAssessment?: { readerDesire?: string; qualityScore?: number }
+  invocationProvenance?: CreativeSkillsProjection['invocations']
+  repair?: { run: number; limit: number; scope: string[]; escalation: string | null }
+}
+
+export interface NarrativeTasteProjection {
+  ref?: { artifactId: string; version: number; payloadHash: string }
+  version?: string
+  digest?: string
+  softOnly?: boolean
+}
+
 export interface ProductionCenterProjection {
   timeline: TimelineItem[]
   tasks: ProductionTask[]
@@ -370,6 +419,10 @@ export interface ProductionCenterProjection {
   finalChapterRef?: { artifactId: string; version: number; payloadHash: string } | null
   reconciliation?: 'NO_ACTION' | 'RECOMPILE_NEXT_CHAPTER' | 'RECOMPILE_ROLLING_WINDOW' | 'REPLAN_VOLUME_ROUTE' | 'CHANGE_REQUEST' | null
   repair?: RepairWorkflowProjection | null
+  creativeSkills?: CreativeSkillsProjection | null
+  quality?: NarrativeQualityProjection | null
+  tasteProfile?: NarrativeTasteProjection | null
+  readerDesire?: { readerDesire?: string; qualityScore?: number } | null
 }
 
 export interface RepairWorkflowProjection {
