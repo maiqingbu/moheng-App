@@ -60,9 +60,9 @@ async function createFromMarket(){
     <PageHeader title="新建作品" subtitle="你只需要说清楚想看什么、不要什么；系统负责把意图转化为可生产的小说项目。" />
 
     <section class="hero">
-      <div class="hero-eyebrow">AI NOVEL PRODUCTION</div>
+      <div class="hero-eyebrow">长篇小说创作</div>
       <h1>从一个念头，<br>到一部可以持续生产的小说。</h1>
-      <p>不需要先写大纲，也不需要理解提示词。描述一个念头、人物、场景或你喜欢的阅读体验，AI 会完成市场判断、故事立项、设定、开篇审核与后续生产。</p>
+      <p>不需要先写大纲，也不需要理解提示词。描述一个念头、人物、场景或你喜欢的阅读体验，系统会完成市场判断、故事立项、设定、开篇审核与后续生产。</p>
       <div class="idea-composer">
         <input v-model="projectTitle" class="input project-title-input" placeholder="作品名称（可稍后修改）" aria-label="作品名称" />
         <textarea v-model="idea" aria-label="故事想法" placeholder="例如：我想看一个不愿当英雄的人，被迫卷进一场关于名字与记忆的江湖阴谋……" />
@@ -99,7 +99,7 @@ async function createFromMarket(){
       </section>
 
       <section class="card pad">
-        <div class="card-head"><div><h2 class="card-title">AI 推断的创作约束</h2><p class="card-subtitle">全自动模式可以直接采用；你随时可以修改。</p></div><span class="badge pine">可修改</span></div>
+        <div class="card-head"><div><h2 class="card-title">系统整理的创作约束</h2><p class="card-subtitle">全自动模式可以直接采用；你随时可以修改。</p></div><span class="badge pine">可修改</span></div>
         <div class="inference-list">
           <div v-for="row in inference" :key="row[0]" class="inference-row"><span class="muted">{{ row[0] }}</span><strong style="max-width:64%;text-align:right;font-size:12px">{{ row[1] }}</strong></div>
         </div>
