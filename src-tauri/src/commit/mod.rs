@@ -208,6 +208,28 @@ impl CommitService {
         bundle: &CommitBundle,
         committed_at: &str,
     ) -> Result<CommitReceipt, CommitError> {
+        Self::commit_with_revision(connection, bundle, committed_at, true)
+    }
+
+    /// Commits a non-authoritative project-entry bundle without advancing the
+    /// project revision. This preserves the frozen project-create contract:
+    /// creating a project remains revision 0 while its initial candidates and
+    /// receipt are durably recorded. Later explicit user decisions advance the
+    /// normal project revision through the same CommitService.
+    pub fn commit_without_revision(
+        connection: &Connection,
+        bundle: &CommitBundle,
+        committed_at: &str,
+    ) -> Result<CommitReceipt, CommitError> {
+        Self::commit_with_revision(connection, bundle, committed_at, false)
+    }
+
+    fn commit_with_revision(
+        connection: &Connection,
+        bundle: &CommitBundle,
+        committed_at: &str,
+        advance_revision: bool,
+    ) -> Result<CommitReceipt, CommitError> {
         let bundle_value = serde_json::to_value(bundle)?;
         validate_commit_bundle(&bundle_value).map_err(CommitError::ContractInvalid)?;
         if bundle.contract_version != CONTRACT_VERSION {
@@ -248,7 +270,14 @@ impl CommitService {
                     return Err(CommitError::RevisionConflict);
                 }
             }
-            Self::apply(connection, bundle, bundle_digest, before, committed_at)
+            Self::apply(
+                connection,
+                bundle,
+                bundle_digest,
+                before,
+                committed_at,
+                advance_revision,
+            )
         })();
         match result {
             Ok(receipt) => {
@@ -268,6 +297,7 @@ impl CommitService {
         bundle_digest: String,
         before: i64,
         committed_at: &str,
+        advance_revision: bool,
     ) -> Result<CommitReceipt, CommitError> {
         final_gate::validate(connection, bundle)?;
         let artifacts_before: i64 = connection.query_row(
@@ -386,13 +416,15 @@ impl CommitService {
             committed_at,
         )
         .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
-        let after = before + 1;
-        let updated = connection.execute(
-            "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",
-            libsql_rusqlite::params![after, committed_at, bundle.project_id, before],
-        )?;
-        if updated != 1 {
-            return Err(CommitError::RevisionConflict);
+        let after = if advance_revision { before + 1 } else { before };
+        if advance_revision {
+            let updated = connection.execute(
+                "UPDATE project_meta SET revision = ?1, updated_at = ?2 WHERE project_id = ?3 AND revision = ?4",
+                libsql_rusqlite::params![after, committed_at, bundle.project_id, before],
+            )?;
+            if updated != 1 {
+                return Err(CommitError::RevisionConflict);
+            }
         }
         connection.execute(
             "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES (?1, 'fts.indexedSourceRevision', ?2, ?3) ON CONFLICT(project_id, setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",

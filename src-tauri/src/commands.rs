@@ -376,6 +376,64 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
     }))
 }
 
+pub fn query_market_strategy_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_i64)
+        .unwrap_or(20);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::project_entry::query_market_strategy(connection, project_id, cursor, limit)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_story_directions_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_i64)
+        .unwrap_or(10);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::project_entry::query_directions(connection, project_id, cursor, limit)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_story_setup_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::project_entry::query_story_setup(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::project_entry::query_opening_ready(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
 /// B08 production projection.  This is a bounded read projection assembled
 /// from the authoritative job/artifact/runtime rows; it never reconstructs a
 /// candidate as a committed chapter and never trusts Vue-local state.
@@ -3476,6 +3534,117 @@ fn save_provider_settings(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_b11_command(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    if command_type == "opening_start_creating" {
+        let expected_revision = expected_revision
+            .ok_or_else(|| "IPC_INVALID:expectedRevision required for B11 opening".to_string())?;
+        let spec = project_command_spec(
+            project_id,
+            project_id,
+            command_id,
+            idempotency_key,
+            command_type,
+            digest,
+            Some(expected_revision),
+            requested_at,
+            false,
+        );
+        let outcome = state
+            .manager
+            .commit_project_command(spec, |connection| {
+                crate::project_entry::start_creating(connection, project_id)
+                    .map_err(ManagerError::ProjectCommand)
+            })
+            .map_err(|error| error.to_string())?;
+        let (start, receipt) = match outcome {
+            ProjectCommandOutcome::Replayed(receipt) => {
+                let start = state
+                    .manager
+                    .with_read_connection(project_id, requested_at, |connection| {
+                        crate::project_entry::start_creating(connection, project_id)
+                            .map_err(ManagerError::ProjectCommand)
+                    })
+                    .map_err(|error| error.to_string())?;
+                (start, receipt)
+            }
+            ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+        };
+        let mut response = project_command_response(&receipt);
+        response["message"] = json!("开篇准备已完成，已进入正式创作中心。");
+        response["startCreating"] = start;
+        return Ok(response);
+    }
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for B11 command".to_string())?;
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let receipt = match command_type {
+        "pitch_regenerate" => crate::project_entry::commit_regenerate(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "pitch_select" => crate::project_entry::commit_selection(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "story_setup_save" => crate::project_entry::commit_story_setup(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "opening_ready" => crate::project_entry::commit_opening_ready(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        _ => Err(format!("B11_UNSUPPORTED_COMMAND:{command_type}")),
+    }
+    .map_err(|error| error.to_string())?;
+    let receipt = serde_json::to_value(receipt).map_err(|error| error.to_string())?;
+    Ok(json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "resultProjectId":project_id,
+        "finalStatus":"committed",
+        "message":match command_type { "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
+        "receiptId":receipt["receiptId"],
+        "beforeRevision":receipt["beforeRevision"],
+        "afterRevision":receipt["afterRevision"],
+        "receipt":receipt
+    }))
+}
+
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
     let command_id = required_string(&request, "commandId")?;
@@ -3490,6 +3659,24 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             save_provider_settings(
                 state,
                 &request,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
+            )
+        }
+        "pitch_regenerate"
+        | "pitch_select"
+        | "story_setup_save"
+        | "opening_ready"
+        | "opening_start_creating" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_b11_command(
+                state,
+                &request,
+                command_type,
                 id,
                 command_id,
                 idempotency_key,
@@ -3574,28 +3761,40 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 .pointer("/payload/title")
                 .and_then(Value::as_str)
                 .unwrap_or("未命名作品");
+            let entry_kind = if command_type == "project_create_from_market" {
+                crate::project_entry::EntryKind::Market
+            } else {
+                crate::project_entry::EntryKind::Idea
+            };
+            crate::project_entry::validate_initial_request(&request, entry_kind)?;
             let id = stable_project_id(command_id)?;
             if let Some(replayed) = replayed_project_command(state, &id, idempotency_key, &digest)?
             {
                 return Ok(replayed);
             }
-            match state.manager.overview(&id) {
-                Ok((existing_title, revision, _)) if existing_title == title && revision == 0 => {
-                    // Recover a crash after atomic create/catalog registration but
-                    // before the command receipt was persisted.
-                }
+            let handle = match state.manager.overview(&id) {
+                Ok((existing_title, _revision, _)) if existing_title == title => state
+                    .manager
+                    .open(&id, "", requested_at)
+                    .map_err(|error| error.to_string())?,
                 Ok(_) => return Err("IDEMPOTENCY_CONFLICT".to_string()),
-                Err(crate::project_db::ManagerError::ProjectNotFound) => {
-                    drop(
-                        state
-                            .manager
-                            .create(&id, title, requested_at)
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
+                Err(crate::project_db::ManagerError::ProjectNotFound) => state
+                    .manager
+                    .create(&id, title, requested_at)
+                    .map_err(|error| error.to_string())?,
                 Err(error) => return Err(error.to_string()),
-            }
-            let receipt = outcome_receipt(
+            };
+            let entry_receipt = crate::project_entry::commit_initial(
+                &handle,
+                &id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                &request,
+                entry_kind,
+            )?;
+            drop(handle);
+            let project_receipt = outcome_receipt(
                 state
                     .manager
                     .commit_project_command(
@@ -3606,7 +3805,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                             idempotency_key,
                             command_type,
                             &digest,
-                            expected_revision,
+                            None,
                             requested_at,
                             false,
                         ),
@@ -3614,7 +3813,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     )
                     .map_err(|error| error.to_string())?,
             );
-            Ok(project_command_response(&receipt))
+            let mut response = project_command_response(&project_receipt);
+            response["entryReceipt"] =
+                serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
+            Ok(response)
         }
         "project_rename" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -3895,6 +4097,32 @@ pub fn query_project_overview(
 }
 
 #[tauri::command]
+pub fn query_market_strategy(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_market_strategy_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_story_directions(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_story_directions_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_story_setup(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_story_setup_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_opening_ready_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_production_center(
     state: State<'_, KernelState>,
     request: Value,
@@ -4150,6 +4378,10 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         query_project_library,
         query_project_overview,
+        query_market_strategy,
+        query_story_directions,
+        query_story_setup,
+        query_opening_ready,
         query_production_center,
         search_fulltext,
         query_volume_list,

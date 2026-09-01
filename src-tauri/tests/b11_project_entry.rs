@@ -1,7 +1,6 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_market_strategy_impl, query_opening_ready_impl,
-    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl,
-    KernelState,
+    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl, KernelState,
 };
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -52,7 +51,7 @@ fn b11_idea_entry_persists_three_substantive_candidates_without_auto_selection()
     .unwrap();
     let pitches = directions["pitches"].as_array().unwrap();
     assert_eq!(pitches.len(), 3);
-    assert_eq!(directions.get("selectedPitchId"), None);
+    assert!(directions["selectedPitchId"].is_null());
     assert!(pitches.iter().all(|pitch| {
         pitch["sourceInputDigest"].as_str().is_some()
             && pitch["createdAt"] == NOW
@@ -159,20 +158,24 @@ fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
     )
     .unwrap();
     let selected_pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
-    let revision = query_project_overview_impl(&state, json!({"projectId":project_id}))
-        .unwrap()["project"]["revision"]
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap()
+        ["project"]["revision"]
         .as_i64()
         .unwrap();
 
-    let selected = execute_command_impl(&state, json!({
-        "type":"pitch_select",
-        "commandId":"cmd:b11:select",
-        "idempotencyKey":"cmd:b11:select:key",
-        "projectId":project_id,
-        "expectedRevision":revision,
-        "requestedAt":NOW,
-        "payload":{"pitchIds":[selected_pitch_id],"mode":"single"}
-    })).unwrap();
+    let selected = execute_command_impl(
+        &state,
+        json!({
+            "type":"pitch_select",
+            "commandId":"cmd:b11:select",
+            "idempotencyKey":"cmd:b11:select:key",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"pitchIds":[selected_pitch_id],"mode":"single"}
+        }),
+    )
+    .unwrap();
     assert_eq!(selected["finalStatus"], "committed");
     assert!(selected["receipt"]["receiptId"].as_str().is_some());
 
@@ -184,49 +187,55 @@ fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
     assert_eq!(setup["selectedPitchId"], selected_pitch_id);
     assert_eq!(setup["status"], "SELECTED");
 
-    let revision = query_project_overview_impl(&state, json!({"projectId":project_id}))
-        .unwrap()["project"]["revision"]
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap()
+        ["project"]["revision"]
         .as_i64()
         .unwrap();
-    execute_command_impl(&state, json!({
-        "type":"story_setup_save",
-        "commandId":"cmd:b11:setup",
-        "idempotencyKey":"cmd:b11:setup:key",
-        "projectId":project_id,
-        "expectedRevision":revision,
-        "requestedAt":NOW,
-        "payload":{"storyCore":{
-            "protagonist":"被逐出宗门的炼丹师",
-            "desire":"证明废丹不是废物并找回师门尊严",
-            "mechanism":"废丹会让妖兽进化，但每次进化都会留下可追踪代价",
-            "conflict":"宗门想封锁进化秘密，妖兽群开始反向学习炼丹术",
-            "worldRules":["进化必须支付代价"],
-            "readerPromise":"每次升级都伴随新的选择与代价",
-            "forbiddenReveals":["前三章不揭开秘方来源"],
-            "style":"紧凑、悬疑、带成长回报",
-            "expandableDirections":["宗门旧案","妖兽文明"]
-        }}
-    })).unwrap();
-
-    let revision = query_project_overview_impl(&state, json!({"projectId":project_id}))
-        .unwrap()["project"]["revision"]
-        .as_i64()
-        .unwrap();
-    let ready = execute_command_impl(&state, json!({
-        "type":"opening_ready",
-        "commandId":"cmd:b11:opening",
-        "idempotencyKey":"cmd:b11:opening:key",
-        "projectId":project_id,
-        "expectedRevision":revision,
-        "requestedAt":NOW,
-        "payload":{"approved":true}
-    })).unwrap();
-    assert_eq!(ready["finalStatus"], "committed");
-    let opening = query_opening_ready_impl(
+    execute_command_impl(
         &state,
-        json!({"projectId":project_id,"scope":"opening"}),
+        json!({
+            "type":"story_setup_save",
+            "commandId":"cmd:b11:setup",
+            "idempotencyKey":"cmd:b11:setup:key",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"storyCore":{
+                "protagonist":"被逐出宗门的炼丹师",
+                "desire":"证明废丹不是废物并找回师门尊严",
+                "mechanism":"废丹会让妖兽进化，但每次进化都会留下可追踪代价",
+                "conflict":"宗门想封锁进化秘密，妖兽群开始反向学习炼丹术",
+                "worldRules":["进化必须支付代价"],
+                "readerPromise":"每次升级都伴随新的选择与代价",
+                "forbiddenReveals":["前三章不揭开秘方来源"],
+                "style":"紧凑、悬疑、带成长回报",
+                "expandableDirections":["宗门旧案","妖兽文明"]
+            }}
+        }),
     )
     .unwrap();
+
+    let revision = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap()
+        ["project"]["revision"]
+        .as_i64()
+        .unwrap();
+    let ready = execute_command_impl(
+        &state,
+        json!({
+            "type":"opening_ready",
+            "commandId":"cmd:b11:opening",
+            "idempotencyKey":"cmd:b11:opening:key",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"approved":true}
+        }),
+    )
+    .unwrap();
+    assert_eq!(ready["finalStatus"], "committed");
+    let opening =
+        query_opening_ready_impl(&state, json!({"projectId":project_id,"scope":"opening"}))
+            .unwrap();
     assert_eq!(opening["ready"], true);
     assert!(opening["firstChapterPlan"]["artifactId"].as_str().is_some());
     assert_eq!(opening["firstChapterPlan"]["owner"], "B07::PlanningOwner");

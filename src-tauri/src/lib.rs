@@ -8,6 +8,7 @@ pub mod narrative;
 pub mod planning;
 pub mod production;
 pub mod project_db;
+pub mod project_entry;
 pub mod provider;
 pub mod repair;
 pub mod repositories;
