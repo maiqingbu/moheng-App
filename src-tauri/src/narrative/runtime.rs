@@ -477,7 +477,11 @@ pub fn evaluate_plan_stale(
     current_revision: i64,
     current_digest: &str,
 ) -> PlanStaleStatus {
-    if compiled_revision == current_revision && compiled_digest == current_digest {
+    // A revision can advance for an unrelated scope while the relevant
+    // authority digest remains unchanged.  The digest is the freshness proof;
+    // a changed digest is stale even when the numeric revision is unchanged.
+    let _ = (compiled_revision, current_revision);
+    if compiled_digest == current_digest {
         PlanStaleStatus::Valid
     } else {
         PlanStaleStatus::PlanStale

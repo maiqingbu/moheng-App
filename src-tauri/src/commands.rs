@@ -1525,14 +1525,26 @@ pub fn query_plan_stale_impl(state: &KernelState, request: Value) -> Result<Valu
                     stale_refs.push(plan_ref.artifact_id);
                 }
             }
-            if crate::repositories::change_retcon::has_pending_stale_for_refs(
+            let queued_stale = crate::repositories::change_retcon::has_pending_stale_for_refs(
                 connection,
                 project_id,
                 &stale_refs.iter().map(String::as_str).collect::<Vec<_>>(),
             )
-            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
-            {
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            if queued_stale {
                 status = PlanStaleStatus::PlanStale;
+            }
+            // The legacy read-only diagnostic contract treats an unchanged
+            // project revision as a valid snapshot when no B12 invalidation is
+            // recorded. Formal B06/B07/B08 execution uses the strict digest
+            // check in their owners above; keeping this read projection
+            // compatible avoids turning an unrelated diagnostic query into a
+            // write-path freshness decision.
+            if matches!(status, PlanStaleStatus::PlanStale)
+                && compiled_revision == current_revision
+                && !queued_stale
+            {
+                status = PlanStaleStatus::Valid;
             }
             Ok(json!({
                 "projectId": project_id,
