@@ -32,6 +32,7 @@ import type {
   VolumeLifecycleProjection
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
+import { receiptSummary } from '../presentation/productLanguage'
 import { useProjectLibraryStore } from './projectLibraryStore'
 
 const frontendPort = getFrontendPort()
@@ -388,7 +389,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     }
     if (!isCurrentBinding()) return receipt
 
-    commandStates.value[key] = { status: receipt.finalStatus, message: receipt.message, commandId: receipt.commandId }
+    commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
     if (receipt.finalStatus === 'committed') {
       await refresh()
       await refreshLoadedWorkspaces()

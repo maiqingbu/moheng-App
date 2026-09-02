@@ -13,6 +13,7 @@ import {
   startDependencySummaryBootstrap,
 } from '../flows/b12RetconFlow'
 import type { RetconFactOption } from '../flows/b12RetconFlow'
+import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -30,6 +31,9 @@ const authState = computed(() => store.commandState('assistant-authorize'))
 const executeState = computed(() => store.commandState('assistant-execute'))
 const groundingOptions = ref<RetconFactOption[]>([])
 const selectedGroundingFactId = ref('')
+const displayScopes = (values: unknown) => Array.isArray(values)
+  ? values.map(value => sanitizeProductText(value, '当前作品')).filter(Boolean).join('、') || '无'
+  : '无'
 
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
@@ -37,7 +41,13 @@ async function ask() {
 }
 
 async function prepareRepair() {
-  plan.value = await store.prepareAssistantRepair(question.value)
+  try {
+    plan.value = await store.prepareAssistantRepair(question.value)
+  } catch (error) {
+    repairMessage.value = productErrorMessage(error, '暂时无法核对修复范围，请刷新当前作品后重试。')
+    repairOpen.value = true
+    return
+  }
   repairMessage.value = plan.value.action === 'PROPOSAL_ONLY'
     ? '这项请求会改变正式事实，请先走修改提案。'
     : plan.value.action === 'NO_ACTION' ? '当前记录不支持执行修复。' : ''
@@ -50,7 +60,7 @@ async function authorizeRepair() {
     const execute = await store.authorizeAssistantRepair(plan.value)
     repairMessage.value = execute.finalStatus === 'committed' ? '修复已完成，并已重新核对结果。' : '修复没有完成，请先刷新当前作品后再试。'
   } catch (error) {
-    repairMessage.value = error instanceof Error ? error.message : '修复没有完成，请先刷新当前作品后再试。'
+    repairMessage.value = productErrorMessage(error, '修复没有完成，请先刷新当前作品后再试。')
   }
 }
 
@@ -111,7 +121,7 @@ async function proposeChange() {
       changeMessage.value = error.message
       return
     }
-    changeMessage.value = error instanceof Error ? error.message : '变更提案未建立。'
+    changeMessage.value = productErrorMessage(error, '变更提案未建立，请刷新当前作品后重试。')
   }
 }
 
@@ -146,8 +156,8 @@ function chooseGrounding(factId: string) {
       <div v-else class="empty">当前没有足够的依据可以展开。</div>
     </BaseModal>
 
-    <BaseModal :open="repairOpen" title="确认修复范围" subtitle="方案只会影响已说明的展示投影；正式执行前仍需你的明确授权。" @close="repairOpen=false">
-      <div v-if="plan" style="display:grid;gap:12px"><div class="task-row"><strong>核对结果</strong><span>{{ plan.action === 'EXECUTABLE' ? '已有明确的可执行能力' : plan.action === 'PROPOSAL_ONLY' ? '需要先建立正式修改提案' : '当前记录不需要执行修复' }}</span></div><div class="task-row"><strong>诊断</strong><span>{{ plan.diagnosis.claim || '已完成当前作品记录核对。' }}</span></div><div class="task-row"><strong>影响范围</strong><span>{{ plan.affectedScopes.length ? plan.affectedScopes.join('、') : '无' }}</span></div><div class="task-row"><strong>执行前备份</strong><span>{{ plan.requiresBackup ? '需要' : '不需要' }}</span></div></div>
+    <BaseModal :open="repairOpen" title="确认修复范围" subtitle="方案只会影响已说明的页面信息；正式执行前仍需你的明确授权。" @close="repairOpen=false">
+      <div v-if="plan" style="display:grid;gap:12px"><div class="task-row"><strong>核对结果</strong><span>{{ plan.action === 'EXECUTABLE' ? '可以执行这项修复' : plan.action === 'PROPOSAL_ONLY' ? '需要先建立正式修改提案' : '当前记录不需要执行修复' }}</span></div><div class="task-row"><strong>诊断</strong><span>{{ sanitizeProductText(plan.diagnosis.claim, '已完成当前作品记录核对。') }}</span></div><div class="task-row"><strong>影响范围</strong><span>{{ displayScopes(plan.affectedScopes) }}</span></div><div class="task-row"><strong>执行前备份</strong><span>{{ plan.requiresBackup ? '需要' : '不需要' }}</span></div></div>
       <CommandFeedback :state="planState" />
       <CommandFeedback :state="authState" />
       <CommandFeedback :state="executeState" />

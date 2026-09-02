@@ -5,6 +5,7 @@ import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import ProjectSwitcher from './ProjectSwitcher.vue'
 import { phaseLabel } from '../presentation/projectLabels'
+import { productErrorMessage } from '../presentation/productLanguage'
 
 const route = useRoute()
 const router = useRouter()
@@ -104,7 +105,7 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
         </div>
       </header>
 
-      <div v-if="inWorkspace && store.loadError" class="page"><div class="banner danger"><div><div class="banner-title">无法读取作品</div><div class="banner-copy">{{ store.loadError }}</div></div><div class="actions"><button class="btn small" @click="router.push('/projects')">返回作品库</button><button class="btn small" @click="store.refresh">重试</button></div></div></div>
+      <div v-if="inWorkspace && store.loadError" class="page"><div class="banner danger"><div><div class="banner-title">无法读取作品</div><div class="banner-copy">{{ productErrorMessage(store.loadError, '暂时无法读取作品，请返回作品库重试。') }}</div></div><div class="actions"><button class="btn small" @click="router.push('/projects')">返回作品库</button><button class="btn small" @click="store.refresh">重试</button></div></div></div>
       <div v-else-if="inWorkspace && store.loading && !store.overview" class="page"><div class="skeleton" style="height:32px;width:220px"/><div class="skeleton" style="height:180px;margin-top:20px"/><div class="metric-grid" style="margin-top:14px"><div v-for="i in 4" :key="i" class="skeleton" style="height:88px"/></div></div>
       <slot v-else />
     </main>

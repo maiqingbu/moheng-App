@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { sanitizeProductText, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -29,7 +30,7 @@ const exitSnapshotKind = 'VolumeExitState'
 const unresolvedLabel = 'OPEN / SUSPENDED'
 const handoffFields = ['fromVolumeId', 'toVolumeId', 'handoffStatus']
 const frozenProjectionMarkers = ['PLAN', 'PROJECTION']
-const statusLabel = (value: unknown) => ({ READY: '已满足', BLOCKED: '待完成', OPEN: '进行中', SUSPENDED: '已挂起', CLOSED: '已关闭', UNKNOWN: '待确认', PASS: '已通过', FAIL: '未通过', NOT_STARTED: '未开始' } as Record<string, string>)[String(value)] ?? '待确认'
+const statusLabel = (value: unknown) => productStatusLabel(value, '待确认')
 const taskClassLabel = (value: string) => ({ REQUIRED: '必须完成', OPTIONAL: '可选安排', FLEXIBLE: '弹性安排', BLOCKED: '当前阻塞' } as Record<string, string>)[value] ?? '任务'
 
 async function closeVolume() {
@@ -59,9 +60,9 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
         <MetricCard label="下一卷" :value="statusLabel(lifecycle.latestClose?.nextVolumeEligibility ?? '待关闭')" note="关闭记录中的下一步判断" />
         <MetricCard label="记录版本" :value="String(planningState.generatedRevision ?? lifecycle.projectRevision)" note="可重新生成的当前记录" />
       </div>
-      <div v-if="remainingTasks.length" class="muted" style="margin-top:10px">阻塞项：{{ remainingTasks.join('、') }}</div>
+      <div v-if="remainingTasks.length" class="muted" style="margin-top:10px">还有 {{ remainingTasks.length }} 项任务待完成。</div>
       <div v-if="responsibilities.length" class="section-subgroup" style="margin-top:14px"><strong>未完成的跨卷事项</strong><div class="timeline"><div v-for="item in responsibilities" :key="String(item.threadRef)" class="timeline-item"><div class="timeline-marker">T</div><div><strong>相关剧情线</strong><div class="muted" style="font-size:12px">{{ statusLabel(item.status ?? 'OPEN') }} · 需要在后续卷继续核对</div></div></div></div></div>
-      <div v-if="routeReplans.length" class="section-subgroup" style="margin-top:14px"><strong>规划调整记录</strong><div class="timeline"><div v-for="item in routeReplans" :key="String(item.replanId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>第 {{ String(item.newVersion) }} 次调整 · {{ statusLabel(item.validationStatus ?? 'UNKNOWN') }}</strong><div class="muted" style="font-size:12px">{{ String(item.reason ?? '未提供原因') }}</div></div></div></div></div>
+      <div v-if="routeReplans.length" class="section-subgroup" style="margin-top:14px"><strong>规划调整记录</strong><div class="timeline"><div v-for="item in routeReplans" :key="String(item.replanId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>第 {{ String(item.newVersion) }} 次调整 · {{ statusLabel(item.validationStatus ?? 'UNKNOWN') }}</strong><div class="muted" style="font-size:12px">{{ sanitizeProductText(item.reason, '调整原因已记录。') }}</div></div></div></div></div>
       <div class="section-subgroup" style="margin-top:14px"><strong>下一卷交接</strong><div v-if="lifecycle.latestHandoff" class="muted">{{ statusLabel(lifecycle.latestHandoff.handoffStatus ?? 'UNKNOWN') }} · 下一卷安排已记录</div><div v-else class="muted">当前卷尚无交接记录；关闭并满足条件后才可创建。</div></div>
       <CommandFeedback :state="closeState" />
       <div class="actions" style="margin-top:14px"><button class="btn primary" :disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成本卷退出记录并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出记录会在同一流程中提交；失败会完整回滚。</span></div>

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { sanitizeProductText } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const volumeId = ref('')
@@ -16,6 +17,7 @@ const revisionState = computed(() => store.commandState('reader-revision'))
 const exportState = computed(() => store.commandState('reader-export'))
 const volumes = computed(() => store.readerVolumes?.items ?? [])
 const chapters = computed(() => volumeId.value ? store.chapterLists[volumeId.value]?.items ?? [] : [])
+const versionReason = (value: unknown) => sanitizeProductText(value, '这次版本调整已记录。')
 
 async function pickVolume(id: string) {
   volumeId.value = id
@@ -62,7 +64,7 @@ onMounted(async () => {
 
 <template>
   <div class="page">
-    <PageHeader title="成品阅读" subtitle="目录按卷懒加载，正文只读取当前章节；整书导出由后端流式任务完成，不把全文装入 WebView。">
+    <PageHeader title="成品阅读" subtitle="按卷打开目录，正文只读取当前章节；整书导出会在后台完成。">
       <div class="actions"><input v-model="query" class="input" style="width:220px" placeholder="搜索正文 / 人名 / 地点" @keyup.enter="search"><button class="btn" @click="search">搜索</button></div>
     </PageHeader>
 
@@ -86,7 +88,7 @@ onMounted(async () => {
       <aside class="reader-tools">
         <section class="card pad">
           <h2 class="card-title">版本</h2>
-          <div v-for="version in store.chapterVersions.items" :key="version.id" class="version-row"><strong>{{ version.label }}</strong><div class="muted" style="font-size:11px">{{ version.reason }}</div></div>
+          <div v-for="version in store.chapterVersions.items" :key="version.id" class="version-row"><strong>{{ version.label }}</strong><div class="muted" style="font-size:11px">{{ versionReason(version.reason) }}</div></div>
         </section>
 
         <section class="card pad">

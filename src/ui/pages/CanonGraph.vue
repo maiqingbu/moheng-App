@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader.vue'
 import BaseDrawer from '../components/BaseDrawer.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { statusLabel } from '../presentation/productLanguage'
 
 const store=useProjectStore()
 const tab=ref<'relations'|'timeline'|'foreshadow'|'knowledge'>('relations')
@@ -53,11 +54,11 @@ async function submitRevision(){ await store.runCommand(revisionKey,{type:'chang
           <line x1="230" y1="135" x2="760" y2="168" stroke="var(--red)" stroke-width="1.5" stroke-dasharray="6 6" />
         </svg>
         <button v-for="c in canon.characters.items" :key="c.id" class="graph-node" :class="{primary:c.id==='shen',candidate:c.status==='候选影响'}" :style="{left:`${nodePositions[c.id]?.x ?? 50}%`,top:`${nodePositions[c.id]?.y ?? 50}%`}" @click="selectedCharacter=c.id">
-          <strong>{{ c.name }}</strong><span>{{ c.role }} · {{ c.status }}</span>
+          <strong>{{ c.name }}</strong><span>{{ c.role }} · {{ statusLabel(c.status) }}</span>
         </button>
       </div>
       <aside class="card pad">
-        <template v-if="selected"><div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="selected.status==='正式'?'success':'warning'">{{ selected.status }}</span><span class="muted" style="font-size:10px">{{ selected.location }}</span></div><h2 style="margin:10px 0 4px;font-family:var(--font-serif)">{{ selected.name }}</h2><p class="muted">{{ selected.note }}</p><div class="divider" /><h3 style="font-size:13px">当前关系</h3><div style="display:grid;gap:8px"><div v-for="r in relatedList" :key="r.key" class="card pad" style="padding:10px"><strong style="font-size:12px">{{ r.name }}</strong><div class="muted" style="font-size:11px">{{ r.label }}</div></div></div></template>
+        <template v-if="selected"><div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="selected.status==='正式'?'success':'warning'">{{ statusLabel(selected.status) }}</span><span class="muted" style="font-size:10px">{{ selected.location }}</span></div><h2 style="margin:10px 0 4px;font-family:var(--font-serif)">{{ selected.name }}</h2><p class="muted">{{ selected.note }}</p><div class="divider" /><h3 style="font-size:13px">当前关系</h3><div style="display:grid;gap:8px"><div v-for="r in relatedList" :key="r.key" class="card pad" style="padding:10px"><strong style="font-size:12px">{{ r.name }}</strong><div class="muted" style="font-size:11px">{{ r.label }}</div></div></div></template>
       </aside>
     </section>
 

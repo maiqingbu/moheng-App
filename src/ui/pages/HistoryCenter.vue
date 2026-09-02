@@ -7,6 +7,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { confirmRetconPlan, createRetconPlan, createRetconProposal, monitorDependencySummary, startDependencySummaryBootstrap, type DependencySummaryStatus, type RetconDraft, type RetconPlanView } from '../flows/b12RetconFlow'
 import type { RetconContextProjection } from '../../application/contracts'
+import { changeStatusLabel, evidenceLabel, productErrorMessage, sanitizeProductText, scopeLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -33,7 +34,10 @@ const applyState = computed(() => store.commandState('history-apply'))
 const activeChange = ref<{ id: string; type: 'CHANGE' | 'RETCON'; digest: string; scope: string; status: string; expandedEdges: number; totalEdges: number; targetFactId?: string; replacement?: string; evidenceRef?: string; evidenceVersion?: number; evidencePayloadHash?: string; planId?: string; planDigest?: string; plan?: RetconPlanView } | null>(null)
 const impactItems = ref<string[]>([])
 const actionMessage = ref('')
-const historyStatusLabel = (value: string) => ({ applied: '已生效', approved: '已确认', impact_ready: '影响已算出', draft: '草稿', pending: '待确认' } as Record<string, string>)[value] ?? '待确认'
+const historyStatusLabel = (value: string) => changeStatusLabel(value)
+const changeScopeLabel = (value: unknown) => scopeLabel(value)
+const changeImpactLabel = (value: unknown) => productErrorMessage(value, '影响范围已完成分析。')
+const impactSummary = computed(() => impactItems.value.length ? `已识别 ${impactItems.value.length} 项可能受影响的内容${impactItems.value.length > 12 ? '，其余内容将在继续分析后显示。' : '。'}` : '')
 
 async function openRetconModal() {
   modal.value = 'retcon'
@@ -44,7 +48,7 @@ async function openRetconModal() {
     retconTargetRef.value = retconContext.value.facts.find(item => item.current)?.factId ?? ''
     retconEvidenceRef.value = retconContext.value.evidence.find(item => item.supportsFactId === retconTargetRef.value && item.relationship === 'FACT_SOURCE')?.artifactId ?? ''
   } catch (error) {
-    actionMessage.value = error instanceof Error ? error.message : '暂时无法读取当前事实和依据。'
+    actionMessage.value = productErrorMessage(error, '暂时无法读取当前事实和依据。')
   } finally {
     retconContextLoading.value = false
   }
@@ -55,7 +59,7 @@ function selectedEvidence() {
 }
 
 const selectedFactLabel = computed(() => retconContext.value?.facts.find(item => item.factId === retconTargetRef.value)?.label ?? '')
-const selectedEvidenceLabel = computed(() => retconContext.value?.evidence.find(item => item.artifactId === retconEvidenceRef.value)?.label ?? '')
+const selectedEvidenceLabel = computed(() => evidenceLabel(retconContext.value?.evidence.find(item => item.artifactId === retconEvidenceRef.value)?.label))
 
 function chooseFact(event: Event) {
   const label = (event.target as HTMLInputElement).value
@@ -93,7 +97,7 @@ function planFactLabel(fact: Record<string, unknown> | undefined) {
   if (!fact) return '未读取到当前正式事实。'
   const predicate = typeof fact.predicate === 'string' ? fact.predicate : '正式事实'
   const object = fact.objectJson && typeof fact.objectJson === 'object' ? fact.objectJson as Record<string, unknown> : {}
-  const description = typeof object.description === 'string' ? object.description : '当前记录'
+  const description = sanitizeProductText(object.description, '当前记录')
   return `${predicate}：${description}`
 }
 
@@ -124,8 +128,8 @@ function startSummaryBootstrap(changeId: string) {
       }
       actionMessage.value = '影响索引已准备完成，可以重新分析影响范围。'
     },
-    error => { actionMessage.value = error.message },
-  )).catch(error => { actionMessage.value = error instanceof Error ? error.message : '影响索引准备失败。' })
+    error => { actionMessage.value = productErrorMessage(error, '影响范围分析失败，请刷新后重试。') },
+  )).catch(error => { actionMessage.value = productErrorMessage(error, '影响范围分析失败，请刷新后重试。') })
 }
 
 async function restoreChange(changeId: string) {
@@ -157,7 +161,7 @@ async function restoreChange(changeId: string) {
     }
     if (route.query.bootstrap === '1') startSummaryBootstrap(changeId)
   } catch (error) {
-    actionMessage.value = error instanceof Error ? error.message : '无法恢复这项变更提案。'
+    actionMessage.value = productErrorMessage(error, '无法恢复这项变更提案。')
   }
 }
 
@@ -312,16 +316,16 @@ async function approveAndApply() {
     </div>
 
     <section v-if="activeChange" class="card pad section">
-      <div class="card-head"><div><h2 class="card-title">当前变更方案</h2><p class="card-subtitle">先看预计影响，再决定是否继续；正式执行后会再次核对结果。</p></div><span class="badge" :class="activeChange.status === 'APPLIED' ? 'success' : 'warning'">{{ activeChange.status === 'APPLIED' ? '已完成并复核' : activeChange.status === 'CANCELLED' ? '已取消' : '等待确认' }}</span></div>
-      <div class="metric-grid"><div class="metric-card"><div class="metric-label">影响范围</div><div class="metric-value">{{ activeChange.scope === 'GLOBAL' ? '全局' : activeChange.scope === 'WIDE' ? '较广' : '局部' }}</div></div><div class="metric-card"><div class="metric-label">已分析内容</div><div class="metric-value">{{ activeChange.expandedEdges }} / {{ activeChange.totalEdges }}</div></div></div>
-      <div v-if="impactItems.length" class="banner info"><div><div class="banner-title">受影响内容</div><div class="banner-copy">{{ [...new Set(impactItems)].slice(0, 12).join('、') }}{{ impactItems.length > 12 ? ' 等' : '' }}</div></div></div>
+      <div class="card-head"><div><h2 class="card-title">当前变更方案</h2><p class="card-subtitle">先看预计影响，再决定是否继续；正式执行后会再次核对结果。</p></div><span class="badge" :class="activeChange.status === 'APPLIED' ? 'success' : 'warning'">{{ changeStatusLabel(activeChange.status) }}</span></div>
+      <div class="metric-grid"><div class="metric-card"><div class="metric-label">影响范围</div><div class="metric-value">{{ changeScopeLabel(activeChange.scope) }}</div></div><div class="metric-card"><div class="metric-label">已分析内容</div><div class="metric-value">{{ activeChange.expandedEdges }} / {{ activeChange.totalEdges }}</div></div></div>
+      <div v-if="impactItems.length" class="banner info"><div><div class="banner-title">受影响内容</div><div class="banner-copy">{{ impactSummary }}</div></div></div>
       <p v-if="activeChange.type === 'RETCON'" class="banner warning">这项请求涉及已经确认的事实，需先查看原事实、依据和事实修订方案。</p>
       <div v-if="activeChange.plan" class="card pad" style="display:grid;gap:8px;background:var(--surface-muted, #f7f5ef)">
         <div class="card-title">事实修订方案（请先核对）</div>
         <div class="task-row"><strong>当前正式事实</strong><span>{{ planFactLabel(activeChange.plan.oldCanon) }}</span></div>
         <div class="task-row"><strong>准备改为</strong><span>{{ planFactLabel(activeChange.plan.replacementFact) }}</span></div>
-        <div class="task-row"><strong>影响范围</strong><span>{{ activeChange.plan.approvedScopeClass === 'GLOBAL' ? '全局' : activeChange.plan.approvedScopeClass === 'WIDE' ? '较广' : '局部' }}</span></div>
-        <div class="task-row"><strong>风险</strong><span>{{ activeChange.plan.riskClass === 'HIGH' ? '高' : activeChange.plan.riskClass === 'MEDIUM' ? '中' : '低' }}</span></div>
+        <div class="task-row"><strong>影响范围</strong><span>{{ changeScopeLabel(activeChange.plan.approvedScopeClass) }}</span></div>
+        <div class="task-row"><strong>风险</strong><span>{{ activeChange.plan.riskClass === 'HIGH' ? '高风险' : activeChange.plan.riskClass === 'MEDIUM' ? '需要关注' : '较低风险' }}</span></div>
         <div class="task-row"><strong>执行前备份</strong><span>{{ activeChange.plan.requiresBackup ? '需要' : '不需要' }}</span></div>
         <div class="task-row"><strong>开篇 / 签约影响</strong><span>{{ activeChange.plan.signingImpact ? '需要重新核对' : '未发现' }}</span></div>
       </div>
@@ -340,7 +344,7 @@ async function approveAndApply() {
           </div>
           <span class="badge" :class="entry.status === 'applied' ? 'success' : entry.status === 'impact_ready' ? 'warning' : ''">{{ historyStatusLabel(entry.status) }}</span>
         </div>
-        <div class="banner info"><div><div class="banner-title">影响范围 · {{ entry.scope }}</div><div class="banner-copy">{{ entry.impact }}</div></div></div>
+        <div class="banner info"><div><div class="banner-title">影响范围 · {{ changeScopeLabel(entry.scope) }}</div><div class="banner-copy">{{ changeImpactLabel(entry.impact) }}</div></div></div>
       </article>
     </div>
 
@@ -350,7 +354,7 @@ async function approveAndApply() {
         <div v-if="retconContextLoading" class="empty">正在读取当前正式事实和已有依据…</div>
         <label v-else class="field"><span class="field-label">要修订的当前事实</span><input class="input" :value="selectedFactLabel" list="b12-retcon-facts" placeholder="请选择当前正式事实" @change="chooseFact" /><datalist id="b12-retcon-facts"><option v-for="fact in retconContext?.facts.filter(item => item.current)" :key="fact.factId" :value="fact.label" /></datalist></label>
         <label class="field"><span class="field-label">新的事实内容</span><textarea v-model="retconReplacement" class="textarea" placeholder="填写你确认后的新事实" /></label>
-        <label class="field"><span class="field-label">这条事实的原始依据</span><input class="input" :value="selectedEvidenceLabel" list="b12-retcon-evidence" placeholder="请选择这条事实的原始依据" @change="chooseEvidence" /><datalist id="b12-retcon-evidence"><option v-for="item in retconContext?.evidence.filter(item => item.supportsFactId === retconTargetRef && item.relationship === 'FACT_SOURCE')" :key="`${item.artifactId}:${item.version}`" :value="item.label" /></datalist></label>
+        <label class="field"><span class="field-label">这条事实的原始依据</span><input class="input" :value="selectedEvidenceLabel" list="b12-retcon-evidence" placeholder="请选择这条事实的原始依据" @change="chooseEvidence" /><datalist id="b12-retcon-evidence"><option v-for="item in retconContext?.evidence.filter(item => item.supportsFactId === retconTargetRef && item.relationship === 'FACT_SOURCE')" :key="`${item.artifactId}:${item.version}`" :value="evidenceLabel(item.label)" /></datalist></label>
       </template>
       <CommandFeedback :state="state" />
       <template #footer><button class="btn" @click="modal = null">取消</button><button class="btn primary" :disabled="!requestText.trim() || (modal === 'retcon' && (!retconTargetRef.trim() || !retconReplacement.trim() || !retconEvidenceRef.trim()))" @click="create">开始影响分析</button></template>

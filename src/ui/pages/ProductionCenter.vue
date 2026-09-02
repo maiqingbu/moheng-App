@@ -5,6 +5,7 @@ import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { productErrorMessage, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const project = computed(() => store.project)
@@ -17,7 +18,9 @@ const stageLabel = (value: unknown) => ({ OPENING: '开篇准备', OPENING_PRODU
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
 const capabilityLabel = (value: unknown) => ({ RENDER_CHAPTER: '撰写章节', AUDIT_EXTRACT: '检查章节', QUALITY_EVALUATION: '评估叙事质量' } as Record<string, string>)[String(value)] ?? '创作步骤'
-const statusLabel = (value: unknown) => ({ done: '已完成', active: '进行中', locked: '待解锁', PASS: '已通过', PROPOSED: '待确认', AUTHORIZED: '已授权', REPAIR_VERIFIED: '已核对完成' } as Record<string, string>)[String(value)] ?? '待检查'
+const statusLabel = (value: unknown) => productStatusLabel(value, '待检查')
+const detailLabel = (value: unknown, fallback = '当前状态已查询。') => sanitizeProductText(value, fallback)
+const scopeLabel = (value: unknown) => /^[A-Z_]+$/.test(String(value)) ? productScopeLabel(value) : sanitizeProductText(value, '当前作品')
 const dimensionLabel = (value: unknown) => ({ agency: '主角主动性', desire: '主角欲望', hook: '开篇吸引力', pacing: '节奏', voice: '叙事声音', dialogue: '对话', subtext: '潜台词', repetition: '重复风险', exposition: '信息呈现', emotionalPayoff: '情绪回报' } as Record<string, string>)[String(value)] ?? '叙事维度'
 const historicalB10Terms = ['ReaderDesire', 'SOFT 质量评估', 'HARD Gate']
 
@@ -91,9 +94,9 @@ async function executeRepair() {
     <CommandFeedback :state="commandState" />
 
     <div class="metric-grid section">
-      <MetricCard label="当前阶段" :value="stageLabel(production.productionStage)" :note="production.activeWork.detail" />
+      <MetricCard label="当前阶段" :value="stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />
       <MetricCard label="正式章节" :value="project.committedChapters" note="只有正式确认的正文会计入这里" />
-      <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="production.gate?.reason || '等待结构化校验'" />
+      <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
     </div>
 
@@ -114,8 +117,8 @@ async function executeRepair() {
             <p><strong>{{ production.chapterPlan.chapterGoal }}</strong></p>
             <small class="muted">当前规划已与作品版本绑定</small>
             <p class="muted">依据范围：当前任务所需的作品记录</p>
-            <p class="muted">规划状态：{{ production.stale?.status === 'PLAN_STALE' ? '需要重新检查' : '可以使用' }}<span v-if="production.stale?.reason"> · {{ production.stale.reason }}</span></p>
-            <div v-for="item in production.triggeredContinuity" :key="item.threadRef" class="task-row"><strong>相关剧情线</strong><small>{{ item.bridge }}</small></div>
+            <p class="muted">规划状态：{{ production.stale?.status === 'PLAN_STALE' ? '需要重新确认' : '可以使用' }}<span v-if="production.stale?.reason"> · {{ productErrorMessage(production.stale.reason, '当前规划需要重新确认。') }}</span></p>
+            <div v-for="item in production.triggeredContinuity" :key="item.threadRef" class="task-row"><strong>相关剧情线</strong><small>{{ detailLabel(item.bridge, '这条剧情线需要继续核对。') }}</small></div>
           </template>
           <p v-else class="muted">开篇阶段会先整理当前所需信息，再建立第一章规划。</p>
         </section>
@@ -154,7 +157,7 @@ async function executeRepair() {
       </div>
       <div v-if="production.quality?.repair" class="task-row">
         <strong>局部修订 {{ production.quality.repair.run }}/{{ production.quality.repair.limit }}</strong>
-        <small class="muted">影响范围：{{ production.quality.repair.scope.join('、') || '无' }} · {{ production.quality.repair.escalation || '未升级' }}</small>
+        <small class="muted">影响范围：{{ production.quality.repair.scope.map(scopeLabel).join('、') || '无' }} · {{ detailLabel(production.quality.repair.escalation, '未升级') }}</small>
       </div>
       <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
         <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '可以做局部修订' : '仅供查看' }}</small>
@@ -170,9 +173,9 @@ async function executeRepair() {
       <div class="metric-grid">
         <MetricCard label="状态" :value="statusLabel(production.repair.status)" :note="production.repair.authorizationId ? '已获得本次确认' : '尚未确认'" />
         <MetricCard label="影响等级" :value="production.repair.riskLevel === 'LOW' ? '较低' : '需要关注'" :note="production.repair.requiresBackup ? '执行前需要备份' : '无需备份'" />
-        <MetricCard label="核对范围" :value="production.repair.affectedScopes.join('、') || '当前作品'" note="执行后会再次核对" />
+        <MetricCard label="核对范围" :value="production.repair.affectedScopes.map(scopeLabel).join('、') || '当前作品'" note="执行后会再次核对" />
       </div>
-      <p><strong>影响范围：</strong>{{ production.repair.affectedScopes.join('、') || '无' }}</p>
+      <p><strong>影响范围：</strong>{{ production.repair.affectedScopes.map(scopeLabel).join('、') || '无' }}</p>
       <p><strong>处理方式：</strong>重新整理并核对当前作品展示。</p>
       <div v-if="production.repair.executionReceipt" class="task-row">
         <strong>{{ statusLabel(production.repair.executionReceipt.status) }}</strong><small class="muted">修复结果已经重新核对</small>

@@ -43,7 +43,7 @@ async function confirm(){
     <CommandFeedback :state="commandState" /><CommandFeedback :state="regenerateState" />
 
     <section v-if="store.directions" class="card pad section" style="margin-top:14px">
-      <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示创作层摘要；详细合同和内部校验器不直接暴露给普通界面。</p></div><button class="btn" @click="reviseBookPlan">修订书级战略</button></div>
+      <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示会影响创作的核心内容，详细检查由系统自动完成。</p></div><button class="btn" @click="reviseBookPlan">修订书级战略</button></div>
       <CommandFeedback :state="bookPlanState" />
       <dl class="pitch-kv" style="margin-top:12px">
         <div><dt>全书承诺</dt><dd>{{ store.directions.strategy.storyPromise }}</dd></div>
@@ -80,7 +80,7 @@ async function confirm(){
             <div><dt>原创性说明</dt><dd>{{ pitch.originality }}</dd></div>
             <div><dt>创作难点</dt><dd>{{ pitch.difficulty }}</dd></div>
             <div><dt>失败风险</dt><dd>{{ pitch.failureRisk }}</dd></div>
-            <div style="padding:10px;border-radius:9px;background:var(--pine-50)"><dt style="color:var(--pine-700)">AI 推荐理由</dt><dd>{{ pitch.aiReason }}</dd></div>
+            <div style="padding:10px;border-radius:9px;background:var(--pine-50)"><dt style="color:var(--pine-700)">系统推荐理由</dt><dd>{{ pitch.aiReason }}</dd></div>
           </dl>
           <button class="btn large" :class="selected.includes(pitch.id)?'primary':''" style="width:100%;margin-top:16px" @click="choose(pitch.id)">{{ selected.includes(pitch.id)?'已选择':'选择这个方向' }}</button>
         </div>

@@ -9,6 +9,7 @@ import type {
   ProviderSettingsInput
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
+import { receiptSummary } from '../presentation/productLanguage'
 
 const frontendPort = getFrontendPort()
 
@@ -59,7 +60,7 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     const receipt = await frontendPort.testProvider(settings, (status, message) => {
       commandStates.value[key] = { ...commandStates.value[key], status, message }
     })
-    commandStates.value[key] = { status: receipt.finalStatus, message: receipt.message, commandId: receipt.commandId }
+    commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
     return receipt
   }
 

@@ -58,8 +58,8 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
 
       <main>
         <section id="setting-model" class="setting-section">
-          <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">正式产品由 Rust 受限命令测试连接；应用设置作为默认值，项目设置可以覆盖模型策略。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Endpoint</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">API Key</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥仅通过 IPC 写入系统 Keychain；不会进入 Pinia、浏览器存储、项目库或回执。留空表示沿用已保存密钥。</span></label></div>
+          <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">可在这里测试模型服务连接。应用设置作为默认配置，单个作品可以使用独立的模型设置。</p></div></div>
+          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
           <div class="actions" style="margin-top:14px"><button class="btn" @click="test">测试模型连接</button></div><CommandFeedback :state="testState" />
         </section>
 
@@ -82,7 +82,7 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
         </section>
 
         <section v-if="isProjectSettings" id="setting-reliability" class="setting-section">
-          <div class="card-head"><div><h2 class="card-title">数据可靠性</h2><p class="card-subtitle">备份和完整性检查必须由后端作业执行；前端只提交命令并展示回执，不直接复制或改写权威数据库。</p></div></div>
+          <div class="card-head"><div><h2 class="card-title">数据可靠性</h2><p class="card-subtitle">备份和完整性检查会在后台完成；页面只提交操作并展示结果，不会直接改写作品正式记录。</p></div></div>
           <div class="actions"><button class="btn" @click="backup">创建里程碑备份</button><button class="btn" @click="integrity">运行完整性检查</button></div>
           <CommandFeedback :state="backupState" /><CommandFeedback :state="integrityState" />
           <div class="banner info" style="margin-top:12px"><div><div class="banner-title">可靠性基线</div><div class="banner-copy">正式实现包含本机事务、崩溃恢复、快速检查、哈希验证、引用检查和只读恢复模式。</div></div></div>

@@ -1,4 +1,5 @@
 import type { SupportSessionProjection } from '../../application/contracts'
+import { statusLabel as productStatusLabel } from './productLanguage'
 
 export type AssistantViewStatus = 'supported' | 'insufficient' | 'conflicting' | 'inferred'
 
@@ -34,7 +35,7 @@ const boilerplate = [
 ]
 
 const internalStatus = /PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED/g
-const internalReference = /\/?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|(?:sourceRefs|artifactRef|stateDigest|operationDigest)\s*[:=][^\s,，。；;]*/g
+const internalReference = /\/?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|(?:sourceRefs|artifactRef|stateDigest|operationDigest|projectId|artifactId|payloadHash|changeRequestId|authorizationId|repairPlanId)\s*[:=][^\s,，。；;]*/gi
 const jsonBlock = /\{[^{}]*\}/g
 
 export function sanitizeAssistantText(value: unknown): string {
@@ -43,9 +44,12 @@ export function sanitizeAssistantText(value: unknown): string {
   text = text
     .replace(/作为\s*AI[：:，,。]?/g, '')
     .replace(/根据你提供的上下文[：:，,]?/g, '')
-    .replace(internalStatus, '当前规划需要重新检查')
+    .replace(internalStatus, code => productStatusLabel(code))
     .replace(jsonBlock, '')
     .replace(internalReference, '')
+    .replace(/\b(?:[A-Z]\d+|RC\d+)::[A-Za-z0-9_:.-]+/g, '')
+    .replace(/\b(?:Runtime|Owner|Artifact|CommitBundle|Repository|Pinia|Keychain|Tauri|IPC)\b/gi, '')
+    .replace(/\bP[0-3]\b/g, '需要优先处理')
     .replace(/\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
@@ -82,24 +86,13 @@ function stringField(record: Record<string, unknown>, ...keys: string[]): string
 
 function chapterSource(record: Record<string, unknown>): string | undefined {
   const chapter = stringField(record, 'chapterId', 'finalChapterId', 'fromChapterId', 'lastTouchedChapterId')
-  const number = chapter?.match(/(?:chapter:|第\s*)(\d+)/i)?.[1]
+  const number = chapter?.match(/(?:chapter[:-]|第\s*)(\d+)/i)?.[1]
   return number ? `第 ${number} 章` : undefined
 }
 
 function statusLabel(value: string | undefined): string | undefined {
   if (!value) return undefined
-  return ({
-    KNOWS: '已知',
-    BELIEVES: '相信',
-    CONCEALS: '刻意隐瞒',
-    UNKNOWN: '未知',
-    OPEN: '进行中',
-    SUSPENDED: '暂缓',
-    RESOLVED: '已解决',
-    PASS: '已通过',
-    VALID: '有效',
-    PLAN_STALE: '需要重新整理',
-  } as Record<string, string>)[value] ?? value
+  return productStatusLabel(value)
 }
 
 function evidenceRecord(capability: string, record: Record<string, unknown>): string {

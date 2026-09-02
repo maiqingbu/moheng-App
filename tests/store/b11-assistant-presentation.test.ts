@@ -44,7 +44,7 @@ describe('B11 项目助手中文展示层', () => {
   it('should remove internal codes, JSON, paths, and AI boilerplate from dynamic text', () => {
     const clean = sanitizeAssistantText('作为 AI，根据你提供的上下文，PLAN_STALE /src-tauri/src/commands.rs {"sourceRefs":[]}')
     expect(clean).not.toMatch(/作为 AI|根据你提供的上下文|PLAN_STALE|src-tauri|sourceRefs|\{/) 
-    expect(clean).toContain('当前规划需要重新检查')
+    expect(clean).toContain('当前规划已与最新内容不一致，需要重新确认或更新')
   })
 
   it('should expose grounded record details instead of only a source count', () => {

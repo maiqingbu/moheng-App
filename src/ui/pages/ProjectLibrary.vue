@@ -7,6 +7,7 @@ import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import { blockReasonLabels, phaseLabel, runStateLabel, signingLabels } from '../presentation/projectLabels'
+import { productErrorMessage } from '../presentation/productLanguage'
 import type { ProjectLibraryItem } from '../../application/contracts'
 
 const router = useRouter()
@@ -41,6 +42,7 @@ const filteredProjects = computed(() => {
 })
 
 function blockLabel(reason: ProjectLibraryItem['blockReason']) { return reason ? blockReasonLabels[reason] : '' }
+function readErrorLabel(error: unknown) { return productErrorMessage(error, '暂时无法打开这部作品，请重试。') }
 
 function statusClass(item: ProjectLibraryItem) {
   if (item.runState === 'FAILED' || item.runState === 'BLOCKED') return 'danger'
@@ -104,7 +106,7 @@ async function deleteProject() {
       <button class="btn primary" @click="router.push('/projects/new')">＋ 新建作品</button>
     </PageHeader>
 
-    <div v-if="store.loadError" class="banner danger"><div><div class="banner-title">无法读取作品库</div><div class="banner-copy">{{ store.loadError }}</div></div><button class="btn small" @click="store.refresh">重试</button></div>
+    <div v-if="store.loadError" class="banner danger"><div><div class="banner-title">无法读取作品库</div><div class="banner-copy">{{ productErrorMessage(store.loadError, '暂时无法读取作品库，请重试。') }}</div></div><button class="btn small" @click="store.refresh">重试</button></div>
 
     <template v-if="store.projection">
       <div class="metric-grid library-metrics">
@@ -143,7 +145,7 @@ async function deleteProject() {
                 <div class="project-tags"><span>{{ item.platform }}</span><span>{{ item.genre }}</span><span>{{ item.mode==='AUTO'?'全自动':'导演模式' }}</span></div>
                 <div class="project-progress-row"><div class="progress"><span :style="{width:`${item.progress}%`}" /></div><b>{{ item.progress }}%</b></div>
                 <div class="project-stats"><span><b>{{ item.committedChapters }}</b> 正式章节</span><span><b>{{ item.totalWords.toLocaleString() }}</b> 字</span><span><b>¥{{ item.totalCost.toFixed(2) }}</b></span><span>{{ phaseLabel(item.phase) }}</span></div>
-                <div v-if="!item.operational" class="project-next warning-text">不可操作：{{ item.readError }}</div><div v-else-if="item.blockReason" class="project-next warning-text">当前原因：{{ blockLabel(item.blockReason) }}</div>
+                <div v-if="!item.operational" class="project-next warning-text">暂时无法打开：{{ readErrorLabel(item.readError) }}</div><div v-else-if="item.blockReason" class="project-next warning-text">当前原因：{{ blockLabel(item.blockReason) }}</div>
                 <div v-else class="project-next">开篇评估：{{ signingLabels[item.signingStatus] }} · 最近打开 {{ item.lastOpenedAt }}</div>
               </div>
             </button>
@@ -172,7 +174,7 @@ async function deleteProject() {
     </template>
 
     <BaseModal :open="!!actionTarget && actionMode==='duplicate'" title="复制作品" :subtitle="actionTarget ? `将创建《${actionTarget.title}》的独立副本。` : ''" @close="closeAction">
-      <div class="banner info"><div><div class="banner-title">副本会获得新的 projectId</div><div class="banner-copy">正文、图谱和版本会复制，但运行状态默认重置为“未运行”，不会继续原作品正在执行的任务。</div></div></div>
+      <div class="banner info"><div><div class="banner-title">副本会作为独立作品创建</div><div class="banner-copy">正文、图谱和版本会复制，但运行状态会重置为“未运行”，不会继续原作品正在执行的任务。</div></div></div>
       <CommandFeedback v-if="actionTarget" :state="store.commandState(`duplicate-${actionTarget.id}`)" />
       <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn primary" @click="duplicateProject">创建副本</button></template>
     </BaseModal>
@@ -184,7 +186,7 @@ async function deleteProject() {
     </BaseModal>
 
     <BaseModal :open="!!actionTarget && actionMode==='delete'" title="永久删除作品" :subtitle="actionTarget ? `删除《${actionTarget.title}》是不可逆操作。` : ''" @close="closeAction">
-      <div class="banner danger"><div><div class="banner-title">正式实现必须执行项目级安全清理</div><div class="banner-copy">根据架构要求，删除时应同时清理该 projectId 下的原始响应、候选稿、缓存和导出临时文件，并保留必要的删除审计记录。</div></div></div>
+      <div class="banner danger"><div><div class="banner-title">删除前请确认</div><div class="banner-copy">删除作品时会同时清理与它关联的临时内容和缓存，并保留必要的安全操作记录。</div></div></div>
       <label v-if="actionTarget" class="field" style="margin-top:16px"><span class="field-label">输入作品名“{{ actionTarget.title }}”确认删除</span><input v-model="deleteConfirm" class="input" /></label>
       <CommandFeedback v-if="actionTarget" :state="store.commandState(`delete-${actionTarget.id}`)" />
       <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn danger" :disabled="!actionTarget || deleteConfirm!==actionTarget.title" @click="deleteProject">永久删除</button></template>

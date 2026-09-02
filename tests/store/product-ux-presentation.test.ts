@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   commandMessage,
+  evidenceLabel,
   productErrorMessage,
   receiptSummary,
   scopeLabel,
@@ -23,9 +24,9 @@ describe('Product UX 展示语义映射', () => {
     expect(productErrorMessage('PLAN_STALE')).toContain('重新确认')
     expect(productErrorMessage('PROTOCOL / PROJECT_BINDING_ERROR')).toContain('作品状态')
     expect(productErrorMessage('AUTHORIZATION_STALE')).toContain('重新确认修复方案')
-    expect(productErrorMessage('连接服务失败，请检查 Endpoint')).toContain('连接服务失败')
+    expect(productErrorMessage('连接服务失败，请检查 Endpoint')).toContain('模型服务连接失败')
     expect(productErrorMessage('PROTOCOL / projectId=secret payloadHash=abc')).not.toMatch(/projectId|payloadHash|PROTOCOL/)
-    expect(commandMessage({ status: 'failed', message: 'EVIDENCE_GAP' })).toBe('现有信息不足，暂时无法给出可靠结论')
+    expect(commandMessage({ status: 'failed', message: 'EVIDENCE_GAP' })).toContain('现有信息不足，暂时无法给出可靠结论')
   })
 
   it('presents receipts as Chinese outcome summaries while preserving failure meaning', () => {
@@ -39,6 +40,11 @@ describe('Product UX 展示语义映射', () => {
       title: '未完成',
       detail: '作品状态已经变化，请重新确认修复方案。',
     })
+  })
+
+  it('does not expose JSON or internal identifiers in evidence labels', () => {
+    expect(evidenceLabel('正式章节依据 · {"chapterId":"chapter:18","artifactId":"artifact:1"}')).toBe('这条事实的原始依据')
+    expect(evidenceLabel('第一卷第18章正文依据')).toBe('第一卷第18章正文依据')
   })
 
   it('removes internal codes, fields, paths and model self-talk from assistant output', () => {

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { CommandUiState } from '../stores/projectStore'
+import { commandMessage, statusLabel } from '../presentation/productLanguage'
 const props = defineProps<{ state: CommandUiState }>()
-const label = computed(() => ({ submitting:'正在提交', accepted:'已接收', processing:'处理中', committed:'已完成', blocked:'已阻断', failed:'失败', idle:'' }[props.state.status]))
+const label = computed(() => statusLabel(props.state.status, ''))
+const message = computed(() => commandMessage(props.state))
 </script>
 <template>
   <div v-if="state.status !== 'idle'" class="command-feedback" :class="state.status">
     <strong>{{ label }}</strong>
-    <span> · {{ state.message }}</span>
+    <span v-if="message"> · {{ message }}</span>
   </div>
 </template>
