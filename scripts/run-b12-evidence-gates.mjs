@@ -108,6 +108,15 @@ const freezePass = freeze.freezeThrough === 'B11' && freeze.acceptedBaseline ===
 const rustPass = rust.status === 'PASS'
 const nodePass = node.status === 'PASS'
 const b12NodePass = b12Node.status === 'PASS'
+const historicalEvidenceRestoration = []
+if (before.dirtyPaths.length === 0) {
+  for (const relative of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
+    if (git(['diff', '--quiet', '--', relative]).status !== 0) {
+      const restored = git(['restore', '--source', before.commit, '--', relative])
+      historicalEvidenceRestoration.push({ file: relative, status: restored.status === 0 ? 'PASS' : 'FAIL' })
+    }
+  }
+}
 const sourceAfterTests = snapshot()
 const startCommitIsAncestor = git(['merge-base', '--is-ancestor', startCommit, before.commit]).status === 0
 const sourceBinding = before.dirtyPaths.length === 0 && sourceAfterTests.dirtyPaths.length === 0 && before.commit === sourceAfterTests.commit && startCommitIsAncestor && before.commit !== startCommit
@@ -122,6 +131,7 @@ const sourceBindingReport = {
   workingTreeDirtyBefore: before.dirtyPaths.length > 0,
   workingTreeDirtyAfter: sourceAfterTests.dirtyPaths.length > 0,
   excludedUncommittedPaths: [],
+  frozenHistoricalEvidenceRestoration: historicalEvidenceRestoration,
   status: sourceBinding ? 'PASS' : 'FAIL',
 }
 fs.writeFileSync(path.join(evidence, 'B12_SOURCE_BINDING.json'), `${JSON.stringify(sourceBindingReport, null, 2)}\n`)
