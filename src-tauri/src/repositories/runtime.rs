@@ -200,7 +200,10 @@ impl DurableJobService {
         let Some(current) = current else {
             return Err(RuntimeError::JobNotFound);
         };
-        if current == "COMPLETED" {
+        // A slow local worker may outlive the short lease TTL.  A normal UI
+        // bootstrap request is not restart recovery, so it must never steal a
+        // live RUNNING job merely because that TTL elapsed.
+        if matches!(current.as_str(), "COMPLETED" | "RUNNING") {
             return Ok(false);
         }
         let active_holder: Option<(String, String)> = connection
@@ -216,11 +219,11 @@ impl DurableJobService {
         {
             return Ok(false);
         }
-        if !matches!(current.as_str(), "QUEUED" | "PAUSED" | "RUNNING" | "FAILED") {
+        if !matches!(current.as_str(), "QUEUED" | "PAUSED" | "FAILED") {
             return Ok(false);
         }
         let updated = connection.execute(
-            "UPDATE jobs SET status='RUNNING',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND current_stage=?4 AND status IN ('QUEUED','PAUSED','RUNNING','FAILED')",
+            "UPDATE jobs SET status='RUNNING',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND current_stage=?4 AND status IN ('QUEUED','PAUSED','FAILED')",
             libsql_rusqlite::params![now, project_id, job_id, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
         )?;
         if updated != 1 {
@@ -245,21 +248,29 @@ impl DurableJobService {
         now: &str,
     ) -> Result<(), RuntimeError> {
         Self::transition_for_worker(connection, project_id, job_id, "COMPLETED", worker_id, now)?;
-        Self::release_lease(connection, project_id, job_id, now)
+        Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
     }
 
     pub fn pause_dependency_summary_job(
         connection: &Connection,
         project_id: &str,
         job_id: &str,
+        worker_id: &str,
         error_code: &str,
         now: &str,
     ) -> Result<(), RuntimeError> {
-        connection.execute(
-            "UPDATE jobs SET status='PAUSED',error_code=?1,updated_at=?2 WHERE project_id=?3 AND job_id=?4",
+        ensure_active_lease_for_holder(connection, project_id, job_id, worker_id, now)?;
+        let updated = connection.execute(
+            "UPDATE jobs SET status='PAUSED',error_code=?1,updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status='RUNNING'",
             libsql_rusqlite::params![error_code, now, project_id, job_id],
         )?;
-        Self::release_lease(connection, project_id, job_id, now)
+        if updated != 1 {
+            return Err(RuntimeError::InvalidTransition(
+                "NOT_RUNNING".into(),
+                "PAUSED".into(),
+            ));
+        }
+        Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
     }
 
     pub fn dependency_summary_job_status(
@@ -485,6 +496,23 @@ impl DurableJobService {
             "UPDATE job_leases SET released_at=?1 WHERE project_id=?2 AND job_id=?3 AND released_at IS NULL",
             libsql_rusqlite::params![now, project_id, job_id],
         )?;
+        Ok(())
+    }
+
+    pub fn release_lease_for_holder(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        holder: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        let updated = connection.execute(
+            "UPDATE job_leases SET released_at=?1 WHERE project_id=?2 AND job_id=?3 AND holder=?4 AND released_at IS NULL",
+            libsql_rusqlite::params![now, project_id, job_id, holder],
+        )?;
+        if updated != 1 {
+            return Err(RuntimeError::LeaseHeld);
+        }
         Ok(())
     }
 

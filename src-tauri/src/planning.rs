@@ -143,6 +143,167 @@ fn merge_change_patch(target: &mut Value, patch: &Value) {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ChapterPlanChangeSemantics {
+    route_task_refs_checked: usize,
+    triggered_continuity_checked: usize,
+    reservation_refs_checked: usize,
+    stale_refs_checked: usize,
+}
+
+fn validate_chapter_plan_change_semantics(
+    connection: &Connection,
+    project_id: &str,
+    candidate: &Value,
+    expected_scope: &Value,
+) -> Result<ChapterPlanChangeSemantics, String> {
+    let chapter_id = expected_scope
+        .get("chapterId")
+        .and_then(Value::as_str)
+        .ok_or("CHAPTER_PLAN_SCOPE_REQUIRED")?;
+    let context_ref: ArtifactRef = serde_json::from_value(
+        candidate
+            .get("contextManifestRef")
+            .cloned()
+            .ok_or("CONTEXT_MANIFEST_REF_REQUIRED")?,
+    )
+    .map_err(|error| format!("CONTEXT_MANIFEST_REF_INVALID:{error}"))?;
+    if crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection,
+        project_id,
+        &context_ref,
+    )
+    .map_err(|error| error.to_string())?
+    .is_none()
+    {
+        return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
+    }
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("CHAPTER_NOT_FOUND")?;
+    let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+        connection, project_id, &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("VOLUME_PLAN_NOT_FOUND")?;
+    if crate::repositories::change_retcon::has_pending_stale_for_refs(
+        connection,
+        project_id,
+        &[
+            context_ref.artifact_id.as_str(),
+            route_ref.artifact_id.as_str(),
+        ],
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("PLAN_STALE".into());
+    }
+    let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection, project_id, &route_ref,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("VOLUME_PLAN_PAYLOAD_NOT_FOUND")?;
+    let route_task_ids = route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let project_revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+        connection, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let current_chapter_no: i64 = connection
+        .query_row(
+            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let context = crate::commands::context_input_from_authority(
+        connection,
+        &json!({
+            "chapterId":chapter_id,
+            "volumeId":volume_id,
+            "currentVolumeId":volume_id,
+            "currentChapter":current_chapter_no,
+            "executionMode":"LONG_FORM"
+        }),
+        project_id,
+        project_revision,
+    )?;
+    let triggered_threads = context
+        .continuity_threads
+        .iter()
+        .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    validate_current_chapter_plan(candidate, chapter_id, &route_task_ids, &triggered_threads)?;
+    let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+        connection,
+        project_id,
+        &route_task_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        100,
+    )
+    .map_err(|error| error.to_string())?;
+    let states = states
+        .iter()
+        .map(|state| {
+            (
+                state.state_id.as_str(),
+                state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NOT_STARTED"),
+            )
+        })
+        .collect::<Vec<_>>();
+    validate_task_reality(candidate, &route, &states)?;
+    let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(
+        connection, project_id, &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("VOLUME_NOT_FOUND")?;
+    let reservations = [
+        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+            connection, project_id, "BookPlan",
+        )
+        .map_err(|error| error.to_string())?,
+        crate::repositories::narrative::NarrativeRepository::artifact_payload(
+            connection,
+            project_id,
+            "VolumeIntent",
+            &volume_id,
+        )
+        .map_err(|error| error.to_string())?,
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|payload| {
+        payload
+            .get("futureReservations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    })
+    .collect::<Vec<_>>();
+    validate_reservation_actions(candidate, &reservations, current_volume_no)?;
+    Ok(ChapterPlanChangeSemantics {
+        route_task_refs_checked: route_task_ids.len(),
+        triggered_continuity_checked: triggered_threads.len(),
+        reservation_refs_checked: reservations.len(),
+        stale_refs_checked: 2,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 impl PlanningOwner {
     /// Applies one approved typed plan operation without committing it.  The
@@ -201,21 +362,16 @@ impl PlanningOwner {
             &candidate,
             expected_scope,
         )?;
-        if artifact_type == "ChapterPlan" {
-            let chapter_id = expected_scope
-                .get("chapterId")
-                .and_then(Value::as_str)
-                .ok_or("CHAPTER_PLAN_SCOPE_REQUIRED")?;
-            let active_tasks = candidate
-                .get("activeTaskRefs")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            validate_current_chapter_plan(&candidate, chapter_id, &active_tasks, &[])?;
-        }
+        let chapter_semantics = (artifact_type == "ChapterPlan")
+            .then(|| {
+                validate_chapter_plan_change_semantics(
+                    connection,
+                    project_id,
+                    &candidate,
+                    expected_scope,
+                )
+            })
+            .transpose()?;
         let payload_hash = sha256_canonical(&candidate).map_err(|error| error.to_string())?;
         let artifact: ArtifactEnvelope = serde_json::from_value(json!({
             "artifactId":artifact_id,
@@ -251,7 +407,12 @@ impl PlanningOwner {
             "resultHead":{"version":artifact.version,"payloadHash":artifact.payload_hash},
             "invocationCount":1,
             "directB12HeadMutationCount":0,
-            "semanticValidation":"PASS"
+            "semanticValidation":"PASS",
+            "routeTaskRefsChecked":chapter_semantics.as_ref().map(|value| value.route_task_refs_checked).unwrap_or(0),
+            "triggeredContinuityChecked":chapter_semantics.as_ref().map(|value| value.triggered_continuity_checked).unwrap_or(0),
+            "reservationRefsChecked":chapter_semantics.as_ref().map(|value| value.reservation_refs_checked).unwrap_or(0),
+            "taskRealityChecked":chapter_semantics.is_some(),
+            "staleRefsChecked":chapter_semantics.as_ref().map(|value| value.stale_refs_checked).unwrap_or(0)
         });
         Ok(PlanningChangeMutation {
             artifact,

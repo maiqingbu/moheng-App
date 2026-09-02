@@ -441,7 +441,7 @@ export class BrowserDemoPort implements FrontendPort {
     const fact = record.bundle.canon.characters[0]
     return clone({
       facts: fact ? [{ factId: `fact:${fact.id}`, label: `当前作品：${fact.name}的正式状态`, current: true, predicate: '正式状态', source: '当前作品记录' }] : [],
-      evidence: [{ artifactId: 'artifact:demo:evidence', version: 1, payloadHash: 'e'.repeat(64), label: '当前作品的已核验依据', kind: 'ReviewReport' }]
+      evidence: fact ? [{ artifactId: 'artifact:demo:evidence', version: 1, payloadHash: 'e'.repeat(64), label: '当前作品的已核验依据', kind: 'ReviewReport', supportsFactId: `fact:${fact.id}`, relationship: 'FACT_SOURCE', sourceArtifactId: 'artifact:demo:evidence', sourceVersion: 1 }] : []
     })
   }
 

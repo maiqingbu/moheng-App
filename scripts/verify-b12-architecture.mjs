@@ -25,6 +25,7 @@ export function evaluateB12Architecture({
   history = '',
   assistant = '',
   retconFlow = '',
+  runtime = '',
   migrationPresent = true,
 } = {}) {
   const assistantGrounding = `${assistant}\n${retconFlow}`
@@ -34,16 +35,16 @@ export function evaluateB12Architecture({
   const checks = [
     ['owner', /B12::ChangeRetconOwner/.test(owner) && /resolve_typed_target/.test(owner) && /B12_CHANGE_TARGET_UNSUPPORTED/.test(owner)],
     ['real_target_head', /load_authority_head/.test(repository) && /head_updates/.test(owner) && /PlanningOwner::apply_typed_change/.test(targetOwner) && /VolumeLifecycleOwner::apply_typed_change/.test(targetOwner)],
-    ['semantic_target_owner', /PlanningOwner::apply_typed_change/.test(targetOwner) && /VolumeLifecycleOwner::apply_typed_change/.test(targetOwner) && !/build_artifact_with_owner/.test(targetOwner) && /owner_receipt/.test(targetOwner)],
+    ['semantic_target_owner', /PlanningOwner::apply_typed_change/.test(targetOwner) && /VolumeLifecycleOwner::apply_typed_change/.test(targetOwner) && !/build_artifact_with_owner/.test(targetOwner) && /owner_receipt/.test(targetOwner) && /validate_chapter_plan_change_semantics/.test(planning) && /volume_plan_route/.test(planning) && /context_input_from_authority/.test(planning) && /validate_current_chapter_plan/.test(planning) && /validate_task_reality/.test(planning) && /validate_reservation_actions/.test(planning) && !/let route_task_ids\s*=\s*candidate/.test(planning) && !/let triggered_threads\s*=\s*Vec::new\(\)/.test(planning)],
     ['transitive_impact', /impact_frontier/.test(repository) && /expand_impact_batch/.test(repository) && /initialize_impact_frontier/.test(owner + repository)],
     ['bounded_checkpoint', /processed_pages_json/.test(repository) && /visitedCount/.test(owner + repository) && /maxFrontierBatch/.test(repository)],
     ['stale_runtime', /activate_stale_queue/.test(repository) && /impact_items/.test(repository) && /has_pending_stale_for_refs/.test(repository) && /PLAN_STALE:RECOMPILE_REQUIRED/.test(production)],
     ['retcon_plan_binding', /retcon_plan_digest/.test(owner) && /planDigest/.test(owner) && /retconPlanId/.test(owner)],
     ['history_retcon_path', /retcon_plan_create/.test(retconFlow) && /retcon_apply/.test(retconFlow) && /change_request_decide/.test(retconFlow) && /confirmRetconPlan/.test(history)],
     ['assistant_grounding', /queryRetconContext/.test(assistantGrounding) && /targetFactId/.test(assistantGrounding) && /evidenceRef/.test(assistantGrounding) && /change_request_create/.test(assistantGrounding) && /impact_preflight/.test(assistantGrounding)],
-    ['grounding_semantics', /grounding_terms/.test(repository) && /score_grounding_candidate/.test(repository) && /AMBIGUOUS/.test(repository) && /needsUserSelection/.test(repository) && !/f\.fact_id LIKE/.test(repository)],
+    ['grounding_semantics', /grounding_terms/.test(repository) && /score_grounding_candidate/.test(repository) && /AMBIGUOUS/.test(repository) && /needsUserSelection/.test(repository) && /exact_fact_evidence/.test(repository) && /supportsFactId/.test(repository) && /EVIDENCE_GAP/.test(repository) && !/f\.fact_id LIKE/.test(repository) && !/artifact_status='COMMITTED' AND artifact_type IN/.test(repository)],
     ['cold_summary_boundary', /SUMMARY_BOOTSTRAP_REQUIRED/.test(owner) && /summaryStatus/.test(repository)],
-    ['async_summary_worker', /std::thread::Builder/.test(bootstrap) && /run_dependency_summary_worker/.test(bootstrap) && !/rebuild_global_dependency_summary/.test(bootstrap) && /rebuild_global_dependency_summary/.test(worker) && /save_checkpoint/.test(worker)],
+    ['async_summary_worker', /std::thread::Builder/.test(bootstrap) && /run_dependency_summary_worker/.test(bootstrap) && !/rebuild_global_dependency_summary/.test(bootstrap) && /rebuild_global_dependency_summary/.test(worker) && /save_checkpoint/.test(worker) && /worker_holder/.test(bootstrap) && /matches!\(current\.as_str\(\), "COMPLETED" \| "RUNNING"\)/.test(runtime) && !/QUEUED" \| "PAUSED" \| "RUNNING" \| "FAILED/.test(runtime) && /release_lease_for_holder/.test(runtime)],
     ['migration_0011', migrationPresent && /B12_CHANGE_RETCON_MIGRATION/.test(connection)],
     ['no_runtime_trigger_creation', !/CREATE TRIGGER/.test(connection)],
     ['stale_plan_owner', /has_pending_stale_for_refs/.test(planning)],
@@ -68,6 +69,7 @@ if (process.argv[1]?.endsWith('verify-b12-architecture.mjs')) {
     history: read('src/ui/pages/HistoryCenter.vue'),
     assistant: read('src/ui/pages/ProjectAssistant.vue'),
     retconFlow: read('src/ui/flows/b12RetconFlow.ts'),
+    runtime: read('src-tauri/src/repositories/runtime.rs'),
     migrationPresent: fs.existsSync(path.join(root, 'src-tauri/migrations/0011_b12_change_retcon_runtime.sql')),
   })
   console.log(JSON.stringify(result, null, 2))

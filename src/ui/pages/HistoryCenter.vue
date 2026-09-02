@@ -42,7 +42,7 @@ async function openRetconModal() {
   try {
     retconContext.value = await store.queryRetconContext(requestText.value.trim())
     retconTargetRef.value = retconContext.value.facts.find(item => item.current)?.factId ?? ''
-    retconEvidenceRef.value = retconContext.value.evidence[0]?.artifactId ?? ''
+    retconEvidenceRef.value = retconContext.value.evidence.find(item => item.supportsFactId === retconTargetRef.value && item.relationship === 'FACT_SOURCE')?.artifactId ?? ''
   } catch (error) {
     actionMessage.value = error instanceof Error ? error.message : '暂时无法读取当前事实和依据。'
   } finally {
@@ -51,7 +51,7 @@ async function openRetconModal() {
 }
 
 function selectedEvidence() {
-  return retconContext.value?.evidence.find(item => item.artifactId === retconEvidenceRef.value)
+  return retconContext.value?.evidence.find(item => item.artifactId === retconEvidenceRef.value && item.supportsFactId === retconTargetRef.value && item.relationship === 'FACT_SOURCE')
 }
 
 const selectedFactLabel = computed(() => retconContext.value?.facts.find(item => item.factId === retconTargetRef.value)?.label ?? '')
@@ -60,11 +60,12 @@ const selectedEvidenceLabel = computed(() => retconContext.value?.evidence.find(
 function chooseFact(event: Event) {
   const label = (event.target as HTMLInputElement).value
   retconTargetRef.value = retconContext.value?.facts.find(item => item.label === label && item.current)?.factId ?? ''
+  retconEvidenceRef.value = retconContext.value?.evidence.find(item => item.supportsFactId === retconTargetRef.value && item.relationship === 'FACT_SOURCE')?.artifactId ?? ''
 }
 
 function chooseEvidence(event: Event) {
   const label = (event.target as HTMLInputElement).value
-  retconEvidenceRef.value = retconContext.value?.evidence.find(item => item.label === label)?.artifactId ?? ''
+  retconEvidenceRef.value = retconContext.value?.evidence.find(item => item.label === label && item.supportsFactId === retconTargetRef.value && item.relationship === 'FACT_SOURCE')?.artifactId ?? ''
 }
 
 function retconDraftFromActive(): RetconDraft | null {
@@ -349,7 +350,7 @@ async function approveAndApply() {
         <div v-if="retconContextLoading" class="empty">正在读取当前正式事实和已有依据…</div>
         <label v-else class="field"><span class="field-label">要修订的当前事实</span><input class="input" :value="selectedFactLabel" list="b12-retcon-facts" placeholder="请选择当前正式事实" @change="chooseFact" /><datalist id="b12-retcon-facts"><option v-for="fact in retconContext?.facts.filter(item => item.current)" :key="fact.factId" :value="fact.label" /></datalist></label>
         <label class="field"><span class="field-label">新的事实内容</span><textarea v-model="retconReplacement" class="textarea" placeholder="填写你确认后的新事实" /></label>
-        <label class="field"><span class="field-label">已有依据</span><input class="input" :value="selectedEvidenceLabel" list="b12-retcon-evidence" placeholder="请选择已有依据" @change="chooseEvidence" /><datalist id="b12-retcon-evidence"><option v-for="item in retconContext?.evidence" :key="`${item.artifactId}:${item.version}`" :value="item.label" /></datalist></label>
+        <label class="field"><span class="field-label">这条事实的原始依据</span><input class="input" :value="selectedEvidenceLabel" list="b12-retcon-evidence" placeholder="请选择这条事实的原始依据" @change="chooseEvidence" /><datalist id="b12-retcon-evidence"><option v-for="item in retconContext?.evidence.filter(item => item.supportsFactId === retconTargetRef && item.relationship === 'FACT_SOURCE')" :key="`${item.artifactId}:${item.version}`" :value="item.label" /></datalist></label>
       </template>
       <CommandFeedback :state="state" />
       <template #footer><button class="btn" @click="modal = null">取消</button><button class="btn primary" :disabled="!requestText.trim() || (modal === 'retcon' && (!retconTargetRef.trim() || !retconReplacement.trim() || !retconEvidenceRef.trim()))" @click="create">开始影响分析</button></template>

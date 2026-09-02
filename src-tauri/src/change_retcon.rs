@@ -877,6 +877,7 @@ fn run_dependency_summary_worker(
     manager: ProjectManager,
     project_id: String,
     job_id: String,
+    worker_id: String,
     now: String,
 ) -> Result<(), String> {
     let handle = manager.open(&project_id, "", &now).map_err(manager_error)?;
@@ -907,7 +908,7 @@ fn run_dependency_summary_worker(
             &handle,
             &project_id,
             &job_id,
-            crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
+            &worker_id,
             &now,
         )
         .map_err(|error| error.to_string())
@@ -917,6 +918,7 @@ fn run_dependency_summary_worker(
             &handle,
             &project_id,
             &job_id,
+            &worker_id,
             "SUMMARY_BOOTSTRAP_FAILED",
             &now,
         );
@@ -935,6 +937,10 @@ pub fn bootstrap_dependency_summary(
     expected_revision: Option<i64>,
     now: &str,
 ) -> Result<Value, String> {
+    let worker_holder = format!(
+        "{}:{command_id}",
+        crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER
+    );
     let outcome = manager
         .commit_project_command(
             ProjectCommandSpec {
@@ -959,15 +965,15 @@ pub fn bootstrap_dependency_summary(
                         connection,
                         project_id,
                         &job_id,
-                        crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
+                        &worker_holder,
                         now,
                     )
                     .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
-                Ok(json!({"jobId":job_id,"claimed":claimed}))
+                Ok(json!({"jobId":job_id,"claimed":claimed,"workerHolder":worker_holder}))
             },
         )
         .map_err(manager_error)?;
-    let (receipt, claimed, committed_job_id) = match outcome {
+    let (receipt, claimed, committed_job_id, committed_worker_holder) = match outcome {
         ProjectCommandOutcome::Committed { value, receipt } => (
             receipt,
             value
@@ -978,8 +984,12 @@ pub fn bootstrap_dependency_summary(
                 .get("jobId")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
+            value
+                .get("workerHolder")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
         ),
-        ProjectCommandOutcome::Replayed(receipt) => (receipt, false, None),
+        ProjectCommandOutcome::Replayed(receipt) => (receipt, false, None, None),
     };
     if !claimed {
         let job = manager
@@ -1026,6 +1036,8 @@ pub fn bootstrap_dependency_summary(
     let worker_manager = manager.clone();
     let worker_project_id = project_id.to_owned();
     let worker_job_id = job_id.clone();
+    let worker_holder = committed_worker_holder.unwrap_or(worker_holder);
+    let worker_holder_for_thread = worker_holder.clone();
     let worker_now = now.to_owned();
     if let Err(error) = std::thread::Builder::new()
         .name("b12-dependency-summary".into())
@@ -1034,6 +1046,7 @@ pub fn bootstrap_dependency_summary(
                 worker_manager,
                 worker_project_id,
                 worker_job_id,
+                worker_holder_for_thread,
                 worker_now,
             );
         })
@@ -1043,6 +1056,7 @@ pub fn bootstrap_dependency_summary(
                 &handle,
                 project_id,
                 &job_id,
+                &worker_holder,
                 "SUMMARY_WORKER_SPAWN_FAILED",
                 now,
             );
@@ -1991,6 +2005,74 @@ fn create_change(
     )
 }
 
+fn validate_retcon_evidence_refs(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    old_fact: &Value,
+    evidence_refs: &[Value],
+) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), String> {
+    let fact_id = old_fact
+        .get("factId")
+        .and_then(Value::as_str)
+        .ok_or("B12_CANON_FACT_NOT_FOUND")?;
+    let exact_evidence = repository::exact_fact_evidence(connection, project_id, old_fact)
+        .map_err(|error| format!("B12_DB:{error}"))?;
+    if exact_evidence.is_empty() {
+        return Err("B12_RETCON_EVIDENCE_GAP".into());
+    }
+    let mut original_fact_evidence = Vec::new();
+    let mut additional_retcon_evidence = Vec::new();
+    for evidence in evidence_refs {
+        let artifact_id = evidence.get("artifactId").and_then(Value::as_str);
+        let version = evidence.get("version").and_then(Value::as_i64);
+        let valid = match (artifact_id, version) {
+            (Some(artifact_id), Some(version)) => {
+                repository::artifact_reference_exists(connection, project_id, artifact_id, version)
+                    .map_err(|error| format!("B12_DB:{error}"))?
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err("B12_RETCON_EVIDENCE_NOT_FOUND".into());
+        }
+        let original = exact_evidence.iter().find(|option| {
+            option.get("artifactId").and_then(Value::as_str) == artifact_id
+                && option.get("version").and_then(Value::as_i64) == version
+        });
+        if let Some(original) = original {
+            original_fact_evidence.push(original.clone());
+            continue;
+        }
+        let relationship = evidence.get("relationship").and_then(Value::as_str);
+        let explanation = evidence
+            .get("explanation")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        if relationship == Some("ADDITIONAL_RETCON_EVIDENCE") && explanation.is_some() {
+            additional_retcon_evidence.push(json!({
+                "artifactId":artifact_id,
+                "version":version,
+                "payloadHash":evidence.get("payloadHash").cloned().unwrap_or(Value::Null),
+                "relationship":"ADDITIONAL_RETCON_EVIDENCE",
+                "explanation":explanation,
+                "supportsFactId":fact_id
+            }));
+            continue;
+        }
+        return Err("B12_RETCON_EVIDENCE_UNRELATED".into());
+    }
+    if original_fact_evidence.is_empty() {
+        return Err("B12_RETCON_FACT_SOURCE_REQUIRED".into());
+    }
+    let mut evidence_refs = original_fact_evidence.clone();
+    evidence_refs.extend(additional_retcon_evidence.iter().cloned());
+    Ok((
+        evidence_refs,
+        original_fact_evidence,
+        additional_retcon_evidence,
+    ))
+}
+
 fn create_retcon_plan(
     manager: &ProjectManager,
     project_id: &str,
@@ -2010,14 +2092,11 @@ fn create_retcon_plan(
         .get("replacement")
         .cloned()
         .ok_or_else(|| "B12_INVALID:replacement".to_string())?;
-    let evidence_refs = input
+    let supplied_evidence_refs = input
         .get("evidenceRefs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if evidence_refs.is_empty() {
-        return Err("B12_RETCON_EVIDENCE_REQUIRED".into());
-    }
     control_command(
         manager,
         project_id,
@@ -2055,23 +2134,13 @@ fn create_retcon_plan(
             {
                 return Err("B12_CANON_FACT_NOT_CURRENT".into());
             }
-            for evidence in &evidence_refs {
-                let artifact_id = evidence.get("artifactId").and_then(Value::as_str);
-                let version = evidence.get("version").and_then(Value::as_i64);
-                let valid = match (artifact_id, version) {
-                    (Some(artifact_id), Some(version)) => repository::artifact_reference_exists(
-                        connection,
-                        project_id,
-                        artifact_id,
-                        version,
-                    )
-                    .map_err(|error| format!("B12_DB:{error}"))?,
-                    _ => false,
-                };
-                if !valid {
-                    return Err("B12_RETCON_EVIDENCE_NOT_FOUND".into());
-                }
-            }
+            let (evidence_refs, original_fact_evidence, additional_retcon_evidence) =
+                validate_retcon_evidence_refs(
+                    connection,
+                    project_id,
+                    &old,
+                    &supplied_evidence_refs,
+                )?;
             let signing_impact = signing_impact_for_fact(connection, project_id, &old)?;
             let fix_type = input
                 .get("fixType")
@@ -2094,6 +2163,8 @@ fn create_retcon_plan(
                 "impactSetId":impact.impact_set_id,
                 "impactDigest":impact.estimate.get("impactDigest").cloned().unwrap_or(Value::Null),
                 "evidenceRefs":evidence_refs,
+                "originalFactEvidence":original_fact_evidence,
+                "additionalRetconEvidence":additional_retcon_evidence,
                 "oldCanon":old,
                 "replacement":replacement,
                 "signingImpact":signing_impact,

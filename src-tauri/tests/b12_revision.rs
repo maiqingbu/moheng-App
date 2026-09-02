@@ -411,7 +411,7 @@ fn b12_retcon_context_query_returns_current_fact_and_typed_evidence_options() {
         .unwrap();
     handle
         .execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r05:context','p-b12-r05-context','entity:r05:context','状态','{\"description\":\"已经死亡\"}','A',?1,?1)",
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r05:context','p-b12-r05-context','entity:r05:context','状态','{\"description\":\"已经死亡\"}','evidence:r05:context',2,'A',?1,?1)",
             [NOW],
         )
         .unwrap();
@@ -442,7 +442,10 @@ fn b12_retcon_context_query_returns_current_fact_and_typed_evidence_options() {
 fn b12_assistant_retcon_uses_selected_fact_source_evidence() {
     let project_id = "p-b12-r05-source";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open source evidence fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open source evidence fixture");
     handle
         .execute(
             "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:source',?1,'父亲','CHARACTER',?2,?2)",
@@ -478,7 +481,10 @@ fn b12_assistant_retcon_uses_selected_fact_source_evidence() {
         .expect("insert fact provenance");
     drop(handle);
     let context = ai_novel_production_system_core::repositories::change_retcon::retcon_context(
-        &state.manager.open(project_id, "", NOW).expect("reopen source evidence fixture"),
+        &state
+            .manager
+            .open(project_id, "", NOW)
+            .expect("reopen source evidence fixture"),
         project_id,
         Some("父亲死亡"),
         20,
@@ -486,7 +492,10 @@ fn b12_assistant_retcon_uses_selected_fact_source_evidence() {
     .expect("query grounded retcon context");
     assert_eq!(context["selectedFact"]["factId"], "fact:r05:source");
     assert_eq!(context["evidence"].as_array().map(Vec::len), Some(1));
-    assert_eq!(context["evidence"][0]["artifactId"], "artifact:r05:999-fact-source");
+    assert_eq!(
+        context["evidence"][0]["artifactId"],
+        "artifact:r05:999-fact-source"
+    );
     assert_eq!(context["evidence"][0]["payloadHash"], source_hash);
     assert_eq!(context["evidence"][0]["supportsFactId"], "fact:r05:source");
     assert_ne!(context["evidence"][0]["payloadHash"], unrelated_hash);
@@ -497,7 +506,10 @@ fn b12_assistant_retcon_uses_selected_fact_source_evidence() {
 fn b12_assistant_retcon_missing_fact_evidence_fails_closed() {
     let project_id = "p-b12-r05-gap";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open evidence gap fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open evidence gap fixture");
     handle
         .execute(
             "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:gap',?1,'父亲','CHARACTER',?2,?2)",
@@ -519,13 +531,31 @@ fn b12_assistant_retcon_missing_fact_evidence_fails_closed() {
     assert_eq!(context["selectedFact"]["factId"], "fact:r05:gap");
     assert_eq!(context["evidence"], json!([]));
     assert_eq!(context["grounding"]["evidenceStatus"], "EVIDENCE_GAP");
+    command(
+        &state,
+        project_id,
+        "change_request_create",
+        "cmd:b12:r05:gap:create",
+        0,
+        json!({"changeRequestId":"change:b12:r05:gap","changeType":"RETCON","scope":"PROJECT","summary":"缺少依据的事实修订","targetFactId":"fact:r05:gap","sourceRefs":["fact:r05:gap"],"requestedChange":{"replacement":{"objectJson":{"description":"假死"}}}}),
+    )
+    .expect("create evidence gap change request");
+    command(
+        &state,
+        project_id,
+        "impact_preflight",
+        "cmd:b12:r05:gap:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r05:gap"}),
+    )
+    .expect("preflight evidence gap change request");
     let error = command(
         &state,
         project_id,
         "retcon_plan_create",
         "cmd:b12:r05:gap:plan",
         0,
-        json!({"changeRequestId":"missing","retconPlanId":"plan:r05:gap","targetFactId":"fact:r05:gap","reason":"不能绕过来源依据","replacement":{"objectJson":{"description":"假死"}},"evidenceRefs":[]}),
+        json!({"changeRequestId":"change:b12:r05:gap","retconPlanId":"plan:r05:gap","targetFactId":"fact:r05:gap","reason":"不能绕过来源依据","replacement":{"objectJson":{"description":"假死"}},"evidenceRefs":[]}),
     )
     .expect_err("missing exact fact evidence must fail closed before an executable RetconPlan");
     assert_eq!(error, "B12_RETCON_EVIDENCE_GAP");
@@ -535,7 +565,10 @@ fn b12_assistant_retcon_missing_fact_evidence_fails_closed() {
 fn b12_retcon_rejects_unrelated_evidence_without_relationship() {
     let project_id = "p-b12-r05-unrelated";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open unrelated evidence fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open unrelated evidence fixture");
     handle
         .execute(
             "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:a',?1,'父亲','CHARACTER',?2,?2),('entity:r05:b',?1,'师父','CHARACTER',?2,?2)",
@@ -740,7 +773,10 @@ fn b12_summary_bootstrap_command_returns_before_aggregation_complete() {
 fn b12_summary_running_job_not_reclaimed_after_lease_expiry() {
     let project_id = "p-b12-r06-expired-running";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open runtime fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open runtime fixture");
     let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
         .expect("ensure summary job");
     assert!(DurableJobService::claim_dependency_summary_job(
@@ -752,16 +788,14 @@ fn b12_summary_running_job_not_reclaimed_after_lease_expiry() {
     )
     .expect("first worker claim"));
     let after_expiry = "2026-09-02T05:01:01Z";
-    assert!(
-        !DurableJobService::claim_dependency_summary_job(
-            &handle,
-            project_id,
-            &job_id,
-            "worker:r06:second",
-            after_expiry,
-        )
-        .expect("a normal bootstrap request must not reclaim live RUNNING work after TTL"),
-    );
+    assert!(!DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:second",
+        after_expiry,
+    )
+    .expect("a normal bootstrap request must not reclaim live RUNNING work after TTL"),);
     let (status, holder, released_at): (String, String, Option<String>) = handle
         .query_row(
             "SELECT j.status,l.holder,l.released_at FROM jobs j JOIN job_leases l ON l.project_id=j.project_id AND l.job_id=j.job_id WHERE j.project_id=?1 AND j.job_id=?2",
@@ -779,7 +813,10 @@ fn b12_summary_running_job_not_reclaimed_after_lease_expiry() {
 fn b12_summary_restart_recovery_allows_reclaim_after_pause() {
     let project_id = "p-b12-r06-recovery-reclaim";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open recovery fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open recovery fixture");
     let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
         .expect("ensure summary job");
     assert!(DurableJobService::claim_dependency_summary_job(
@@ -816,7 +853,10 @@ fn b12_summary_restart_recovery_allows_reclaim_after_pause() {
 fn b12_summary_old_worker_cannot_release_new_holder_lease() {
     let project_id = "p-b12-r06-old-worker";
     let state = test_state(project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open old worker fixture");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open old worker fixture");
     let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
         .expect("ensure summary job");
     assert!(DurableJobService::claim_dependency_summary_job(
@@ -838,14 +878,19 @@ fn b12_summary_old_worker_cannot_release_new_holder_lease() {
         recovered_at,
     )
     .expect("claim resumed worker"));
-    DurableJobService::pause_dependency_summary_job(
+    let error = DurableJobService::pause_dependency_summary_job(
         &handle,
         project_id,
         &job_id,
+        "worker:r06:old",
         "OLD_WORKER_FAILED",
         recovered_at,
     )
-    .expect("simulated old worker completion path");
+    .expect_err("old worker must not pause or release the new holder's job");
+    assert!(matches!(
+        error,
+        ai_novel_production_system_core::repositories::runtime::RuntimeError::LeaseHeld
+    ));
     let (status, holder, released_at): (String, String, Option<String>) = handle
         .query_row(
             "SELECT j.status,l.holder,l.released_at FROM jobs j JOIN job_leases l ON l.project_id=j.project_id AND l.job_id=j.job_id WHERE j.project_id=?1 AND j.job_id=?2",
@@ -1302,9 +1347,7 @@ fn insert_semantic_chapter_fixture(
         true,
     );
     drop(handle);
-    SemanticChapterFixture {
-        chapter_plan_id,
-    }
+    SemanticChapterFixture { chapter_plan_id }
 }
 
 fn insert_retcon_evidence_chapter(
@@ -1618,10 +1661,7 @@ fn b12_change_chapter_plan_invokes_b07_semantic_owner() {
         .expect("verify chapter plan owner mutation");
 }
 
-fn assert_chapter_change_rejected_without_head_mutation(
-    state: &KernelState,
-    project_id: &str,
-) {
+fn assert_chapter_change_rejected_without_head_mutation(state: &KernelState, project_id: &str) {
     state
         .manager
         .with_read_connection(project_id, NOW, |connection| {
@@ -1673,7 +1713,10 @@ fn b12_change_chapter_plan_rejects_blocked_real_route_task() {
     let project_id = "p-b12-r01-blocked";
     let state = test_state(project_id);
     let fixture = insert_semantic_chapter_fixture(&state, project_id);
-    let handle = state.manager.open(project_id, "", NOW).expect("open route state");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open route state");
     handle
         .execute(
             "UPDATE state_deltas SET value_json='{\"taskId\":\"task:b12:route\",\"status\":\"BLOCKED\",\"evidenceRefs\":[],\"remainingConditions\":[\"blocked\"]}' WHERE project_id=?1 AND state_id='task:b12:route'",
@@ -1716,7 +1759,7 @@ fn b12_change_chapter_plan_rejects_missing_triggered_continuity() {
         .expect("open continuity fixture");
     handle
         .execute(
-            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES ('obligation:b12:secret',?1,'VOLUME','PROMISE','A',?2,1,'必须处理的秘密','[]','APPROVED',?3,?3)",
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES ('obligation:b12:secret',?1,'VOLUME','PROMISE','A',?2,1,'必须处理的秘密','[]','{\"kind\":\"AFTER_CHAPTER\",\"value\":0}','APPROVED',?3,?3)",
             params![project_id, fixture.chapter_plan_id, NOW],
         )
         .expect("insert triggered continuity obligation");
@@ -2121,7 +2164,7 @@ fn b12_retcon_plan_change_invalidates_an_old_decision() {
         .expect("insert entity");
     handle
         .execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r04','p-b12-r04','entity:r04','状态','{\"old\":true}','A',?1,?1)",
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r04','p-b12-r04','entity:r04','状态','{\"old\":true}','evidence:r04',1,'A',?1,?1)",
             [NOW],
         )
         .expect("insert fact");
@@ -2230,7 +2273,7 @@ fn b12_h03_retcon_execution_uses_the_same_owner_and_postverify() {
         .expect("insert entity");
     handle
         .execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r05','p-b12-r05','entity:r05','状态','{\"old\":true}','A',?1,?1)",
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r05','p-b12-r05','entity:r05','状态','{\"old\":true}','evidence:r05',1,'A',?1,?1)",
             [NOW],
         )
         .expect("insert fact");

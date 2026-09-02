@@ -6,6 +6,7 @@ import {
   createGroundedAssistantRetcon,
   createRetconPlan,
   createRetconProposal,
+  RetconEvidenceGapError,
   RetconContextSelectionError,
   selectGroundedRetconContext,
   startDependencySummaryBootstrap,
@@ -52,7 +53,7 @@ describe('B12 Retcon product flow', () => {
       summary: '修订父亲状态',
       targetFactId: 'fact:father',
       replacement: '父亲是假死',
-      evidenceRef: { artifactId: 'evidence:1', version: 2, payloadHash: 'e'.repeat(64) },
+      evidenceRef: { artifactId: 'evidence:1', version: 2, payloadHash: 'e'.repeat(64), supportsFactId: 'fact:father', relationship: 'FACT_SOURCE' as const },
       impactDigest: 'i'.repeat(64),
     }
 
@@ -83,7 +84,7 @@ describe('B12 Retcon product flow', () => {
     })
     const context = {
       facts: [{ factId: 'fact:father', label: '第一卷第18章：父亲已经死亡', current: true }],
-      evidence: [{ artifactId: 'evidence:18', version: 3, payloadHash: 'e'.repeat(64), label: '第一卷第18章正文依据' }],
+      evidence: [{ artifactId: 'evidence:18', version: 3, payloadHash: 'e'.repeat(64), label: '第一卷第18章正文依据', supportsFactId: 'fact:father', relationship: 'FACT_SOURCE' as const }],
     }
     const queryRetconContext = vi.fn(async () => context)
 
@@ -110,11 +111,21 @@ describe('B12 Retcon product flow', () => {
         { factId: 'fact:father', label: '父亲：已经死亡', current: true },
         { factId: 'fact:master', label: '师父：已经死亡', current: true },
       ],
-      evidence: [{ artifactId: 'evidence:death', version: 1, payloadHash: 'e'.repeat(64), label: '已有正文依据' }],
+      evidence: [{ artifactId: 'evidence:death', version: 1, payloadHash: 'e'.repeat(64), label: '已有正文依据', supportsFactId: 'fact:father', relationship: 'FACT_SOURCE' as const }],
       grounding: { status: 'AMBIGUOUS' as const, candidateCount: 2, needsUserSelection: true },
     }
     expect(() => selectGroundedRetconContext(context, '把那个死亡改成假死')).toThrow(RetconContextSelectionError)
     expect(() => selectGroundedRetconContext(context, '把那个死亡改成假死')).not.toThrow(/fact:father/)
+  })
+
+  it('fails closed in Chinese when the selected fact has no exact source evidence', () => {
+    const context = {
+      facts: [{ factId: 'fact:father', label: '父亲：已经死亡', current: true }],
+      evidence: [{ artifactId: 'evidence:other', version: 1, payloadHash: 'e'.repeat(64), label: '师父的正文依据', supportsFactId: 'fact:master', relationship: 'FACT_SOURCE' as const }],
+      grounding: { status: 'UNIQUE' as const, candidateCount: 1, needsUserSelection: false, evidenceStatus: 'EVIDENCE_GAP' as const },
+    }
+    expect(() => selectGroundedRetconContext(context, '父亲改成假死')).toThrow(RetconEvidenceGapError)
+    expect(() => selectGroundedRetconContext(context, '父亲改成假死')).toThrow('这条事实目前缺少可核验的来源记录，不能直接执行事实修订。')
   })
 
   it('starts summary bootstrap without waiting for worker completion', async () => {

@@ -17,6 +17,7 @@ const architectureSources = () => ({
   history: read('src/ui/pages/HistoryCenter.vue'),
   assistant: read('src/ui/pages/ProjectAssistant.vue'),
   retconFlow: read('src/ui/flows/b12RetconFlow.ts'),
+  runtime: read('src-tauri/src/repositories/runtime.rs'),
 })
 
 test('B12 has an independent architecture verifier', () => {
@@ -59,32 +60,34 @@ test('B12 global preflight has a formal durable bootstrap job boundary', () => {
   assert.match(commands, /query_dependency_summary_bootstrap/)
 })
 
-test('b12_acceptance_rejects_validator_only_change_owner', () => {
+test('b12_acceptance_rejects_chapter_self_whitelist', () => {
   const sources = architectureSources()
   const injected = {
     ...sources,
-    owner: sources.owner
-      .replaceAll('PlanningOwner::apply_typed_change', 'validate_change_target_owner')
-      .replaceAll('VolumeLifecycleOwner::apply_typed_change', 'validate_change_target_owner'),
+    planning: `${sources.planning}\nlet route_task_ids = candidate.activeTaskRefs;\nlet triggered_threads = Vec::new();`,
   }
   const result = evaluateB12Architecture(injected)
   assert.equal(result.checks.semantic_target_owner, 'FAIL')
 })
 
-test('b12_acceptance_rejects_full_sentence_like_grounding', () => {
+test('b12_acceptance_rejects_unrelated_retcon_evidence', () => {
   const sources = architectureSources()
   const result = evaluateB12Architecture({
     ...sources,
-    repository: sources.repository.replaceAll('grounding_terms', 'legacy_sentence_query'),
+    repository: sources.repository
+      .replaceAll('exact_fact_evidence', 'arbitrary_project_latest_evidence')
+      .replaceAll('supportsFactId', 'unrelatedEvidence'),
   })
   assert.equal(result.checks.grounding_semantics, 'FAIL')
 })
 
-test('b12_acceptance_rejects_synchronous_bootstrap_command', () => {
+test('b12_acceptance_rejects_expired_running_job_reclaim', () => {
   const sources = architectureSources()
   const result = evaluateB12Architecture({
     ...sources,
-    owner: sources.owner.replaceAll('run_dependency_summary_worker', 'rebuild_global_dependency_summary'),
+    runtime: sources.runtime
+      .replace('"COMPLETED" | "RUNNING"', '"COMPLETED"')
+      .replace("'QUEUED','PAUSED','FAILED'", "'QUEUED','PAUSED','RUNNING','FAILED'"),
   })
   assert.equal(result.checks.async_summary_worker, 'FAIL')
 })
@@ -96,6 +99,8 @@ test('B12 semantic gates are blocking and source-bound', () => {
   assert.match(verifier, /grounding_semantics/)
   assert.match(verifier, /async_summary_worker/)
   assert.match(runner, /B12_ASSISTANT_GROUNDING_RESULT/)
+  assert.match(runner, /B12_ASSISTANT_RETCON_EVIDENCE_RESULT/)
+  assert.match(runner, /B12_SUMMARY_LEASE_EXPIRY_RESULT/)
   assert.match(runner, /B12_SUMMARY_BOOTSTRAP_ASYNC_RESULT/)
   assert.match(runner, /B12_R08_NEGATIVE_INJECTIONS\.json/)
 })

@@ -1190,6 +1190,110 @@ pub fn current_fact(
         .map_err(Into::into)
 }
 
+fn fact_evidence_label(artifact_type: &str, scope_key: &str) -> String {
+    let label = match artifact_type {
+        "FinalChapter" => "正式章节依据",
+        "ChapterSummary" => "章节摘要依据",
+        _ => "已核验事实依据",
+    };
+    format!("{label} · {scope_key}")
+}
+
+fn fact_evidence_range(fact: &Value) -> Value {
+    fact.get("evidenceRangeJson")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Returns only evidence that is authoritatively bound to this exact current
+/// Canon fact.  It deliberately has no project-recent fallback: a Retcon
+/// proposal must not borrow another fact's evidence merely because it exists.
+pub fn exact_fact_evidence(
+    connection: &Connection,
+    project_id: &str,
+    fact: &Value,
+) -> Result<Vec<Value>, ChangeRetconRepositoryError> {
+    let Some(fact_id) = fact.get("factId").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let source_artifact_id = fact.get("sourceArtifactId").and_then(Value::as_str);
+    let source_version = fact.get("sourceVersion").and_then(Value::as_i64);
+    if let (Some(artifact_id), Some(version)) = (source_artifact_id, source_version) {
+        let artifact: Option<(String, String, String)> = connection
+            .query_row(
+                "SELECT payload_hash,artifact_type,scope_key FROM artifacts WHERE project_id=?1 AND artifact_id=?2 AND version=?3 AND artifact_status='COMMITTED'",
+                libsql_rusqlite::params![project_id, artifact_id, version],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((payload_hash, artifact_type, scope_key)) = artifact {
+            seen.insert((artifact_id.to_owned(), version));
+            result.push(json!({
+                "artifactId":artifact_id,
+                "version":version,
+                "payloadHash":payload_hash,
+                "label":fact_evidence_label(&artifact_type, &scope_key),
+                "kind":artifact_type,
+                "supportsFactId":fact_id,
+                "relationship":"FACT_SOURCE",
+                "sourceArtifactId":artifact_id,
+                "sourceVersion":version,
+                "sourceChapterId":fact.get("sourceChapterId").cloned().unwrap_or(Value::Null),
+                "evidenceRange":fact_evidence_range(fact)
+            }));
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT e.source_artifact_id,e.source_version,a.payload_hash,a.artifact_type,a.scope_key,e.final_chapter_id,e.quote,e.range_start,e.range_end FROM canon_evidence e JOIN artifacts a ON a.artifact_id=e.source_artifact_id AND a.version=e.source_version WHERE e.project_id=?1 AND e.fact_id=?2 AND a.project_id=?1 AND a.artifact_status='COMMITTED' ORDER BY e.created_at DESC,e.evidence_id",
+    )?;
+    let rows = statement.query_map(libsql_rusqlite::params![project_id, fact_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            artifact_id,
+            version,
+            payload_hash,
+            artifact_type,
+            scope_key,
+            source_chapter_id,
+            quote,
+            range_start,
+            range_end,
+        ) = row?;
+        if !seen.insert((artifact_id.clone(), version)) {
+            continue;
+        }
+        result.push(json!({
+            "artifactId":artifact_id.clone(),
+            "version":version,
+            "payloadHash":payload_hash,
+            "label":fact_evidence_label(&artifact_type, &scope_key),
+            "kind":artifact_type,
+            "supportsFactId":fact_id,
+            "relationship":"FACT_SOURCE",
+            "sourceArtifactId":artifact_id,
+            "sourceVersion":version,
+            "sourceChapterId":source_chapter_id,
+            "evidenceRange":{"rangeStart":range_start,"rangeEnd":range_end,"quote":quote}
+        }));
+    }
+    Ok(result)
+}
+
 fn normalize_grounding_text(value: &str) -> String {
     value
         .chars()
@@ -1322,7 +1426,7 @@ pub fn retcon_context(
     let query = query.unwrap_or_default().trim().to_owned();
     let terms = grounding_terms(&query);
     let mut facts = connection.prepare(
-        "SELECT f.fact_id,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,e.canonical_name FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND f.superseded_by IS NULL ORDER BY f.updated_at DESC,f.fact_id LIMIT ?2",
+        "SELECT f.fact_id,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,f.evidence_range_json,e.canonical_name FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND f.superseded_by IS NULL ORDER BY f.updated_at DESC,f.fact_id LIMIT ?2",
     )?;
     let fact_rows = facts.query_map(
         libsql_rusqlite::params![project_id, (limit * 20).clamp(50, 500)],
@@ -1342,7 +1446,7 @@ pub fn retcon_context(
                 .get::<_, Option<String>>(3)?
                 .map(|value| format!("章节记录 {value}"))
                 .unwrap_or_else(|| "当前作品记录".into());
-            let entity_name: Option<String> = row.get(6)?;
+            let entity_name: Option<String> = row.get(7)?;
             let match_score = if query.is_empty() {
                 0
             } else {
@@ -1362,6 +1466,8 @@ pub fn retcon_context(
                 "source":source,
                 "sourceArtifactId":row.get::<_,Option<String>>(4)?,
                 "sourceVersion":row.get::<_,Option<i64>>(5)?,
+                "sourceChapterId":row.get::<_,Option<String>>(3)?,
+                "evidenceRangeJson":row.get::<_,Option<String>>(6)?,
                 "objectJson":object,
                 "entityName":entity_name,
                 "matchScore":match_score
@@ -1405,32 +1511,27 @@ pub fn retcon_context(
         Value::Null
     };
     let facts = fact_candidates;
-    let mut evidence = connection.prepare(
-        "SELECT artifact_id,version,payload_hash,artifact_type,scope_key FROM artifacts WHERE project_id=?1 AND artifact_status='COMMITTED' AND artifact_type IN ('ReviewReport','FinalChapter','ChapterSummary','EvidenceBundle','SimulatedSigningReceipt') ORDER BY committed_at DESC,artifact_id,version LIMIT ?2",
-    )?;
-    let evidence_rows = evidence.query_map(libsql_rusqlite::params![project_id, limit], |row| {
-        let artifact_type: String = row.get(3)?;
-        let scope_key: String = row.get(4)?;
-        let label = if artifact_type == "FinalChapter" {
-            "正式章节依据"
-        } else if artifact_type == "ChapterSummary" {
-            "章节摘要依据"
+    let mut evidence = Vec::new();
+    for fact in &facts {
+        evidence.extend(exact_fact_evidence(connection, project_id, fact)?);
+    }
+    let evidence_status = if let Some(fact_id) = selected_fact.get("factId").and_then(Value::as_str)
+    {
+        if evidence
+            .iter()
+            .any(|item| item.get("supportsFactId").and_then(Value::as_str) == Some(fact_id))
+        {
+            "EXACT"
         } else {
-            "已核验依据"
-        };
-        Ok(json!({
-            "artifactId":row.get::<_,String>(0)?,
-            "version":row.get::<_,i64>(1)?,
-            "payloadHash":row.get::<_,String>(2)?,
-            "label":format!("{label} · {scope_key}"),
-            "kind":artifact_type
-        }))
-    })?;
-    let evidence = evidence_rows.collect::<Result<Vec<_>, _>>()?;
+            "EVIDENCE_GAP"
+        }
+    } else {
+        "NEEDS_FACT_SELECTION"
+    };
     Ok(json!({
         "facts":facts,
         "evidence":evidence,
-        "grounding":{"status":grounding_status,"candidateCount":top_count,"needsUserSelection":grounding_status == "AMBIGUOUS"},
+        "grounding":{"status":grounding_status,"candidateCount":top_count,"needsUserSelection":grounding_status == "AMBIGUOUS","evidenceStatus":evidence_status},
         "selectedFact":selected_fact,
         "bounded":true,
         "owner":"B12::ChangeRetconOwner"

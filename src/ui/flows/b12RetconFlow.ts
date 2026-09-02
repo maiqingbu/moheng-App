@@ -11,6 +11,11 @@ export interface RetconEvidenceOption {
   version: number
   payloadHash: string
   label: string
+  supportsFactId?: string
+  relationship?: 'FACT_SOURCE' | 'ADDITIONAL_RETCON_EVIDENCE'
+  sourceArtifactId?: string
+  sourceVersion?: number
+  sourceChapterId?: string | null
 }
 
 export interface RetconContext {
@@ -20,6 +25,7 @@ export interface RetconContext {
     status: 'UNIQUE' | 'AMBIGUOUS' | 'NO_MATCH' | 'NEEDS_QUERY'
     candidateCount: number
     needsUserSelection: boolean
+    evidenceStatus?: 'EXACT' | 'EVIDENCE_GAP' | 'NEEDS_FACT_SELECTION'
   }
   selectedFact?: RetconFactOption | null
 }
@@ -58,6 +64,13 @@ export class RetconContextSelectionError extends Error {
     super('当前描述对应多个正式事实，请先选择要修订的事实。')
     this.name = 'RetconContextSelectionError'
     this.candidates = candidates
+  }
+}
+
+export class RetconEvidenceGapError extends Error {
+  constructor() {
+    super('这条事实目前缺少可核验的来源记录，不能直接执行事实修订。')
+    this.name = 'RetconEvidenceGapError'
   }
 }
 
@@ -230,9 +243,9 @@ export function selectGroundedRetconContext(context: RetconContext, _question: s
           : candidates[0]
         : candidates.length === 1 ? candidates[0] : undefined
   if (!fact && candidates.length > 1) throw new RetconContextSelectionError(candidates)
-  const evidence = context.evidence[0]
   if (!fact) throw new Error('当前作品没有可供修订的正式事实。')
-  if (!evidence) throw new Error('当前作品没有可供核验的已有依据。')
+  const evidence = context.evidence.find(item => item.supportsFactId === fact.factId && item.relationship === 'FACT_SOURCE')
+  if (!evidence) throw new RetconEvidenceGapError()
   return { fact, evidence }
 }
 

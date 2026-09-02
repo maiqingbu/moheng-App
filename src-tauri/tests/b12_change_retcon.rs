@@ -269,7 +269,7 @@ fn b12_retcon_creates_versioned_canon_and_preserves_old_fact_history() {
         .unwrap();
     handle
         .execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:b12:father','p-b12-retcon','entity:b12:hero','父亲状态','{\"alive\":false}','A',?1,?1)",
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:b12:father','p-b12-retcon','entity:b12:hero','父亲状态','{\"alive\":false}','evidence:b12:father',1,'A',?1,?1)",
             [NOW],
         )
         .unwrap();
