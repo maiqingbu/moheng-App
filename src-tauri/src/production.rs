@@ -511,6 +511,7 @@ fn current_authority_digest(
     crate::narrative::relevant_state_digest(&input)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_plan_is_current(
     connection: &libsql_rusqlite::Connection,
     request: &Value,

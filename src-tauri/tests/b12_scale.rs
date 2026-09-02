@@ -3,6 +3,7 @@ use ai_novel_production_system_core::commands::{execute_command_impl, KernelStat
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::change_retcon::rebuild_global_dependency_summary;
+use ai_novel_production_system_core::repositories::ops::SearchService;
 use ai_novel_production_system_core::repositories::ops::{FixtureSpec, LongBookFixture};
 use serde_json::json;
 use std::sync::Arc;
@@ -42,6 +43,11 @@ fn b12_three_million_dependency_preflight_has_bounded_cold_and_warm_paths() {
         NOW,
     )
     .unwrap();
+    // The scale fixture models an already-opened project whose ordinary B04
+    // search projection is current. This is separate from the B12 dependency
+    // summary: the cold B12 measurement below deliberately has no dependency
+    // summary and must return the bounded bootstrap response.
+    SearchService::reconcile(&connection, "p-b12-scale", NOW).unwrap();
     connection
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON")
         .unwrap();

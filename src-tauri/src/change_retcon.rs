@@ -273,7 +273,7 @@ fn change_target_input<'a>(input: &'a Value, requested_change: &'a Value) -> Opt
         .filter(|value| !value.is_null())
 }
 
-fn target_patch<'a>(requested_change: &'a Value) -> Option<&'a Value> {
+fn target_patch(requested_change: &Value) -> Option<&Value> {
     requested_change
         .get("patch")
         .or_else(|| requested_change.get("changes"))
