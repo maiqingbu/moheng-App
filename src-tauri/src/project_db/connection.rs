@@ -237,6 +237,14 @@ pub fn migrate_project(
         [],
         |row| row.get(0),
     )?;
+    if !needs_full_migration && h03_exists && b04_index_exists {
+        // A fully migrated project needs no writer transaction just to prove
+        // that every numbered migration is still present.  B12 preflight
+        // opens a writer for its own atomic command transaction; keeping this
+        // migration no-op read-only avoids an extra synchronous commit on a
+        // large dependency database.
+        return Ok(());
+    }
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         if needs_full_migration {

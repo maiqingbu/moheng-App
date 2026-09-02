@@ -354,10 +354,10 @@ impl ProjectManager {
                 }
                 return Err(error.into());
             }
-            record_runtime_profile(&connection, project_id, now).map_err(|error| {
-                ManagerError::Database(DatabaseError::Integrity(error.to_string()))
-            })?;
             if ensure_projection {
+                record_runtime_profile(&connection, project_id, now).map_err(|error| {
+                    ManagerError::Database(DatabaseError::Integrity(error.to_string()))
+                })?;
                 crate::repositories::ops::SearchService::ensure_projection(
                     &connection,
                     project_id,
@@ -366,10 +366,10 @@ impl ProjectManager {
                 .map_err(|error| {
                     ManagerError::Database(DatabaseError::Integrity(error.to_string()))
                 })?;
+                let catalog = CatalogRepository::open(&self.paths, now)?;
+                CatalogRepository::touch_opened(&catalog, project_id, now)?;
+                CatalogRepository::set_compatibility(&catalog, project_id, "COMPATIBLE", now)?;
             }
-            let catalog = CatalogRepository::open(&self.paths, now)?;
-            CatalogRepository::touch_opened(&catalog, project_id, now)?;
-            CatalogRepository::set_compatibility(&catalog, project_id, "COMPATIBLE", now)?;
             Ok(ProjectHandle {
                 connection,
                 project_id: project_id.to_string(),
