@@ -2,11 +2,20 @@ use ai_novel_production_system_core::commands::{execute_command_impl, KernelStat
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use libsql_rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 const NOW: &str = "2026-09-02T05:00:00Z";
+
+#[test]
+fn b12_same_revision_with_changed_authority_digest_is_stale() {
+    assert_eq!(
+        evaluate_plan_stale(7, &"a".repeat(64), 7, &"b".repeat(64)),
+        PlanStaleStatus::PlanStale
+    );
+}
 
 fn test_state(project_id: &str) -> KernelState {
     let temp = tempfile::tempdir().expect("temporary project root");
