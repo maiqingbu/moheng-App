@@ -139,9 +139,10 @@ test('NEG-25 Health remains unavailable in B12', () => {
   assert.match(read('src/app/router.ts'), /health.*UnavailableFeature/)
 })
 
-test('NEG-26 B12 does not add a migration over frozen 0001-0010', () => {
+test('NEG-26 B12 only adds an additive migration after frozen 0001-0010', () => {
   const migrations = fs.readdirSync(path.join(root, 'src-tauri/migrations'))
-  assert.equal(migrations.filter(name => /^0011|^0012/.test(name)).length, 0)
+  assert.equal(migrations.filter(name => /^0012/.test(name)).length, 0)
+  assert.equal(migrations.filter(name => /^0011/.test(name)).length, 1)
 })
 
 test('NEG-27 acceptance is fail closed on missing evidence', () => {

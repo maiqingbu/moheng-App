@@ -266,10 +266,7 @@ fn merge_json_patch(target: &mut Value, patch: &Value) {
     }
 }
 
-fn change_target_input<'a>(
-    input: &'a Value,
-    requested_change: &'a Value,
-) -> Option<&'a Value> {
+fn change_target_input<'a>(input: &'a Value, requested_change: &'a Value) -> Option<&'a Value> {
     input
         .get("targetAuthority")
         .or_else(|| requested_change.get("targetAuthority"))
@@ -303,8 +300,32 @@ fn validate_typed_target_payload(artifact_type: &str, payload: &Value) -> Result
     }
 }
 
+fn target_class(artifact_type: Option<&str>) -> &'static str {
+    match artifact_type {
+        Some("BookPlan" | "VolumeIntent" | "VolumePlan" | "ChapterPlan") => "PLAN_CHANGE",
+        Some("StoryConstitution" | "OpeningContract") => "NON_CANON_AUTHORITY_CHANGE",
+        Some(_) => "UNSUPPORTED",
+        None => "PROJECTION_ONLY",
+    }
+}
+
 fn retcon_plan_digest(plan: &repository::RetconPlanRecord) -> Result<String, String> {
     sha256_canonical(&plan.downstream_impact).map_err(|error| format!("B12_RETCON_DIGEST:{error}"))
+}
+
+fn signing_impact_for_fact(
+    connection: &Connection,
+    project_id: &str,
+    fact: &Value,
+) -> Result<bool, String> {
+    let Some(chapter_id) = fact.get("sourceChapterId").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let chapter_number = crate::repositories::narrative::NarrativeRepository::chapter_number(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| format!("B12_DB:{error}"))?;
+    Ok(chapter_number.is_some_and(|number| (1..=3).contains(&number)))
 }
 
 fn resolve_typed_target(
@@ -314,11 +335,17 @@ fn resolve_typed_target(
     requested_change: &Value,
     change_seed: &Value,
 ) -> Result<Option<repository::AuthorityHeadRecord>, String> {
-    let target = change_target_input(input, requested_change).or_else(|| {
-        change_seed
-            .get("targetAuthority")
-            .filter(|value| !value.is_null())
-    });
+    let target = change_target_input(input, requested_change)
+        .or_else(|| {
+            change_seed
+                .get("targetAuthority")
+                .filter(|value| !value.is_null())
+        })
+        .or_else(|| {
+            change_seed
+                .get("requestedChange")
+                .and_then(|value| change_target_input(value, value))
+        });
     let target_ref = target
         .and_then(|value| value.get("artifactId").or_else(|| value.get("artifactRef")))
         .and_then(|value| {
@@ -346,16 +373,18 @@ fn resolve_typed_target(
     {
         return Err("B12_RETCON_REQUIRED".into());
     }
-    let scope = target.and_then(|value| value.get("scope")).and_then(|value| {
-        value
-            .get("level")
-            .and_then(Value::as_str)
-            .map(|level| (level.to_owned(), value.to_owned()))
-    });
+    let scope = target
+        .and_then(|value| value.get("scope"))
+        .and_then(|value| {
+            value
+                .get("level")
+                .and_then(Value::as_str)
+                .map(|level| (level.to_owned(), value.to_owned()))
+        });
     let (scope_level, scope_value) = scope
         .map(|(level, value)| {
-            let key = String::from_utf8(canonical_bytes(&value).unwrap_or_default())
-                .unwrap_or_default();
+            let key =
+                String::from_utf8(canonical_bytes(&value).unwrap_or_default()).unwrap_or_default();
             (level, key)
         })
         .unzip();
@@ -527,6 +556,7 @@ fn preflight(
                     "status":"SUMMARY_BOOTSTRAP_REQUIRED",
                     "changeRequestId":change_id,
                     "summaryStatus":snapshot.summary_status,
+                    "summaryBootstrapMode":"EXPLICIT_BACKGROUND_REQUIRED",
                     "fullGraphSynchronousScan":snapshot.full_graph_synchronous_scan,
                     "preflightOnly":true,
                     "bounded":true,
@@ -777,7 +807,11 @@ fn expand(
             )
             .map_err(|error| format!("B12_DB:{error}"))?;
             let page_count = page.edges.len() as i64;
-            let status = if page.frontier_pending == 0 { "COMPLETED" } else { "RUNNING" };
+            let status = if page.frontier_pending == 0 {
+                "COMPLETED"
+            } else {
+                "RUNNING"
+            };
             let next_status = if status == "COMPLETED" {
                 "PENDING_APPROVAL"
             } else {
@@ -799,8 +833,9 @@ fn expand(
                 None,
                 now,
             )
-                .map_err(|error| format!("B12_DB:{error}"))?;
-            let page_value = serde_json::to_value(&page.edges).map_err(|error| error.to_string())?;
+            .map_err(|error| format!("B12_DB:{error}"))?;
+            let page_value =
+                serde_json::to_value(&page.edges).map_err(|error| error.to_string())?;
             impact.expanded_edges = page.expanded_count;
             impact.checkpoint_offset = page.checkpoint_offset;
             impact.total_edges = impact
@@ -1113,6 +1148,7 @@ fn apply_change(
     let requested_change = input
         .get("requestedChange")
         .cloned()
+        .or_else(|| change.impact_seed.get("requestedChange").cloned())
         .unwrap_or_else(|| json!({}));
     let typed_target = resolve_typed_target(
         &handle,
@@ -1164,7 +1200,8 @@ fn apply_change(
         "impactSetId":impact.impact_set_id,
         "impactDigest":supplied_digest,
         "decisionId":decision_id,
-        "authorityType":target_type.clone()
+        "authorityType":target_type.clone(),
+        "targetClass":target_class(target_type.as_deref())
     });
     let artifact = build_artifact(
         project_id,
@@ -1195,9 +1232,7 @@ fn apply_change(
         idempotency_key,
         current_revision,
         now,
-        std::iter::once(artifact)
-            .chain(target_artifact)
-            .collect(),
+        std::iter::once(artifact).chain(target_artifact).collect(),
         None,
         vec![stale_state, applied_state],
         decision_update(&decision_id, &change_id, decision_payload),
@@ -1238,7 +1273,7 @@ fn apply_change(
     )?;
     Ok(final_response(
         &receipt,
-        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type,"authorityMutation":target_type.is_some()}),
+        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityMutation":target_type.is_some()}),
         postverify,
         "变更已完成并复核。",
     ))
@@ -1315,14 +1350,54 @@ pub fn apply_approved_on_connection(
     let requested_change = input
         .get("requestedChange")
         .cloned()
+        .or_else(|| change.impact_seed.get("requestedChange").cloned())
         .unwrap_or_else(|| json!({}));
+    let typed_target = resolve_typed_target(
+        connection,
+        project_id,
+        input,
+        &requested_change,
+        &change.impact_seed,
+    )?;
+    let (target_artifact, target_head, target_type) = if let Some(target) = typed_target {
+        let patch = target_patch(&requested_change)
+            .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
+        let mut target_payload = target.payload.clone();
+        merge_json_patch(&mut target_payload, patch);
+        validate_typed_target_payload(&target.artifact_type, &target_payload)?;
+        let scope = target_scope_value(&target)?;
+        let artifact = build_artifact_with_scope(
+            project_id,
+            command_id,
+            &target.artifact_id,
+            &target.artifact_type,
+            scope.clone(),
+            target.version + 1,
+            target_payload,
+            "APPROVED_PLAN",
+            vec![decision_id.clone()],
+            now,
+        )?;
+        let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
+            "artifactType":target.artifact_type,
+            "scope":scope,
+            "artifactId":artifact.artifact_id,
+            "version":artifact.version,
+            "payloadHash":artifact.payload_hash
+        }))
+        .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
+        let artifact_type = target.artifact_type.clone();
+        (Some(artifact), Some(head), Some(artifact_type))
+    } else {
+        (None, None, None)
+    };
     let artifact = build_artifact(
         project_id,
         command_id,
         &change_id,
         "ChangeRequest",
         1,
-        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id}),
+        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref())}),
         "MATERIALIZED",
         vec![decision_id.clone()],
         now,
@@ -1339,18 +1414,21 @@ pub fn apply_approved_on_connection(
         json!({"changeRequestId":change_id,"requestedChange":requested_change,"impactDigest":digest,"authorityStatus":"COMMITTED"}),
         json!({"owner":OWNER_NAME,"basedOnRevision":expected_revision}),
     );
-    let bundle = build_bundle(
+    let mut bundle = build_bundle(
         project_id,
         command_id,
         idempotency_key,
         expected_revision,
         now,
-        vec![artifact],
+        std::iter::once(artifact).chain(target_artifact).collect(),
         None,
         vec![stale, applied],
         decision_update(&decision_id, &change_id, decision_payload),
         "B12_CHANGE",
     )?;
+    if let Some(head) = target_head {
+        bundle.head_updates = Some(vec![head]);
+    }
     let impact_id = impact.impact_set_id.clone();
     let seed = change.impact_seed.clone();
     let receipt =
@@ -1379,7 +1457,7 @@ pub fn apply_approved_on_connection(
     Ok(json!({
         "receiptId":receipt.receipt_id,
         "receipt":receipt,
-        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id},
+        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref())},
         "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"typedRequery":true}
     }))
 }
@@ -1433,6 +1511,7 @@ fn create_change(
                 "basedOnRevision":based,
                 "targetRefs":target_refs,
                 "sourceRefs":source_refs,
+                "targetFactId":input.get("targetFactId").cloned().unwrap_or(Value::Null),
                 "targetAuthority":input.get("targetAuthority").cloned().unwrap_or(Value::Null),
                 "requestedChange":input.get("requestedChange").cloned().unwrap_or_else(|| json!({})),
                 "reason":input.get("reason").cloned().unwrap_or_else(|| json!(summary)),
@@ -1544,12 +1623,7 @@ fn create_retcon_plan(
                     return Err("B12_RETCON_EVIDENCE_NOT_FOUND".into());
                 }
             }
-            let signing_impact = old
-                .get("sourceChapterId")
-                .and_then(Value::as_str)
-                .is_some_and(|chapter| {
-                    chapter.contains(":1") || chapter.contains(":2") || chapter.contains(":3")
-                });
+            let signing_impact = signing_impact_for_fact(connection, project_id, &old)?;
             let downstream = json!({
                 "changeRequestId":change_id,
                 "basedOnRevision":based,
@@ -1646,7 +1720,12 @@ fn apply_retcon(
     {
         return Err("B12_DECISION_STALE".into());
     }
-    if change.impact_seed.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str()) {
+    if change
+        .impact_seed
+        .get("retconPlanId")
+        .and_then(Value::as_str)
+        != Some(plan_id.as_str())
+    {
         return Err("B12_DECISION_STALE".into());
     }
     if plan
@@ -1869,7 +1948,12 @@ pub fn apply_retcon_on_connection(
     {
         return Err("B12_DECISION_STALE".into());
     }
-    if change.impact_seed.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str()) {
+    if change
+        .impact_seed
+        .get("retconPlanId")
+        .and_then(Value::as_str)
+        != Some(plan_id.as_str())
+    {
         return Err("B12_DECISION_STALE".into());
     }
     if plan
@@ -1980,11 +2064,8 @@ pub fn apply_retcon_on_connection(
         .ok_or_else(|| "B12_IMPACT_SET_REQUIRED".to_string())?
         .to_owned();
     let seed = change.impact_seed.clone();
-    let receipt = CommitService::commit_with_post_apply(
-        connection,
-        &bundle,
-        now,
-        |connection, receipt| {
+    let receipt =
+        CommitService::commit_with_post_apply(connection, &bundle, now, |connection, receipt| {
             repository::mark_applied(
                 connection,
                 project_id,
@@ -1999,9 +2080,8 @@ pub fn apply_retcon_on_connection(
             .map_err(|error| {
                 crate::commit::CommitError::ProjectCommandApply(format!("B12_DB:{error}"))
             })
-        },
-    )
-    .map_err(|error| error.to_string())?;
+        })
+        .map_err(|error| error.to_string())?;
     let current = repository::current_fact(connection, project_id, &old_fact_id)
         .map_err(|error| format!("B12_DB:{error}"))?;
     let new_current = repository::current_fact(connection, project_id, &new_fact_id)

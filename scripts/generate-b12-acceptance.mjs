@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export const START_COMMIT = 'edadc96aba68fe89b8e1e453387eb6ffe3fd9968'
+export const START_COMMIT = 'e784c9206ce60fd8c8cbe7da827234850caba20e'
 export const B12_BLOCKING_GATES = Array.from({ length: 61 }, (_, index) => `B12-A${String(index).padStart(2, '0')}`)
 export const NEGATIVE_BLOCKING_GATES = Array.from({ length: 28 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
 export const R2_GLOBAL_BLOCKING_GATES = [
@@ -56,6 +56,7 @@ export const B12_ENGINEERING_GATES = [
   'b12_product_ux',
   'b12_language_scan',
   'b12_scale_bound',
+  'b12_architecture',
 ]
 export const RELEASE_GATES = [
   'source_binding',
@@ -97,9 +98,21 @@ export function sourceBindingPass(report) {
 export function evaluateAcceptance(report = {}, options = {}) {
   const gates = report.gates ?? {}
   const requiredGates = options.excludeSelfGate
-    ? REQUIRED_BLOCKING_GATES.filter(name => name !== 'fresh_package_generator')
+    ? REQUIRED_BLOCKING_GATES.filter(name => !['B12-A59', 'fresh_package_generator'].includes(name))
     : REQUIRED_BLOCKING_GATES
-  const missingGates = requiredGates.filter(name => !gates[name])
+  const evidenceDir = options.evidenceDir
+  const sourceExists = source => {
+    if (!source) return false
+    if (Array.isArray(source)) return source.every(item => sourceExists(item))
+    return fs.existsSync(source) || (evidenceDir && fs.existsSync(path.resolve(evidenceDir, source)))
+  }
+  const missingGates = requiredGates.filter(name => {
+    const gate = gates[name]
+    return !gate || (evidenceDir && !sourceExists(gate.source))
+  })
+  const missingEvidenceSources = requiredGates
+    .filter(name => gates[name] && evidenceDir && !sourceExists(gates[name].source))
+    .map(name => ({ gate: name, source: gates[name].source ?? null }))
   const failedGates = requiredGates.filter(name => gates[name] && !gatePassed(gates[name]))
   const sourceBinding = sourceBindingPass(report)
   return {
@@ -119,6 +132,7 @@ export function evaluateAcceptance(report = {}, options = {}) {
     requiredBlockingGates: requiredGates,
     failedGates,
     missingGates,
+    missingEvidenceSources,
   }
 }
 
@@ -127,7 +141,7 @@ export function generateAcceptance(evidenceDir = process.env.B12_EVIDENCE_DIR ??
   if (!fs.existsSync(reportPath)) throw new Error(`B12_EVIDENCE_MISSING:${reportPath}`)
   const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
   const acceptance = {
-    ...evaluateAcceptance(report, { excludeSelfGate: process.env.B12_GENERATOR_SELF_CHECK === '1' }),
+    ...evaluateAcceptance(report, { excludeSelfGate: process.env.B12_GENERATOR_SELF_CHECK === '1', evidenceDir }),
     generatedAt: new Date().toISOString(),
     generator: 'scripts/generate-b12-acceptance.mjs',
   }
@@ -141,4 +155,3 @@ if (process.argv[1]?.endsWith('generate-b12-acceptance.mjs')) {
   console.log(`B12 acceptance generated: ${result.status}; missing=${result.missingGates.length}; failed=${result.failedGates.length}`)
   if (result.status !== 'READY_FOR_ACCEPTANCE') process.exitCode = 1
 }
-

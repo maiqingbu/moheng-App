@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 
 const store = useProjectStore()
+const route = useRoute()
 type HistoryKind = 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
 const filters: { value: HistoryKind; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -15,18 +17,50 @@ const filters: { value: HistoryKind; label: string }[] = [
 ]
 const kind = ref<HistoryKind>('all')
 const requestText = ref('')
+const retconTargetRef = ref('')
+const retconReplacement = ref('')
+const retconEvidenceRef = ref('')
 const modal = ref<'change' | 'retcon' | null>(null)
 const history = computed(() => store.history)
 const state = computed(() => store.commandState('history-create'))
 const impactState = computed(() => store.commandState('history-impact'))
 const decisionState = computed(() => store.commandState('history-decision'))
 const applyState = computed(() => store.commandState('history-apply'))
-const activeChange = ref<{ id: string; type: 'CHANGE' | 'RETCON'; digest: string; scope: string; status: string; expandedEdges: number; totalEdges: number } | null>(null)
+const activeChange = ref<{ id: string; type: 'CHANGE' | 'RETCON'; digest: string; scope: string; status: string; expandedEdges: number; totalEdges: number; targetFactId?: string; replacement?: string; evidenceRef?: string; planId?: string; planDigest?: string } | null>(null)
 const impactItems = ref<string[]>([])
 const actionMessage = ref('')
 const historyStatusLabel = (value: string) => ({ applied: '已生效', approved: '已确认', impact_ready: '影响已算出', draft: '草稿', pending: '待确认' } as Record<string, string>)[value] ?? '待确认'
 
-onMounted(() => void store.loadHistory())
+async function restoreChange(changeId: string) {
+  try {
+    const detail = await store.queryChangeRequest(changeId)
+    const impact = detail.impact && typeof detail.impact === 'object' ? detail.impact as Record<string, unknown> : {}
+    const changeType = detail.changeType === 'RETCON' ? 'RETCON' : 'CHANGE'
+    const requested = detail.requestedChange && typeof detail.requestedChange === 'object' ? detail.requestedChange as Record<string, unknown> : {}
+    const replacement = requested.replacement && typeof requested.replacement === 'object' ? requested.replacement as Record<string, unknown> : {}
+    const replacementObject = replacement.objectJson && typeof replacement.objectJson === 'object' ? replacement.objectJson as Record<string, unknown> : {}
+    activeChange.value = {
+      id: changeId,
+      type: changeType,
+      digest: typeof detail.impactDigest === 'string' ? detail.impactDigest : '',
+      scope: typeof impact.scopeClass === 'string' ? impact.scopeClass : 'LOCAL',
+      status: typeof detail.status === 'string' ? detail.status : 'PREFLIGHTED',
+      expandedEdges: Number(impact.expandedEdges ?? 0),
+      totalEdges: Number(impact.totalEdges ?? 0),
+      targetFactId: typeof detail.targetFactId === 'string' ? detail.targetFactId : undefined,
+      replacement: typeof replacementObject.description === 'string' ? replacementObject.description : undefined,
+      evidenceRef: typeof requested.evidenceRef === 'string' ? requested.evidenceRef : undefined,
+    }
+  } catch (error) {
+    actionMessage.value = error instanceof Error ? error.message : '无法恢复这项变更提案。'
+  }
+}
+
+onMounted(() => {
+  void store.loadHistory()
+  const changeId = route.query.changeRequestId
+  if (typeof changeId === 'string' && changeId.trim()) void restoreChange(changeId)
+})
 async function setKind(next: HistoryKind) { kind.value = next; await store.loadHistory(next, true) }
 async function create() {
   const projectId = store.currentProjectId
@@ -42,7 +76,16 @@ async function create() {
       scope: 'PROJECT',
       summary: requestText.value.trim(),
       reason: requestText.value.trim(),
-      requestedChange: { description: requestText.value.trim() },
+      targetFactId: type === 'RETCON' ? retconTargetRef.value.trim() : undefined,
+      targetRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : undefined,
+      sourceRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : undefined,
+      requestedChange: {
+        description: requestText.value.trim(),
+        ...(type === 'RETCON' ? {
+          replacement: { objectJson: { description: retconReplacement.value.trim() } },
+          evidenceRef: retconEvidenceRef.value.trim(),
+        } : {}),
+      },
     },
   })
   const preflight = await store.runCommand('history-impact', {
@@ -59,10 +102,16 @@ async function create() {
     status: typeof result.status === 'string' ? result.status : 'PREFLIGHTED',
     expandedEdges: typeof result.expandedEdges === 'number' ? result.expandedEdges : 0,
     totalEdges: typeof result.totalEdges === 'number' ? result.totalEdges : 0,
+    targetFactId: type === 'RETCON' ? retconTargetRef.value.trim() : undefined,
+    replacement: type === 'RETCON' ? retconReplacement.value.trim() : undefined,
+    evidenceRef: type === 'RETCON' ? retconEvidenceRef.value.trim() : undefined,
   }
   impactItems.value = []
   modal.value = null
   requestText.value = ''
+  retconTargetRef.value = ''
+  retconReplacement.value = ''
+  retconEvidenceRef.value = ''
   await store.loadHistory('all', true)
 }
 async function continueImpact() {
@@ -94,7 +143,45 @@ async function rejectChange() {
 async function approveAndApply() {
   if (!activeChange.value || !activeChange.value.digest) return
   if (activeChange.value.type === 'RETCON') {
-    actionMessage.value = '这项请求已识别为事实修订，需要先补充事实修订方案和依据。'
+    if (!activeChange.value.targetFactId || !activeChange.value.replacement || !activeChange.value.evidenceRef) {
+      actionMessage.value = '请先选定当前事实、填写新的事实内容，并提供已有依据。'
+      return
+    }
+    const planResult = await store.runCommand('history-retcon-plan', {
+      type: 'retcon_plan_create',
+      projectId: store.currentProjectId ?? undefined,
+      payload: {
+        changeRequestId: activeChange.value.id,
+        retconPlanId: `retcon-plan:${activeChange.value.id}`,
+        targetFactId: activeChange.value.targetFactId,
+        reason: '用户在版本与变更记录中确认事实修订方案',
+        fixType: 'REWRITE',
+        replacement: { objectJson: { description: activeChange.value.replacement } },
+        evidenceRefs: [{ artifactId: activeChange.value.evidenceRef, version: 1 }],
+      },
+    })
+    const plan = planResult.result ?? {}
+    const planId = String(plan.retconPlanId ?? '')
+    const planDigest = String(plan.planDigest ?? '')
+    if (!planId || !planDigest) {
+      actionMessage.value = '事实修订方案未能完成核对。'
+      return
+    }
+    activeChange.value = { ...activeChange.value, planId, planDigest, status: 'PLAN_READY' }
+    actionMessage.value = '事实修订方案已生成，正在提交最终决定并执行。'
+    await store.runCommand('history-decision', {
+      type: 'change_request_decide',
+      projectId: store.currentProjectId ?? undefined,
+      payload: { changeRequestId: activeChange.value.id, retconPlanId: planId, planDigest, decision: 'APPROVE', impactDigest: activeChange.value.digest, scopeAcknowledged: true, riskAcknowledged: true },
+    })
+    const result = await store.runCommand('history-retcon-apply', {
+      type: 'retcon_apply',
+      projectId: store.currentProjectId ?? undefined,
+      payload: { changeRequestId: activeChange.value.id, retconPlanId: planId, planDigest, impactDigest: activeChange.value.digest },
+    })
+    activeChange.value = { ...activeChange.value, status: result.postverify?.status === 'VERIFIED' ? 'APPLIED' : 'VERIFY_REQUIRED' }
+    actionMessage.value = result.postverify?.status === 'VERIFIED' ? '事实修订已完成，并已重新核对版本历史。' : '事实修订已提交，但复核未完成。'
+    await store.loadHistory('all', true)
     return
   }
   await store.runCommand('history-decision', {
@@ -136,7 +223,7 @@ async function approveAndApply() {
       <div v-if="impactItems.length" class="banner info"><div><div class="banner-title">受影响内容</div><div class="banner-copy">{{ [...new Set(impactItems)].slice(0, 12).join('、') }}{{ impactItems.length > 12 ? ' 等' : '' }}</div></div></div>
       <p v-if="activeChange.type === 'RETCON'" class="banner warning">这项请求涉及已经确认的事实，需先查看原事实、依据和事实修订方案。</p>
       <p v-if="actionMessage" class="banner warning">{{ actionMessage }}</p>
-      <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="continueImpact">继续分析影响</button><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="cancelImpact">取消分析</button><button class="btn small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="rejectChange">拒绝方案</button><button class="btn primary small" :disabled="activeChange.type === 'RETCON' || !activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="approveAndApply">确认并执行</button></div>
+      <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="continueImpact">继续分析影响</button><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="cancelImpact">取消分析</button><button class="btn small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="rejectChange">拒绝方案</button><button class="btn primary small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="approveAndApply">确认并执行</button></div>
       <CommandFeedback :state="impactState" /><CommandFeedback :state="decisionState" /><CommandFeedback :state="applyState" />
     </section>
 
@@ -156,8 +243,13 @@ async function approveAndApply() {
 
     <BaseModal :open="!!modal" :title="modal === 'retcon' ? '建立事实修订提案' : '建立修改请求'" :subtitle="modal === 'retcon' ? '重大正式事实不会被普通保存覆盖，需补充事实修订方案。' : '先计算影响，再决定是否应用。'" @close="modal = null">
       <textarea v-model="requestText" class="textarea" placeholder="描述你希望改变的内容" />
+      <template v-if="modal === 'retcon'">
+        <label class="field"><span class="field-label">要修订的当前事实</span><input v-model="retconTargetRef" class="input" placeholder="选择或填写当前事实记录" /></label>
+        <label class="field"><span class="field-label">新的事实内容</span><textarea v-model="retconReplacement" class="textarea" placeholder="填写你确认后的新事实" /></label>
+        <label class="field"><span class="field-label">已有依据</span><input v-model="retconEvidenceRef" class="input" placeholder="填写已存在的核验依据" /></label>
+      </template>
       <CommandFeedback :state="state" />
-      <template #footer><button class="btn" @click="modal = null">取消</button><button class="btn primary" :disabled="!requestText.trim()" @click="create">开始影响分析</button></template>
+      <template #footer><button class="btn" @click="modal = null">取消</button><button class="btn primary" :disabled="!requestText.trim() || (modal === 'retcon' && (!retconTargetRef.trim() || !retconReplacement.trim() || !retconEvidenceRef.trim()))" @click="create">开始影响分析</button></template>
     </BaseModal>
   </div>
 </template>

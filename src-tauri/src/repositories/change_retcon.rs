@@ -359,7 +359,10 @@ pub fn expand_impact_batch(
             continue;
         }
         let has_more = source_edges.len() as i64 > remaining;
-        let batch = source_edges.into_iter().take(remaining as usize).collect::<Vec<_>>();
+        let batch = source_edges
+            .into_iter()
+            .take(remaining as usize)
+            .collect::<Vec<_>>();
         for edge in &batch {
             let mut path = serde_json::from_str::<Vec<String>>(&raw_path).unwrap_or_default();
             if path.is_empty() {
@@ -443,7 +446,11 @@ pub fn expand_impact_batch(
         "frontierPending": frontier_pending,
         "maxFrontierBatch": bound
     });
-    let status = if frontier_pending == 0 { "COMPLETED" } else { "RUNNING" };
+    let status = if frontier_pending == 0 {
+        "COMPLETED"
+    } else {
+        "RUNNING"
+    };
     connection.execute(
         "UPDATE impact_sets SET processed_pages_json=?1,expanded_edges=?2,checkpoint_offset=?3,total_edges=MAX(total_edges,?4),status=?5,preflight_state='EXPANDED',updated_at=?6 WHERE project_id=?7 AND impact_set_id=?8",
         libsql_rusqlite::params![
@@ -478,7 +485,12 @@ pub fn impact_item_page(
         "SELECT item_ref,source_ref,dependency_type,impact_class,depth,path_json,first_edge_id FROM impact_items WHERE project_id=?1 AND impact_set_id=?2 ORDER BY depth,item_ref LIMIT ?3 OFFSET ?4",
     )?;
     let rows = statement.query_map(
-        libsql_rusqlite::params![project_id, impact_set_id, limit.clamp(1, 100) + 1, cursor.max(0)],
+        libsql_rusqlite::params![
+            project_id,
+            impact_set_id,
+            limit.clamp(1, 100) + 1,
+            cursor.max(0)
+        ],
         |row| {
             let path: String = row.get(5)?;
             Ok(json!({
@@ -1109,6 +1121,10 @@ pub fn activate_stale_queue(
     impact_set_id: &str,
     now: &str,
 ) -> Result<i64, ChangeRetconRepositoryError> {
+    // The original sourceRefs are retained in change_requests for audit and
+    // are only used to seed the durable traversal; this function consumes the
+    // resulting ImpactSet rather than re-querying sourceRefs with a weaker SQL
+    // approximation.
     let changed = connection.execute(
         "INSERT OR IGNORE INTO stale_queue(stale_id,project_id,change_request_id,target_ref,stale_reason,revalidate_class,processed,created_at,updated_at)
          SELECT 'stale:'||?2||':'||item.item_ref,?1,?2,item.item_ref,'B12_CHANGE_IMPACT',
@@ -1216,26 +1232,15 @@ pub fn change_request_detail(
     };
     let impact = load_impact_set(connection, project_id, change_request_id)?;
     let (impact_value, impact_digest) = if let Some(impact) = impact {
-        let query_global = impact
-            .estimate
-            .get("queryGlobal")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let refs = change
-            .impact_seed
-            .get("sourceRefs")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
         let digest = impact
             .estimate
             .get("impactDigest")
             .cloned()
             .unwrap_or(Value::Null);
-        let items = dependency_page(
+        let items = impact_item_page(
             connection,
             project_id,
-            &refs,
-            query_global,
+            &impact.impact_set_id,
             cursor.max(0),
             page_size.clamp(1, MAX_DETAIL_PAGE),
         )?;
@@ -1267,6 +1272,8 @@ pub fn change_request_detail(
         "summary":change.summary,
         "status":change.status,
         "basedOnRevision":change.impact_seed.get("basedOnRevision").cloned().unwrap_or(Value::Null),
+        "targetFactId":change.impact_seed.get("targetFactId").cloned().unwrap_or(Value::Null),
+        "requestedChange":change.impact_seed.get("requestedChange").cloned().unwrap_or_else(|| json!({})),
         "impactDigest":impact_digest,
         "impact":impact_value,
         "decisionId":change.decision_ref,

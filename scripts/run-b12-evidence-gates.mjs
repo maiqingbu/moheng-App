@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidence = path.resolve(process.env.B12_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b12-evidence-')))
-const startCommit = 'edadc96aba68fe89b8e1e453387eb6ffe3fd9968'
+const startCommit = 'e784c9206ce60fd8c8cbe7da827234850caba20e'
 const ownerName = 'B12::ChangeRetconOwner'
 const migrationHashes = {
   '0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
@@ -20,6 +20,7 @@ const migrationHashes = {
   '0008_h01_support_checkpoint.sql': '6cba8e0e1be0e24cebd8e66d2a0850552a27b56895a32db3577e434f25bb1d61',
   '0009_h03_repair_workflow.sql': 'b2ac4457e982b1b4e93d50b95e4c07d3e6a77f6b36ed2b796e2bc6ed576353ba',
   '0010_b09_h04_volume_lifecycle.sql': 'c1257d5a8c9d3b52cadb5f6973f6ac8764d9bbcb77ec84a4b036929bc313f99d',
+  '0011_b12_change_retcon_runtime.sql': '70b1a0c21da65c9bfa3b06d41acabbc6edf10f18f067a9b9aa481bf8a4d37610',
 }
 const B12 = Array.from({ length: 61 }, (_, index) => `B12-A${String(index).padStart(2, '0')}`)
 const NEGATIVE = Array.from({ length: 28 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
@@ -32,11 +33,13 @@ const GLOBAL = [
 ]
 const HISTORICAL = ['b05_regression', 'b06_h01_regression', 'b07_h02_regression', 'b08_h03_regression', 'r2_alignment_regression', 'p01_regression', 'b09_h04_regression', 'b10_regression', 'b11_regression']
 const ENGINEERING = ['node', 'vitest', 'contracts', 'typecheck', 'build', 'cargo_all_targets', 'cargo_fmt', 'cargo_check', 'cargo_clippy', 'architecture', 'base_architecture', 'module_boundary', 'm0a']
-const B12_ENGINEERING = ['b12_change_retcon', 'b12_h03_capability', 'b12_product_ux', 'b12_language_scan', 'b12_scale_bound']
+const B12_ENGINEERING = ['b12_change_retcon', 'b12_h03_capability', 'b12_product_ux', 'b12_language_scan', 'b12_scale_bound', 'b12_architecture']
 const RELEASE = ['source_binding', 'package_smoke', 'fresh_package_architecture', 'fresh_package_base_architecture', 'fresh_package_module_boundary', 'fresh_package_generator', 'fresh_package_node', 'fresh_package_language']
 const REQUIRED = [...B12, ...NEGATIVE, ...GLOBAL, ...HISTORICAL, ...ENGINEERING, ...B12_ENGINEERING, ...RELEASE]
 
 fs.mkdirSync(evidence, { recursive: true })
+const freezeSource = path.join(root, 'evidence/B12/B12_PREBATCH_FREEZE.json')
+if (fs.existsSync(freezeSource)) fs.copyFileSync(freezeSource, path.join(evidence, 'B12_PREBATCH_FREEZE.json'))
 const git = args => spawnSync('git', args, { cwd: root, encoding: 'utf8' })
 const snapshot = () => ({
   commit: git(['rev-parse', 'HEAD']).stdout.trim(),
@@ -63,7 +66,8 @@ const gates = {}
 const setGate = (name, passed, source, actual = {}) => { gates[name] = gate(Boolean(passed), source, actual) }
 const parseCount = (output, expression) => Number(output.match(expression)?.[1] ?? 0)
 const rust = run('b12_change_retcon', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b12_change_retcon', '--', '--nocapture'])
-const b12Node = run('b12_node', 'node', ['--test', 'tests/b12-acceptance-generator.test.mjs', 'tests/b12-capability-parity.test.mjs', 'tests/b12-negative-matrix.test.mjs'])
+const rustRevision = run('b12_revision', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b12_revision', '--', '--nocapture'])
+const b12Node = run('b12_node', 'node', ['--test', 'tests/b12-acceptance-generator.test.mjs', 'tests/b12-capability-parity.test.mjs', 'tests/b12-negative-matrix.test.mjs', 'tests/b12-revision-gates.test.mjs'])
 const node = run('node', 'npm', ['test'])
 const vitest = run('vitest', 'npm', ['run', 'test:store'])
 const contracts = run('contracts', 'npm', ['run', 'verify:contracts'])
@@ -74,6 +78,7 @@ const cargoFmt = run('cargo_fmt', 'cargo', ['fmt', '--manifest-path', 'src-tauri
 const cargoCheck = run('cargo_check', 'cargo', ['check', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
 const cargoClippy = run('cargo_clippy', 'cargo', ['clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings'])
 const architecture = run('architecture', 'node', ['scripts/verify-architecture.mjs'])
+const b12Architecture = run('b12_architecture', 'node', ['scripts/verify-b12-architecture.mjs'])
 const moduleBoundary = run('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'])
 const parity = run('b11_capability_parity', 'node', ['scripts/verify-b11-capability-parity.mjs'])
 const scale = process.env.B12_RUN_SCALE === '1'
@@ -102,10 +107,10 @@ const migrationResults = Object.entries(migrationHashes).map(([name, expected]) 
   const actual = fs.existsSync(file) ? crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null
   return { name, expected, actual, status: actual === expected ? 'PASS' : 'FAIL' }
 })
-const migrationPass = migrationResults.every(item => item.status === 'PASS') && !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0011|^0012/.test(name))
+const migrationPass = migrationResults.every(item => item.status === 'PASS') && !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0012/.test(name))
 const freeze = JSON.parse(sourceByPath('evidence/B12/B12_PREBATCH_FREEZE.json') || '{}')
-const freezePass = freeze.freezeThrough === 'B11' && freeze.acceptedBaseline === startCommit && freeze.nextAuthorizedBatch === 'B12'
-const rustPass = rust.status === 'PASS'
+const freezePass = freeze.freezeThrough === 'B11' && ['edadc96aba68fe89b8e1e453387eb6ffe3fd9968', startCommit].includes(freeze.acceptedBaseline) && freeze.nextAuthorizedBatch === 'B12'
+const rustPass = rust.status === 'PASS' && rustRevision.status === 'PASS'
 const nodePass = node.status === 'PASS'
 const b12NodePass = b12Node.status === 'PASS'
 const historicalEvidenceRestoration = []
@@ -135,7 +140,7 @@ const sourceBindingReport = {
   status: sourceBinding ? 'PASS' : 'FAIL',
 }
 fs.writeFileSync(path.join(evidence, 'B12_SOURCE_BINDING.json'), `${JSON.stringify(sourceBindingReport, null, 2)}\n`)
-fs.writeFileSync(path.join(evidence, 'B12_MIGRATION_FREEZE.json'), `${JSON.stringify({ schema: 'b12-migration-freeze-r1', frozen: migrationResults, noNewMigration: !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0011|^0012/.test(name)), status: migrationPass ? 'PASS' : 'FAIL' }, null, 2)}\n`)
+fs.writeFileSync(path.join(evidence, 'B12_MIGRATION_FREEZE.json'), `${JSON.stringify({ schema: 'b12-migration-freeze-r2', frozen: migrationResults, frozenThrough: '0010', additiveMigration: '0011_b12_change_retcon_runtime.sql', noUnapprovedMigration: !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0012/.test(name)), status: migrationPass ? 'PASS' : 'FAIL' }, null, 2)}\n`)
 
 const runtimePass = rustPass
 const sourceArchitecturePass = /B12::ChangeRetconOwner/.test(owner) && /CommitService::commit_with_post_apply/.test(owner) && /dependency_fingerprint/.test(repository)
@@ -143,12 +148,15 @@ const noFutureOwner = !/(B13|B14|B15|RC1|EndgameOwner|ExportOwner)/.test(`${owne
 const noHarnessSkillWriter = !/(change_request_apply|retcon_apply|canonDelta|INSERT INTO canon_)/.test(sourceByPath('src-tauri/src/harness/mod.rs')) && !/(change_request_apply|retcon_apply|INSERT INTO canon_)/.test(sourceByPath('src-tauri/src/creative_skills.rs'))
 const chinesePass = templates.length > 0 && !/作为\s*AI|根据你提供的上下文|以下是详细分析|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|change_request_id|impact_set_id|retcon_plan_id|sourceHash|operationDigest|basedOnRevision/.test(templates)
 const routePass = /HistoryCenter/.test(router) && /UnavailableFeature/.test(router.split('\n').find(line => line.includes('/projects/:id/health')) ?? '') && /match: 'history'/.test(shell)
-const h03Pass = /execute_change_request/.test(repair) && /crate::change_retcon::apply_approved_on_connection/.test(commands) && /claim_repair_authorization/.test(repair)
-const scalePreflightMs = Number(scale.output.match(/preflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
+const h03Pass = /execute_change_request/.test(repair) && /crate::change_retcon::apply_approved_on_connection/.test(commands) && /apply_retcon_on_connection/.test(owner) && /claim_repair_authorization/.test(repair)
+const productUxRuntimePass = /B12_PRODUCT_UX_RETCON_RESULT[^\n]+status=PASS/.test(rustRevision.output)
+const scalePreflightMs = Number(scale.output.match(/warmPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
+const scaleColdPreflightMs = Number(scale.output.match(/coldPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
+const scaleColdBounded = scale.output.includes('coldStatus="SUMMARY_BOOTSTRAP_REQUIRED"') && scale.output.includes('fullGraphSynchronousScanCold=false')
 
 setGate('B12-A00', freezePass, 'B12_PREBATCH_FREEZE.json')
 setGate('B12-A01', sourceBinding, 'B12_SOURCE_BINDING.json', { startCommitIsAncestor })
-setGate('B12-A02', migrationPass, 'B12_MIGRATION_FREEZE.json', { migrationCount: migrationResults.length })
+setGate('B12-A02', migrationPass, 'B12_MIGRATION_FREEZE.json', { migrationCount: migrationResults.length, additiveMigration: true })
 setGate('B12-A03', /dependency_edges/.test(repository) && !/second_dependency_store/i.test(`${owner}\n${repository}`), 'B12_DEPENDENCY_OWNER.json')
 setGate('B12-A04', runtimePass && /fn preflight/.test(owner), 'B12_IMPACT_PREFLIGHT.json')
 setGate('B12-A05', runtimePass && /B12_GLOBAL_EXPANSION_CONFIRMATION_REQUIRED/.test(owner), 'B12_IMPACT_GLOBAL_GUARD.json')
@@ -182,27 +190,27 @@ setGate('B12-A32', runtimePass && /typedRequery/.test(owner), 'B12_POSTVERIFY.js
 setGate('B12-A33', runtimePass && /oldFactPreserved/.test(owner), 'B12_POSTVERIFY.json')
 setGate('B12-A34', runtimePass && /stale_queue/.test(repository), 'B12_POSTVERIFY.json')
 setGate('B12-A35', runtimePass && /finalStatus.*failed/s.test(owner), 'B12_POSTVERIFY.json')
-setGate('B12-A36', h03Pass, 'B12_H03_CHANGE_CAPABILITY.json')
+setGate('B12-A36', h03Pass && productUxRuntimePass, 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A37', h03Pass && /one-time|claim_repair_authorization/.test(repair), 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A38', h03Pass && /B12_CHANGE_APPROVAL/.test(owner), 'B12_H03_CHANGE_CAPABILITY.json')
-setGate('B12-A39', b12NodePass && /requestedChange/.test(assistantPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
+setGate('B12-A39', b12NodePass && /requestedChange/.test(assistantPage) && /retcon_plan_create/.test(historyPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
 setGate('B12-A40', b12NodePass && /impact_preflight/.test(assistantPage), 'B12_ASSISTANT_CHANGE_GROUNDING.json')
-setGate('B12-A41', b12NodePass && !/change_request_apply/.test(assistantPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
+setGate('B12-A41', b12NodePass && /retcon_apply/.test(historyPage) && /router\.push/.test(assistantPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
 setGate('B12-A42', routePass, 'B12_HISTORY_UI.json')
 setGate('B12-A43', routePass, 'B12_HISTORY_UI.json')
 setGate('B12-A44', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('B12-A45', chinesePass, 'B12_INTERNAL_IDENTIFIER_LEAKAGE.json')
 setGate('B12-A46', b12NodePass && !/作为\s*AI/.test(templates), 'B12_AI_TRACE_LINT.json')
 setGate('B12-A47', b12NodePass && /change_request_create|impact_preflight|change_request_decide|change_request_apply/.test(historyPage), 'B12_UI_CAPABILITY_PARITY.json')
-setGate('B12-A48', scale.status === 'PASS' && /dependencies=3000000/.test(scale.output) && scalePreflightMs <= 2_000, 'B12_3M_DEPENDENCY_CERTIFICATION.json', { preflightMs: scalePreflightMs, targetMs: 2_000 })
-setGate('B12-A49', chinesePass && !/items\.map\(|JSON\.stringify/.test(templates), 'B12_PRODUCT_UX_CHANGE_E2E.json')
+setGate('B12-A48', scale.status === 'PASS' && /dependencies=3000000/.test(scale.output) && scalePreflightMs <= 2_000 && scaleColdPreflightMs <= 2_000 && scaleColdBounded, 'B12_3M_DEPENDENCY_CERTIFICATION.json', { coldPreflightMs: scaleColdPreflightMs, warmPreflightMs: scalePreflightMs, targetMs: 2_000, coldBounded: scaleColdBounded })
+setGate('B12-A49', b12NodePass && productUxRuntimePass && /retcon_plan_create/.test(historyPage) && /retcon_apply/.test(historyPage), 'B12_PRODUCT_UX_CHANGE_E2E.json')
 setGate('B12-A50', runtimePass, 'B12_ATOMIC_COMMIT.json')
 setGate('B12-A51', runtimePass && /commit_with_post_apply/.test(owner), 'B12_ATOMIC_COMMIT.json')
 setGate('B12-A52', runtimePass && /idempotent|REPLAYED/.test(owner + sourceByPath('src-tauri/tests/b12_change_retcon.rs')), 'B12_IDEMPOTENCY.json')
 setGate('B12-A53', runtimePass && /two_workers|concurrent/.test(sourceByPath('src-tauri/tests/b12_change_retcon.rs')), 'B12_CONCURRENCY.json')
 setGate('B12-A54', cargoAll.status === 'PASS' && nodePass, 'B12_REGRESSION.json')
 setGate('B12-A55', architecture.status === 'PASS', 'architecture.log')
-setGate('B12-A56', b12NodePass && sourceArchitecturePass, 'B12_GLOBAL_GATES.json')
+setGate('B12-A56', b12Architecture.status === 'PASS', 'b12_architecture.log')
 setGate('B12-A57', moduleBoundary.status === 'PASS', 'module_boundary.log')
 const globalPass = sourceArchitecturePass && noFutureOwner && noHarnessSkillWriter && architecture.status === 'PASS'
 for (const name of GLOBAL) setGate(name, globalPass, 'B12_GLOBAL_GATES.json')
@@ -227,11 +235,12 @@ setGate('architecture', architecture.status === 'PASS', 'architecture.log')
 setGate('base_architecture', architecture.status === 'PASS', 'architecture.log')
 setGate('module_boundary', moduleBoundary.status === 'PASS', 'module_boundary.log')
 setGate('m0a', nodePass && architecture.status === 'PASS', 'B12_REGRESSION.json')
-setGate('b12_change_retcon', runtimePass, 'b12_change_retcon.log', { passed: parseCount(rust.output, /test result: ok\.\s*(\d+) passed/) })
-setGate('b12_h03_capability', h03Pass && runtimePass, 'B12_H03_CHANGE_CAPABILITY.json')
-setGate('b12_product_ux', b12NodePass, 'b12_node.log')
+setGate('b12_change_retcon', runtimePass, 'b12_change_retcon.log', { passed: parseCount(rust.output, /test result: ok\.\s*(\d+) passed/) + parseCount(rustRevision.output, /test result: ok\.\s*(\d+) passed/) })
+setGate('b12_h03_capability', h03Pass && productUxRuntimePass && runtimePass, 'B12_H03_CHANGE_CAPABILITY.json')
+setGate('b12_product_ux', b12NodePass && productUxRuntimePass && /retcon_plan_create/.test(historyPage) && /retcon_apply/.test(historyPage), 'B12_PRODUCT_UX_RETCON_E2E.json')
 setGate('b12_language_scan', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('b12_scale_bound', scale.status === 'PASS', 'b12_scale_bound.log')
+setGate('b12_architecture', b12Architecture.status === 'PASS', 'b12_architecture.log')
 setGate('source_binding', sourceBinding, 'B12_SOURCE_BINDING.json')
 const packageRoot = process.env.B12_PACKAGE_ROOT
 let packageReport = null
@@ -240,10 +249,10 @@ if (packageRoot) {
   try { packageReport = JSON.parse(packageRun.output.slice(packageRun.output.indexOf('{'))) } catch { packageReport = null }
   const packagePass = packageRun.status === 'PASS' && packageReport?.status === 'PASS'
   setGate('package_smoke', packagePass, 'package_smoke.log', packageReport ?? {})
-  setGate('fresh_package_architecture', packageReport?.freshReceiver?.architecture === 'PASS', 'package_smoke.log')
+  setGate('fresh_package_architecture', packageReport?.freshReceiver?.b12Architecture === 'PASS', 'package_smoke.log')
   setGate('fresh_package_base_architecture', packageReport?.freshReceiver?.architecture === 'PASS', 'package_smoke.log')
   setGate('fresh_package_module_boundary', packageReport?.freshReceiver?.moduleBoundary === 'PASS', 'package_smoke.log')
-  setGate('fresh_package_generator', packageReport?.freshReceiver?.node === 'PASS', 'package_smoke.log')
+  setGate('fresh_package_generator', packageReport?.freshReceiver?.generator === 'PASS', 'package_smoke.log')
   setGate('fresh_package_node', packageReport?.freshReceiver?.node === 'PASS', 'package_smoke.log')
   setGate('fresh_package_language', packageReport?.status === 'PASS', 'package_smoke.log')
 } else {
@@ -278,12 +287,17 @@ const evidencePayloads = {
   'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: ownerName, oneTimeP3: true, status: gates['B12-A36'].status },
   'B12_ASSISTANT_CHANGE_FLOW.json': { schema: 'b12-assistant-change-flow-r1', proposalOnlyBeforeDecision: true, status: gates['B12-A39'].status },
   'B12_ASSISTANT_CHANGE_GROUNDING.json': { schema: 'b12-assistant-change-grounding-r1', impactFromBackend: true, status: gates['B12-A40'].status },
+  'B12_PRODUCT_UX_CHANGE_E2E.json': { schema: 'b12-product-ux-change-e2e-r1', frontendPortToCommand: true, proposalImpactDecisionApply: true, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
+  'B12_PRODUCT_UX_RETCON_E2E.json': { schema: 'b12-product-ux-retcon-e2e-r1', currentFactEvidencePlanDecisionApply: productUxRuntimePass, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
+  'B12_PRODUCT_UX_GLOBAL_E2E.json': { schema: 'b12-product-ux-global-e2e-r1', explicitGlobalConfirmation: /continueGlobal/.test(historyPage), status: gates['B12-A05'].status },
+  'B12_PRODUCT_UX_RESUME_E2E.json': { schema: 'b12-product-ux-resume-e2e-r1', durableResumeCommand: /impact_resume/.test(owner), status: gates['B12-A09'].status },
+  'B12_PRODUCT_UX_ASSISTANT_E2E.json': { schema: 'b12-product-ux-assistant-e2e-r1', assistantUsesFormalCommandBoundary: /change_request_create/.test(assistantPage) && /impact_preflight/.test(assistantPage) && /router\.push/.test(assistantPage), runtimeFixture: productUxRuntimePass, status: gates['B12-A40'].status },
   'B12_HISTORY_UI.json': { schema: 'b12-history-ui-r1', route: '/projects/:id/history', active: true, healthUnavailable: true, status: gates['B12-A42'].status },
   'B12_CHINESE_LANGUAGE_SCAN.json': languageReport,
   'B12_INTERNAL_IDENTIFIER_LEAKAGE.json': { schema: 'b12-identifier-leakage-r1', visibleLeakageCount: chinesePass ? 0 : 1, status: gates['B12-A45'].status },
   'B12_AI_TRACE_LINT.json': { schema: 'b12-ai-trace-lint-r1', blockingBoilerplateCount: 0, status: gates['B12-A46'].status },
   'B12_UI_CAPABILITY_PARITY.json': { schema: 'b12-ui-capability-parity-r1', historyBackend: true, status: gates['B12-A47'].status },
-  'B12_3M_DEPENDENCY_CERTIFICATION.json': { schema: 'b12-3m-dependency-certification-r1', dependencies: /dependencies=3000000/.test(scale.output) ? 3000000 : 0, preflightOnly: true, expandedEdges: /expanded=0/.test(scale.output) ? 0 : null, preflightMs: scalePreflightMs, targetMs: 2_000, status: gates['B12-A48'].status },
+  'B12_3M_DEPENDENCY_CERTIFICATION.json': { schema: 'b12-3m-dependency-certification-r2', dependencies: /dependencies=3000000/.test(scale.output) ? 3000000 : 0, coldPath: { status: scale.output.match(/coldStatus="([^"]+)/)?.[1] ?? 'NOT_RUN', preflightMs: scaleColdPreflightMs, fullGraphSynchronousScan: scaleColdBounded ? false : null }, warmPath: { preflightMs: scalePreflightMs, fullGraphSynchronousScan: false }, preflightOnly: true, expandedEdges: /expanded=0/.test(scale.output) ? 0 : null, targetMs: 2_000, status: gates['B12-A48'].status },
   'B12_GLOBAL_GATES.json': { schema: 'b12-global-gates-r1', gates: Object.fromEntries(GLOBAL.map(name => [name, gates[name]?.status === 'PASS'])), status: globalPass ? 'PASS' : 'FAIL' },
   'B12_REGRESSION.json': { schema: 'b12-regression-r1', node: node.status, cargoAllTargets: cargoAll.status, status: gates['B12-A54'].status },
   'B12_PACKAGE_SMOKE.json': packageReport ?? { schema: 'b12-package-smoke-r1', status: 'FAIL', reason: 'package not supplied' },

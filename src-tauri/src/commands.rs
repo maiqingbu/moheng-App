@@ -933,6 +933,17 @@ pub(crate) fn context_input_from_authority(
     project_id: &str,
     revision: i64,
 ) -> Result<crate::narrative::ContextCompilerInput, String> {
+    if let Some(context_ref) = request.get("contextManifestRef").and_then(Value::as_str) {
+        if crate::repositories::change_retcon::has_pending_stale_target(
+            connection,
+            project_id,
+            context_ref,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Err("CONTEXT_STALE:RECOMPILE_REQUIRED".into());
+        }
+    }
     let state = narrative_state_from_request(connection, request, project_id)?;
     let (threads, continuity_truncated) =
         continuity_from_request_bounded(connection, request, project_id)?;
@@ -1502,13 +1513,14 @@ pub fn query_plan_stale_impl(state: &KernelState, request: Value) -> Result<Valu
             let mut stale_refs = Vec::new();
             if let Some(chapter_id) = request.get("chapterId").and_then(Value::as_str) {
                 stale_refs.push(chapter_id.to_owned());
-                if let Some(plan_ref) = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
-                    connection,
-                    project_id,
-                    "ChapterPlan",
-                    chapter_id,
-                )
-                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                if let Some(plan_ref) =
+                    crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+                        connection,
+                        project_id,
+                        "ChapterPlan",
+                        chapter_id,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
                 {
                     stale_refs.push(plan_ref.artifact_id);
                 }

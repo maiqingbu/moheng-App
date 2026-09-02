@@ -377,7 +377,7 @@ pub fn recompile_chapter_plan_owner(
             connection, project_id, &route_ref,
         )
         .map_err(|error| error.to_string())?
-            .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
         if crate::repositories::change_retcon::has_pending_stale_for_refs(
             connection,
             project_id,

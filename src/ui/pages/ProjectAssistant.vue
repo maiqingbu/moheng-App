@@ -70,7 +70,8 @@ async function proposeChange() {
       payload: { changeRequestId: changeId },
     })
     const result = preflight.result ?? {}
-    changeMessage.value = `${changeType === 'RETCON' ? '事实修订提案' : '变更提案'}已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；尚未执行正式修改。`
+    changeMessage.value = `${changeType === 'RETCON' ? '事实修订提案' : '变更提案'}已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；请到版本与变更记录完成最终核对。`
+    router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: changeId } })
   } catch (error) {
     changeMessage.value = error instanceof Error ? error.message : '变更提案未建立。'
   }

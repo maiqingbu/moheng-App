@@ -12,7 +12,7 @@ const NOW: &str = "2026-09-02T05:00:00Z";
 
 #[test]
 #[ignore = "B12 release-scale certification only"]
-fn b12_three_million_dependency_preflight_is_bounded_without_full_graph_expansion() {
+fn b12_three_million_dependency_preflight_has_bounded_cold_and_warm_paths() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());
     let state =
@@ -42,9 +42,6 @@ fn b12_three_million_dependency_preflight_is_bounded_without_full_graph_expansio
         NOW,
     )
     .unwrap();
-    let summary_started = Instant::now();
-    let summary = rebuild_global_dependency_summary(&connection, "p-b12-scale").unwrap();
-    let summary_ms = summary_started.elapsed().as_secs_f64() * 1000.0;
     connection
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON")
         .unwrap();
@@ -70,8 +67,8 @@ fn b12_three_million_dependency_preflight_is_bounded_without_full_graph_expansio
         }),
     )
     .unwrap();
-    let started = Instant::now();
-    let preflight = execute_command_impl(
+    let cold_started = Instant::now();
+    let cold_preflight = execute_command_impl(
         &state,
         json!({
             "type":"impact_preflight",
@@ -84,22 +81,58 @@ fn b12_three_million_dependency_preflight_is_bounded_without_full_graph_expansio
         }),
     )
     .unwrap();
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let result = &preflight["result"];
+    let cold_ms = cold_started.elapsed().as_secs_f64() * 1000.0;
+    let cold_result = &cold_preflight["result"];
     assert_eq!(manifest.counts.dependencies, 3_000_000);
     assert_eq!(dependency_count, 3_000_000);
-    assert_eq!(summary.total_edges, 3_000_000);
-    assert_eq!(result["scopeClass"], "GLOBAL");
-    assert_eq!(result["totalEdges"], 3_000_000);
-    assert_eq!(result["expandedEdges"], 0);
-    assert_eq!(result["preflightOnly"], true);
+    assert_eq!(cold_result["status"], "SUMMARY_BOOTSTRAP_REQUIRED");
+    assert_eq!(cold_result["summaryStatus"], "NOT_READY");
+    assert_eq!(cold_result["fullGraphSynchronousScan"], false);
     assert!(
-        elapsed_ms <= 2_000.0,
-        "B12 preflight target exceeded: {elapsed_ms:.2}ms"
+        cold_ms <= 2_000.0,
+        "B12 cold preflight target exceeded: {cold_ms:.2}ms"
+    );
+    let summary_started = Instant::now();
+    let summary = state
+        .manager
+        .open("p-b12-scale", "", NOW)
+        .map(|handle| {
+            let result = rebuild_global_dependency_summary(&handle, "p-b12-scale");
+            drop(handle);
+            result
+        })
+        .unwrap()
+        .unwrap();
+    let summary_ms = summary_started.elapsed().as_secs_f64() * 1000.0;
+    let warm_started = Instant::now();
+    let warm_preflight = execute_command_impl(
+        &state,
+        json!({
+            "type":"impact_preflight",
+            "commandId":"cmd:b12:scale:preflight:warm",
+            "idempotencyKey":"key:b12:scale:preflight:warm",
+            "projectId":"p-b12-scale",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"changeRequestId":"change:b12:scale"}
+        }),
+    )
+    .unwrap();
+    let warm_ms = warm_started.elapsed().as_secs_f64() * 1000.0;
+    let warm_result = &warm_preflight["result"];
+    assert_eq!(summary.total_edges, 3_000_000);
+    assert_eq!(warm_result["status"], "PREFLIGHTED");
+    assert_eq!(warm_result["summaryStatus"], "READY");
+    assert_eq!(warm_result["fullGraphSynchronousScan"], false);
+    assert_eq!(warm_result["totalEdges"], 3_000_000);
+    assert_eq!(warm_result["expandedEdges"], 0);
+    assert!(
+        warm_ms <= 2_000.0,
+        "B12 warm preflight target exceeded: {warm_ms:.2}ms"
     );
     println!(
-        "B12_SCALE_CERTIFICATION_RESULT dependencies={} expanded={} summaryMs={:.2} preflightMs={:.2} status=PASS",
-        dependency_count, result["expandedEdges"], summary_ms, elapsed_ms
+        "B12_SCALE_CERTIFICATION_RESULT dependencies={} coldStatus={} coldPreflightMs={:.2} expanded={} summaryMs={:.2} warmPreflightMs={:.2} fullGraphSynchronousScanCold={} fullGraphSynchronousScanWarm={} status=PASS",
+        dependency_count, cold_result["status"], cold_ms, warm_result["expandedEdges"], summary_ms, warm_ms, cold_result["fullGraphSynchronousScan"], warm_result["fullGraphSynchronousScan"]
     );
     let _ = change_retcon::OWNER_NAME;
 }

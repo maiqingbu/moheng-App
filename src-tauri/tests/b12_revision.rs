@@ -1,8 +1,9 @@
 use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
 use ai_novel_production_system_core::hash::sha256_canonical;
+use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
+use ai_novel_production_system_core::repair::{operation_digest_with_postconditions, RepairPlan};
 use libsql_rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -61,7 +62,10 @@ fn insert_dependency(
     target_ref: &str,
     scope: &str,
 ) {
-    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project");
     handle
         .execute(
             "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES (?1,?2,?3,?4,'PLAN_INPUT',?5,'REVIEW_REQUIRED',?6,'B12_REVISION_TEST',?7)",
@@ -92,7 +96,10 @@ fn insert_book_plan(state: &KernelState, project_id: &str, artifact_id: &str) {
     });
     let hash = sha256_canonical(&payload).expect("book plan hash");
     let scope_key = json!({"level":"PROJECT"}).to_string();
-    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project");
     handle
         .execute(
             "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'BookPlan', 'PROJECT',?3,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','A',?4,'{}',?5,?5)",
@@ -390,7 +397,10 @@ fn b12_stale_queue_uses_actual_transitive_impact_targets() {
 #[test]
 fn b12_retcon_plan_change_invalidates_an_old_decision() {
     let state = test_state("p-b12-r04");
-    let handle = state.manager.open("p-b12-r04", "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open("p-b12-r04", "", NOW)
+        .expect("open project");
     handle
         .execute(
             "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r04','p-b12-r04','主角','CHARACTER',?1,?1)",
@@ -429,7 +439,10 @@ fn b12_retcon_plan_change_invalidates_an_old_decision() {
         json!({"changeRequestId":"change:r04"}),
     )
     .expect("preflight retcon");
-    let impact_digest = preflight["result"]["impactDigest"].as_str().unwrap().to_owned();
+    let impact_digest = preflight["result"]["impactDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let plan = command(
         &state,
         "p-b12-r04",
@@ -449,7 +462,10 @@ fn b12_retcon_plan_change_invalidates_an_old_decision() {
         json!({"changeRequestId":"change:r04","retconPlanId":"plan:r04:one","planDigest":plan_digest,"decision":"APPROVE","impactDigest":impact_digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
     )
     .expect("approve plan");
-    let handle = state.manager.open("p-b12-r04", "", NOW).expect("open for mutation");
+    let handle = state
+        .manager
+        .open("p-b12-r04", "", NOW)
+        .expect("open for mutation");
     handle
         .execute(
             "UPDATE retcon_plans SET downstream_impact_json=?1 WHERE project_id='p-b12-r04' AND retcon_plan_id='plan:r04:one'",
@@ -467,6 +483,132 @@ fn b12_retcon_plan_change_invalidates_an_old_decision() {
     )
     .expect_err("changed plan must invalidate decision");
     assert_eq!(blocked, "B12_DECISION_STALE");
+}
+
+#[test]
+fn b12_h03_retcon_execution_uses_the_same_owner_and_postverify() {
+    let state = test_state("p-b12-r05");
+    let handle = state
+        .manager
+        .open("p-b12-r05", "", NOW)
+        .expect("open project");
+    handle
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05','p-b12-r05','主角','CHARACTER',?1,?1)",
+            [NOW],
+        )
+        .expect("insert entity");
+    handle
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r05','p-b12-r05','entity:r05','状态','{\"old\":true}','A',?1,?1)",
+            [NOW],
+        )
+        .expect("insert fact");
+    handle
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('evidence:r05','p-b12-r05','ReviewReport','PROJECT','p-b12-r05',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2,?2)",
+            params!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", NOW],
+        )
+        .expect("insert evidence");
+    drop(handle);
+    command(
+        &state,
+        "p-b12-r05",
+        "change_request_create",
+        "cmd:r05:create",
+        0,
+        json!({"changeRequestId":"change:r05","changeType":"RETCON","scope":"PROJECT","summary":"助手请求修订事实","targetFactId":"fact:r05","sourceRefs":["fact:r05"],"requestedChange":{"replacement":{"objectJson":{"old":false}}}}),
+    )
+    .expect("create retcon");
+    let preflight = command(
+        &state,
+        "p-b12-r05",
+        "impact_preflight",
+        "cmd:r05:preflight",
+        0,
+        json!({"changeRequestId":"change:r05"}),
+    )
+    .expect("preflight retcon");
+    let impact_digest = preflight["result"]["impactDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let plan = command(
+        &state,
+        "p-b12-r05",
+        "retcon_plan_create",
+        "cmd:r05:plan",
+        0,
+        json!({"changeRequestId":"change:r05","retconPlanId":"plan:r05","targetFactId":"fact:r05","reason":"助手提供新的核验依据","replacement":{"objectJson":{"old":false}},"evidenceRefs":[{"artifactId":"evidence:r05","version":1}]}),
+    )
+    .expect("create retcon plan");
+    let plan_digest = plan["result"]["planDigest"].as_str().unwrap().to_owned();
+    command(
+        &state,
+        "p-b12-r05",
+        "change_request_decide",
+        "cmd:r05:decision",
+        0,
+        json!({"changeRequestId":"change:r05","retconPlanId":"plan:r05","planDigest":plan_digest,"decision":"APPROVE","impactDigest":impact_digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
+    )
+    .expect("approve retcon");
+
+    let operation = ai_novel_production_system_core::repair::RepairOperation {
+        operation: "execute_change_request".into(),
+        target: "change:r05".into(),
+        params: json!({"changeRequestId":"change:r05","impactDigest":impact_digest,"retconPlanId":"plan:r05","planDigest":plan_digest,"commandId":"h03:r05:apply","idempotencyKey":"h03:r05:apply:key"}),
+        postconditions: json!({"kind":"b12_change_postverify","expected":true}),
+    };
+    let expected_postconditions = vec![operation.postconditions.clone()];
+    let operation_digest = operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &expected_postconditions,
+    )
+    .unwrap();
+    let repair_plan = RepairPlan {
+        repair_plan_id: "repair-plan:r05".into(),
+        project_id: "p-b12-r05".into(),
+        based_on_project_revision: 0,
+        diagnosis: json!({"claim":"已核对事实修订方案"}),
+        finding_refs: vec!["change:r05".into()],
+        target_authority_owner: "B12::ChangeRetconOwner".into(),
+        proposed_operations: vec![operation],
+        affected_artifacts: vec!["fact:r05".into()],
+        affected_scopes: vec!["当前作品".into()],
+        risk_level: "HIGH".into(),
+        requires_backup: false,
+        expected_postconditions,
+        operation_digest: operation_digest.clone(),
+        created_at: NOW.into(),
+    };
+    execute_command_impl(
+        &state,
+        json!({"type":"repair_plan_create","commandId":"cmd:r05:repair-plan","idempotencyKey":"key:r05:repair-plan","projectId":"p-b12-r05","expectedRevision":0,"requestedAt":NOW,"payload":{"dryRun":true,"repairPlan":repair_plan}}),
+    )
+    .expect("save h03 plan");
+    let authorization = ai_novel_production_system_core::repair::RepairAuthorization {
+        authorization_id: "repair-auth:r05".into(),
+        project_id: "p-b12-r05".into(),
+        repair_plan_id: "repair-plan:r05".into(),
+        based_on_project_revision: 0,
+        operation_digest,
+        approved_by_user: true,
+        issued_at: NOW.into(),
+        consumed_at: None,
+    };
+    execute_command_impl(
+        &state,
+        json!({"type":"repair_authorize","commandId":"cmd:r05:authorize","idempotencyKey":"key:r05:authorize","projectId":"p-b12-r05","expectedRevision":0,"requestedAt":NOW,"payload":{"authorization":authorization}}),
+    )
+    .expect("authorize h03 plan");
+    let executed = execute_command_impl(
+        &state,
+        json!({"type":"repair_execute","commandId":"cmd:r05:execute","idempotencyKey":"key:r05:execute","projectId":"p-b12-r05","requestedAt":NOW,"payload":{"repairPlanId":"repair-plan:r05","authorizationId":"repair-auth:r05"}}),
+    )
+    .expect("execute h03 retcon");
+    assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
+    assert_eq!(executed["receipt"]["owner"], "B12::ChangeRetconOwner");
+    println!("B12_PRODUCT_UX_RETCON_RESULT command_boundary=PASS plan=PASS decision=PASS h03=PASS owner=B12::ChangeRetconOwner postverify=PASS status=PASS");
 }
 
 #[test]

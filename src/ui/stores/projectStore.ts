@@ -239,6 +239,9 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (history.value && !force && kind==='all') return history.value
     return withWorkspace('history', () => frontendPort.queryHistory({ ...queryBase('history', 40), kind }), v => { history.value=v })
   }
+  async function queryChangeRequest(changeRequestId: string) {
+    return frontendPort.queryChangeRequest({ ...queryBase(`history:change:${changeRequestId}`, 40), changeRequestId })
+  }
   async function loadSettings(force=false) {
     if (settings.value && !force) return settings.value
     return withWorkspace('settings', () => frontendPort.queryProjectSettings(queryBase('settings', 1)), v => { settings.value=v })
@@ -403,7 +406,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
-    loadCanon, loadHealth, loadHistory, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHistory, queryChangeRequest, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }
 })
