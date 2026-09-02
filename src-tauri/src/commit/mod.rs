@@ -208,7 +208,13 @@ impl CommitService {
         bundle: &CommitBundle,
         committed_at: &str,
     ) -> Result<CommitReceipt, CommitError> {
-        Self::commit_with_revision(connection, bundle, committed_at, true)
+        Self::commit_with_revision_and_hook(
+            connection,
+            bundle,
+            committed_at,
+            true,
+            |_connection, _receipt| Ok(()),
+        )
     }
 
     /// Commits a non-authoritative project-entry bundle without advancing the
@@ -221,14 +227,36 @@ impl CommitService {
         bundle: &CommitBundle,
         committed_at: &str,
     ) -> Result<CommitReceipt, CommitError> {
-        Self::commit_with_revision(connection, bundle, committed_at, false)
+        Self::commit_with_revision_and_hook(
+            connection,
+            bundle,
+            committed_at,
+            false,
+            |_connection, _receipt| Ok(()),
+        )
     }
 
-    fn commit_with_revision(
+    /// Runs a typed callback after the CommitBundle receipt has been assembled,
+    /// but before the transaction is committed. B12 uses this narrow hook to
+    /// atomically settle Change/Retcon lifecycle rows and stale propagation
+    /// alongside the ordinary CommitService deltas. The callback cannot run
+    /// outside the transaction and therefore cannot create a fresh inconsistent
+    /// window.
+    pub fn commit_with_post_apply(
+        connection: &Connection,
+        bundle: &CommitBundle,
+        committed_at: &str,
+        post_apply: impl FnOnce(&Connection, &CommitReceipt) -> Result<(), CommitError>,
+    ) -> Result<CommitReceipt, CommitError> {
+        Self::commit_with_revision_and_hook(connection, bundle, committed_at, true, post_apply)
+    }
+
+    fn commit_with_revision_and_hook(
         connection: &Connection,
         bundle: &CommitBundle,
         committed_at: &str,
         advance_revision: bool,
+        post_apply: impl FnOnce(&Connection, &CommitReceipt) -> Result<(), CommitError>,
     ) -> Result<CommitReceipt, CommitError> {
         let bundle_value = serde_json::to_value(bundle)?;
         validate_commit_bundle(&bundle_value).map_err(CommitError::ContractInvalid)?;
@@ -270,14 +298,16 @@ impl CommitService {
                     return Err(CommitError::RevisionConflict);
                 }
             }
-            Self::apply(
+            let receipt = Self::apply(
                 connection,
                 bundle,
                 bundle_digest,
                 before,
                 committed_at,
                 advance_revision,
-            )
+            )?;
+            post_apply(connection, &receipt)?;
+            Ok(receipt)
         })();
         match result {
             Ok(receipt) => {

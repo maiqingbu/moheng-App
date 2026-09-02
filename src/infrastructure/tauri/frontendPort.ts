@@ -95,6 +95,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryCanon(request: ProjectQueryRequest) { return invokeQuery<CanonProjection>(this.ipc, 'query_canon', { request }) }
   queryBookHealth(request: ProjectQueryRequest) { return invokeQuery<BookHealthProjection>(this.ipc, 'query_book_health', { request }) }
   queryHistory(request: Parameters<FrontendPort['queryHistory']>[0]) { return invokeQuery<HistoryProjection>(this.ipc, 'query_history', { request }) }
+  queryChangeRequest(request: Parameters<FrontendPort['queryChangeRequest']>[0]) { return invokeQuery<Record<string, unknown>>(this.ipc, 'query_change_request', { request }) }
   queryProjectSettings(request: ProjectQueryRequest) { return invokeQuery<SettingsProjection>(this.ipc, 'query_project_settings', { request }) }
   searchFulltext(request: Parameters<FrontendPort['searchFulltext']>[0]) { return invokeQuery<PageResult<SearchHit>>(this.ipc, 'search_fulltext', { request }) }
   queryMarketOpportunities() { return invokeQuery<MarketOpportunity[]>(this.ipc, 'query_market_opportunities') }

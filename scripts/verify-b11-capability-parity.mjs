@@ -41,12 +41,14 @@ export function inspectB11CapabilityParity(projectRoot = root) {
     historyRouteExists: historyRoute.length > 0,
     healthRouteUnavailable: /UnavailableFeature/.test(healthRoute) && !/LongFormHealth|query_book_health/.test(healthRoute),
     historyRouteUnavailable: /UnavailableFeature/.test(historyRoute) && !/HistoryCenter|change_request_apply|retcon_apply/.test(historyRoute),
+    historyRouteActive: /HistoryCenter/.test(historyRoute) && !/UnavailableFeature/.test(historyRoute),
     healthSidebarPreserved: /长篇健康/.test(shell) && /尚未开放/.test(shell) && /disabled/.test(shell),
-    historySidebarPreserved: /版本与变更记录/.test(shell) && /尚未开放/.test(shell) && /disabled/.test(shell),
+    historySidebarPreserved: (/版本与变更记录/.test(shell) && /尚未开放/.test(shell) && /disabled/.test(shell))
+      || (/版本与变更记录/.test(shell) && /match: 'history'/.test(shell) && !/match: 'history', disabled: true/.test(shell)),
   }
   const futureRouteLeaks = [
     frozenIa.healthRouteExists && !frozenIa.healthRouteUnavailable ? 'health route is executable' : null,
-    frozenIa.historyRouteExists && !frozenIa.historyRouteUnavailable ? 'history route is executable' : null,
+    frozenIa.historyRouteExists && !frozenIa.historyRouteUnavailable && !frozenIa.historyRouteActive ? 'history route is executable without a declared B12 owner' : null,
     !frozenIa.healthRouteExists ? 'health route missing' : null,
     !frozenIa.historyRouteExists ? 'history route missing' : null,
     !frozenIa.healthSidebarPreserved ? 'health sidebar item missing or enabled' : null,

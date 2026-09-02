@@ -654,6 +654,30 @@ pub fn query_history_impl(state: &KernelState, request: Value) -> Result<Value, 
         .map_err(|error| error.to_string())
 }
 
+pub fn query_change_request_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let change_request_id = required_string(&request, "changeRequestId")?;
+    let cursor = request.get("cursor").and_then(Value::as_i64).unwrap_or(0);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_i64)
+        .unwrap_or(40);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::change_retcon::change_request_detail(
+                connection,
+                project_id,
+                change_request_id,
+                limit,
+                cursor,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            .ok_or(ManagerError::ProjectNotFound)
+        })
+        .map_err(|error| error.to_string())
+}
+
 fn request_strings(request: &Value, field: &str) -> Vec<String> {
     request
         .get(field)
@@ -2620,6 +2644,57 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     owner_receipt_ref: Some(manifest.backup_id),
                 })
             }
+            "execute_change_request" => {
+                let change_request_id = operation
+                    .params
+                    .get("changeRequestId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_CHANGE_REQUEST_ID_REQUIRED".to_string())?;
+                let impact_digest = operation
+                    .params
+                    .get("impactDigest")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_CHANGE_IMPACT_DIGEST_REQUIRED".to_string())?;
+                let revision =
+                    crate::repositories::narrative::NarrativeRepository::project_revision(
+                        self.connection,
+                        self.project_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let command_id = operation
+                    .params
+                    .get("commandId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("h03:execute-change-request");
+                let idempotency_key = operation
+                    .params
+                    .get("idempotencyKey")
+                    .and_then(Value::as_str)
+                    .unwrap_or(command_id);
+                let request = json!({
+                    "payload":{
+                        "changeRequestId":change_request_id,
+                        "impactDigest":impact_digest,
+                        "requestedChange":operation.params.get("requestedChange").cloned().unwrap_or_else(|| json!({}))
+                    }
+                });
+                let result = crate::change_retcon::apply_approved_on_connection(
+                    self.connection,
+                    self.project_id,
+                    command_id,
+                    idempotency_key,
+                    revision,
+                    self.now,
+                    &request,
+                )?;
+                Ok(crate::repair::OwnerExecution {
+                    owner: crate::change_retcon::OWNER_NAME.into(),
+                    owner_receipt_ref: result
+                        .get("receiptId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            }
             "replan_volume_route" => {
                 let volume_id = operation
                     .params
@@ -2724,13 +2799,34 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                         .map(|digest| format!("planning-projection:{digest}")),
                 })
             }
-            "execute_change_request" => Err("H03_CHANGE_REQUEST_PROPOSAL_ONLY".into()),
             _ => Err("H03_OWNER_OPERATION_UNKNOWN".into()),
         }
     }
 
     fn verify(&self, operation: &crate::repair::RepairOperation) -> Result<Value, String> {
         match operation.operation.as_str() {
+            "execute_change_request" => {
+                let change_request_id = operation
+                    .params
+                    .get("changeRequestId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "H03_CHANGE_REQUEST_ID_REQUIRED".to_string())?;
+                let status = crate::repositories::change_retcon::load_change_request(
+                    self.connection,
+                    self.project_id,
+                    change_request_id,
+                )
+                .map_err(|error| error.to_string())?
+                .map(|item| item.status == "APPLIED")
+                .unwrap_or(false);
+                Ok(json!({
+                    "operation":operation.operation,
+                    "kind":"b12_change_postverify",
+                    "status":if status {"PASS"} else {"FAIL"},
+                    "observed":status,
+                    "userMessage":if status {"已完成并复核"} else {"暂时无法完成复核"}
+                }))
+            }
             "refresh_runtime_projection" => {
                 let updated_at = DurableJobService::runtime_projection_updated_at(
                     self.connection,
@@ -3886,6 +3982,28 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "change_request_create"
+        | "impact_preflight"
+        | "impact_expand"
+        | "impact_resume"
+        | "impact_cancel"
+        | "change_request_decide"
+        | "change_request_apply"
+        | "retcon_plan_create"
+        | "retcon_apply" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::change_retcon::execute(
+                &state.manager,
+                command_type,
+                id,
+                command_id,
+                idempotency_key,
+                &digest,
+                expected_revision,
+                requested_at,
+                &request,
+            )
+        }
         "volume_replan_route" | "volume_close" | "volume_handoff" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_volume_lifecycle_command(
@@ -4361,6 +4479,14 @@ pub fn query_history(state: State<'_, KernelState>, request: Value) -> Result<Va
 }
 
 #[tauri::command]
+pub fn query_change_request(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_change_request_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_narrative_state(
     state: State<'_, KernelState>,
     request: Value,
@@ -4593,6 +4719,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_canon,
         query_book_health,
         query_history,
+        query_change_request,
         query_narrative_state,
         query_continuity,
         query_volume_progress,

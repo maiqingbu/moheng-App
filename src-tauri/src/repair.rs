@@ -211,7 +211,23 @@ fn stage_gate(operation: &RepairOperation) -> Result<(), RepairError> {
         // lifecycle owner. Authorization is still required by `execute`;
         // this gate only rejects operations that belong to a later batch.
         "replan_volume_route" | "rebuild_planning_state_projection" => Ok(()),
-        "execute_change_request" => Err(RepairError::ProposalOnly),
+        "execute_change_request" => {
+            let b12_bound = operation
+                .params
+                .get("changeRequestId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+                && operation
+                    .params
+                    .get("impactDigest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.len() == 64);
+            if b12_bound {
+                Ok(())
+            } else {
+                Err(RepairError::ProposalOnly)
+            }
+        }
         _ => Ok(()),
     }
 }

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod change_retcon;
 pub mod commands;
 pub mod commit;
 pub mod creative_skills;

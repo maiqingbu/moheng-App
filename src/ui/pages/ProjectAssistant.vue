@@ -17,6 +17,7 @@ const plan = ref<AssistantPlan | null>(null)
 const evidenceOpen = ref(false)
 const repairOpen = ref(false)
 const repairMessage = ref('')
+const changeMessage = ref('')
 const queryState = computed(() => store.commandState('assistant-query'))
 const planState = computed(() => store.commandState('assistant-plan'))
 const authState = computed(() => store.commandState('assistant-authorize'))
@@ -44,6 +45,36 @@ async function authorizeRepair() {
     repairMessage.value = error instanceof Error ? error.message : '修复没有完成，请先刷新当前作品后再试。'
   }
 }
+
+async function proposeChange() {
+  const projectId = store.currentProjectId
+  if (!projectId || !question.value.trim()) return
+  const changeId = `change:${projectId}:${Date.now()}`
+  const changeType = /事实|改成|原来|没有死|其实/.test(question.value) ? 'RETCON' : 'CHANGE'
+  try {
+    await store.runCommand('assistant-change-proposal', {
+      type: 'change_request_create',
+      projectId,
+      payload: {
+        changeRequestId: changeId,
+        changeType,
+        scope: 'PROJECT',
+        summary: question.value.trim(),
+        reason: '用户从项目助手明确发起变更提案',
+        requestedChange: { description: question.value.trim(), source: 'PROJECT_ASSISTANT' },
+      },
+    })
+    const preflight = await store.runCommand('assistant-change-impact', {
+      type: 'impact_preflight',
+      projectId,
+      payload: { changeRequestId: changeId },
+    })
+    const result = preflight.result ?? {}
+    changeMessage.value = `${changeType === 'RETCON' ? '事实修订提案' : '变更提案'}已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；尚未执行正式修改。`
+  } catch (error) {
+    changeMessage.value = error instanceof Error ? error.message : '变更提案未建立。'
+  }
+}
 </script>
 
 <template>
@@ -53,8 +84,9 @@ async function authorizeRepair() {
     </PageHeader>
     <section class="card pad">
       <label class="field"><span class="field-label">你想确认什么</span><textarea v-model="question" class="textarea" /></label>
-      <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" @click="ask">查询当前作品记录</button><button class="btn" @click="prepareRepair">准备一次可核对的修复</button></div>
+      <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" @click="ask">查询当前作品记录</button><button class="btn" @click="prepareRepair">准备一次可核对的修复</button><button class="btn warning" @click="proposeChange">建立变更提案</button></div>
       <CommandFeedback :state="queryState" />
+      <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
     </section>
 
     <section v-if="presentation" class="card pad section">

@@ -461,6 +461,13 @@ export class BrowserDemoPort implements FrontendPort {
     })
   }
 
+  async queryChangeRequest(request: ProjectQueryRequest & { changeRequestId: string }): Promise<Record<string, unknown>> {
+    await wait(40)
+    const entry = historyEntries(this.record(request.projectId)).find(item => item.id === request.changeRequestId)
+    if (!entry) throw new Error('变更记录不存在。')
+    return clone({ changeRequestId: entry.id, summary: entry.summary, status: entry.status, impact: { scopeClass: entry.scope, items: [], bounded: true, paged: true } })
+  }
+
   async queryProjectSettings(request: ProjectQueryRequest): Promise<SettingsProjection> {
     await wait(30)
     return clone(this.record(request.projectId).bundle.settings)

@@ -39,11 +39,11 @@ test('b11_health_route_unavailable_before_b13', () => {
   assert.doesNotMatch(healthRoute, /LongFormHealth|query_book_health/)
 })
 
-test('b11_history_change_execution_unavailable_before_b12', () => {
+test('b12_history_change_execution_is_active_after_b11_freeze', () => {
   const router = read('src/app/router.ts')
   const historyRoute = router.split('\n').find(line => line.includes('/projects/:id/history')) ?? ''
-  assert.match(historyRoute, /UnavailableFeature/)
-  assert.doesNotMatch(historyRoute, /HistoryCenter|change_request_apply|retcon_apply/)
+  assert.match(historyRoute, /HistoryCenter/)
+  assert.doesNotMatch(historyRoute, /UnavailableFeature/)
 })
 
 test('b11_sidebar_preserves_frozen_ia_without_fake_capability', () => {
@@ -51,6 +51,5 @@ test('b11_sidebar_preserves_frozen_ia_without_fake_capability', () => {
   assert.match(shell, /长篇健康/)
   assert.match(shell, /版本与变更记录/)
   assert.match(shell, /尚未开放/)
-  assert.match(shell, /aria-disabled|disabled/)
-  assert.doesNotMatch(shell, /to: `\/projects\/\$\{id\.value\}\/(?:health|history)`/)
+  assert.match(shell, /match: 'history'/)
 })

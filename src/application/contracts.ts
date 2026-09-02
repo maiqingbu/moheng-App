@@ -698,6 +698,9 @@ export interface CommandReceipt {
   beforeRevision?: number
   afterRevision?: number
   requestDigest?: string
+  result?: Record<string, unknown>
+  receipt?: Record<string, unknown>
+  postverify?: Record<string, unknown>
 }
 
 export type CommandType =
@@ -738,6 +741,11 @@ export type CommandType =
   | 'revision_request'
   | 'chapter_revision_request'
   | 'change_request_create'
+  | 'impact_preflight'
+  | 'impact_expand'
+  | 'impact_resume'
+  | 'impact_cancel'
+  | 'change_request_decide'
   | 'change_request_apply'
   | 'retcon_plan_create'
   | 'retcon_apply'
@@ -784,6 +792,7 @@ export interface FrontendPort {
   queryCanon(request: ProjectQueryRequest): Promise<CanonProjection>
   queryBookHealth(request: ProjectQueryRequest): Promise<BookHealthProjection>
   queryHistory(request: ProjectQueryRequest & { kind?: 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON' }): Promise<HistoryProjection>
+  queryChangeRequest(request: ProjectQueryRequest & { changeRequestId: string }): Promise<Record<string, unknown>>
   queryProjectSettings(request: ProjectQueryRequest): Promise<SettingsProjection>
   searchFulltext(request: ProjectQueryRequest & { text: string }): Promise<PageResult<SearchHit>>
   queryMarketOpportunities(): Promise<MarketOpportunity[]>

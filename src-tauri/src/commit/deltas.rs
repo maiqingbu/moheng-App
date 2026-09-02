@@ -99,6 +99,17 @@ fn apply_canon(
     )?;
     connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13) ON CONFLICT(fact_id) DO UPDATE SET subject_id=excluded.subject_id, predicate=excluded.predicate, object_json=excluded.object_json, valid_from_chapter_id=excluded.valid_from_chapter_id, valid_to_chapter_id=excluded.valid_to_chapter_id, story_time_from=excluded.story_time_from, story_time_to=excluded.story_time_to, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, authority_level=excluded.authority_level, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.fact_id, project_id, subject_id, predicate, object_json, delta.valid_from_chapter_id, delta.valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, delta.authority_level.as_ref().map(crate::repositories::artifacts::enum_string).transpose()?.unwrap_or_else(|| "C".into()), now])?;
     inserted += i64::from(!fact_existed);
+    if let Some(previous_fact_id) = payload_string(payload, "supersedesFactId") {
+        let updated = connection.execute(
+            "UPDATE canon_facts SET superseded_by=?1,updated_at=?2 WHERE project_id=?3 AND fact_id=?4 AND superseded_by IS NULL",
+            libsql_rusqlite::params![delta.fact_id, now, project_id, previous_fact_id],
+        )?;
+        if updated != 1 {
+            return Err(invalid(format!(
+                "retcon source fact is not a current fact: {previous_fact_id}"
+            )));
+        }
+    }
     if let Some(relation_id) = &delta.relation_id {
         let object_id = payload_string(payload, "objectId")
             .or_else(|| {
@@ -259,6 +270,17 @@ fn apply_dependency(
         libsql_rusqlite::params![project_id, edge_id],
     )?;
     connection.execute("INSERT INTO dependency_edges(edge_id, project_id, source_ref, target_ref, dependency_type, scope, impact_class, source_hash, selector, entity_id, chapter_range_json, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(edge_id) DO UPDATE SET source_ref=excluded.source_ref, target_ref=excluded.target_ref, dependency_type=excluded.dependency_type, scope=excluded.scope, impact_class=excluded.impact_class, source_hash=excluded.source_hash, selector=excluded.selector, entity_id=excluded.entity_id, chapter_range_json=excluded.chapter_range_json, created_by=excluded.created_by", libsql_rusqlite::params![edge_id, project_id, delta.source_ref, delta.target_ref, delta.dependency_type, delta.scope, delta.impact_class, delta.source_hash, delta.selector, delta.entity_id, payload_json(payload, "chapterRangeJson").unwrap_or_else(|| "{}".into()), payload_string(payload, "createdBy").unwrap_or_else(|| "CommitService".into()), now])?;
+    crate::repositories::change_retcon::record_dependency_delta(
+        connection,
+        &project_id,
+        &edge_id,
+        &delta.source_ref,
+        &delta.target_ref,
+        &delta.impact_class,
+        &delta.source_hash,
+        existed,
+    )
+    .map_err(|error| invalid(format!("dependency summary: {error}")))?;
     Ok(i64::from(!existed))
 }
 

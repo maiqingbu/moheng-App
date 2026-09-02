@@ -294,11 +294,16 @@ pub fn history(
         entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
     }
     if kind.is_none() || kind == Some("CHANGE_REQUEST") || kind == Some("RETCON") {
-        let mut statement = connection.prepare("SELECT change_request_id,change_type,status,summary,created_at,updated_at FROM change_requests WHERE project_id=?1 ORDER BY created_at DESC,change_request_id DESC LIMIT ?2 OFFSET ?3")?;
+        let mut statement = connection.prepare("SELECT change_request_id,change_type,status,summary,created_at,updated_at,impact_seed_json FROM change_requests WHERE project_id=?1 ORDER BY created_at DESC,change_request_id DESC LIMIT ?2 OFFSET ?3")?;
         let rows = statement.query_map(libsql_rusqlite::params![project_id,(limit + 1) as i64,start], |row| {
             let change_type: String = row.get(1)?;
             let entry_kind = if change_type.to_uppercase().contains("RETCON") { "RETCON" } else { "CHANGE_REQUEST" };
-            Ok(json!({"id":row.get::<_,String>(0)?,"kind":entry_kind,"title":"作品修改请求","status":match row.get::<_,String>(2)?.as_str() { "APPLIED" => "applied", "APPROVED" => "approved", "IMPACT_READY" => "impact_ready", "REJECTED" => "rejected", _ => "draft" },"createdAt":row.get::<_,String>(4)?,"summary":row.get::<_,String>(3)?,"impact":"影响范围以当前分析结果为准。","scope":"当前作品"}))
+            let seed: String = row.get(6)?;
+            let seed: serde_json::Value = serde_json::from_str(&seed).unwrap_or_else(|_| json!({}));
+            let scope = seed.pointer("/preflight/scopeClass").and_then(|value| value.as_str()).unwrap_or("LOCAL");
+            let impact = match scope { "GLOBAL" => "预计影响全局内容。", "WIDE" => "预计影响较多关联内容。", _ => "预计影响当前相关内容。" };
+            let status = match row.get::<_,String>(2)?.as_str() { "APPLIED" => "applied", "APPROVED" => "approved", "IMPACT_READY" | "PENDING_APPROVAL" => "impact_ready", "REJECTED" => "rejected", _ => "draft" };
+            Ok(json!({"id":row.get::<_,String>(0)?,"kind":entry_kind,"title":if entry_kind == "RETCON" {"事实修订计划"} else {"作品修改请求"},"status":status,"createdAt":row.get::<_,String>(4)?,"summary":row.get::<_,String>(3)?,"impact":impact,"scope":match scope { "GLOBAL" => "全局", "WIDE" => "较广", _ => "局部" }}))
         })?;
         entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
     }
