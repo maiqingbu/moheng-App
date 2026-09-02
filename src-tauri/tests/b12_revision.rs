@@ -1184,6 +1184,7 @@ struct SemanticChapterFixture {
     chapter_plan_id: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_committed_artifact(
     connection: &Connection,
     project_id: &str,

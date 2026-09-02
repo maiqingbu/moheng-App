@@ -217,13 +217,11 @@ fn validate_chapter_plan_change_semantics(
         connection, project_id,
     )
     .map_err(|error| error.to_string())?;
-    let current_chapter_no: i64 = connection
-        .query_row(
-            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
-            libsql_rusqlite::params![project_id, chapter_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
+    let current_chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("CHAPTER_NOT_FOUND")?;
     let context = crate::commands::context_input_from_authority(
         connection,
         &json!({

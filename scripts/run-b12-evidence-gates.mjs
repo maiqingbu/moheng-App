@@ -196,11 +196,11 @@ const chapterSemanticPass = [
   'b12_change_chapter_plan_rejects_future_reservation_violation',
 ].every(name => new RegExp(`test ${name} \\.+ ok`).test(rustRevision.output))
 const exactEvidencePass = /B12_ASSISTANT_RETCON_EVIDENCE_RESULT[^\n]+exactFactSource=PASS[^\n]+status=PASS/.test(rustRevision.output)
-  && /test b12_assistant_retcon_missing_fact_evidence_fails_closed \\.+ ok/.test(rustRevision.output)
-  && /test b12_retcon_rejects_unrelated_evidence_without_relationship \\.+ ok/.test(rustRevision.output)
+  && /test b12_assistant_retcon_missing_fact_evidence_fails_closed \.{3} ok/.test(rustRevision.output)
+  && /test b12_retcon_rejects_unrelated_evidence_without_relationship \.{3} ok/.test(rustRevision.output)
 const leaseExpiryPass = /B12_SUMMARY_LEASE_EXPIRY_RESULT[^\n]+duplicateWorkerCount=0[^\n]+status=PASS/.test(rustRevision.output)
-  && /test b12_summary_restart_recovery_allows_reclaim_after_pause \\.+ ok/.test(rustRevision.output)
-  && /test b12_summary_old_worker_cannot_release_new_holder_lease \\.+ ok/.test(rustRevision.output)
+  && /test b12_summary_restart_recovery_allows_reclaim_after_pause \.{3} ok/.test(rustRevision.output)
+  && /test b12_summary_old_worker_cannot_release_new_holder_lease \.{3} ok/.test(rustRevision.output)
 const r08InjectionPass = b12NodePass
   && /b12_acceptance_rejects_chapter_self_whitelist/.test(b12Node.output)
   && /b12_acceptance_rejects_unrelated_retcon_evidence/.test(b12Node.output)

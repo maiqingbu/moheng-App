@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export const START_COMMIT = 'e784c9206ce60fd8c8cbe7da827234850caba20e'
+export const START_COMMIT = '84195d156be8bf852b26867fc6f26dd51632e2db'
 export const B12_BLOCKING_GATES = Array.from({ length: 61 }, (_, index) => `B12-A${String(index).padStart(2, '0')}`)
 export const NEGATIVE_BLOCKING_GATES = Array.from({ length: 28 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
 export const R2_GLOBAL_BLOCKING_GATES = [

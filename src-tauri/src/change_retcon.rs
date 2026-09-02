@@ -21,6 +21,7 @@ pub const OWNER_NAME: &str = "B12::ChangeRetconOwner";
 const CONTRACT_VERSION: &str = "m0a.v1";
 const MAX_IMPACT_PAGE: i64 = 100;
 const GLOBAL_FAN_OUT_THRESHOLD: i64 = 100;
+type RetconEvidenceGroups = (Vec<Value>, Vec<Value>, Vec<Value>);
 
 fn payload(request: &Value) -> Result<&Value, String> {
     request
@@ -2010,7 +2011,7 @@ fn validate_retcon_evidence_refs(
     project_id: &str,
     old_fact: &Value,
     evidence_refs: &[Value],
-) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), String> {
+) -> Result<RetconEvidenceGroups, String> {
     let fact_id = old_fact
         .get("factId")
         .and_then(Value::as_str)
