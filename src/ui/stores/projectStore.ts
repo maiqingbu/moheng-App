@@ -21,6 +21,8 @@ import type {
   SearchHit,
   SettingsProjection,
   ProviderSettingsInput,
+  DependencySummaryBootstrapProjection,
+  RetconContextProjection,
   StorySetupProjection,
   SupportSessionProjection,
   StoryDirectionProjection,
@@ -242,6 +244,12 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function queryChangeRequest(changeRequestId: string) {
     return frontendPort.queryChangeRequest({ ...queryBase(`history:change:${changeRequestId}`, 40), changeRequestId })
   }
+  async function queryRetconContext(query?: string): Promise<RetconContextProjection> {
+    return frontendPort.queryRetconContext({ ...queryBase('history:retcon-context', 30), query })
+  }
+  async function queryDependencySummaryBootstrap(): Promise<DependencySummaryBootstrapProjection> {
+    return frontendPort.queryDependencySummaryBootstrap(queryBase('history:dependency-summary', 1))
+  }
   async function loadSettings(force=false) {
     if (settings.value && !force) return settings.value
     return withWorkspace('settings', () => frontendPort.queryProjectSettings(queryBase('settings', 1)), v => { settings.value=v })
@@ -406,7 +414,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
-    loadCanon, loadHealth, loadHistory, queryChangeRequest, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
     clearCommandState, isWorkspaceLoading
   }
 })

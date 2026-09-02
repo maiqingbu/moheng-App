@@ -582,7 +582,7 @@ pub fn load_authority_head(
     let mut statement = connection.prepare(
         "SELECT h.artifact_id,h.version,h.payload_hash,h.artifact_type,h.scope_level,h.scope_key,p.payload_json
          FROM canonical_heads h
-         JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version
+         LEFT JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version
          WHERE h.project_id=?1
            AND (?2 IS NULL OR h.artifact_type=?2)
            AND (?3 IS NULL OR h.artifact_id=?3)
@@ -601,7 +601,7 @@ pub fn load_authority_head(
                 scope_key
             ],
             |row| {
-                let raw_payload: String = row.get(6)?;
+                let raw_payload: Option<String> = row.get(6)?;
                 Ok(AuthorityHeadRecord {
                     artifact_id: row.get(0)?,
                     version: row.get(1)?,
@@ -609,7 +609,9 @@ pub fn load_authority_head(
                     artifact_type: row.get(3)?,
                     scope_level: row.get(4)?,
                     scope_key: row.get(5)?,
-                    payload: serde_json::from_str(&raw_payload).unwrap_or(Value::Null),
+                    payload: raw_payload
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or(Value::Null),
                 })
             },
         )
@@ -870,17 +872,59 @@ pub fn dependency_snapshot(
     dependency_snapshot_uncached(connection, project_id, source_refs, global)
 }
 
+pub fn dependency_summary_status(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Value, ChangeRetconRepositoryError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key=?2",
+            libsql_rusqlite::params![project_id, DEPENDENCY_SUMMARY_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(
+            json!({"summaryStatus":"NOT_READY","totalEdges":0,"mutationEpoch":0,"computedEpoch":-1}),
+        );
+    };
+    let summary = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({}));
+    let mutation_epoch = summary
+        .get("mutationEpoch")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let computed_epoch = summary
+        .get("computedEpoch")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    Ok(json!({
+        "summaryStatus":if mutation_epoch == computed_epoch && summary.get("summaryStatus").and_then(Value::as_str) == Some("READY") { "READY" } else { "NOT_READY" },
+        "totalEdges":summary.get("totalEdges").cloned().unwrap_or_else(|| json!(0)),
+        "mutationEpoch":mutation_epoch,
+        "computedEpoch":computed_epoch,
+        "fingerprint":summary.get("fingerprint").cloned().unwrap_or(Value::Null)
+    }))
+}
+
 pub fn rebuild_global_dependency_summary(
     connection: &Connection,
     project_id: &str,
 ) -> Result<DependencySnapshot, ChangeRetconRepositoryError> {
     let snapshot = dependency_snapshot_uncached(connection, project_id, &json!([]), true)?;
+    let mutation_epoch: i64 = connection
+        .query_row(
+            "SELECT COALESCE(json_extract(setting_value,'$.mutationEpoch'),0) FROM project_settings WHERE project_id=?1 AND setting_key=?2",
+            libsql_rusqlite::params![project_id, DEPENDENCY_SUMMARY_KEY],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     let value = json!({
         "totalEdges":snapshot.total_edges,
         "classCounts":snapshot.class_counts,
         "fingerprint":snapshot.fingerprint,
-        "mutationEpoch":0,
-        "computedEpoch":0,
+        "mutationEpoch":mutation_epoch,
+        "computedEpoch":mutation_epoch,
         "summaryStatus":"READY"
     });
     connection.execute(
@@ -948,8 +992,16 @@ pub fn record_dependency_delta(
         .get("mutationEpoch")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    summary["computedEpoch"] = json!(mutation_epoch);
-    summary["summaryStatus"] = json!("READY");
+    let computed_epoch = summary
+        .get("computedEpoch")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    summary["computedEpoch"] = json!(computed_epoch);
+    summary["summaryStatus"] = json!(if computed_epoch == mutation_epoch {
+        "READY"
+    } else {
+        "NOT_READY"
+    });
     connection.execute(
         "UPDATE project_settings SET setting_value=?1 WHERE project_id=?2 AND setting_key=?3",
         libsql_rusqlite::params![summary.to_string(), project_id, DEPENDENCY_SUMMARY_KEY],
@@ -1095,6 +1147,16 @@ pub fn update_retcon_plan(
     Ok(())
 }
 
+pub fn retcon_plan_digest(plan: &RetconPlanRecord) -> Result<String, ChangeRetconRepositoryError> {
+    Ok(crate::hash::sha256_canonical(&json!({
+        "retconPlanId":plan.retcon_plan_id,
+        "targetFact":plan.target_fact,
+        "reason":plan.reason,
+        "fixType":plan.fix_type,
+        "downstreamImpact":plan.downstream_impact
+    }))?)
+}
+
 pub fn current_fact(
     connection: &Connection,
     project_id: &str,
@@ -1126,6 +1188,74 @@ pub fn current_fact(
         )
         .optional()
         .map_err(Into::into)
+}
+
+pub fn retcon_context(
+    connection: &Connection,
+    project_id: &str,
+    query: Option<&str>,
+    limit: i64,
+) -> Result<Value, ChangeRetconRepositoryError> {
+    let limit = limit.clamp(1, 50);
+    let query = query.unwrap_or_default().trim().to_owned();
+    let pattern = format!("%{query}%");
+    let mut facts = connection.prepare(
+        "SELECT f.fact_id,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND f.superseded_by IS NULL AND (?2='' OR f.fact_id LIKE ?3 OR f.predicate LIKE ?3 OR f.object_json LIKE ?3 OR e.canonical_name LIKE ?3) ORDER BY f.updated_at DESC,f.fact_id LIMIT ?4",
+    )?;
+    let fact_rows = facts.query_map(
+        libsql_rusqlite::params![project_id, query, pattern, limit],
+        |row| {
+            let fact_id: String = row.get(0)?;
+            let predicate: String = row.get(1)?;
+            let raw_object: String = row.get(2)?;
+            let object = serde_json::from_str::<Value>(&raw_object)
+                .unwrap_or_else(|_| Value::String(raw_object.clone()));
+            let object_label = object
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| object.as_str())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| object.to_string());
+            let source = row
+                .get::<_, Option<String>>(3)?
+                .map(|value| format!("章节记录 {value}"))
+                .unwrap_or_else(|| "当前作品记录".into());
+            Ok(json!({
+                "factId":fact_id,
+                "label":format!("{predicate}：{object_label}"),
+                "current":true,
+                "predicate":predicate,
+                "source":source,
+                "sourceArtifactId":row.get::<_,Option<String>>(4)?,
+                "sourceVersion":row.get::<_,Option<i64>>(5)?,
+                "objectJson":object
+            }))
+        },
+    )?;
+    let facts = fact_rows.collect::<Result<Vec<_>, _>>()?;
+    let mut evidence = connection.prepare(
+        "SELECT artifact_id,version,payload_hash,artifact_type,scope_key FROM artifacts WHERE project_id=?1 AND artifact_status='COMMITTED' AND artifact_type IN ('ReviewReport','FinalChapter','ChapterSummary','EvidenceBundle','SimulatedSigningReceipt') ORDER BY committed_at DESC,artifact_id,version LIMIT ?2",
+    )?;
+    let evidence_rows = evidence.query_map(libsql_rusqlite::params![project_id, limit], |row| {
+        let artifact_type: String = row.get(3)?;
+        let scope_key: String = row.get(4)?;
+        let label = if artifact_type == "FinalChapter" {
+            "正式章节依据"
+        } else if artifact_type == "ChapterSummary" {
+            "章节摘要依据"
+        } else {
+            "已核验依据"
+        };
+        Ok(json!({
+            "artifactId":row.get::<_,String>(0)?,
+            "version":row.get::<_,i64>(1)?,
+            "payloadHash":row.get::<_,String>(2)?,
+            "label":format!("{label} · {scope_key}"),
+            "kind":artifact_type
+        }))
+    })?;
+    let evidence = evidence_rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"facts":facts,"evidence":evidence,"bounded":true,"owner":"B12::ChangeRetconOwner"}))
 }
 
 pub fn activate_stale_queue(
@@ -1279,6 +1409,32 @@ pub fn change_request_detail(
             Value::Null,
         )
     };
+    let retcon_plan = if let Some(plan_id) = change
+        .impact_seed
+        .get("retconPlanId")
+        .and_then(Value::as_str)
+    {
+        load_retcon_plan(connection, project_id, plan_id)?.map(|plan| {
+            Ok::<Value, ChangeRetconRepositoryError>(json!({
+                "retconPlanId":plan.retcon_plan_id,
+                "status":plan.status,
+                "planDigest":retcon_plan_digest(&plan)?,
+                "oldCanon":plan.target_fact.get("old").cloned().unwrap_or(Value::Null),
+                "replacement":plan.target_fact.get("replacement").cloned().unwrap_or(Value::Null),
+                "reason":plan.reason,
+                "fixType":plan.fix_type,
+                "downstreamImpact":plan.downstream_impact,
+                "approvedScopeClass":plan.downstream_impact.get("approvedScopeClass").cloned().unwrap_or(Value::Null),
+                "riskClass":plan.downstream_impact.get("riskClass").cloned().unwrap_or(Value::Null),
+                "requiresBackup":plan.downstream_impact.get("requiresBackup").cloned().unwrap_or(Value::Null),
+                "replacementDigest":plan.downstream_impact.get("replacementDigest").cloned().unwrap_or(Value::Null),
+                "targetAuthorityDigest":plan.downstream_impact.get("targetAuthorityDigest").cloned().unwrap_or(Value::Null),
+                "signingImpact":plan.downstream_impact.get("signingImpact").cloned().unwrap_or(Value::Null)
+            }))
+        }).transpose()?
+    } else {
+        None
+    };
     Ok(Some(json!({
         "changeRequestId":change.change_request_id,
         "changeType":change.change_type,
@@ -1292,6 +1448,7 @@ pub fn change_request_detail(
         "impact":impact_value,
         "decisionId":change.decision_ref,
         "retconPlanId":change.impact_seed.get("retconPlanId").cloned().unwrap_or(Value::Null),
+        "retconPlan":retcon_plan.unwrap_or(Value::Null),
         "postverifyStatus":change.impact_seed.get("postverifyStatus").cloned().unwrap_or(Value::Null)
     })))
 }

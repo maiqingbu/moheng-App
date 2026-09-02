@@ -22,6 +22,8 @@ import type {
   ProjectLibraryProjection,
   ProjectOverviewProjection,
   ProjectQueryRequest,
+  DependencySummaryBootstrapProjection,
+  RetconContextProjection,
   SearchHit,
   SettingsProjection,
   StoryDirectionProjection,
@@ -431,6 +433,21 @@ export class BrowserDemoPort implements FrontendPort {
       foreshadows: page(canon.foreshadows, request, 80),
       knowledge: page(canon.knowledge, request, 80)
     })
+  }
+
+  async queryRetconContext(request: ProjectQueryRequest & { query?: string }): Promise<RetconContextProjection> {
+    await wait(35)
+    const record = this.record(request.projectId)
+    const fact = record.bundle.canon.characters[0]
+    return clone({
+      facts: fact ? [{ factId: `fact:${fact.id}`, label: `当前作品：${fact.name}的正式状态`, current: true, predicate: '正式状态', source: '当前作品记录' }] : [],
+      evidence: [{ artifactId: 'artifact:demo:evidence', version: 1, payloadHash: 'e'.repeat(64), label: '当前作品的已核验依据', kind: 'ReviewReport' }]
+    })
+  }
+
+  async queryDependencySummaryBootstrap(request: ProjectQueryRequest): Promise<DependencySummaryBootstrapProjection> {
+    await wait(25)
+    return { projectId: request.projectId, summary: { summaryStatus: 'READY', totalEdges: 0, mutationEpoch: 0, computedEpoch: 0 }, job: null, owner: 'B12::ChangeRetconOwner' }
   }
 
   async queryBookHealth(request: ProjectQueryRequest): Promise<BookHealthProjection> {

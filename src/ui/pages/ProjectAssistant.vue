@@ -7,6 +7,7 @@ import BaseModal from '../components/BaseModal.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
+import { createGroundedAssistantRetcon } from '../flows/b12RetconFlow'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -52,6 +53,23 @@ async function proposeChange() {
   const changeId = `change:${projectId}:${Date.now()}`
   const changeType = /事实|改成|原来|没有死|其实/.test(question.value) ? 'RETCON' : 'CHANGE'
   try {
+    if (changeType === 'RETCON') {
+      const grounded = await createGroundedAssistantRetcon({
+        execute: (key, request) => store.runCommand(key, request),
+        queryRetconContext: request => store.queryRetconContext(String(request.query ?? '')),
+      }, projectId, question.value)
+      const preflight = grounded.preflight
+      if (preflight.status === 'SUMMARY_BOOTSTRAP_REQUIRED') {
+        changeMessage.value = '正在准备全局影响索引，请稍候。'
+        await store.runCommand('assistant-summary-bootstrap', { type: 'dependency_summary_bootstrap', projectId, payload: {} })
+        const status = await store.queryDependencySummaryBootstrap()
+        if (status.summary.summaryStatus !== 'READY') throw new Error('影响索引尚未准备完成，请稍后重试。')
+        await store.runCommand('assistant-change-impact', { type: 'impact_preflight', projectId, payload: { changeRequestId: grounded.changeRequestId } })
+      }
+      changeMessage.value = `已找到并核对“${grounded.fact.label}”，依据为“${grounded.evidence.label}”；事实修订提案已建立，请到版本与变更记录查看方案并完成二次确认。`
+      router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: grounded.changeRequestId } })
+      return
+    }
     await store.runCommand('assistant-change-proposal', {
       type: 'change_request_create',
       projectId,
@@ -70,7 +88,7 @@ async function proposeChange() {
       payload: { changeRequestId: changeId },
     })
     const result = preflight.result ?? {}
-    changeMessage.value = `${changeType === 'RETCON' ? '事实修订提案' : '变更提案'}已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；请到版本与变更记录完成最终核对。`
+    changeMessage.value = `变更提案已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；请到版本与变更记录完成最终核对。`
     router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: changeId } })
   } catch (error) {
     changeMessage.value = error instanceof Error ? error.message : '变更提案未建立。'

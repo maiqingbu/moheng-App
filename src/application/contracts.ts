@@ -512,6 +512,18 @@ export interface CanonProjection {
   knowledge: PageResult<KnowledgeItem>
 }
 
+export interface RetconContextProjection {
+  facts: Array<{ factId: string; label: string; current: boolean; predicate?: string; source?: string }>
+  evidence: Array<{ artifactId: string; version: number; payloadHash: string; label: string; kind?: string }>
+}
+
+export interface DependencySummaryBootstrapProjection {
+  projectId: string
+  summary: { summaryStatus: 'READY' | 'NOT_READY'; totalEdges: number; mutationEpoch: number; computedEpoch: number }
+  job: Record<string, unknown> | null
+  owner: string
+}
+
 export interface SettingsProjection {
   provider: string
   model: string
@@ -749,6 +761,7 @@ export type CommandType =
   | 'change_request_apply'
   | 'retcon_plan_create'
   | 'retcon_apply'
+  | 'dependency_summary_bootstrap'
   | 'signing_retry'
   | 'export_create'
   | 'backup_create'
@@ -790,6 +803,8 @@ export interface FrontendPort {
   queryChapterFinal(request: ProjectQueryRequest & { chapterId: string }): Promise<ChapterProjection>
   queryChapterVersions(request: ProjectQueryRequest & { chapterId: string }): Promise<PageResult<VersionProjection>>
   queryCanon(request: ProjectQueryRequest): Promise<CanonProjection>
+  queryRetconContext(request: ProjectQueryRequest & { query?: string }): Promise<RetconContextProjection>
+  queryDependencySummaryBootstrap(request: ProjectQueryRequest): Promise<DependencySummaryBootstrapProjection>
   queryBookHealth(request: ProjectQueryRequest): Promise<BookHealthProjection>
   queryHistory(request: ProjectQueryRequest & { kind?: 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON' }): Promise<HistoryProjection>
   queryChangeRequest(request: ProjectQueryRequest & { changeRequestId: string }): Promise<Record<string, unknown>>

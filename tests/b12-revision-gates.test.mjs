@@ -13,13 +13,35 @@ test('B12 has an independent architecture verifier', () => {
 
 test('History UI exposes the complete Retcon plan and execution path', () => {
   const history = read('src/ui/pages/HistoryCenter.vue')
-  assert.match(history, /retcon_plan_create/)
-  assert.match(history, /retcon_apply/)
-  assert.match(history, /planDigest/)
+  const flow = read('src/ui/flows/b12RetconFlow.ts')
+  assert.match(flow, /retcon_plan_create/)
+  assert.match(flow, /retcon_apply/)
+  assert.match(flow, /planDigest/)
+  assert.match(history, /createRetconPlan/)
+  assert.match(history, /confirmRetconPlan/)
 })
 
 test('B12 acceptance maps every gate to an existing evidence source', () => {
   const generator = read('scripts/generate-b12-acceptance.mjs')
   assert.match(generator, /existsSync\(source\)/)
   assert.match(generator, /b12_architecture/)
+})
+
+test('B12 Product UX gates consume real frontend sequence markers', () => {
+  const runner = read('scripts/run-b12-evidence-gates.mjs')
+  assert.match(runner, /B12_FRONTEND_HISTORY_RETCON_RESULT/)
+  assert.match(runner, /B12_FRONTEND_ASSISTANT_RETCON_RESULT/)
+  assert.match(runner, /vitest\.output/)
+  assert.match(runner, /historyTwoStageConfirmation/)
+  assert.doesNotMatch(runner, /setGate\('B12-A49',[^\n]*retcon_plan_create/)
+})
+
+test('B12 global preflight has a formal durable bootstrap job boundary', () => {
+  const owner = read('src-tauri/src/change_retcon.rs')
+  const runtime = read('src-tauri/src/repositories/runtime.rs')
+  const commands = read('src-tauri/src/commands.rs')
+  assert.match(owner, /ensure_dependency_summary_job/)
+  assert.match(runtime, /DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE/)
+  assert.match(runtime, /claim_dependency_summary_job/)
+  assert.match(commands, /query_dependency_summary_bootstrap/)
 })

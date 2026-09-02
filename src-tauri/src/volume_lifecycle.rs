@@ -63,6 +63,51 @@ pub struct NextVolumeHandoffRequest {
 
 pub struct VolumeLifecycleOwner;
 
+/// B09's semantic adapter for B12 planning targets.  This validates the
+/// candidate against the current volume topology and its existing intent
+/// owner before B12 materializes the versioned authority bundle.
+pub fn validate_change_target_owner(
+    connection: &Connection,
+    project_id: &str,
+    artifact_type: &str,
+    candidate: &Value,
+    scope: &Value,
+) -> Result<(), String> {
+    let volume_id = scope
+        .get("volumeId")
+        .and_then(Value::as_str)
+        .ok_or("B09_VOLUME_SCOPE_REQUIRED")?;
+    if NarrativeRepository::volume_exists(connection, project_id, volume_id)
+        .map_err(|error| error.to_string())?
+        == false
+    {
+        return Err("VOLUME_NOT_FOUND".into());
+    }
+    match artifact_type {
+        "VolumeIntent" => {
+            if !NarrativeRepository::approved_book_plan_exists(connection, project_id)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("BOOK_PLAN_APPROVED_REQUIRED".into());
+            }
+            planning::validate_volume_intent(candidate)
+        }
+        "VolumePlan" => {
+            planning::validate_volume_route(candidate)?;
+            let intent = NarrativeRepository::canonical_head_ref(
+                connection,
+                project_id,
+                "VolumeIntent",
+                volume_id,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("VOLUME_INTENT_NOT_FOUND")?;
+            planning::validate_volume_route_reference(candidate, &intent)
+        }
+        _ => Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}")),
+    }
+}
+
 impl VolumeLifecycleOwner {
     pub fn rebuild_planning_state(
         connection: &Connection,

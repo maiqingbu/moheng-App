@@ -150,6 +150,9 @@ const chinesePass = templates.length > 0 && !/作为\s*AI|根据你提供的上�
 const routePass = /HistoryCenter/.test(router) && /UnavailableFeature/.test(router.split('\n').find(line => line.includes('/projects/:id/health')) ?? '') && /match: 'history'/.test(shell)
 const h03Pass = /execute_change_request/.test(repair) && /crate::change_retcon::apply_approved_on_connection/.test(commands) && /apply_retcon_on_connection/.test(owner) && /claim_repair_authorization/.test(repair)
 const productUxRuntimePass = /B12_PRODUCT_UX_RETCON_RESULT[^\n]+status=PASS/.test(rustRevision.output)
+const frontendHistoryPass = /B12_FRONTEND_HISTORY_RETCON_RESULT[^\n]+status=PASS/.test(vitest.output)
+const frontendAssistantPass = /B12_FRONTEND_ASSISTANT_RETCON_RESULT[^\n]+status=PASS/.test(vitest.output)
+const summaryBootstrapPass = /B12_SUMMARY_BOOTSTRAP_RESULT[^\n]+status=PASS/.test(rustRevision.output)
 const scalePreflightMs = Number(scale.output.match(/warmPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
 const scaleColdPreflightMs = Number(scale.output.match(/coldPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
 const scaleColdBounded = scale.output.includes('coldStatus="SUMMARY_BOOTSTRAP_REQUIRED"') && scale.output.includes('fullGraphSynchronousScanCold=false')
@@ -193,17 +196,17 @@ setGate('B12-A35', runtimePass && /finalStatus.*failed/s.test(owner), 'B12_POSTV
 setGate('B12-A36', h03Pass && productUxRuntimePass, 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A37', h03Pass && /one-time|claim_repair_authorization/.test(repair), 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A38', h03Pass && /B12_CHANGE_APPROVAL/.test(owner), 'B12_H03_CHANGE_CAPABILITY.json')
-setGate('B12-A39', b12NodePass && /requestedChange/.test(assistantPage) && /retcon_plan_create/.test(historyPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
-setGate('B12-A40', b12NodePass && /impact_preflight/.test(assistantPage), 'B12_ASSISTANT_CHANGE_GROUNDING.json')
-setGate('B12-A41', b12NodePass && /retcon_apply/.test(historyPage) && /router\.push/.test(assistantPage), 'B12_ASSISTANT_CHANGE_FLOW.json')
+setGate('B12-A39', b12NodePass && frontendAssistantPass, 'B12_ASSISTANT_CHANGE_FLOW.json')
+setGate('B12-A40', b12NodePass && frontendAssistantPass, 'B12_ASSISTANT_CHANGE_GROUNDING.json')
+setGate('B12-A41', b12NodePass && frontendHistoryPass && frontendAssistantPass, 'B12_PRODUCT_UX_RETCON_E2E.json')
 setGate('B12-A42', routePass, 'B12_HISTORY_UI.json')
 setGate('B12-A43', routePass, 'B12_HISTORY_UI.json')
 setGate('B12-A44', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('B12-A45', chinesePass, 'B12_INTERNAL_IDENTIFIER_LEAKAGE.json')
 setGate('B12-A46', b12NodePass && !/作为\s*AI/.test(templates), 'B12_AI_TRACE_LINT.json')
 setGate('B12-A47', b12NodePass && /change_request_create|impact_preflight|change_request_decide|change_request_apply/.test(historyPage), 'B12_UI_CAPABILITY_PARITY.json')
-setGate('B12-A48', scale.status === 'PASS' && /dependencies=3000000/.test(scale.output) && scalePreflightMs <= 2_000 && scaleColdPreflightMs <= 2_000 && scaleColdBounded, 'B12_3M_DEPENDENCY_CERTIFICATION.json', { coldPreflightMs: scaleColdPreflightMs, warmPreflightMs: scalePreflightMs, targetMs: 2_000, coldBounded: scaleColdBounded })
-setGate('B12-A49', b12NodePass && productUxRuntimePass && /retcon_plan_create/.test(historyPage) && /retcon_apply/.test(historyPage), 'B12_PRODUCT_UX_CHANGE_E2E.json')
+setGate('B12-A48', scale.status === 'PASS' && summaryBootstrapPass && /dependencies=3000000/.test(scale.output) && scalePreflightMs <= 2_000 && scaleColdPreflightMs <= 2_000 && scaleColdBounded, ['B12_3M_DEPENDENCY_CERTIFICATION.json', 'B12_DEPENDENCY_SUMMARY_BOOTSTRAP.json'], { coldPreflightMs: scaleColdPreflightMs, warmPreflightMs: scalePreflightMs, targetMs: 2_000, coldBounded: scaleColdBounded, summaryBootstrap: summaryBootstrapPass })
+setGate('B12-A49', b12NodePass && productUxRuntimePass && frontendHistoryPass && frontendAssistantPass, 'B12_PRODUCT_UX_RETCON_E2E.json')
 setGate('B12-A50', runtimePass, 'B12_ATOMIC_COMMIT.json')
 setGate('B12-A51', runtimePass && /commit_with_post_apply/.test(owner), 'B12_ATOMIC_COMMIT.json')
 setGate('B12-A52', runtimePass && /idempotent|REPLAYED/.test(owner + sourceByPath('src-tauri/tests/b12_change_retcon.rs')), 'B12_IDEMPOTENCY.json')
@@ -237,7 +240,7 @@ setGate('module_boundary', moduleBoundary.status === 'PASS', 'module_boundary.lo
 setGate('m0a', nodePass && architecture.status === 'PASS', 'B12_REGRESSION.json')
 setGate('b12_change_retcon', runtimePass, 'b12_change_retcon.log', { passed: parseCount(rust.output, /test result: ok\.\s*(\d+) passed/) + parseCount(rustRevision.output, /test result: ok\.\s*(\d+) passed/) })
 setGate('b12_h03_capability', h03Pass && productUxRuntimePass && runtimePass, 'B12_H03_CHANGE_CAPABILITY.json')
-setGate('b12_product_ux', b12NodePass && productUxRuntimePass && /retcon_plan_create/.test(historyPage) && /retcon_apply/.test(historyPage), 'B12_PRODUCT_UX_RETCON_E2E.json')
+setGate('b12_product_ux', b12NodePass && productUxRuntimePass && frontendHistoryPass && frontendAssistantPass, 'B12_PRODUCT_UX_RETCON_E2E.json')
 setGate('b12_language_scan', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('b12_scale_bound', scale.status === 'PASS', 'b12_scale_bound.log')
 setGate('b12_architecture', b12Architecture.status === 'PASS', 'b12_architecture.log')
@@ -285,13 +288,14 @@ const evidencePayloads = {
   'B12_IDEMPOTENCY.json': { schema: 'b12-idempotency-r1', status: gates['B12-A52'].status },
   'B12_CONCURRENCY.json': { schema: 'b12-concurrency-r1', concurrentWinner: 1, status: gates['B12-A53'].status },
   'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: ownerName, oneTimeP3: true, status: gates['B12-A36'].status },
-  'B12_ASSISTANT_CHANGE_FLOW.json': { schema: 'b12-assistant-change-flow-r1', proposalOnlyBeforeDecision: true, status: gates['B12-A39'].status },
-  'B12_ASSISTANT_CHANGE_GROUNDING.json': { schema: 'b12-assistant-change-grounding-r1', impactFromBackend: true, status: gates['B12-A40'].status },
-  'B12_PRODUCT_UX_CHANGE_E2E.json': { schema: 'b12-product-ux-change-e2e-r1', frontendPortToCommand: true, proposalImpactDecisionApply: true, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
-  'B12_PRODUCT_UX_RETCON_E2E.json': { schema: 'b12-product-ux-retcon-e2e-r1', currentFactEvidencePlanDecisionApply: productUxRuntimePass, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
+  'B12_ASSISTANT_CHANGE_FLOW.json': { schema: 'b12-assistant-change-flow-r2', proposalOnlyBeforeDecision: true, frontendSequence: frontendAssistantPass, status: gates['B12-A39'].status },
+  'B12_ASSISTANT_CHANGE_GROUNDING.json': { schema: 'b12-assistant-change-grounding-r2', groundedCanonQuery: frontendAssistantPass, exactFactAndEvidenceRefs: frontendAssistantPass, impactFromBackend: true, status: gates['B12-A40'].status },
+  'B12_PRODUCT_UX_CHANGE_E2E.json': { schema: 'b12-product-ux-change-e2e-r2', frontendSequence: frontendHistoryPass, proposalImpactDecisionApply: frontendHistoryPass, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
+  'B12_PRODUCT_UX_RETCON_E2E.json': { schema: 'b12-product-ux-retcon-e2e-r2', historyTwoStageConfirmation: frontendHistoryPass, assistantGroundedContinuity: frontendAssistantPass, currentFactEvidencePlanDecisionApply: productUxRuntimePass && frontendHistoryPass, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
   'B12_PRODUCT_UX_GLOBAL_E2E.json': { schema: 'b12-product-ux-global-e2e-r1', explicitGlobalConfirmation: /continueGlobal/.test(historyPage), status: gates['B12-A05'].status },
   'B12_PRODUCT_UX_RESUME_E2E.json': { schema: 'b12-product-ux-resume-e2e-r1', durableResumeCommand: /impact_resume/.test(owner), status: gates['B12-A09'].status },
-  'B12_PRODUCT_UX_ASSISTANT_E2E.json': { schema: 'b12-product-ux-assistant-e2e-r1', assistantUsesFormalCommandBoundary: /change_request_create/.test(assistantPage) && /impact_preflight/.test(assistantPage) && /router\.push/.test(assistantPage), runtimeFixture: productUxRuntimePass, status: gates['B12-A40'].status },
+  'B12_PRODUCT_UX_ASSISTANT_E2E.json': { schema: 'b12-product-ux-assistant-e2e-r2', assistantUsesFormalCommandBoundary: frontendAssistantPass, groundedFact: frontendAssistantPass, runtimeFixture: productUxRuntimePass, status: gates['B12-A40'].status },
+  'B12_DEPENDENCY_SUMMARY_BOOTSTRAP.json': { schema: 'b12-dependency-summary-bootstrap-r1', formalJob: summaryBootstrapPass, restartSafe: summaryBootstrapPass, projectScoped: summaryBootstrapPass, concurrentJobs: summaryBootstrapPass ? 1 : null, status: summaryBootstrapPass ? 'PASS' : 'FAIL' },
   'B12_HISTORY_UI.json': { schema: 'b12-history-ui-r1', route: '/projects/:id/history', active: true, healthUnavailable: true, status: gates['B12-A42'].status },
   'B12_CHINESE_LANGUAGE_SCAN.json': languageReport,
   'B12_INTERNAL_IDENTIFIER_LEAKAGE.json': { schema: 'b12-identifier-leakage-r1', visibleLeakageCount: chinesePass ? 0 : 1, status: gates['B12-A45'].status },

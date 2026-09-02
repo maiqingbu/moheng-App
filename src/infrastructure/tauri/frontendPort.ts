@@ -16,6 +16,8 @@ import type {
   ProjectLibraryProjection,
   ProjectOverviewProjection,
   ProjectQueryRequest,
+  DependencySummaryBootstrapProjection,
+  RetconContextProjection,
   NarrativeContextProjection,
   NarrativeRuntimeQueryRequest,
   NarrativeStateProjection,
@@ -93,6 +95,8 @@ export class TauriFrontendPort implements FrontendPort {
   queryChapterFinal(request: Parameters<FrontendPort['queryChapterFinal']>[0]) { return invokeQuery<ChapterProjection>(this.ipc, 'query_chapter_final', { request }) }
   queryChapterVersions(request: Parameters<FrontendPort['queryChapterVersions']>[0]) { return invokeQuery<PageResult<VersionProjection>>(this.ipc, 'query_chapter_versions', { request }) }
   queryCanon(request: ProjectQueryRequest) { return invokeQuery<CanonProjection>(this.ipc, 'query_canon', { request }) }
+  queryRetconContext(request: ProjectQueryRequest & { query?: string }) { return invokeQuery<RetconContextProjection>(this.ipc, 'query_retcon_context', { request }) }
+  queryDependencySummaryBootstrap(request: ProjectQueryRequest) { return invokeQuery<DependencySummaryBootstrapProjection>(this.ipc, 'query_dependency_summary_bootstrap', { request }) }
   queryBookHealth(request: ProjectQueryRequest) { return invokeQuery<BookHealthProjection>(this.ipc, 'query_book_health', { request }) }
   queryHistory(request: Parameters<FrontendPort['queryHistory']>[0]) { return invokeQuery<HistoryProjection>(this.ipc, 'query_history', { request }) }
   queryChangeRequest(request: Parameters<FrontendPort['queryChangeRequest']>[0]) { return invokeQuery<Record<string, unknown>>(this.ipc, 'query_change_request', { request }) }

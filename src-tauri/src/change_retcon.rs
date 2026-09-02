@@ -231,6 +231,34 @@ fn build_artifact_with_scope(
     decision_refs: Vec<String>,
     now: &str,
 ) -> Result<crate::generated::types::ArtifactEnvelope, String> {
+    build_artifact_with_owner(
+        project_id,
+        command_id,
+        artifact_id,
+        artifact_type,
+        scope,
+        version,
+        payload,
+        lifecycle,
+        decision_refs,
+        OWNER_NAME,
+        now,
+    )
+}
+
+fn build_artifact_with_owner(
+    project_id: &str,
+    command_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    scope: Value,
+    version: i64,
+    payload: Value,
+    lifecycle: &str,
+    decision_refs: Vec<String>,
+    owner: &str,
+    now: &str,
+) -> Result<crate::generated::types::ArtifactEnvelope, String> {
     let payload_hash = sha256_canonical(&payload).map_err(|error| error.to_string())?;
     serde_json::from_value(json!({
         "artifactId":artifact_id,
@@ -245,7 +273,7 @@ fn build_artifact_with_scope(
         "payload":payload,
         "payloadHash":payload_hash,
         "dependencyRefs":[],
-        "provenance":{"createdBy":OWNER_NAME,"commandId":command_id,"decisionRefs":decision_refs},
+        "provenance":{"createdBy":owner,"commandId":command_id,"decisionRefs":decision_refs},
         "createdAt":now
     }))
     .map_err(|error| format!("B12_ARTIFACT:{error}"))
@@ -303,14 +331,87 @@ fn validate_typed_target_payload(artifact_type: &str, payload: &Value) -> Result
 fn target_class(artifact_type: Option<&str>) -> &'static str {
     match artifact_type {
         Some("BookPlan" | "VolumeIntent" | "VolumePlan" | "ChapterPlan") => "PLAN_CHANGE",
-        Some("StoryConstitution" | "OpeningContract") => "NON_CANON_AUTHORITY_CHANGE",
         Some(_) => "UNSUPPORTED",
         None => "PROJECTION_ONLY",
     }
 }
 
+fn target_owner(artifact_type: &str) -> Option<&'static str> {
+    match artifact_type {
+        "BookPlan" | "ChapterPlan" => Some("B07::PlanningOwner"),
+        "VolumeIntent" | "VolumePlan" => Some("B09::VolumeLifecycleOwner"),
+        _ => None,
+    }
+}
+
+fn requested_change_digest(requested_change: &Value) -> Result<String, String> {
+    sha256_canonical(requested_change).map_err(|error| format!("B12_CHANGE_DIGEST:{error}"))
+}
+
+fn target_binding_value(target: &repository::AuthorityHeadRecord) -> Result<Value, String> {
+    Ok(json!({
+        "artifactType":target.artifact_type,
+        "artifactId":target.artifact_id,
+        "scope":target_scope_value(target)?,
+        "version":target.version,
+        "payloadHash":target.payload_hash,
+        "owner":target_owner(&target.artifact_type)
+    }))
+}
+
+fn approved_risk_class(
+    scope_class: &str,
+    target_type: Option<&str>,
+    signing_impact: bool,
+) -> &'static str {
+    if signing_impact || scope_class == "GLOBAL" {
+        "HIGH"
+    } else if scope_class == "WIDE" || target_type == Some("ChapterPlan") {
+        "MEDIUM"
+    } else {
+        "LOW"
+    }
+}
+
 fn retcon_plan_digest(plan: &repository::RetconPlanRecord) -> Result<String, String> {
-    sha256_canonical(&plan.downstream_impact).map_err(|error| format!("B12_RETCON_DIGEST:{error}"))
+    repository::retcon_plan_digest(plan).map_err(|error| format!("B12_RETCON_DIGEST:{error}"))
+}
+
+fn ensure_retcon_decision_binding(
+    decision_payload: &Value,
+    plan: &repository::RetconPlanRecord,
+    plan_digest: &str,
+) -> Result<(), String> {
+    if decision_payload.get("retconPlanId").and_then(Value::as_str)
+        != Some(plan.retcon_plan_id.as_str())
+        || decision_payload.get("planDigest").and_then(Value::as_str) != Some(plan_digest)
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    for (field, expected) in [
+        (
+            "approvedScopeClass",
+            plan.downstream_impact.get("approvedScopeClass"),
+        ),
+        ("approvedRiskClass", plan.downstream_impact.get("riskClass")),
+        (
+            "replacementDigest",
+            plan.downstream_impact.get("replacementDigest"),
+        ),
+        (
+            "targetAuthorityDigest",
+            plan.downstream_impact.get("targetAuthorityDigest"),
+        ),
+        (
+            "requiresBackup",
+            plan.downstream_impact.get("requiresBackup"),
+        ),
+    ] {
+        if decision_payload.get(field) != expected {
+            return Err("B12_DECISION_STALE".into());
+        }
+    }
+    Ok(())
 }
 
 fn signing_impact_for_fact(
@@ -408,21 +509,143 @@ fn resolve_typed_target(
             return Err("B12_CHANGE_TARGET_UNSUPPORTED".into());
         }
     }
-    if !matches!(
-        record.artifact_type.as_str(),
-        "BookPlan"
-            | "VolumeIntent"
-            | "VolumePlan"
-            | "ChapterPlan"
-            | "StoryConstitution"
-            | "OpeningContract"
-    ) {
+    if target_owner(&record.artifact_type).is_none() {
         return Err(format!(
             "B12_CHANGE_TARGET_UNSUPPORTED:{}",
             record.artifact_type
         ));
     }
     Ok(Some(record))
+}
+
+struct TypedTargetMutation {
+    artifact: crate::generated::types::ArtifactEnvelope,
+    head: crate::generated::types::HeadChange,
+    artifact_type: String,
+    owner: &'static str,
+}
+
+fn materialize_typed_target(
+    connection: &Connection,
+    project_id: &str,
+    target: repository::AuthorityHeadRecord,
+    requested_change: &Value,
+    decision_id: &str,
+    command_id: &str,
+    now: &str,
+) -> Result<TypedTargetMutation, String> {
+    let patch = target_patch(requested_change)
+        .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
+    let mut target_payload = target.payload.clone();
+    merge_json_patch(&mut target_payload, patch);
+    let owner = target_owner(&target.artifact_type)
+        .ok_or_else(|| format!("B12_CHANGE_TARGET_UNSUPPORTED:{}", target.artifact_type))?;
+    validate_typed_target_payload(&target.artifact_type, &target_payload)?;
+    match target.artifact_type.as_str() {
+        "BookPlan" | "ChapterPlan" => {
+            crate::planning::validate_change_target_owner(
+                connection,
+                project_id,
+                &target.artifact_type,
+                &target_payload,
+                &target_scope_value(&target)?,
+            )?;
+        }
+        "VolumeIntent" | "VolumePlan" => {
+            crate::volume_lifecycle::validate_change_target_owner(
+                connection,
+                project_id,
+                &target.artifact_type,
+                &target_payload,
+                &target_scope_value(&target)?,
+            )?;
+        }
+        _ => {
+            return Err(format!(
+                "B12_CHANGE_TARGET_UNSUPPORTED:{}",
+                target.artifact_type
+            ))
+        }
+    }
+    let scope = target_scope_value(&target)?;
+    let artifact = build_artifact_with_owner(
+        project_id,
+        command_id,
+        &target.artifact_id,
+        &target.artifact_type,
+        scope.clone(),
+        target.version + 1,
+        target_payload,
+        "APPROVED_PLAN",
+        vec![decision_id.to_string()],
+        owner,
+        now,
+    )?;
+    let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
+        "artifactType":target.artifact_type,
+        "scope":scope,
+        "artifactId":artifact.artifact_id,
+        "version":artifact.version,
+        "payloadHash":artifact.payload_hash
+    }))
+    .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
+    Ok(TypedTargetMutation {
+        artifact,
+        head,
+        artifact_type: target.artifact_type,
+        owner,
+    })
+}
+
+fn ensure_approved_change_binding(
+    connection: &Connection,
+    project_id: &str,
+    input: &Value,
+    change: &repository::ChangeRequestRecord,
+    decision_payload: &Value,
+) -> Result<Value, String> {
+    for field in [
+        "requestedChange",
+        "targetAuthority",
+        "targetRef",
+        "patch",
+        "changes",
+        "targetFactId",
+        "canonDelta",
+    ] {
+        if input.get(field).is_some() {
+            return Err("B12_APPROVED_OPERATION_INPUT_FORBIDDEN".into());
+        }
+    }
+    let requested_change = change
+        .impact_seed
+        .get("requestedChange")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let digest = requested_change_digest(&requested_change)?;
+    if decision_payload
+        .get("requestedChangeDigest")
+        .and_then(Value::as_str)
+        != Some(digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    let target = resolve_typed_target(
+        connection,
+        project_id,
+        &json!({}),
+        &requested_change,
+        &change.impact_seed,
+    )?;
+    let current_binding = target.as_ref().map(target_binding_value).transpose()?;
+    let approved_binding = decision_payload
+        .get("targetAuthorityRef")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if approved_binding != current_binding.unwrap_or(Value::Null) {
+        return Err("B12_DECISION_STALE".into());
+    }
+    Ok(requested_change)
 }
 
 fn state_delta(state_id: &str, state_type: &str, value: Value, payload: Value) -> Value {
@@ -552,10 +775,17 @@ fn preflight(
                 repository::dependency_snapshot(connection, project_id, &refs, explicit_global)
                     .map_err(|error| format!("B12_DB:{error}"))?;
             if explicit_global && snapshot.summary_status != "READY" {
+                let bootstrap_job_id =
+                    crate::repositories::runtime::DurableJobService::ensure_dependency_summary_job(
+                        connection, project_id, now,
+                    )
+                    .map_err(|error| format!("B12_DB:{error}"))?;
                 return Ok(json!({
                     "status":"SUMMARY_BOOTSTRAP_REQUIRED",
                     "changeRequestId":change_id,
                     "summaryStatus":snapshot.summary_status,
+                    "bootstrapJobId":bootstrap_job_id,
+                    "bootstrapStatus":"QUEUED",
                     "summaryBootstrapMode":"EXPLICIT_BACKGROUND_REQUIRED",
                     "fullGraphSynchronousScan":snapshot.full_graph_synchronous_scan,
                     "preflightOnly":true,
@@ -679,6 +909,146 @@ fn preflight(
             }))
         },
     )
+}
+
+pub fn bootstrap_dependency_summary(
+    manager: &ProjectManager,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    request_digest: &str,
+    expected_revision: Option<i64>,
+    now: &str,
+) -> Result<Value, String> {
+    let outcome = manager
+        .commit_project_command(
+            ProjectCommandSpec {
+                project_id,
+                result_project_id: project_id,
+                command_id,
+                idempotency_key,
+                command_type: "dependency_summary_bootstrap",
+                request_digest,
+                expected_revision,
+                now,
+                advance_revision: false,
+            },
+            |connection| {
+                let job_id =
+                    crate::repositories::runtime::DurableJobService::ensure_dependency_summary_job(
+                        connection, project_id, now,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+                let claimed =
+                    crate::repositories::runtime::DurableJobService::claim_dependency_summary_job(
+                        connection,
+                        project_id,
+                        &job_id,
+                        crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
+                        now,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+                Ok(json!({"jobId":job_id,"claimed":claimed}))
+            },
+        )
+        .map_err(manager_error)?;
+    let (receipt, claimed) = match outcome {
+        ProjectCommandOutcome::Committed { value, receipt } => (
+            receipt,
+            value
+                .get("claimed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ),
+        ProjectCommandOutcome::Replayed(receipt) => (receipt, false),
+    };
+    if !claimed {
+        let status = manager
+            .with_read_connection(project_id, now, |connection| {
+                crate::repositories::runtime::DurableJobService::dependency_summary_job_status(
+                    connection, project_id,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
+            })
+            .map_err(|error| error.to_string())?;
+        let summary_status = manager
+            .with_read_connection(project_id, now, |connection| {
+                repository::dependency_summary_status(connection, project_id)
+                    .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
+            })
+            .map_err(|error| error.to_string())?;
+        return Ok(control_response(
+            &receipt,
+            json!({
+                "status":"ALREADY_RUNNING",
+                "jobId":crate::repositories::runtime::DurableJobService::dependency_summary_job_id(project_id).map_err(|error| error.to_string())?,
+                "summaryStatus":summary_status,
+                "job":status
+            }),
+            "影响索引正在由后台任务准备。",
+        ));
+    }
+    let handle = manager.open(project_id, "", now).map_err(manager_error)?;
+    let job_id =
+        crate::repositories::runtime::DurableJobService::dependency_summary_job_id(project_id)
+            .map_err(|error| error.to_string())?;
+    let result = (|| {
+        crate::repositories::runtime::DurableJobService::save_checkpoint(
+            &handle,
+            project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
+            0,
+            &json!({"phase":"AGGREGATING","summaryStatus":"NOT_READY"}),
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        let summary = repository::rebuild_global_dependency_summary(&handle, project_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        crate::repositories::runtime::DurableJobService::save_checkpoint(
+            &handle,
+            project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
+            summary.total_edges,
+            &json!({"phase":"READY","summaryStatus":"READY","totalEdges":summary.total_edges}),
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        crate::repositories::runtime::DurableJobService::complete_dependency_summary_job(
+            &handle,
+            project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok::<_, String>(json!({
+            "status":"COMPLETED",
+            "jobId":job_id,
+            "summaryStatus":"READY",
+            "totalEdges":summary.total_edges,
+            "classCounts":summary.class_counts,
+            "fingerprint":summary.fingerprint,
+            "restartSafe":true
+        }))
+    })();
+    if let Err(error) = &result {
+        let _ = crate::repositories::runtime::DurableJobService::pause_dependency_summary_job(
+            &handle,
+            project_id,
+            &job_id,
+            "SUMMARY_BOOTSTRAP_FAILED",
+            now,
+        );
+        return Err(error.clone());
+    }
+    drop(handle);
+    Ok(control_response(
+        &receipt,
+        result?,
+        "影响索引已准备完成，可以重新分析影响范围。",
+    ))
 }
 
 fn expand(
@@ -953,6 +1323,30 @@ fn decide(
             {
                 return Err("B12_DECISION_STALE".into());
             }
+            let requested_change = change
+                .impact_seed
+                .get("requestedChange")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let requested_digest = requested_change_digest(&requested_change)?;
+            let ordinary_target = if change.change_type == "CHANGE" {
+                resolve_typed_target(
+                    connection,
+                    project_id,
+                    &json!({}),
+                    &requested_change,
+                    &change.impact_seed,
+                )?
+            } else {
+                None
+            };
+            let target_binding = ordinary_target
+                .as_ref()
+                .map(target_binding_value)
+                .transpose()?;
+            let target_type = ordinary_target
+                .as_ref()
+                .map(|target| target.artifact_type.clone());
             let retcon_plan = if change.change_type == "RETCON" {
                 let plan_id = required_string(input, "retconPlanId")?.to_owned();
                 let plan = repository::load_retcon_plan(connection, project_id, &plan_id)
@@ -966,19 +1360,69 @@ fn decide(
                 {
                     return Err("B12_DECISION_STALE".into());
                 }
-                Some((plan_id, digest))
+                for (field, expected) in [
+                    (
+                        "approvedScopeClass",
+                        plan.downstream_impact.get("approvedScopeClass"),
+                    ),
+                    ("approvedRiskClass", plan.downstream_impact.get("riskClass")),
+                    (
+                        "replacementDigest",
+                        plan.downstream_impact.get("replacementDigest"),
+                    ),
+                    (
+                        "targetAuthorityDigest",
+                        plan.downstream_impact.get("targetAuthorityDigest"),
+                    ),
+                ] {
+                    if input.get(field).is_some() && input.get(field) != expected {
+                        return Err("B12_DECISION_STALE".into());
+                    }
+                }
+                if input.get("requiresBackup").is_some()
+                    && input.get("requiresBackup") != plan.downstream_impact.get("requiresBackup")
+                {
+                    return Err("B12_DECISION_STALE".into());
+                }
+                Some((plan_id, digest, plan))
             } else {
                 None
             };
+            let approved_scope = retcon_plan
+                .as_ref()
+                .and_then(|item| item.2.downstream_impact.get("approvedScopeClass"))
+                .cloned()
+                .unwrap_or_else(|| json!(impact.scope_class));
+            let approved_risk = retcon_plan
+                .as_ref()
+                .and_then(|item| item.2.downstream_impact.get("riskClass"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!(approved_risk_class(
+                        &impact.scope_class,
+                        target_type.as_deref(),
+                        false
+                    ))
+                });
             let decision_payload = json!({
                 "changeRequestId":change_id,
                 "impactSetId":impact.impact_set_id,
                 "impactDigest":supplied_digest,
                 "basedOnRevision":current_revision,
+                "requestedChangeDigest":requested_digest,
+                "targetAuthorityRef":target_binding.unwrap_or(Value::Null),
+                "targetHeadVersion":ordinary_target.as_ref().map(|target| target.version),
+                "targetHeadPayloadHash":ordinary_target.as_ref().map(|target| target.payload_hash.clone()),
+                "targetOwner":ordinary_target.as_ref().and_then(|target| target_owner(&target.artifact_type)),
+                "approvedScopeClass":approved_scope,
+                "approvedRiskClass":approved_risk,
                 "scopeAcknowledged":true,
                 "riskAcknowledged":true,
                 "retconPlanId":retcon_plan.as_ref().map(|item| item.0.clone()),
-                "planDigest":retcon_plan.as_ref().map(|item| item.1.clone())
+                "planDigest":retcon_plan.as_ref().map(|item| item.1.clone()),
+                "replacementDigest":retcon_plan.as_ref().and_then(|item| item.2.downstream_impact.get("replacementDigest")).cloned(),
+                "targetAuthorityDigest":retcon_plan.as_ref().and_then(|item| item.2.downstream_impact.get("targetAuthorityDigest")).cloned(),
+                "requiresBackup":retcon_plan.as_ref().and_then(|item| item.2.downstream_impact.get("requiresBackup")).cloned()
             });
             repository::insert_decision(
                 connection,
@@ -1015,7 +1459,7 @@ fn decide(
                 now,
             )
             .map_err(|error| format!("B12_DB:{error}"))?;
-            if let Some((plan_id, _)) = retcon_plan.as_ref() {
+            if let Some((plan_id, _, _)) = retcon_plan.as_ref() {
                 repository::update_retcon_plan(
                     connection,
                     project_id,
@@ -1127,17 +1571,6 @@ fn apply_change(
     if change.change_type == "RETCON" {
         return Err("B12_RETCON_PLAN_REQUIRED".into());
     }
-    if request
-        .pointer("/payload/targetFactId")
-        .and_then(Value::as_str)
-        .is_some()
-        || request
-            .pointer("/payload/canonDelta")
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty())
-    {
-        return Err("B12_RETCON_REQUIRED".into());
-    }
     let impact = repository::load_impact_set(&handle, project_id, &change_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_IMPACT_PREFLIGHT_REQUIRED".to_string())?;
@@ -1172,50 +1605,35 @@ fn apply_change(
     {
         return Err("B12_DECISION_STALE".into());
     }
-    let requested_change = input
-        .get("requestedChange")
-        .cloned()
-        .or_else(|| change.impact_seed.get("requestedChange").cloned())
-        .unwrap_or_else(|| json!({}));
+    let requested_change =
+        ensure_approved_change_binding(&handle, project_id, input, &change, &decision_payload)?;
     let typed_target = resolve_typed_target(
         &handle,
         project_id,
-        input,
+        &json!({}),
         &requested_change,
         &change.impact_seed,
     )?;
-    let (target_artifact, target_head, target_type) = if let Some(target) = typed_target {
-        let patch = target_patch(&requested_change)
-            .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
-        let mut target_payload = target.payload.clone();
-        merge_json_patch(&mut target_payload, patch);
-        validate_typed_target_payload(&target.artifact_type, &target_payload)?;
-        let scope = target_scope_value(&target)?;
-        let artifact = build_artifact_with_scope(
-            project_id,
-            command_id,
-            &target.artifact_id,
-            &target.artifact_type,
-            scope.clone(),
-            target.version + 1,
-            target_payload,
-            "APPROVED_PLAN",
-            vec![decision_id.clone()],
-            now,
-        )?;
-        let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
-            "artifactType":target.artifact_type,
-            "scope":scope,
-            "artifactId":artifact.artifact_id,
-            "version":artifact.version,
-            "payloadHash":artifact.payload_hash
-        }))
-        .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
-        let artifact_type = target.artifact_type.clone();
-        (Some(artifact), Some(head), Some(artifact_type))
-    } else {
-        (None, None, None)
-    };
+    let (target_artifact, target_head, target_type, target_owner_name) =
+        if let Some(target) = typed_target {
+            let mutation = materialize_typed_target(
+                &handle,
+                project_id,
+                target,
+                &requested_change,
+                &decision_id,
+                command_id,
+                now,
+            )?;
+            (
+                Some(mutation.artifact),
+                Some(mutation.head),
+                Some(mutation.artifact_type),
+                Some(mutation.owner),
+            )
+        } else {
+            (None, None, None, None)
+        };
     let change_payload = json!({
         "payloadSchema":"b12-change-request.r1",
         "changeRequestId":change_id,
@@ -1228,7 +1646,8 @@ fn apply_change(
         "impactDigest":supplied_digest,
         "decisionId":decision_id,
         "authorityType":target_type.clone(),
-        "targetClass":target_class(target_type.as_deref())
+        "targetClass":target_class(target_type.as_deref()),
+        "authorityOwner":target_owner_name
     });
     let artifact = build_artifact(
         project_id,
@@ -1300,7 +1719,7 @@ fn apply_change(
     )?;
     Ok(final_response(
         &receipt,
-        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityMutation":target_type.is_some()}),
+        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"authorityMutation":target_type.is_some()}),
         postverify,
         "变更已完成并复核。",
     ))
@@ -1348,9 +1767,6 @@ pub fn apply_approved_on_connection(
             request,
         );
     }
-    if input.get("targetFactId").is_some() || input.get("canonDelta").is_some() {
-        return Err("B12_RETCON_REQUIRED".into());
-    }
     let impact = repository::load_impact_set(connection, project_id, &change_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_IMPACT_PREFLIGHT_REQUIRED".to_string())?;
@@ -1374,57 +1790,42 @@ pub fn apply_approved_on_connection(
     {
         return Err("B12_DECISION_STALE".into());
     }
-    let requested_change = input
-        .get("requestedChange")
-        .cloned()
-        .or_else(|| change.impact_seed.get("requestedChange").cloned())
-        .unwrap_or_else(|| json!({}));
+    let requested_change =
+        ensure_approved_change_binding(connection, project_id, input, &change, &decision_payload)?;
     let typed_target = resolve_typed_target(
         connection,
         project_id,
-        input,
+        &json!({}),
         &requested_change,
         &change.impact_seed,
     )?;
-    let (target_artifact, target_head, target_type) = if let Some(target) = typed_target {
-        let patch = target_patch(&requested_change)
-            .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
-        let mut target_payload = target.payload.clone();
-        merge_json_patch(&mut target_payload, patch);
-        validate_typed_target_payload(&target.artifact_type, &target_payload)?;
-        let scope = target_scope_value(&target)?;
-        let artifact = build_artifact_with_scope(
-            project_id,
-            command_id,
-            &target.artifact_id,
-            &target.artifact_type,
-            scope.clone(),
-            target.version + 1,
-            target_payload,
-            "APPROVED_PLAN",
-            vec![decision_id.clone()],
-            now,
-        )?;
-        let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
-            "artifactType":target.artifact_type,
-            "scope":scope,
-            "artifactId":artifact.artifact_id,
-            "version":artifact.version,
-            "payloadHash":artifact.payload_hash
-        }))
-        .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
-        let artifact_type = target.artifact_type.clone();
-        (Some(artifact), Some(head), Some(artifact_type))
-    } else {
-        (None, None, None)
-    };
+    let (target_artifact, target_head, target_type, target_owner_name) =
+        if let Some(target) = typed_target {
+            let mutation = materialize_typed_target(
+                connection,
+                project_id,
+                target,
+                &requested_change,
+                &decision_id,
+                command_id,
+                now,
+            )?;
+            (
+                Some(mutation.artifact),
+                Some(mutation.head),
+                Some(mutation.artifact_type),
+                Some(mutation.owner),
+            )
+        } else {
+            (None, None, None, None)
+        };
     let artifact = build_artifact(
         project_id,
         command_id,
         &change_id,
         "ChangeRequest",
         1,
-        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref())}),
+        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name}),
         "MATERIALIZED",
         vec![decision_id.clone()],
         now,
@@ -1484,7 +1885,7 @@ pub fn apply_approved_on_connection(
     Ok(json!({
         "receiptId":receipt.receipt_id,
         "receipt":receipt,
-        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref())},
+        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name},
         "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"typedRequery":true}
     }))
 }
@@ -1534,13 +1935,19 @@ fn create_change(
             }
             let target_refs = string_array(input.get("targetRefs"));
             let source_refs = string_array(input.get("sourceRefs"));
+            let requested_change = input
+                .get("requestedChange")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let requested_change_digest = requested_change_digest(&requested_change)?;
             let seed = json!({
                 "basedOnRevision":based,
                 "targetRefs":target_refs,
                 "sourceRefs":source_refs,
                 "targetFactId":input.get("targetFactId").cloned().unwrap_or(Value::Null),
                 "targetAuthority":input.get("targetAuthority").cloned().unwrap_or(Value::Null),
-                "requestedChange":input.get("requestedChange").cloned().unwrap_or_else(|| json!({})),
+                "requestedChange":requested_change,
+                "requestedChangeDigest":requested_change_digest,
                 "reason":input.get("reason").cloned().unwrap_or_else(|| json!(summary)),
                 "requestDigest":request_digest,
                 "createdAt":now
@@ -1651,6 +2058,21 @@ fn create_retcon_plan(
                 }
             }
             let signing_impact = signing_impact_for_fact(connection, project_id, &old)?;
+            let fix_type = input
+                .get("fixType")
+                .and_then(Value::as_str)
+                .unwrap_or("REWRITE");
+            if !matches!(fix_type, "EXPLANATORY_PATCH" | "REWRITE" | "SUPPLEMENT") {
+                return Err("B12_INVALID:fixType".into());
+            }
+            let approved_scope_class = impact.scope_class.clone();
+            let risk_class = approved_risk_class(&approved_scope_class, None, signing_impact);
+            let requires_backup =
+                signing_impact || approved_scope_class == "GLOBAL" || fix_type == "REWRITE";
+            let target_authority_digest =
+                sha256_canonical(&old).map_err(|error| format!("B12_RETCON_DIGEST:{error}"))?;
+            let replacement_digest = sha256_canonical(&replacement)
+                .map_err(|error| format!("B12_RETCON_DIGEST:{error}"))?;
             let downstream = json!({
                 "changeRequestId":change_id,
                 "basedOnRevision":based,
@@ -1660,16 +2082,19 @@ fn create_retcon_plan(
                 "oldCanon":old,
                 "replacement":replacement,
                 "signingImpact":signing_impact,
-                "estimatedCostCents":0
+                "estimatedCostCents":0,
+                "approvedScopeClass":approved_scope_class,
+                "riskClass":risk_class,
+                "requiresBackup":requires_backup,
+                "replacementDigest":replacement_digest,
+                "targetAuthorityDigest":target_authority_digest,
+                "expectedPostconditions":[
+                    {"kind":"OLD_FACT_PRESERVED","factId":fact_id},
+                    {"kind":"NEW_FACT_CURRENT"},
+                    {"kind":"RETCON_PLAN_APPLIED","planId":plan_id}
+                ]
             });
             let target_fact = json!({"old":downstream["oldCanon"].clone(),"replacement":downstream["replacement"].clone()});
-            let fix_type = input
-                .get("fixType")
-                .and_then(Value::as_str)
-                .unwrap_or("REWRITE");
-            if !matches!(fix_type, "EXPLANATORY_PATCH" | "REWRITE" | "SUPPLEMENT") {
-                return Err("B12_INVALID:fixType".into());
-            }
             repository::insert_retcon_plan(
                 connection,
                 project_id,
@@ -1698,7 +2123,15 @@ fn create_retcon_plan(
                 now,
             )
             .map_err(|error| format!("B12_DB:{error}"))?;
-            let plan_digest = sha256_canonical(&downstream).map_err(|error| error.to_string())?;
+            let plan_digest = retcon_plan_digest(&repository::RetconPlanRecord {
+                retcon_plan_id: plan_id.clone(),
+                target_fact: target_fact.clone(),
+                reason: reason.clone(),
+                fix_type: fix_type.to_string(),
+                downstream_impact: downstream.clone(),
+                status: "PENDING_APPROVAL".into(),
+                decision_ref: None,
+            })?;
             Ok(json!({
                 "retconPlanId":plan_id,
                 "changeRequestId":change_id,
@@ -1710,7 +2143,13 @@ fn create_retcon_plan(
                 "impactSetId":downstream["impactSetId"],
                 "impactDigest":downstream["impactDigest"],
                 "signingImpact":signing_impact,
-                "planDigest":plan_digest
+                "planDigest":plan_digest,
+                "approvedScopeClass":downstream["approvedScopeClass"],
+                "riskClass":downstream["riskClass"],
+                "requiresBackup":downstream["requiresBackup"],
+                "replacementDigest":downstream["replacementDigest"],
+                "targetAuthorityDigest":downstream["targetAuthorityDigest"],
+                "expectedPostconditions":downstream["expectedPostconditions"]
             }))
         },
     )
@@ -1743,7 +2182,7 @@ fn apply_retcon(
     if input
         .get("planDigest")
         .and_then(Value::as_str)
-        .is_some_and(|digest| digest != current_plan_digest)
+        .is_some_and(|supplied| supplied != current_plan_digest)
     {
         return Err("B12_DECISION_STALE".into());
     }
@@ -1784,13 +2223,10 @@ fn apply_retcon(
     let decision = repository::load_decision(&handle, project_id, &decision_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
-    if decision.0 != "APPROVE"
-        || decision.1.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str())
-        || decision.1.get("planDigest").and_then(Value::as_str)
-            != Some(current_plan_digest.as_str())
-    {
+    if decision.0 != "APPROVE" {
         return Err("B12_DECISION_STALE".into());
     }
+    ensure_retcon_decision_binding(&decision.1, &plan, &current_plan_digest)?;
     let old = plan
         .target_fact
         .get("old")
@@ -1800,6 +2236,15 @@ fn apply_retcon(
     let actual_old = repository::current_fact(&handle, project_id, &old_fact_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_CANON_FACT_NOT_FOUND".to_string())?;
+    let actual_old_digest = sha256_canonical(&actual_old).map_err(|error| error.to_string())?;
+    if plan
+        .downstream_impact
+        .get("targetAuthorityDigest")
+        .and_then(Value::as_str)
+        != Some(actual_old_digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
     if actual_old
         .get("supersededBy")
         .is_some_and(|value| !value.is_null())
@@ -1971,7 +2416,7 @@ pub fn apply_retcon_on_connection(
     if input
         .get("planDigest")
         .and_then(Value::as_str)
-        .is_some_and(|digest| digest != current_plan_digest)
+        .is_some_and(|supplied| supplied != current_plan_digest)
     {
         return Err("B12_DECISION_STALE".into());
     }
@@ -2001,13 +2446,10 @@ pub fn apply_retcon_on_connection(
     let decision = repository::load_decision(connection, project_id, &decision_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
-    if decision.0 != "APPROVE"
-        || decision.1.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str())
-        || decision.1.get("planDigest").and_then(Value::as_str)
-            != Some(current_plan_digest.as_str())
-    {
+    if decision.0 != "APPROVE" {
         return Err("B12_DECISION_STALE".into());
     }
+    ensure_retcon_decision_binding(&decision.1, &plan, &current_plan_digest)?;
     let old = plan
         .target_fact
         .get("old")
@@ -2017,6 +2459,15 @@ pub fn apply_retcon_on_connection(
     let actual_old = repository::current_fact(connection, project_id, &old_fact_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_CANON_FACT_NOT_FOUND".to_string())?;
+    let actual_old_digest = sha256_canonical(&actual_old).map_err(|error| error.to_string())?;
+    if plan
+        .downstream_impact
+        .get("targetAuthorityDigest")
+        .and_then(Value::as_str)
+        != Some(actual_old_digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
     if actual_old
         .get("supersededBy")
         .is_some_and(|value| !value.is_null())

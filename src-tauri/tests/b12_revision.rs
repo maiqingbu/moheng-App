@@ -5,9 +5,13 @@ use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{operation_digest_with_postconditions, RepairPlan};
 use ai_novel_production_system_core::repositories::change_retcon::rebuild_global_dependency_summary;
+use ai_novel_production_system_core::repositories::runtime::{
+    lease_expiry, DurableJobService, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE, DEPENDENCY_SUMMARY_WORKER,
+};
 use libsql_rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 const NOW: &str = "2026-09-02T05:00:00Z";
 
@@ -194,6 +198,34 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
     )
     .unwrap();
     assert_eq!(second["result"]["jobId"], bootstrap["result"]["jobId"]);
+    let handle = state.manager.open("p-b12-r06-job", "", NOW).unwrap();
+    handle
+        .execute(
+            "UPDATE jobs SET status='RUNNING' WHERE project_id=?1 AND current_stage=?2",
+            params!["p-b12-r06-job", DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
+        )
+        .unwrap();
+    DurableJobService::acquire_lease(
+        &handle,
+        "p-b12-r06-job",
+        &bootstrap["result"]["jobId"].as_str().unwrap(),
+        DEPENDENCY_SUMMARY_WORKER,
+        &lease_expiry(NOW),
+        NOW,
+    )
+    .unwrap();
+    DurableJobService::recover_after_restart(&handle, "p-b12-r06-job", NOW).unwrap();
+    drop(handle);
+    let resumed = command(
+        &state,
+        "p-b12-r06-job",
+        "dependency_summary_bootstrap",
+        "cmd:b12:r06:job:restart",
+        0,
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(resumed["result"]["summaryStatus"], "READY");
     state
         .manager
         .with_read_connection("p-b12-r06-job", NOW, |connection| {
@@ -209,6 +241,205 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
+    println!(
+        "B12_SUMMARY_BOOTSTRAP_RESULT jobCreated=PASS restart=PASS concurrentJobs=1 status=PASS"
+    );
+}
+
+#[test]
+fn b12_dependency_summary_bootstrap_concurrent_requests_share_one_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = Box::leak(Box::new(temp)).path().to_path_buf();
+    let setup = KernelState::with_production_gateway(
+        AppPaths::new(root.clone()),
+        Arc::new(UnavailableProductionGateway),
+    );
+    setup
+        .manager
+        .create("p-b12-r06-concurrent", "B12 并发索引测试", NOW)
+        .unwrap();
+    let handle = setup.manager.open("p-b12-r06-concurrent", "", NOW).unwrap();
+    handle.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for index in 0..1_001 {
+        handle
+            .execute(
+                "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES (?1,?2,'concurrent:source',?3,'PLAN_INPUT','BOOK','HARD',?4,'B12_R06_TEST',?5)",
+                params![
+                    format!("edge:b12:r06:concurrent:{index}"),
+                    "p-b12-r06-concurrent",
+                    format!("concurrent:target:{index}"),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    handle.execute_batch("COMMIT").unwrap();
+    drop(handle);
+    command(
+        &setup,
+        "p-b12-r06-concurrent",
+        "change_request_create",
+        "cmd:b12:r06:concurrent:create",
+        0,
+        json!({"changeRequestId":"change:b12:r06:concurrent","changeType":"CHANGE","scope":"GLOBAL","summary":"并发准备索引","requestedChange":{"target":"全局路线"}}),
+    )
+    .unwrap();
+    let preflight = command(
+        &setup,
+        "p-b12-r06-concurrent",
+        "impact_preflight",
+        "cmd:b12:r06:concurrent:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r06:concurrent"}),
+    )
+    .unwrap();
+    assert_eq!(preflight["result"]["status"], "SUMMARY_BOOTSTRAP_REQUIRED");
+
+    let first = KernelState::with_production_gateway(
+        AppPaths::new(root.clone()),
+        Arc::new(UnavailableProductionGateway),
+    );
+    let second = KernelState::with_production_gateway(
+        AppPaths::new(root),
+        Arc::new(UnavailableProductionGateway),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = barrier.clone();
+    let second_barrier = barrier;
+    let first_thread = thread::spawn(move || {
+        first_barrier.wait();
+        command(
+            &first,
+            "p-b12-r06-concurrent",
+            "dependency_summary_bootstrap",
+            "cmd:b12:r06:concurrent:worker-a",
+            0,
+            json!({}),
+        )
+    });
+    let second_thread = thread::spawn(move || {
+        second_barrier.wait();
+        command(
+            &second,
+            "p-b12-r06-concurrent",
+            "dependency_summary_bootstrap",
+            "cmd:b12:r06:concurrent:worker-b",
+            0,
+            json!({}),
+        )
+    });
+    assert!(first_thread.join().unwrap().is_ok());
+    assert!(second_thread.join().unwrap().is_ok());
+
+    setup
+        .manager
+        .with_read_connection("p-b12-r06-concurrent", NOW, |connection| {
+            let jobs: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE project_id=?1 AND current_stage=?2",
+                    params!["p-b12-r06-concurrent", DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(jobs, 1);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+    println!("B12_SUMMARY_BOOTSTRAP_CONCURRENCY_RESULT concurrentJobs=1 status=PASS");
+}
+
+#[test]
+fn b12_retcon_context_query_returns_current_fact_and_typed_evidence_options() {
+    let state = test_state("p-b12-r05-context");
+    let handle = state.manager.open("p-b12-r05-context", "", NOW).unwrap();
+    handle
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:context','p-b12-r05-context','父亲','CHARACTER',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    handle
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r05:context','p-b12-r05-context','entity:r05:context','状态','{\"description\":\"已经死亡\"}','A',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    handle
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('evidence:r05:context','p-b12-r05-context','ReviewReport','PROJECT','p-b12-r05-context',2,'m0a.artifact.v1','COMMITTED',?1,'{}',?2,?2)",
+            params!["a".repeat(64), NOW],
+        )
+        .unwrap();
+    let context = ai_novel_production_system_core::repositories::change_retcon::retcon_context(
+        &handle,
+        "p-b12-r05-context",
+        Some("父亲"),
+        20,
+    )
+    .unwrap();
+    assert_eq!(context["facts"][0]["factId"], "fact:r05:context");
+    assert_eq!(context["facts"][0]["current"], true);
+    assert!(context["facts"][0]["label"]
+        .as_str()
+        .unwrap()
+        .contains("已经死亡"));
+    assert_eq!(context["evidence"][0]["version"], 2);
+    assert_eq!(context["evidence"][0]["payloadHash"], "a".repeat(64));
+}
+
+#[test]
+fn b12_dependency_summary_epoch_invalidates_ready_summary_and_requeues_job() {
+    let state = test_state("p-b12-r06-epoch");
+    let handle = state.manager.open("p-b12-r06-epoch", "", NOW).unwrap();
+    handle
+        .execute(
+            "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES ('edge:r06:epoch','p-b12-r06-epoch','epoch:source','epoch:target','PLAN_INPUT','BOOK','HARD',?1,'B12_R06_TEST',?2)",
+            params!["a".repeat(64), NOW],
+        )
+        .unwrap();
+    rebuild_global_dependency_summary(&handle, "p-b12-r06-epoch").unwrap();
+    let ready =
+        ai_novel_production_system_core::repositories::change_retcon::dependency_summary_status(
+            &handle,
+            "p-b12-r06-epoch",
+        )
+        .unwrap();
+    assert_eq!(ready["summaryStatus"], "READY");
+    handle
+        .execute(
+            "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES ('edge:r06:epoch:2','p-b12-r06-epoch','epoch:source','epoch:target:2','PLAN_INPUT','BOOK','HARD',?1,'B12_R06_TEST',?2)",
+            params!["b".repeat(64), NOW],
+        )
+        .unwrap();
+    let stale =
+        ai_novel_production_system_core::repositories::change_retcon::dependency_summary_status(
+            &handle,
+            "p-b12-r06-epoch",
+        )
+        .unwrap();
+    assert_eq!(stale["summaryStatus"], "NOT_READY");
+    drop(handle);
+    command(
+        &state,
+        "p-b12-r06-epoch",
+        "change_request_create",
+        "cmd:b12:r06:epoch:create",
+        0,
+        json!({"changeRequestId":"change:b12:r06:epoch","changeType":"CHANGE","scope":"GLOBAL","summary":"重新准备影响索引","requestedChange":{"target":"全局路线"}}),
+    )
+    .unwrap();
+    let preflight = command(
+        &state,
+        "p-b12-r06-epoch",
+        "impact_preflight",
+        "cmd:b12:r06:epoch:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r06:epoch"}),
+    )
+    .unwrap();
+    assert_eq!(preflight["result"]["status"], "SUMMARY_BOOTSTRAP_REQUIRED");
+    assert!(preflight["result"]["bootstrapJobId"].as_str().is_some());
 }
 
 #[test]
@@ -460,27 +691,24 @@ fn b12_change_applies_a_real_book_plan_authority_head() {
         "change_request_apply",
         "cmd:change:b12:r01:apply",
         0,
-        json!({
-            "changeRequestId":"change:b12:r01",
-            "impactDigest":digest,
-            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01"},
-            "requestedChange":{"targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01"},"patch":{"storyPromise":"修订后的承诺"}}
-        }),
+        json!({"changeRequestId":"change:b12:r01","impactDigest":digest}),
     )
     .expect("apply typed change");
     assert_eq!(result["result"]["authorityType"], "BookPlan");
+    assert_eq!(result["result"]["authorityOwner"], "B07::PlanningOwner");
     state
         .manager
         .with_read_connection("p-b12-r01", NOW, |connection| {
-            let (version, payload): (i64, String) = connection
+            let (version, payload, provenance): (i64, String, String) = connection
                 .query_row(
-                    "SELECT h.version,p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan'",
+                    "SELECT h.version,p.payload_json,a.provenance_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan'",
                     ["p-b12-r01"],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .expect("read book plan head");
             assert_eq!(version, 2);
             assert_eq!(serde_json::from_str::<Value>(&payload).unwrap()["storyPromise"], "修订后的承诺");
+            assert!(provenance.contains("B07::PlanningOwner"));
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .expect("verify book plan head");
@@ -626,7 +854,7 @@ fn b12_stale_queue_uses_actual_transitive_impact_targets() {
         "change_request_apply",
         "cmd:b12:r03:apply",
         0,
-        json!({"changeRequestId":"change:b12:r03","impactDigest":digest,"requestedChange":{"target":"路线"}}),
+        json!({"changeRequestId":"change:b12:r03","impactDigest":digest}),
     )
     .expect("apply change");
     state

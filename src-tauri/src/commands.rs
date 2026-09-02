@@ -621,6 +621,22 @@ pub fn query_canon_impl(state: &KernelState, request: Value) -> Result<Value, St
         .map_err(|error| error.to_string())
 }
 
+pub fn query_retcon_context_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let query = request.get("query").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_i64)
+        .unwrap_or(30);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::change_retcon::retcon_context(connection, project_id, query, limit)
+                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_book_health_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let cursor = request.get("cursor").and_then(Value::as_str);
@@ -674,6 +690,33 @@ pub fn query_change_request_impl(state: &KernelState, request: Value) -> Result<
             )
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
             .ok_or(ManagerError::ProjectNotFound)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_dependency_summary_bootstrap_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let summary = crate::repositories::change_retcon::dependency_summary_status(
+                connection, project_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+            let job =
+                crate::repositories::runtime::DurableJobService::dependency_summary_job_status(
+                    connection, project_id,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+            Ok(json!({
+                "projectId":project_id,
+                "summary":summary,
+                "job":job,
+                "owner":"B12::ChangeRetconOwner"
+            }))
         })
         .map_err(|error| error.to_string())
 }
@@ -2726,19 +2769,9 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .unwrap_or(command_id);
                 let mut request_payload = json!({
                     "changeRequestId":change_request_id,
-                    "impactDigest":impact_digest,
-                    "requestedChange":operation.params.get("requestedChange").cloned().unwrap_or_else(|| json!({}))
+                    "impactDigest":impact_digest
                 });
-                for key in [
-                    "retconPlanId",
-                    "planDigest",
-                    "targetFactId",
-                    "replacement",
-                    "evidenceRefs",
-                    "reason",
-                    "fixType",
-                    "targetAuthority",
-                ] {
+                for key in ["retconPlanId", "planDigest"] {
                     if let Some(value) = operation.params.get(key) {
                         request_payload[key] = value.clone();
                     }
@@ -4070,6 +4103,18 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &request,
             )
         }
+        "dependency_summary_bootstrap" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::change_retcon::bootstrap_dependency_summary(
+                &state.manager,
+                id,
+                command_id,
+                idempotency_key,
+                &digest,
+                expected_revision,
+                requested_at,
+            )
+        }
         "volume_replan_route" | "volume_close" | "volume_handoff" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_volume_lifecycle_command(
@@ -4535,6 +4580,14 @@ pub fn query_canon(state: State<'_, KernelState>, request: Value) -> Result<Valu
 }
 
 #[tauri::command]
+pub fn query_retcon_context(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_retcon_context_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_book_health(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_book_health_impl(&state, request)
 }
@@ -4550,6 +4603,14 @@ pub fn query_change_request(
     request: Value,
 ) -> Result<Value, String> {
     query_change_request_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_dependency_summary_bootstrap(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_dependency_summary_bootstrap_impl(&state, request)
 }
 
 #[tauri::command]
@@ -4783,9 +4844,11 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_decisions,
         query_chapter_versions,
         query_canon,
+        query_retcon_context,
         query_book_health,
         query_history,
         query_change_request,
+        query_dependency_summary_bootstrap,
         query_narrative_state,
         query_continuity,
         query_volume_progress,

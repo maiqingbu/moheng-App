@@ -537,6 +537,7 @@ impl ProjectManager {
                 | "change_request_decide"
                 | "retcon_plan_create"
                 | "retcon_apply"
+                | "dependency_summary_bootstrap"
         ) {
             self.open_internal(spec.project_id, "", spec.now, false)?
         } else {

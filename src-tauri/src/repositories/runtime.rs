@@ -1,4 +1,4 @@
-use crate::stable_id::{validate_stable_id, StableIdKind};
+use crate::stable_id::{validate_stable_id, StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -55,6 +55,9 @@ pub struct JobSpec {
     pub chapter_id: Option<String>,
     pub stages: Vec<String>,
 }
+
+pub const DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE: &str = "DEPENDENCY_SUMMARY_BOOTSTRAP";
+pub const DEPENDENCY_SUMMARY_WORKER: &str = "b12-dependency-summary-worker";
 
 #[derive(Debug, Clone, Default)]
 pub struct RecoverySummary {
@@ -126,6 +129,172 @@ fn days_in_month(year: i32, month: i32) -> i32 {
 }
 
 impl DurableJobService {
+    pub fn dependency_summary_job_id(project_id: &str) -> Result<String, RuntimeError> {
+        StableIdentityFactory::from_command(
+            StableIdKind::Job,
+            &format!("b12:dependency-summary:{project_id}"),
+        )
+        .map_err(|_| RuntimeError::StableIdRejected)
+    }
+
+    pub fn ensure_dependency_summary_job(
+        connection: &Connection,
+        project_id: &str,
+        now: &str,
+    ) -> Result<String, RuntimeError> {
+        let job_id = Self::dependency_summary_job_id(project_id)?;
+        Self::start_job(
+            connection,
+            &JobSpec {
+                job_id: job_id.clone(),
+                job_type: "BOOK".into(),
+                parent_job_id: None,
+                book_id: None,
+                volume_id: None,
+                chapter_id: None,
+                stages: vec![DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE.into()],
+            },
+            now,
+        )?;
+        let job_status: Option<String> = connection
+            .query_row(
+                "SELECT status FROM jobs WHERE project_id=?1 AND job_id=?2",
+                libsql_rusqlite::params![project_id, job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let summary_ready = connection
+            .query_row(
+                "SELECT COALESCE(json_extract(setting_value,'$.summaryStatus'),'NOT_READY')='READY' AND COALESCE(json_extract(setting_value,'$.mutationEpoch'),0)=COALESCE(json_extract(setting_value,'$.computedEpoch'),-1) FROM project_settings WHERE project_id=?1 AND setting_key='b12.dependencySummary.global'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if job_status.as_deref() == Some("COMPLETED") && !summary_ready {
+            connection.execute(
+                "UPDATE jobs SET status='QUEUED',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3",
+                libsql_rusqlite::params![now, project_id, job_id],
+            )?;
+        }
+        Ok(job_id)
+    }
+
+    /// Claims the single project-scoped bootstrap job.  The caller must hold
+    /// the project command transaction, so the status transition and lease
+    /// acquisition are serialized with competing UI/worker requests.
+    pub fn claim_dependency_summary_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<bool, RuntimeError> {
+        let current: Option<String> = connection
+            .query_row(
+                "SELECT status FROM jobs WHERE project_id=?1 AND job_id=?2 AND current_stage=?3",
+                libsql_rusqlite::params![project_id, job_id, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(RuntimeError::JobNotFound);
+        };
+        if current == "COMPLETED" {
+            return Ok(false);
+        }
+        let active_holder: Option<(String, String)> = connection
+            .query_row(
+                "SELECT holder,expires_at FROM job_leases WHERE project_id=?1 AND job_id=?2 AND released_at IS NULL",
+                libsql_rusqlite::params![project_id, job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if active_holder
+            .as_ref()
+            .is_some_and(|(_, expires_at)| expires_at.as_str() > now)
+        {
+            return Ok(false);
+        }
+        if !matches!(current.as_str(), "QUEUED" | "PAUSED" | "RUNNING" | "FAILED") {
+            return Ok(false);
+        }
+        let updated = connection.execute(
+            "UPDATE jobs SET status='RUNNING',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND current_stage=?4 AND status IN ('QUEUED','PAUSED','RUNNING','FAILED')",
+            libsql_rusqlite::params![now, project_id, job_id, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
+        )?;
+        if updated != 1 {
+            return Ok(false);
+        }
+        Self::acquire_lease(
+            connection,
+            project_id,
+            job_id,
+            worker_id,
+            &lease_expiry(now),
+            now,
+        )?;
+        Ok(true)
+    }
+
+    pub fn complete_dependency_summary_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::transition_for_worker(connection, project_id, job_id, "COMPLETED", worker_id, now)?;
+        Self::release_lease(connection, project_id, job_id, now)
+    }
+
+    pub fn pause_dependency_summary_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        error_code: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET status='PAUSED',error_code=?1,updated_at=?2 WHERE project_id=?3 AND job_id=?4",
+            libsql_rusqlite::params![error_code, now, project_id, job_id],
+        )?;
+        Self::release_lease(connection, project_id, job_id, now)
+    }
+
+    pub fn dependency_summary_job_status(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let job_id = Self::dependency_summary_job_id(project_id)?;
+        let job: Option<(String, Option<String>, Option<String>, i64)> = connection
+            .query_row(
+                "SELECT status,current_stage,error_code,attempt_no FROM jobs WHERE project_id=?1 AND job_id=?2",
+                libsql_rusqlite::params![project_id, job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((status, stage, error_code, attempt_no)) = job else {
+            return Ok(None);
+        };
+        let checkpoint: Option<(i64, String)> = connection
+            .query_row(
+                "SELECT offset,boundary_json FROM job_checkpoints WHERE project_id=?1 AND job_id=?2 AND stage=?3",
+                libsql_rusqlite::params![project_id, job_id, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(Some(serde_json::json!({
+            "jobId":job_id,
+            "status":status,
+            "stage":stage,
+            "errorCode":error_code,
+            "attemptNo":attempt_no,
+            "checkpointOffset":checkpoint.as_ref().map(|item| item.0).unwrap_or(0),
+            "checkpoint":checkpoint.and_then(|item| serde_json::from_str::<Value>(&item.1).ok()).unwrap_or_else(|| serde_json::json!({}))
+        })))
+    }
+
     pub fn runtime_projection_updated_at(
         connection: &Connection,
         project_id: &str,

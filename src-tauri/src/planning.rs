@@ -79,6 +79,43 @@ pub fn validate_volume_intent(plan: &Value) -> Result<(), String> {
         .map_err(|error| format!("VOLUME_INTENT_CONTRACT:{error}"))
 }
 
+/// B07's semantic boundary for a Change target.  B12 may assemble the outer
+/// CommitBundle, but it cannot turn a JSON patch into a planning authority
+/// without this owner validation having accepted the candidate.
+pub fn validate_change_target_owner(
+    _connection: &Connection,
+    _project_id: &str,
+    artifact_type: &str,
+    candidate: &Value,
+    scope: &Value,
+) -> Result<(), String> {
+    match artifact_type {
+        "BookPlan" => {
+            validate_book_plan_r1(candidate)
+                .map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
+            if !matches!(
+                candidate.get("planningMaturity").and_then(Value::as_str),
+                Some("SEED" | "APPROVED")
+            ) {
+                return Err("BOOK_PLAN_MATURITY_INVALID".into());
+            }
+        }
+        "ChapterPlan" => {
+            validate_chapter_plan_r1(candidate)
+                .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+            let scope_chapter = scope
+                .get("chapterId")
+                .and_then(Value::as_str)
+                .ok_or("CHAPTER_PLAN_SCOPE_REQUIRED")?;
+            if candidate.get("chapterId").and_then(Value::as_str) != Some(scope_chapter) {
+                return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
+            }
+        }
+        _ => return Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}")),
+    }
+    Ok(())
+}
+
 pub fn validate_task_reality(
     chapter_plan: &Value,
     route_plan: &Value,
