@@ -518,6 +518,7 @@ fn validate_plan_is_current(
     chapter_id: &str,
     volume_id: &str,
     execution_mode: &str,
+    plan_ref: &ArtifactRef,
     plan: &Value,
 ) -> Result<(), String> {
     let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
@@ -541,6 +542,22 @@ fn validate_plan_is_current(
         .get("compiledFromStateDigest")
         .and_then(Value::as_str)
         .ok_or_else(|| "B08_PLAN_STATE_DIGEST_REQUIRED".to_string())?;
+    let context_ref = plan
+        .get("contextManifestRef")
+        .and_then(|value| serde_json::from_value::<ArtifactRef>(value.clone()).ok());
+    let mut stale_refs = vec![plan_ref.artifact_id.as_str(), chapter_id];
+    if let Some(context_ref) = context_ref.as_ref() {
+        stale_refs.push(context_ref.artifact_id.as_str());
+    }
+    if crate::repositories::change_retcon::has_pending_stale_for_refs(
+        connection,
+        project_id,
+        &stale_refs,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("PLAN_STALE:RECOMPILE_REQUIRED".into());
+    }
     if matches!(
         crate::narrative::evaluate_plan_stale(
             compiled_revision,
@@ -931,6 +948,7 @@ pub fn run_chapter_production(
         &chapter_id,
         &volume_id,
         execution_mode,
+        &plan_ref,
         &plan_payload,
     ) {
         if error.starts_with("PLAN_STALE") {
@@ -1345,6 +1363,7 @@ pub fn run_chapter_production(
         &chapter_id,
         &volume_id,
         execution_mode,
+        &plan_ref,
         &plan_payload,
     ) {
         if error.starts_with("PLAN_STALE") {

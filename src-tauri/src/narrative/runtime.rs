@@ -477,7 +477,7 @@ pub fn evaluate_plan_stale(
     current_revision: i64,
     current_digest: &str,
 ) -> PlanStaleStatus {
-    if compiled_revision == current_revision || compiled_digest == current_digest {
+    if compiled_revision == current_revision && compiled_digest == current_digest {
         PlanStaleStatus::Valid
     } else {
         PlanStaleStatus::PlanStale

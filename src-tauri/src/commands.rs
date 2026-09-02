@@ -1278,6 +1278,12 @@ pub fn plan_route_from_authority(
     )
     .map_err(|e| e.to_string())?
     .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+    let route_stale = crate::repositories::change_retcon::has_pending_stale_for_refs(
+        connection,
+        project_id,
+        &[route_ref.artifact_id.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
     crate::planning::validate_volume_route(&route)?;
     let progress = volume_progress_from_authority(connection, request, project_id, revision)?;
     let intent_payload = crate::repositories::narrative::NarrativeRepository::artifact_payload(
@@ -1365,7 +1371,7 @@ pub fn plan_route_from_authority(
     let truncated = tasks.len() > bound;
     tasks.truncate(bound);
     Ok(
-        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"continuityThreads":continuity_threads,"futureReservations":future_reservations,"currentChapterPlan":current_chapter_plan,"horizonPreview":horizon_preview,"owner":"B07::PlanningRoute","truncated":truncated}),
+        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"continuityThreads":continuity_threads,"futureReservations":future_reservations,"currentChapterPlan":current_chapter_plan,"horizonPreview":horizon_preview,"stale":if route_stale { json!({"status":"STALE","reason":"受影响内容需要重新核对"}) } else { json!({"status":"FRESH"}) },"owner":"B07::PlanningRoute","truncated":truncated}),
     )
 }
 
@@ -1487,12 +1493,35 @@ pub fn query_plan_stale_impl(state: &KernelState, request: Value) -> Result<Valu
                     .map_err(ManagerError::ProjectCommand)?;
             let current_digest = crate::narrative::relevant_state_digest(&input)
                 .map_err(ManagerError::ProjectCommand)?;
-            let status = evaluate_plan_stale(
+            let mut status = evaluate_plan_stale(
                 compiled_revision,
                 compiled_digest,
                 current_revision,
                 &current_digest,
             );
+            let mut stale_refs = Vec::new();
+            if let Some(chapter_id) = request.get("chapterId").and_then(Value::as_str) {
+                stale_refs.push(chapter_id.to_owned());
+                if let Some(plan_ref) = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+                    connection,
+                    project_id,
+                    "ChapterPlan",
+                    chapter_id,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                {
+                    stale_refs.push(plan_ref.artifact_id);
+                }
+            }
+            if crate::repositories::change_retcon::has_pending_stale_for_refs(
+                connection,
+                project_id,
+                &stale_refs.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            {
+                status = PlanStaleStatus::PlanStale;
+            }
             Ok(json!({
                 "projectId": project_id,
                 "projectRevision": current_revision,
@@ -2671,13 +2700,26 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .get("idempotencyKey")
                     .and_then(Value::as_str)
                     .unwrap_or(command_id);
-                let request = json!({
-                    "payload":{
-                        "changeRequestId":change_request_id,
-                        "impactDigest":impact_digest,
-                        "requestedChange":operation.params.get("requestedChange").cloned().unwrap_or_else(|| json!({}))
-                    }
+                let mut request_payload = json!({
+                    "changeRequestId":change_request_id,
+                    "impactDigest":impact_digest,
+                    "requestedChange":operation.params.get("requestedChange").cloned().unwrap_or_else(|| json!({}))
                 });
+                for key in [
+                    "retconPlanId",
+                    "planDigest",
+                    "targetFactId",
+                    "replacement",
+                    "evidenceRefs",
+                    "reason",
+                    "fixType",
+                    "targetAuthority",
+                ] {
+                    if let Some(value) = operation.params.get(key) {
+                        request_payload[key] = value.clone();
+                    }
+                }
+                let request = json!({"payload":request_payload});
                 let result = crate::change_retcon::apply_approved_on_connection(
                     self.connection,
                     self.project_id,

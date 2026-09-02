@@ -325,6 +325,15 @@ pub fn recompile_chapter_plan_owner(
     {
         return Err("CONTEXT_MANIFEST_NOT_FOUND".into());
     }
+    if crate::repositories::change_retcon::has_pending_stale_for_refs(
+        connection,
+        project_id,
+        &[context_ref.artifact_id.as_str()],
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("PLAN_STALE".into());
+    }
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
         connection, project_id, chapter_id,
     )
@@ -368,7 +377,16 @@ pub fn recompile_chapter_plan_owner(
             connection, project_id, &route_ref,
         )
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+            .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+        if crate::repositories::change_retcon::has_pending_stale_for_refs(
+            connection,
+            project_id,
+            &[route_ref.artifact_id.as_str()],
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Err("PLAN_STALE".into());
+        }
         let task_ids = route
             .get("tasks")
             .and_then(Value::as_array)

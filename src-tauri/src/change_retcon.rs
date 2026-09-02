@@ -1276,7 +1276,15 @@ pub fn apply_approved_on_connection(
         return Err("B12_USER_DECISION_REQUIRED".into());
     }
     if change.change_type == "RETCON" {
-        return Err("B12_RETCON_PLAN_REQUIRED".into());
+        return apply_retcon_on_connection(
+            connection,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            now,
+            request,
+        );
     }
     if input.get("targetFactId").is_some() || input.get("canonDelta").is_some() {
         return Err("B12_RETCON_REQUIRED".into());
@@ -1819,6 +1827,199 @@ fn apply_retcon(
         postverify,
         "事实修订已完成并复核。",
     ))
+}
+
+pub fn apply_retcon_on_connection(
+    connection: &Connection,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    request: &Value,
+) -> Result<Value, String> {
+    let input = payload(request)?;
+    let change_id = required_string(input, "changeRequestId")?.to_owned();
+    let plan_id = required_string(input, "retconPlanId")?.to_owned();
+    let supplied_digest = required_string(input, "impactDigest")?.to_owned();
+    if let Some(previous) = CommitService::find_receipt(connection, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(json!({
+            "receiptId":previous.receipt_id,
+            "receipt":previous,
+            "result":{"status":"REPLAYED","changeRequestId":change_id,"retconPlanId":plan_id},
+            "postverify":{"status":"VERIFIED","userMessage":"已完成并复核","typedRequery":true}
+        }));
+    }
+    let change = repository::load_change_request(connection, project_id, &change_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_CHANGE_REQUEST_NOT_FOUND".to_string())?;
+    let plan = repository::load_retcon_plan(connection, project_id, &plan_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_RETCON_PLAN_NOT_FOUND".to_string())?;
+    if change.status != "APPROVED" || plan.status != "APPROVED" {
+        return Err("B12_USER_DECISION_REQUIRED".into());
+    }
+    let current_plan_digest = retcon_plan_digest(&plan)?;
+    if input
+        .get("planDigest")
+        .and_then(Value::as_str)
+        .is_some_and(|digest| digest != current_plan_digest)
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    if change.impact_seed.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str()) {
+        return Err("B12_DECISION_STALE".into());
+    }
+    if plan
+        .downstream_impact
+        .get("impactDigest")
+        .and_then(Value::as_str)
+        != Some(supplied_digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    if project_revision(connection, project_id)? != expected_revision {
+        return Err("REVISION_CONFLICT".into());
+    }
+    let decision_id = change
+        .decision_ref
+        .clone()
+        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
+    let decision = repository::load_decision(connection, project_id, &decision_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
+    if decision.0 != "APPROVE"
+        || decision.1.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str())
+        || decision.1.get("planDigest").and_then(Value::as_str)
+            != Some(current_plan_digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    let old = plan
+        .target_fact
+        .get("old")
+        .cloned()
+        .ok_or_else(|| "B12_RETCON_OLD_FACT_MISSING".to_string())?;
+    let old_fact_id = required_string(&old, "factId")?.to_owned();
+    let actual_old = repository::current_fact(connection, project_id, &old_fact_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_CANON_FACT_NOT_FOUND".to_string())?;
+    if actual_old
+        .get("supersededBy")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("B12_CANON_FACT_NOT_CURRENT".into());
+    }
+    let replacement = plan
+        .target_fact
+        .get("replacement")
+        .cloned()
+        .ok_or_else(|| "B12_RETCON_REPLACEMENT_MISSING".to_string())?;
+    let new_fact_id = format!("{old_fact_id}:retcon:{plan_id}");
+    let canon_delta = json!({
+        "factId":new_fact_id,
+        "subjectId":replacement.get("subjectId").and_then(Value::as_str).or_else(|| actual_old.get("subjectId").and_then(Value::as_str)).ok_or_else(|| "B12_RETCON_SUBJECT_REQUIRED".to_string())?,
+        "predicate":replacement.get("predicate").and_then(Value::as_str).or_else(|| actual_old.get("predicate").and_then(Value::as_str)).ok_or_else(|| "B12_RETCON_PREDICATE_REQUIRED".to_string())?,
+        "objectJson":replacement.get("objectJson").cloned().or_else(|| replacement.get("object").cloned()).ok_or_else(|| "B12_RETCON_OBJECT_REQUIRED".to_string())?,
+        "validFromChapterId":actual_old.get("validFromChapterId").cloned().unwrap_or(Value::Null),
+        "validToChapterId":actual_old.get("validToChapterId").cloned().unwrap_or(Value::Null),
+        "authorityLevel":actual_old.get("authorityLevel").cloned().unwrap_or_else(|| json!("C")),
+        "payloadJson":{"supersedesFactId":old_fact_id,"sourceArtifactId":plan_id,"sourceVersion":1,"retconPlanId":plan_id}
+    });
+    let artifact = build_artifact(
+        project_id,
+        command_id,
+        &format!("retcon:{change_id}:{plan_id}"),
+        "RetconPlan",
+        1,
+        json!({
+            "payloadSchema":"b12-retcon-commit.r1",
+            "changeRequestId":change_id,
+            "retconPlanId":plan_id,
+            "status":"COMMITTED",
+            "basedOnRevision":expected_revision,
+            "impactDigest":supplied_digest,
+            "oldFactId":old_fact_id,
+            "newFactId":new_fact_id,
+            "signingImpact":plan.downstream_impact.get("signingImpact").cloned().unwrap_or(json!(false))
+        }),
+        "MATERIALIZED",
+        vec![decision_id.clone()],
+        now,
+    )?;
+    let stale_state = state_delta(
+        &format!("stale:{change_id}"),
+        "b12.stale.activation",
+        json!({"changeRequestId":change_id,"impactSetId":plan.downstream_impact["impactSetId"],"scopeClass":"RETCON","status":"STALE","reason":"CANON_VERSION_TRANSITION"}),
+        json!({"owner":OWNER_NAME,"impactDigest":supplied_digest}),
+    );
+    let applied_state = state_delta(
+        &format!("change-state:{change_id}"),
+        "b12.retcon.applied",
+        json!({"changeRequestId":change_id,"retconPlanId":plan_id,"oldFactId":old_fact_id,"newFactId":new_fact_id,"authorityStatus":"COMMITTED"}),
+        json!({"owner":OWNER_NAME,"basedOnRevision":expected_revision}),
+    );
+    let bundle = build_bundle(
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        vec![artifact],
+        Some(canon_delta),
+        vec![stale_state, applied_state],
+        decision_update(&decision_id, &change_id, decision.1),
+        "B12_RETCON",
+    )?;
+    let impact_id = plan
+        .downstream_impact
+        .get("impactSetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "B12_IMPACT_SET_REQUIRED".to_string())?
+        .to_owned();
+    let seed = change.impact_seed.clone();
+    let receipt = CommitService::commit_with_post_apply(
+        connection,
+        &bundle,
+        now,
+        |connection, receipt| {
+            repository::mark_applied(
+                connection,
+                project_id,
+                &change_id,
+                &impact_id,
+                Some(&plan_id),
+                &seed,
+                &receipt.receipt_id,
+                now,
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                crate::commit::CommitError::ProjectCommandApply(format!("B12_DB:{error}"))
+            })
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let current = repository::current_fact(connection, project_id, &old_fact_id)
+        .map_err(|error| format!("B12_DB:{error}"))?;
+    let new_current = repository::current_fact(connection, project_id, &new_fact_id)
+        .map_err(|error| format!("B12_DB:{error}"))?;
+    let verified = current
+        .as_ref()
+        .and_then(|item| item.get("supersededBy"))
+        .and_then(Value::as_str)
+        == Some(new_fact_id.as_str())
+        && new_current.is_some()
+        && repository::state_exists(connection, project_id, &format!("change-state:{change_id}"))
+            .map_err(|error| format!("B12_DB:{error}"))?;
+    Ok(json!({
+        "receiptId":receipt.receipt_id,
+        "receipt":receipt,
+        "result":{"status":"APPLIED","changeRequestId":change_id,"retconPlanId":plan_id,"oldFactId":old_fact_id,"newFactId":new_fact_id},
+        "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"oldFactPreserved":current.is_some(),"newFactCurrent":new_current.is_some(),"versionedAuthority":verified,"typedRequery":true}
+    }))
 }
 
 fn cancel_impact(
