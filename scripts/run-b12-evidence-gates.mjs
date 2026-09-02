@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidence = path.resolve(process.env.B12_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b12-evidence-')))
 const startCommit = 'edadc96aba68fe89b8e1e453387eb6ffe3fd9968'
+const ownerName = 'B12::ChangeRetconOwner'
 const migrationHashes = {
   '0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
   '0002_project_authority.sql': '7396fe1ec7769a898d423c97c3d063d7a64c3dc217de3967332bd25b84864924',
@@ -240,7 +241,7 @@ if (packageRoot) {
 }
 const languageReport = { schema: 'b12-language-scan-r1', templateChecked: true, status: chinesePass ? 'PASS' : 'FAIL' }
 const evidencePayloads = {
-  'B12_DEPENDENCY_OWNER.json': { schema: 'b12-dependency-owner-r1', owner: OWNER_NAME, secondDependencyStoreCount: 0, status: sourceArchitecturePass ? 'PASS' : 'FAIL' },
+  'B12_DEPENDENCY_OWNER.json': { schema: 'b12-dependency-owner-r1', owner: ownerName, secondDependencyStoreCount: 0, status: sourceArchitecturePass ? 'PASS' : 'FAIL' },
   'B12_IMPACT_PREFLIGHT.json': { schema: 'b12-impact-preflight-r1', bounded: true, preflightDistinctFromImpactSet: true, status: gates['B12-A04'].status },
   'B12_IMPACT_GLOBAL_GUARD.json': { schema: 'b12-impact-global-guard-r1', beforeConfirmationExpandedEdges: 0, status: gates['B12-A05'].status },
   'B12_IMPACT_CLASSIFICATION.json': { schema: 'b12-impact-classification-r1', classifications: ['LOCAL', 'WIDE', 'GLOBAL'], status: gates['B12-A06'].status },
@@ -264,7 +265,7 @@ const evidencePayloads = {
   'B12_POSTVERIFY.json': { schema: 'b12-postverify-r1', typedRequery: true, statuses: ['VERIFIED', 'FAILED', 'INCOMPLETE'], status: gates['B12-A32'].status },
   'B12_IDEMPOTENCY.json': { schema: 'b12-idempotency-r1', status: gates['B12-A52'].status },
   'B12_CONCURRENCY.json': { schema: 'b12-concurrency-r1', concurrentWinner: 1, status: gates['B12-A53'].status },
-  'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: OWNER_NAME, oneTimeP3: true, status: gates['B12-A36'].status },
+  'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: ownerName, oneTimeP3: true, status: gates['B12-A36'].status },
   'B12_ASSISTANT_CHANGE_FLOW.json': { schema: 'b12-assistant-change-flow-r1', proposalOnlyBeforeDecision: true, status: gates['B12-A39'].status },
   'B12_ASSISTANT_CHANGE_GROUNDING.json': { schema: 'b12-assistant-change-grounding-r1', impactFromBackend: true, status: gates['B12-A40'].status },
   'B12_HISTORY_UI.json': { schema: 'b12-history-ui-r1', route: '/projects/:id/history', active: true, healthUnavailable: true, status: gates['B12-A42'].status },
