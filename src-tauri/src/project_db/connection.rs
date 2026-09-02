@@ -29,6 +29,7 @@ const B12_CHANGE_RETCON_MIGRATION: &str =
     include_str!("../../migrations/0011_b12_change_retcon_runtime.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
+    let existed = path.is_file();
     if !read_only {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -44,8 +45,17 @@ pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, Datab
     if read_only {
         connection.execute_batch("PRAGMA query_only = ON;")?;
     } else {
+        // WAL is persistent per database. Reissuing the mode switch on every
+        // writer open makes a large 3m-edge project pay the transition cost on
+        // each B12 preflight. Only migrate an existing database when it is not
+        // already in WAL mode; new databases receive the mode once here.
+        let journal_mode: String =
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if !existed || !journal_mode.eq_ignore_ascii_case("wal") {
+            connection.execute_batch("PRAGMA journal_mode = WAL;")?;
+        }
         connection.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 1000; PRAGMA mmap_size = 268435456;",
+            "PRAGMA synchronous = FULL; PRAGMA wal_autocheckpoint = 1000; PRAGMA mmap_size = 268435456;",
         )?;
     }
     Ok(connection)

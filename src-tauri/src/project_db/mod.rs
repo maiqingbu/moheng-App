@@ -292,6 +292,16 @@ impl ProjectManager {
         title: &str,
         now: &str,
     ) -> Result<ProjectHandle, ManagerError> {
+        self.open_internal(project_id, title, now, true)
+    }
+
+    fn open_internal(
+        &self,
+        project_id: &str,
+        title: &str,
+        now: &str,
+        ensure_projection: bool,
+    ) -> Result<ProjectHandle, ManagerError> {
         self.acquire_writer(project_id)?;
         let result = (|| {
             // Open-policy gate (M0-03): a DELETING project is no longer
@@ -347,12 +357,16 @@ impl ProjectManager {
             record_runtime_profile(&connection, project_id, now).map_err(|error| {
                 ManagerError::Database(DatabaseError::Integrity(error.to_string()))
             })?;
-            crate::repositories::ops::SearchService::ensure_projection(
-                &connection,
-                project_id,
-                now,
-            )
-            .map_err(|error| ManagerError::Database(DatabaseError::Integrity(error.to_string())))?;
+            if ensure_projection {
+                crate::repositories::ops::SearchService::ensure_projection(
+                    &connection,
+                    project_id,
+                    now,
+                )
+                .map_err(|error| {
+                    ManagerError::Database(DatabaseError::Integrity(error.to_string()))
+                })?;
+            }
             let catalog = CatalogRepository::open(&self.paths, now)?;
             CatalogRepository::touch_opened(&catalog, project_id, now)?;
             CatalogRepository::set_compatibility(&catalog, project_id, "COMPATIBLE", now)?;
@@ -513,7 +527,21 @@ impl ProjectManager {
         spec: ProjectCommandSpec<'_>,
         apply: impl FnOnce(&Connection) -> Result<T, ManagerError>,
     ) -> Result<ProjectCommandOutcome<T>, ManagerError> {
-        let handle = self.open(spec.project_id, "", spec.now)?;
+        let handle = if matches!(
+            spec.command_type,
+            "change_request_create"
+                | "impact_preflight"
+                | "impact_expand"
+                | "impact_resume"
+                | "impact_cancel"
+                | "change_request_decide"
+                | "retcon_plan_create"
+                | "retcon_apply"
+        ) {
+            self.open_internal(spec.project_id, "", spec.now, false)?
+        } else {
+            self.open(spec.project_id, "", spec.now)?
+        };
         let connection: &Connection = &handle;
         CommitService::commit_project_command(connection, spec, |connection| {
             apply(connection).map_err(|error| CommitError::ProjectCommandApply(error.to_string()))
