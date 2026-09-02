@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidence = path.resolve(process.env.B12_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b12-evidence-')))
-const startCommit = 'e784c9206ce60fd8c8cbe7da827234850caba20e'
+const startCommit = '84195d156be8bf852b26867fc6f26dd51632e2db'
 const ownerName = 'B12::ChangeRetconOwner'
 const migrationHashes = {
   '0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
