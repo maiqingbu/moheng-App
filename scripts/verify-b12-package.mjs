@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { packageGeneratorEnvironment } from './b12-package-environment.mjs'
 
 const root = path.resolve(process.env.B12_PACKAGE_ROOT ?? process.cwd())
 const forbidden = /(^|\/)(?:\.git|node_modules|target|dist)(?:\/|$)|\.db(?:$|[-.])|(^|\/)(?:\.env|keys?|secrets?)(?:$|\/)/i
@@ -32,7 +33,9 @@ const run = (args, cwd = root, extraEnv = {}) => spawnSync('node', args, { cwd, 
 const architecture = missingFiles.length === 0 ? run(['scripts/verify-architecture.mjs']) : { status: 1, stdout: '', stderr: 'required file missing' }
 const b12Architecture = missingFiles.length === 0 ? run(['scripts/verify-b12-architecture.mjs']) : { status: 1, stdout: '', stderr: 'required file missing' }
 const moduleBoundary = missingFiles.length === 0 ? run(['scripts/verify-module-boundaries.mjs']) : { status: 1, stdout: '', stderr: 'required file missing' }
-const generator = missingFiles.length === 0 ? run(['scripts/generate-b12-acceptance.mjs'], root, { B12_GENERATOR_SELF_CHECK: '1' }) : { status: 1, stdout: '', stderr: 'required file missing' }
+const generator = missingFiles.length === 0
+  ? run(['scripts/generate-b12-acceptance.mjs'], root, packageGeneratorEnvironment(root))
+  : { status: 1, stdout: '', stderr: 'required file missing' }
 const node = missingFiles.length === 0
   ? run(['--test', 'tests/b12-acceptance-generator.test.mjs', 'tests/b12-capability-parity.test.mjs', 'tests/b12-negative-matrix.test.mjs', 'tests/b12-revision-gates.test.mjs'])
   : { status: 1, stdout: '', stderr: 'required file missing' }

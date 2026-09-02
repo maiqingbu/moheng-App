@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { B12_BLOCKING_GATES, NEGATIVE_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b12-acceptance.mjs'
+import { packageGeneratorEnvironment } from '../scripts/b12-package-environment.mjs'
 
 function passingReport() {
   return {
@@ -55,3 +56,9 @@ test('B12 acceptance cannot pass with a false R2 global guard', () => {
   assert.ok(acceptance.failedGates.includes('second_authority'))
 })
 
+test('package verifier pins generator evidence to the package root', () => {
+  const packageRoot = '/tmp/b12-package-root'
+  const environment = packageGeneratorEnvironment(packageRoot)
+  assert.equal(environment.B12_GENERATOR_SELF_CHECK, '1')
+  assert.equal(environment.B12_EVIDENCE_DIR, '/tmp/b12-package-root/evidence/B12')
+})
