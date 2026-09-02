@@ -11,7 +11,7 @@ use ai_novel_production_system_core::repositories::change_retcon::rebuild_global
 use ai_novel_production_system_core::repositories::runtime::{
     lease_expiry, DurableJobService, DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE, DEPENDENCY_SUMMARY_WORKER,
 };
-use libsql_rusqlite::{params, OptionalExtension};
+use libsql_rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -439,6 +439,167 @@ fn b12_retcon_context_query_returns_current_fact_and_typed_evidence_options() {
 }
 
 #[test]
+fn b12_assistant_retcon_uses_selected_fact_source_evidence() {
+    let project_id = "p-b12-r05-source";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open source evidence fixture");
+    handle
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:source',?1,'父亲','CHARACTER',?2,?2)",
+            params![project_id, NOW],
+        )
+        .expect("insert source fact entity");
+    let source_chapter_id = insert_retcon_evidence_chapter(&handle, project_id, 18);
+    let unrelated_hash = insert_committed_artifact(
+        &handle,
+        project_id,
+        "ReviewReport",
+        "artifact:r05:000-unrelated",
+        "PROJECT",
+        json!({"level":"PROJECT"}),
+        json!({"kind":"unrelated review"}),
+        false,
+    );
+    let source_hash = insert_committed_artifact(
+        &handle,
+        project_id,
+        "FinalChapter",
+        "artifact:r05:999-fact-source",
+        "CHAPTER",
+        json!({"level":"CHAPTER","chapterId":source_chapter_id.as_str()}),
+        json!({"chapter":"父亲死亡的正式正文"}),
+        false,
+    );
+    handle
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,source_chapter_id,evidence_range_json,authority_level,created_at,updated_at) VALUES ('fact:r05:source',?1,'entity:r05:source','状态','{\"description\":\"已经死亡\"}', 'artifact:r05:999-fact-source',1,?2,'{\"rangeStart\":12,\"rangeEnd\":27}','A',?3,?3)",
+            params![project_id, source_chapter_id, NOW],
+        )
+        .expect("insert fact provenance");
+    drop(handle);
+    let context = ai_novel_production_system_core::repositories::change_retcon::retcon_context(
+        &state.manager.open(project_id, "", NOW).expect("reopen source evidence fixture"),
+        project_id,
+        Some("父亲死亡"),
+        20,
+    )
+    .expect("query grounded retcon context");
+    assert_eq!(context["selectedFact"]["factId"], "fact:r05:source");
+    assert_eq!(context["evidence"].as_array().map(Vec::len), Some(1));
+    assert_eq!(context["evidence"][0]["artifactId"], "artifact:r05:999-fact-source");
+    assert_eq!(context["evidence"][0]["payloadHash"], source_hash);
+    assert_eq!(context["evidence"][0]["supportsFactId"], "fact:r05:source");
+    assert_ne!(context["evidence"][0]["payloadHash"], unrelated_hash);
+    println!("B12_ASSISTANT_RETCON_EVIDENCE_RESULT exactFactSource=PASS status=PASS");
+}
+
+#[test]
+fn b12_assistant_retcon_missing_fact_evidence_fails_closed() {
+    let project_id = "p-b12-r05-gap";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open evidence gap fixture");
+    handle
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:gap',?1,'父亲','CHARACTER',?2,?2)",
+            params![project_id, NOW],
+        )
+        .expect("insert gap entity");
+    handle
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:r05:gap',?1,'entity:r05:gap','状态','{\"description\":\"已经死亡\"}','A',?2,?2)",
+            params![project_id, NOW],
+        )
+        .expect("insert fact without provenance");
+    drop(handle);
+    let context = query_retcon_context_impl(
+        &state,
+        json!({"projectId":project_id,"query":"父亲死亡","pageSize":20}),
+    )
+    .expect("query evidence gap context");
+    assert_eq!(context["selectedFact"]["factId"], "fact:r05:gap");
+    assert_eq!(context["evidence"], json!([]));
+    assert_eq!(context["grounding"]["evidenceStatus"], "EVIDENCE_GAP");
+    let error = command(
+        &state,
+        project_id,
+        "retcon_plan_create",
+        "cmd:b12:r05:gap:plan",
+        0,
+        json!({"changeRequestId":"missing","retconPlanId":"plan:r05:gap","targetFactId":"fact:r05:gap","reason":"不能绕过来源依据","replacement":{"objectJson":{"description":"假死"}},"evidenceRefs":[]}),
+    )
+    .expect_err("missing exact fact evidence must fail closed before an executable RetconPlan");
+    assert_eq!(error, "B12_RETCON_EVIDENCE_GAP");
+}
+
+#[test]
+fn b12_retcon_rejects_unrelated_evidence_without_relationship() {
+    let project_id = "p-b12-r05-unrelated";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open unrelated evidence fixture");
+    handle
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r05:a',?1,'父亲','CHARACTER',?2,?2),('entity:r05:b',?1,'师父','CHARACTER',?2,?2)",
+            params![project_id, NOW],
+        )
+        .expect("insert retcon evidence entities");
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "FinalChapter",
+        "artifact:r05:fact-a",
+        "CHAPTER",
+        json!({"level":"CHAPTER","chapterId":"chapter-r05-a"}),
+        json!({"chapter":"父亲死亡"}),
+        false,
+    );
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "FinalChapter",
+        "artifact:r05:fact-b",
+        "CHAPTER",
+        json!({"level":"CHAPTER","chapterId":"chapter-r05-b"}),
+        json!({"chapter":"师父死亡"}),
+        false,
+    );
+    handle
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r05:a',?1,'entity:r05:a','状态','{\"description\":\"已经死亡\"}','artifact:r05:fact-a',1,'A',?2,?2),('fact:r05:b',?1,'entity:r05:b','状态','{\"description\":\"已经死亡\"}','artifact:r05:fact-b',1,'A',?2,?2)",
+            params![project_id, NOW],
+        )
+        .expect("insert facts with distinct provenance");
+    drop(handle);
+    command(
+        &state,
+        project_id,
+        "change_request_create",
+        "cmd:b12:r05:unrelated:create",
+        0,
+        json!({"changeRequestId":"change:b12:r05:unrelated","changeType":"RETCON","scope":"PROJECT","summary":"修订父亲事实","targetFactId":"fact:r05:a","sourceRefs":["fact:r05:a"],"requestedChange":{"replacement":{"objectJson":{"description":"假死"}}}}),
+    )
+    .expect("create retcon request");
+    command(
+        &state,
+        project_id,
+        "impact_preflight",
+        "cmd:b12:r05:unrelated:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r05:unrelated"}),
+    )
+    .expect("preflight retcon request");
+    let error = command(
+        &state,
+        project_id,
+        "retcon_plan_create",
+        "cmd:b12:r05:unrelated:plan",
+        0,
+        json!({"changeRequestId":"change:b12:r05:unrelated","retconPlanId":"plan:r05:unrelated","targetFactId":"fact:r05:a","reason":"不能用师父的依据修父亲事实","replacement":{"objectJson":{"description":"假死"}},"evidenceRefs":[{"artifactId":"artifact:r05:fact-b","version":1}]}),
+    )
+    .expect_err("unrelated evidence without an explicit relationship must be blocked");
+    assert_eq!(error, "B12_RETCON_EVIDENCE_UNRELATED");
+}
+
+#[test]
 fn b12_assistant_natural_language_father_retcon_resolves_current_fact() {
     let state = test_state("p-b12-r05-natural");
     let handle = state.manager.open("p-b12-r05-natural", "", NOW).unwrap();
@@ -573,6 +734,128 @@ fn b12_summary_bootstrap_command_returns_before_aggregation_complete() {
     println!(
         "B12_SUMMARY_BOOTSTRAP_ASYNC_RESULT commandReturnedBeforeWorker=PASS workerCompletesLater=PASS status=PASS"
     );
+}
+
+#[test]
+fn b12_summary_running_job_not_reclaimed_after_lease_expiry() {
+    let project_id = "p-b12-r06-expired-running";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open runtime fixture");
+    let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
+        .expect("ensure summary job");
+    assert!(DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:first",
+        NOW,
+    )
+    .expect("first worker claim"));
+    let after_expiry = "2026-09-02T05:01:01Z";
+    assert!(
+        !DurableJobService::claim_dependency_summary_job(
+            &handle,
+            project_id,
+            &job_id,
+            "worker:r06:second",
+            after_expiry,
+        )
+        .expect("a normal bootstrap request must not reclaim live RUNNING work after TTL"),
+    );
+    let (status, holder, released_at): (String, String, Option<String>) = handle
+        .query_row(
+            "SELECT j.status,l.holder,l.released_at FROM jobs j JOIN job_leases l ON l.project_id=j.project_id AND l.job_id=j.job_id WHERE j.project_id=?1 AND j.job_id=?2",
+            params![project_id, job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read live summary job lease");
+    assert_eq!(status, "RUNNING");
+    assert_eq!(holder, "worker:r06:first");
+    assert_eq!(released_at, None);
+    println!("B12_SUMMARY_LEASE_EXPIRY_RESULT duplicateWorkerCount=0 status=PASS");
+}
+
+#[test]
+fn b12_summary_restart_recovery_allows_reclaim_after_pause() {
+    let project_id = "p-b12-r06-recovery-reclaim";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open recovery fixture");
+    let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
+        .expect("ensure summary job");
+    assert!(DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:before-restart",
+        NOW,
+    )
+    .expect("claim pre-restart worker"));
+    let recovered_at = "2026-09-02T05:01:01Z";
+    DurableJobService::recover_after_restart(&handle, project_id, recovered_at)
+        .expect("recover live job after restart");
+    assert!(DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:after-restart",
+        recovered_at,
+    )
+    .expect("paused job may be reclaimed after explicit restart recovery"));
+    let (status, holder): (String, String) = handle
+        .query_row(
+            "SELECT j.status,l.holder FROM jobs j JOIN job_leases l ON l.project_id=j.project_id AND l.job_id=j.job_id WHERE j.project_id=?1 AND j.job_id=?2",
+            params![project_id, job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read reclaimed summary job");
+    assert_eq!(status, "RUNNING");
+    assert_eq!(holder, "worker:r06:after-restart");
+}
+
+#[test]
+fn b12_summary_old_worker_cannot_release_new_holder_lease() {
+    let project_id = "p-b12-r06-old-worker";
+    let state = test_state(project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open old worker fixture");
+    let job_id = DurableJobService::ensure_dependency_summary_job(&handle, project_id, NOW)
+        .expect("ensure summary job");
+    assert!(DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:old",
+        NOW,
+    )
+    .expect("claim old worker"));
+    let recovered_at = "2026-09-02T05:01:01Z";
+    DurableJobService::recover_after_restart(&handle, project_id, recovered_at)
+        .expect("recover old worker state");
+    assert!(DurableJobService::claim_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "worker:r06:new",
+        recovered_at,
+    )
+    .expect("claim resumed worker"));
+    DurableJobService::pause_dependency_summary_job(
+        &handle,
+        project_id,
+        &job_id,
+        "OLD_WORKER_FAILED",
+        recovered_at,
+    )
+    .expect("simulated old worker completion path");
+    let (status, holder, released_at): (String, String, Option<String>) = handle
+        .query_row(
+            "SELECT j.status,l.holder,l.released_at FROM jobs j JOIN job_leases l ON l.project_id=j.project_id AND l.job_id=j.job_id WHERE j.project_id=?1 AND j.job_id=?2",
+            params![project_id, job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read new worker lease after old worker return");
+    assert_eq!(status, "RUNNING");
+    assert_eq!(holder, "worker:r06:new");
+    assert_eq!(released_at, None);
 }
 
 #[test]
@@ -852,6 +1135,207 @@ fn insert_chapter_plan(state: &KernelState, project_id: &str, artifact_id: &str)
     drop(handle);
 }
 
+struct SemanticChapterFixture {
+    chapter_plan_id: String,
+}
+
+fn insert_committed_artifact(
+    connection: &Connection,
+    project_id: &str,
+    artifact_type: &str,
+    artifact_id: &str,
+    scope_level: &str,
+    scope: Value,
+    payload: Value,
+    make_head: bool,
+) -> String {
+    let scope_key = scope.to_string();
+    let hash = sha256_canonical(&payload).expect("artifact payload hash");
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','B',?6,'{}',?7,?7)",
+            params![artifact_id, project_id, artifact_type, scope_level, scope_key, hash, NOW],
+        )
+        .expect("insert artifact metadata");
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            params![artifact_id, payload.to_string(), hash],
+        )
+        .expect("insert artifact payload");
+    if make_head {
+        connection
+            .execute(
+                "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
+                params![project_id, artifact_type, scope_level, scope_key, artifact_id, hash],
+            )
+            .expect("insert authority head");
+    }
+    hash
+}
+
+fn insert_semantic_chapter_fixture(
+    state: &KernelState,
+    project_id: &str,
+) -> SemanticChapterFixture {
+    let chapter_plan_id = format!("plan:chapter:{project_id}:1");
+    let chapter_id = format!("chapter-{project_id}-1");
+    let volume_id = format!("volume-{project_id}-2");
+    let book_id = format!("book:{project_id}");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open semantic chapter fixture");
+    handle
+        .execute(
+            "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'B12 语义测试书','ACTIVE',?3,?3)",
+            params![book_id, project_id, NOW],
+        )
+        .expect("insert semantic fixture book");
+    handle
+        .execute(
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,2,'第二卷','PLANNING',1,3,3000,?4,?4)",
+            params![volume_id, project_id, book_id, NOW],
+        )
+        .expect("insert semantic fixture volume");
+    handle
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'第一章','NORMAL','PLANNED',0,?4,?4)",
+            params![chapter_id, project_id, volume_id, NOW],
+        )
+        .expect("insert semantic fixture chapter");
+
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "BookPlan",
+        &format!("plan:book:{project_id}"),
+        "PROJECT",
+        json!({"level":"PROJECT"}),
+        json!({
+            "payloadSchema":"book-plan.r1",
+            "planningMaturity":"APPROVED",
+            "futureReservations":[{
+                "reservationId":"reservation:b12:future",
+                "notBeforeVolumeNo":4,
+                "mayForeshadow":true,
+                "mayReveal":false
+            }]
+        }),
+        true,
+    );
+    let context_id = format!("context:{project_id}:1");
+    let context_hash = insert_committed_artifact(
+        &handle,
+        project_id,
+        "ContextManifest",
+        &context_id,
+        "CHAPTER",
+        json!({"level":"CHAPTER","chapterId":chapter_id}),
+        json!({"payloadSchema":"context-manifest.r1"}),
+        false,
+    );
+    let intent_id = format!("intent:{volume_id}");
+    let intent_hash = insert_committed_artifact(
+        &handle,
+        project_id,
+        "VolumeIntent",
+        &intent_id,
+        "VOLUME",
+        json!({"level":"VOLUME","volumeId":volume_id}),
+        json!({"payloadSchema":"volume-intent.r1","futureReservations":[]}),
+        true,
+    );
+    let route_id = format!("plan:{volume_id}");
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "VolumePlan",
+        &route_id,
+        "VOLUME",
+        json!({"level":"VOLUME","volumeId":volume_id}),
+        json!({
+            "payloadSchema":"volume-plan.r1",
+            "volumeIntentRef":{"artifactId":intent_id,"version":1,"payloadHash":intent_hash},
+            "routeVersion":1,
+            "tasks":[{"taskId":"task:b12:route","class":"REQUIRED","dependsOnTaskIds":[],"objective":"推进当前路线"}],
+            "routeInvariants":[],
+            "requiredExitConditions":[],
+            "capacityBudget":{"minChapters":1,"preferredChapters":3,"maxChapters":3}
+        }),
+        true,
+    );
+    handle
+        .execute(
+            "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:b12:route',?1,'volume.task.progress','{\"taskId\":\"task:b12:route\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)",
+            params![project_id, chapter_id, NOW],
+        )
+        .expect("insert route task state");
+    let chapter_plan = json!({
+        "payloadSchema":"chapter-plan.r1",
+        "chapterId":chapter_id,
+        "compiledFromProjectRevision":0,
+        "compiledFromStateDigest":"a".repeat(64),
+        "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
+        "chapterGoal":"推进当前路线",
+        "activeTaskRefs":["task:b12:route"],
+        "continuityActions":[],
+        "requiredStateOutcomes":[],
+        "forbiddenTransitions":[],
+        "knowledgeBoundaries":[],
+        "reservationRefs":[],
+        "sceneExecution":[],
+        "horizonPreview":[
+            {"slotNo":1,"objective":"推进路线","tentative":true},
+            {"slotNo":2,"objective":"制造阻力","tentative":true},
+            {"slotNo":3,"objective":"留下后果","tentative":true}
+        ]
+    });
+    insert_committed_artifact(
+        &handle,
+        project_id,
+        "ChapterPlan",
+        &chapter_plan_id,
+        "CHAPTER",
+        json!({"level":"CHAPTER","chapterId":chapter_id}),
+        chapter_plan,
+        true,
+    );
+    drop(handle);
+    SemanticChapterFixture {
+        chapter_plan_id,
+    }
+}
+
+fn insert_retcon_evidence_chapter(
+    connection: &Connection,
+    project_id: &str,
+    chapter_no: i64,
+) -> String {
+    let book_id = format!("book-{project_id}-retcon");
+    let volume_id = format!("volume-{project_id}-retcon");
+    let chapter_id = format!("chapter-{project_id}-{chapter_no}");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'Retcon 证据书','ACTIVE',?3,?3)",
+            params![book_id, project_id, NOW],
+        )
+        .expect("insert retcon evidence book");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'第一卷','PLANNING',1,99,3000,?4,?4)",
+            params![volume_id, project_id, book_id, NOW],
+        )
+        .expect("insert retcon evidence volume");
+    connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,'证据章','NORMAL','COMMITTED',1000,?5,?5)",
+            params![chapter_id, project_id, volume_id, chapter_no, NOW],
+        )
+        .expect("insert retcon evidence chapter");
+    chapter_id
+}
+
 fn insert_volume_plan(state: &KernelState, project_id: &str, volume_id: &str) {
     let handle = state
         .manager
@@ -1071,18 +1555,14 @@ fn b12_change_applies_a_real_book_plan_authority_head() {
 #[test]
 fn b12_change_chapter_plan_invokes_b07_semantic_owner() {
     let state = test_state("p-b12-r01-chapter");
-    insert_chapter_plan(
-        &state,
-        "p-b12-r01-chapter",
-        "plan:chapter:p-b12-r01-chapter:1",
-    );
+    let fixture = insert_semantic_chapter_fixture(&state, "p-b12-r01-chapter");
     let digest = create_and_approve_change(
         &state,
         "p-b12-r01-chapter",
         "change:b12:r01:chapter",
-        &["plan:chapter:p-b12-r01-chapter:1"],
+        &[fixture.chapter_plan_id.as_str()],
         json!({
-            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":"plan:chapter:p-b12-r01-chapter:1"},
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":fixture.chapter_plan_id},
             "patch":{"chapterGoal":"修订后的章节目标"}
         }),
     );
@@ -1109,6 +1589,18 @@ fn b12_change_chapter_plan_invokes_b07_semantic_owner() {
         result["result"]["semanticOwnerReceipt"]["directB12HeadMutationCount"],
         0
     );
+    assert_eq!(
+        result["result"]["semanticOwnerReceipt"]["routeTaskRefsChecked"],
+        1
+    );
+    assert_eq!(
+        result["result"]["semanticOwnerReceipt"]["triggeredContinuityChecked"],
+        0
+    );
+    assert_eq!(
+        result["result"]["semanticOwnerReceipt"]["taskRealityChecked"],
+        true
+    );
     state
         .manager
         .with_read_connection("p-b12-r01-chapter", NOW, |connection| {
@@ -1124,6 +1616,165 @@ fn b12_change_chapter_plan_invokes_b07_semantic_owner() {
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .expect("verify chapter plan owner mutation");
+}
+
+fn assert_chapter_change_rejected_without_head_mutation(
+    state: &KernelState,
+    project_id: &str,
+) {
+    state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            let (version, count): (i64, i64) = connection
+                .query_row(
+                    "SELECT h.version,(SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ChapterPlan') FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'",
+                    [project_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read unchanged ChapterPlan head");
+            assert_eq!(version, 1);
+            assert_eq!(count, 1);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .expect("verify rejected ChapterPlan did not mutate authority");
+}
+
+#[test]
+fn b12_change_chapter_plan_rejects_task_outside_real_route() {
+    let project_id = "p-b12-r01-route";
+    let state = test_state(project_id);
+    let fixture = insert_semantic_chapter_fixture(&state, project_id);
+    let change_id = "change:b12:r01:route";
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        change_id,
+        &[fixture.chapter_plan_id.as_str()],
+        json!({
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":fixture.chapter_plan_id},
+            "patch":{"activeTaskRefs":["task:b12:outside"]}
+        }),
+    );
+    let error = command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:b12:r01:route:apply",
+        0,
+        json!({"changeRequestId":change_id,"impactDigest":digest}),
+    )
+    .expect_err("task outside the formal B07 route must be rejected");
+    assert_eq!(error, "TASK_SCOPE_VIOLATION");
+    assert_chapter_change_rejected_without_head_mutation(&state, project_id);
+}
+
+#[test]
+fn b12_change_chapter_plan_rejects_blocked_real_route_task() {
+    let project_id = "p-b12-r01-blocked";
+    let state = test_state(project_id);
+    let fixture = insert_semantic_chapter_fixture(&state, project_id);
+    let handle = state.manager.open(project_id, "", NOW).expect("open route state");
+    handle
+        .execute(
+            "UPDATE state_deltas SET value_json='{\"taskId\":\"task:b12:route\",\"status\":\"BLOCKED\",\"evidenceRefs\":[],\"remainingConditions\":[\"blocked\"]}' WHERE project_id=?1 AND state_id='task:b12:route'",
+            [project_id],
+        )
+        .expect("block route task");
+    drop(handle);
+    let change_id = "change:b12:r01:blocked";
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        change_id,
+        &[fixture.chapter_plan_id.as_str()],
+        json!({
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":fixture.chapter_plan_id},
+            "patch":{"chapterGoal":"不应绕过已阻塞任务"}
+        }),
+    );
+    let error = command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:b12:r01:blocked:apply",
+        0,
+        json!({"changeRequestId":change_id,"impactDigest":digest}),
+    )
+    .expect_err("blocked formal route task must be rejected");
+    assert_eq!(error, "TASK_DEPENDENCY_UNMET");
+    assert_chapter_change_rejected_without_head_mutation(&state, project_id);
+}
+
+#[test]
+fn b12_change_chapter_plan_rejects_missing_triggered_continuity() {
+    let project_id = "p-b12-r01-continuity";
+    let state = test_state(project_id);
+    let fixture = insert_semantic_chapter_fixture(&state, project_id);
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open continuity fixture");
+    handle
+        .execute(
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES ('obligation:b12:secret',?1,'VOLUME','PROMISE','A',?2,1,'必须处理的秘密','[]','APPROVED',?3,?3)",
+            params![project_id, fixture.chapter_plan_id, NOW],
+        )
+        .expect("insert triggered continuity obligation");
+    drop(handle);
+    let change_id = "change:b12:r01:continuity";
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        change_id,
+        &[fixture.chapter_plan_id.as_str()],
+        json!({
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":fixture.chapter_plan_id},
+            "patch":{"chapterGoal":"漏掉强制连续性处理"}
+        }),
+    );
+    let error = command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:b12:r01:continuity:apply",
+        0,
+        json!({"changeRequestId":change_id,"impactDigest":digest}),
+    )
+    .expect_err("triggered A/B continuity must require a disposition");
+    assert_eq!(error, "CONTINUITY_BRIDGE_REQUIRED");
+    assert_chapter_change_rejected_without_head_mutation(&state, project_id);
+}
+
+#[test]
+fn b12_change_chapter_plan_rejects_future_reservation_violation() {
+    let project_id = "p-b12-r01-reservation";
+    let state = test_state(project_id);
+    let fixture = insert_semantic_chapter_fixture(&state, project_id);
+    let change_id = "change:b12:r01:reservation";
+    let digest = create_and_approve_change(
+        &state,
+        project_id,
+        change_id,
+        &[fixture.chapter_plan_id.as_str()],
+        json!({
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":fixture.chapter_plan_id},
+            "patch":{
+                "reservationRefs":["reservation:b12:future"],
+                "sceneExecution":[{"action":"REVEAL","reservationRef":"reservation:b12:future"}]
+            }
+        }),
+    );
+    let error = command(
+        &state,
+        project_id,
+        "change_request_apply",
+        "cmd:b12:r01:reservation:apply",
+        0,
+        json!({"changeRequestId":change_id,"impactDigest":digest}),
+    )
+    .expect_err("future reservation reveal must be rejected before B12 commits");
+    assert_eq!(error, "FUTURE_RESERVATION_VIOLATION");
+    assert_chapter_change_rejected_without_head_mutation(&state, project_id);
 }
 
 #[test]
