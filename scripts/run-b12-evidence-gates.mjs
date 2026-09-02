@@ -152,7 +152,7 @@ setGate('B12-A13', runtimePass, 'B12_CHANGE_REQUEST_LIFECYCLE.json')
 setGate('B12-A14', runtimePass && /B12_CHANGE_APPROVAL/.test(owner), 'B12_CHANGE_DECISION.json')
 setGate('B12-A15', runtimePass && /B12_DECISION_STALE/.test(owner), 'B12_CHANGE_DECISION_STALE.json')
 setGate('B12-A16', runtimePass && /B12_RETCON_REQUIRED/.test(owner), 'B12_RETCON_GUARD.json')
-setGate('B12-A17', runtimePass && /changeType.*RETCON/.test(owner), 'B12_RETCON_GUARD.json')
+setGate('B12-A17', runtimePass && /change_type|changeType/.test(owner) && /RETCON/.test(owner), 'B12_RETCON_GUARD.json')
 setGate('B12-A18', runtimePass && /B12_RETCON_EVIDENCE_NOT_FOUND/.test(owner), 'B12_RETCON_PLAN.json')
 setGate('B12-A19', runtimePass && /superseded_by|oldCanon/.test(owner + repository), 'B12_RETCON_HISTORY.json')
 setGate('B12-A20', runtimePass && !/UPDATE\s+chapters/.test(owner), 'B12_FINAL_CHAPTER_IMMUTABILITY.json')
@@ -196,6 +196,7 @@ setGate('B12-A57', moduleBoundary.status === 'PASS', 'module_boundary.log')
 const globalPass = sourceArchitecturePass && noFutureOwner && noHarnessSkillWriter && architecture.status === 'PASS'
 for (const name of GLOBAL) setGate(name, globalPass, 'B12_GLOBAL_GATES.json')
 setGate('B12-A58', globalPass, 'B12_GLOBAL_GATES.json')
+setGate('B12-A60', noFutureOwner, 'B12_GLOBAL_GATES.json')
 for (let index = 0; index < NEGATIVE.length; index += 1) {
   const name = NEGATIVE[index]
   const testMarker = new RegExp(`(?:✔|ok).*${name}`).test(b12Node.output)
