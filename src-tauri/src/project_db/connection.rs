@@ -25,6 +25,8 @@ const H01_SUPPORT_MIGRATION: &str =
 const H03_REPAIR_MIGRATION: &str = include_str!("../../migrations/0009_h03_repair_workflow.sql");
 const B09_H04_VOLUME_LIFECYCLE_MIGRATION: &str =
     include_str!("../../migrations/0010_b09_h04_volume_lifecycle.sql");
+const B12_CHANGE_RETCON_MIGRATION: &str =
+    include_str!("../../migrations/0011_b12_change_retcon_runtime.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     if !read_only {
@@ -148,6 +150,13 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
+    let applied_v11: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 11",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(applied.is_none()
         || applied_v3.is_none()
         || applied_v4.is_none()
@@ -155,7 +164,44 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
         || applied_v6.is_none()
         || applied_v7.is_none()
         || applied_v8.is_none()
-        || applied_v10.is_none())
+        || applied_v10.is_none()
+        || applied_v11.is_none())
+}
+
+fn migration_recorded(connection: &Connection, version: i64) -> Result<bool, DatabaseError> {
+    let history_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_history')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !history_exists {
+        return Ok(false);
+    }
+    let recorded: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version=?1",
+            [version],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(recorded.is_some())
+}
+
+fn apply_numbered_migration(
+    connection: &Connection,
+    version: i64,
+    sql: &str,
+    now: &str,
+) -> Result<bool, DatabaseError> {
+    if migration_recorded(connection, version)? {
+        return Ok(false);
+    }
+    connection.execute_batch(sql)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (?1, ?2)",
+        libsql_rusqlite::params![version, now],
+    )?;
+    Ok(true)
 }
 
 pub fn migrate_project(
@@ -181,62 +227,18 @@ pub fn migrate_project(
         [],
         |row| row.get(0),
     )?;
-    let b12_insert_trigger_exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='b12_dependency_summary_insert')",
-        [],
-        |row| row.get(0),
-    )?;
-    let b12_update_trigger_exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='b12_dependency_summary_update')",
-        [],
-        |row| row.get(0),
-    )?;
-    let b12_delete_trigger_exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='b12_dependency_summary_delete')",
-        [],
-        |row| row.get(0),
-    )?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
-        let (needs_b05_migration, needs_h01_migration, needs_b09_migration) =
-            if needs_full_migration {
-                connection.execute_batch(PROJECT_MIGRATION)?;
-                connection.execute_batch(PROJECT_COMMAND_MIGRATION)?;
-                connection.execute_batch(PROJECT_LONGTERM_MIGRATION)?;
-                connection.execute_batch(M0C_COMMIT_DELTA_MIGRATION)?;
-                connection.execute_batch(M0E_OPS_MIGRATION)?;
-                let needs_b05_migration: bool = connection.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM migration_history WHERE version=7)",
-                    [],
-                    |row| row.get(0),
-                )?;
-                if needs_b05_migration {
-                    connection.execute_batch(B05_NARRATIVE_MIGRATION)?;
-                }
-                let needs_h01_migration: bool = connection.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM migration_history WHERE version=8)",
-                    [],
-                    |row| row.get(0),
-                )?;
-                if needs_h01_migration {
-                    connection.execute_batch(H01_SUPPORT_MIGRATION)?;
-                }
-                let needs_b09_migration: bool = connection.query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM migration_history WHERE version=10)",
-                    [],
-                    |row| row.get(0),
-                )?;
-                if needs_b09_migration {
-                    connection.execute_batch(B09_H04_VOLUME_LIFECYCLE_MIGRATION)?;
-                }
-                (
-                    needs_b05_migration,
-                    needs_h01_migration,
-                    needs_b09_migration,
-                )
-            } else {
-                (false, false, false)
-            };
+        if needs_full_migration {
+            apply_numbered_migration(connection, 2, PROJECT_MIGRATION, now)?;
+            apply_numbered_migration(connection, 3, PROJECT_COMMAND_MIGRATION, now)?;
+            apply_numbered_migration(connection, 4, PROJECT_LONGTERM_MIGRATION, now)?;
+            apply_numbered_migration(connection, 5, M0C_COMMIT_DELTA_MIGRATION, now)?;
+            apply_numbered_migration(connection, 6, M0E_OPS_MIGRATION, now)?;
+            apply_numbered_migration(connection, 7, B05_NARRATIVE_MIGRATION, now)?;
+            apply_numbered_migration(connection, 8, H01_SUPPORT_MIGRATION, now)?;
+            apply_numbered_migration(connection, 10, B09_H04_VOLUME_LIFECYCLE_MIGRATION, now)?;
+        }
         // H03 is deliberately support-only and replay-safe. It is not added to
         // numbered migration history; only a missing support table needs the
         // compatibility SQL on an already-migrated project.
@@ -250,59 +252,7 @@ pub fn migrate_project(
                 "CREATE INDEX IF NOT EXISTS idx_b04_dependency_project_source_edge ON dependency_edges(project_id, source_ref, edge_id);",
             )?;
         }
-        if !b12_insert_trigger_exists {
-            connection.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS b12_dependency_summary_insert AFTER INSERT ON dependency_edges BEGIN UPDATE project_settings SET setting_value=json_set(setting_value, '$.mutationEpoch', COALESCE(json_extract(setting_value, '$.mutationEpoch'), 0) + 1) WHERE project_id=NEW.project_id AND setting_key='b12.dependencySummary.global'; END;",
-            )?;
-        }
-        if !b12_update_trigger_exists {
-            connection.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS b12_dependency_summary_update AFTER UPDATE OF source_ref, target_ref, impact_class, source_hash ON dependency_edges BEGIN UPDATE project_settings SET setting_value=json_set(setting_value, '$.mutationEpoch', COALESCE(json_extract(setting_value, '$.mutationEpoch'), 0) + 1) WHERE project_id=NEW.project_id AND setting_key='b12.dependencySummary.global'; END;",
-            )?;
-        }
-        if !b12_delete_trigger_exists {
-            connection.execute_batch(
-                "CREATE TRIGGER IF NOT EXISTS b12_dependency_summary_delete AFTER DELETE ON dependency_edges BEGIN UPDATE project_settings SET setting_value=json_set(setting_value, '$.mutationEpoch', COALESCE(json_extract(setting_value, '$.mutationEpoch'), 0) + 1) WHERE project_id=OLD.project_id AND setting_key='b12.dependencySummary.global'; END;",
-            )?;
-        }
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (2, ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (3, ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (4, ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (5, ?1)",
-            [now],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (6, ?1)",
-            [now],
-        )?;
-        if needs_b05_migration {
-            connection.execute(
-                "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (7, ?1)",
-                [now],
-            )?;
-        }
-        if needs_h01_migration {
-            connection.execute(
-                "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (8, ?1)",
-                [now],
-            )?;
-        }
-        if needs_b09_migration {
-            connection.execute(
-                "INSERT OR IGNORE INTO migration_history(version, applied_at) VALUES (10, ?1)",
-                [now],
-            )?;
-        }
+        apply_numbered_migration(connection, 11, B12_CHANGE_RETCON_MIGRATION, now)?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;
         Ok::<_, DatabaseError>(())
     })();

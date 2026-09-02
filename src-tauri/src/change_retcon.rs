@@ -10,7 +10,7 @@
 
 use crate::commit::CommitService;
 use crate::generated::types::{CommitBundle, CommitReceipt};
-use crate::hash::sha256_canonical;
+use crate::hash::{canonical_bytes, sha256_canonical};
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use crate::repositories::change_retcon as repository;
 use crate::repositories::narrative::NarrativeRepository;
@@ -205,12 +205,38 @@ fn build_artifact(
     decision_refs: Vec<String>,
     now: &str,
 ) -> Result<crate::generated::types::ArtifactEnvelope, String> {
+    build_artifact_with_scope(
+        project_id,
+        command_id,
+        artifact_id,
+        artifact_type,
+        json!({"level":"PROJECT"}),
+        version,
+        payload,
+        lifecycle,
+        decision_refs,
+        now,
+    )
+}
+
+fn build_artifact_with_scope(
+    project_id: &str,
+    command_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    scope: Value,
+    version: i64,
+    payload: Value,
+    lifecycle: &str,
+    decision_refs: Vec<String>,
+    now: &str,
+) -> Result<crate::generated::types::ArtifactEnvelope, String> {
     let payload_hash = sha256_canonical(&payload).map_err(|error| error.to_string())?;
     serde_json::from_value(json!({
         "artifactId":artifact_id,
         "projectId":project_id,
         "artifactType":artifact_type,
-        "scope":{"level":"PROJECT"},
+        "scope":scope,
         "version":version,
         "schemaVersion":"m0a.artifact.v1",
         "artifactStatus":"CANDIDATE",
@@ -223,6 +249,151 @@ fn build_artifact(
         "createdAt":now
     }))
     .map_err(|error| format!("B12_ARTIFACT:{error}"))
+}
+
+fn merge_json_patch(target: &mut Value, patch: &Value) {
+    match (target.as_object_mut(), patch.as_object()) {
+        (Some(target), Some(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    target.remove(key);
+                } else {
+                    merge_json_patch(target.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            }
+        }
+        _ => *target = patch.clone(),
+    }
+}
+
+fn change_target_input<'a>(
+    input: &'a Value,
+    requested_change: &'a Value,
+) -> Option<&'a Value> {
+    input
+        .get("targetAuthority")
+        .or_else(|| requested_change.get("targetAuthority"))
+        .filter(|value| !value.is_null())
+}
+
+fn target_patch<'a>(requested_change: &'a Value) -> Option<&'a Value> {
+    requested_change
+        .get("patch")
+        .or_else(|| requested_change.get("changes"))
+        .filter(|value| value.is_object())
+}
+
+fn target_scope_value(record: &repository::AuthorityHeadRecord) -> Result<Value, String> {
+    serde_json::from_str(&record.scope_key)
+        .map_err(|error| format!("B12_TARGET_SCOPE_INVALID:{error}"))
+}
+
+fn validate_typed_target_payload(artifact_type: &str, payload: &Value) -> Result<(), String> {
+    match artifact_type {
+        "BookPlan" => crate::generated::validators::validate_book_plan_r1(payload)
+            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
+        "VolumeIntent" => crate::generated::validators::validate_volume_intent_r1(payload)
+            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
+        "VolumePlan" => crate::generated::validators::validate_volume_plan_r1(payload)
+            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
+        "ChapterPlan" => crate::generated::validators::validate_chapter_plan_r1(payload)
+            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
+        "StoryConstitution" | "OpeningContract" => Ok(()),
+        _ => Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}")),
+    }
+}
+
+fn retcon_plan_digest(plan: &repository::RetconPlanRecord) -> Result<String, String> {
+    sha256_canonical(&plan.downstream_impact).map_err(|error| format!("B12_RETCON_DIGEST:{error}"))
+}
+
+fn resolve_typed_target(
+    connection: &Connection,
+    project_id: &str,
+    input: &Value,
+    requested_change: &Value,
+    change_seed: &Value,
+) -> Result<Option<repository::AuthorityHeadRecord>, String> {
+    let target = change_target_input(input, requested_change).or_else(|| {
+        change_seed
+            .get("targetAuthority")
+            .filter(|value| !value.is_null())
+    });
+    let target_ref = target
+        .and_then(|value| value.get("artifactId").or_else(|| value.get("artifactRef")))
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("artifactId").and_then(Value::as_str))
+        })
+        .or_else(|| input.get("targetRef").and_then(Value::as_str))
+        .or_else(|| {
+            change_seed
+                .get("targetRefs")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(Value::as_str)
+        });
+    let target_type = target
+        .and_then(|value| value.get("artifactType").or_else(|| value.get("type")))
+        .and_then(Value::as_str);
+    let explicit_target = target.is_some() || input.get("targetRef").is_some();
+    if target.is_none() && target_ref.is_none() && target_type.is_none() {
+        return Ok(None);
+    }
+    if target_type.is_some_and(|value| value == "Canon" || value == "CanonFact")
+        || target_ref.is_some_and(|value| value.starts_with("fact:"))
+    {
+        return Err("B12_RETCON_REQUIRED".into());
+    }
+    let scope = target.and_then(|value| value.get("scope")).and_then(|value| {
+        value
+            .get("level")
+            .and_then(Value::as_str)
+            .map(|level| (level.to_owned(), value.to_owned()))
+    });
+    let (scope_level, scope_value) = scope
+        .map(|(level, value)| {
+            let key = String::from_utf8(canonical_bytes(&value).unwrap_or_default())
+                .unwrap_or_default();
+            (level, key)
+        })
+        .unzip();
+    let record = repository::load_authority_head(
+        connection,
+        project_id,
+        target_type,
+        target_ref,
+        scope_level.as_deref(),
+        scope_value.as_deref(),
+    )
+    .map_err(|error| format!("B12_DB:{error}"))?;
+    let Some(record) = record else {
+        if explicit_target {
+            return Err("B12_CHANGE_TARGET_UNSUPPORTED".into());
+        }
+        return Ok(None);
+    };
+    if let Some(target_type) = target_type {
+        if target_type != record.artifact_type {
+            return Err("B12_CHANGE_TARGET_UNSUPPORTED".into());
+        }
+    }
+    if !matches!(
+        record.artifact_type.as_str(),
+        "BookPlan"
+            | "VolumeIntent"
+            | "VolumePlan"
+            | "ChapterPlan"
+            | "StoryConstitution"
+            | "OpeningContract"
+    ) {
+        return Err(format!(
+            "B12_CHANGE_TARGET_UNSUPPORTED:{}",
+            record.artifact_type
+        ));
+    }
+    Ok(Some(record))
 }
 
 fn state_delta(state_id: &str, state_type: &str, value: Value, payload: Value) -> Value {
@@ -351,6 +522,17 @@ fn preflight(
             let snapshot =
                 repository::dependency_snapshot(connection, project_id, &refs, explicit_global)
                     .map_err(|error| format!("B12_DB:{error}"))?;
+            if explicit_global && snapshot.summary_status != "READY" {
+                return Ok(json!({
+                    "status":"SUMMARY_BOOTSTRAP_REQUIRED",
+                    "changeRequestId":change_id,
+                    "summaryStatus":snapshot.summary_status,
+                    "fullGraphSynchronousScan":snapshot.full_graph_synchronous_scan,
+                    "preflightOnly":true,
+                    "bounded":true,
+                    "userMessage":"全局影响索引正在准备，请完成一次后台索引后再查看影响。"
+                }));
+            }
             let direct = snapshot.total_edges;
             let scope_class = if explicit_global || direct > GLOBAL_FAN_OUT_THRESHOLD {
                 "GLOBAL"
@@ -413,6 +595,15 @@ fn preflight(
                     now,
                 )
                 .map_err(|error| format!("B12_DB:{error}"))?;
+                repository::initialize_impact_frontier(
+                    connection,
+                    project_id,
+                    &impact_id,
+                    &refs,
+                    query_global,
+                    now,
+                )
+                .map_err(|error| format!("B12_DB:{error}"))?;
             }
             let seed = merge_seed(
                 &change.impact_seed,
@@ -443,6 +634,8 @@ fn preflight(
                 "impactDigest":digest,
                 "estimate":estimate,
                 "preflightOnly":true,
+                "summaryStatus":snapshot.summary_status,
+                "fullGraphSynchronousScan":snapshot.full_graph_synchronous_scan,
                 "bounded":true
             }))
         },
@@ -525,6 +718,9 @@ fn expand(
             let snapshot =
                 repository::dependency_snapshot(connection, project_id, &refs, query_global)
                     .map_err(|error| format!("B12_DB:{error}"))?;
+            if query_global && snapshot.summary_status != "READY" {
+                return Err("B12_DEPENDENCY_SUMMARY_NOT_READY".into());
+            }
             let direct = snapshot.total_edges;
             let class_counts = snapshot.class_counts;
             let dependency_fingerprint = snapshot.fingerprint;
@@ -572,50 +768,21 @@ fn expand(
             if impact.status == "COMPLETED" {
                 return Ok(impact_result(&impact, &digest, json!([]), false));
             }
-            let rows = repository::dependency_page(
+            let page = repository::expand_impact_batch(
                 connection,
                 project_id,
-                &refs,
-                query_global,
-                impact.checkpoint_offset,
+                &impact.impact_set_id,
                 page_size,
+                now,
             )
             .map_err(|error| format!("B12_DB:{error}"))?;
-            let page_count = rows.len() as i64;
-            let mut processed = impact
-                .processed_pages
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            processed.push(json!({
-                "offset":impact.checkpoint_offset,
-                "edgeIds":rows.iter().map(|item| item.edge_id.clone()).collect::<Vec<_>>()
-            }));
-            let new_offset = impact.checkpoint_offset + page_count;
-            let status = if new_offset >= impact.total_edges {
-                "COMPLETED"
-            } else {
-                "RUNNING"
-            };
+            let page_count = page.edges.len() as i64;
+            let status = if page.frontier_pending == 0 { "COMPLETED" } else { "RUNNING" };
             let next_status = if status == "COMPLETED" {
                 "PENDING_APPROVAL"
             } else {
                 "IMPACT_READY"
             };
-            let new_expanded = impact.expanded_edges + page_count;
-            let page_value = serde_json::to_value(&rows).map_err(|error| error.to_string())?;
-            repository::update_impact_set(
-                connection,
-                project_id,
-                &impact.impact_set_id,
-                &Value::Array(processed.clone()),
-                new_expanded,
-                new_offset,
-                status,
-                "EXPANDED",
-                now,
-            )
-            .map_err(|error| format!("B12_DB:{error}"))?;
             let seed = merge_seed(
                 &change.impact_seed,
                 &[
@@ -632,16 +799,25 @@ fn expand(
                 None,
                 now,
             )
-            .map_err(|error| format!("B12_DB:{error}"))?;
-            impact.expanded_edges = new_expanded;
-            impact.checkpoint_offset = new_offset;
+                .map_err(|error| format!("B12_DB:{error}"))?;
+            let page_value = serde_json::to_value(&page.edges).map_err(|error| error.to_string())?;
+            impact.expanded_edges = page.expanded_count;
+            impact.checkpoint_offset = page.checkpoint_offset;
+            impact.total_edges = impact
+                .total_edges
+                .max(page.affected_count + page.frontier_pending);
             impact.status = status.into();
-            impact.processed_pages = Value::Array(processed);
+            impact.processed_pages = json!({
+                "lastBatchEdges":page_count,
+                "visitedCount":page.affected_count,
+                "frontierPending":page.frontier_pending,
+                "maxFrontierBatch":page.max_frontier_batch
+            });
             Ok(impact_result(
                 &impact,
                 &digest,
                 page_value,
-                new_offset < impact.total_edges,
+                page.frontier_pending > 0,
             ))
         },
     )
@@ -715,13 +891,32 @@ fn decide(
             {
                 return Err("B12_DECISION_STALE".into());
             }
+            let retcon_plan = if change.change_type == "RETCON" {
+                let plan_id = required_string(input, "retconPlanId")?.to_owned();
+                let plan = repository::load_retcon_plan(connection, project_id, &plan_id)
+                    .map_err(|error| format!("B12_DB:{error}"))?
+                    .ok_or_else(|| "B12_RETCON_PLAN_NOT_FOUND".to_string())?;
+                let digest = retcon_plan_digest(&plan)?;
+                if input
+                    .get("planDigest")
+                    .and_then(Value::as_str)
+                    .is_some_and(|supplied| supplied != digest)
+                {
+                    return Err("B12_DECISION_STALE".into());
+                }
+                Some((plan_id, digest))
+            } else {
+                None
+            };
             let decision_payload = json!({
                 "changeRequestId":change_id,
                 "impactSetId":impact.impact_set_id,
                 "impactDigest":supplied_digest,
                 "basedOnRevision":current_revision,
                 "scopeAcknowledged":true,
-                "riskAcknowledged":true
+                "riskAcknowledged":true,
+                "retconPlanId":retcon_plan.as_ref().map(|item| item.0.clone()),
+                "planDigest":retcon_plan.as_ref().map(|item| item.1.clone())
             });
             repository::insert_decision(
                 connection,
@@ -758,7 +953,7 @@ fn decide(
                 now,
             )
             .map_err(|error| format!("B12_DB:{error}"))?;
-            if let Some(plan_id) = input.get("retconPlanId").and_then(Value::as_str) {
+            if let Some((plan_id, _)) = retcon_plan.as_ref() {
                 repository::update_retcon_plan(
                     connection,
                     project_id,
@@ -775,6 +970,8 @@ fn decide(
                 "decisionId":decision_id,
                 "impactDigest":supplied_digest,
                 "basedOnRevision":current_revision,
+                "retconPlanId":retcon_plan.as_ref().map(|item| item.0.clone()),
+                "planDigest":retcon_plan.as_ref().map(|item| item.1.clone()),
                 "explicit":true
             }))
         },
@@ -917,6 +1114,45 @@ fn apply_change(
         .get("requestedChange")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let typed_target = resolve_typed_target(
+        &handle,
+        project_id,
+        input,
+        &requested_change,
+        &change.impact_seed,
+    )?;
+    let (target_artifact, target_head, target_type) = if let Some(target) = typed_target {
+        let patch = target_patch(&requested_change)
+            .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
+        let mut target_payload = target.payload.clone();
+        merge_json_patch(&mut target_payload, patch);
+        validate_typed_target_payload(&target.artifact_type, &target_payload)?;
+        let scope = target_scope_value(&target)?;
+        let artifact = build_artifact_with_scope(
+            project_id,
+            command_id,
+            &target.artifact_id,
+            &target.artifact_type,
+            scope.clone(),
+            target.version + 1,
+            target_payload,
+            "APPROVED_PLAN",
+            vec![decision_id.clone()],
+            now,
+        )?;
+        let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
+            "artifactType":target.artifact_type,
+            "scope":scope,
+            "artifactId":artifact.artifact_id,
+            "version":artifact.version,
+            "payloadHash":artifact.payload_hash
+        }))
+        .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
+        let artifact_type = target.artifact_type.clone();
+        (Some(artifact), Some(head), Some(artifact_type))
+    } else {
+        (None, None, None)
+    };
     let change_payload = json!({
         "payloadSchema":"b12-change-request.r1",
         "changeRequestId":change_id,
@@ -927,7 +1163,8 @@ fn apply_change(
         "basedOnRevision":current_revision,
         "impactSetId":impact.impact_set_id,
         "impactDigest":supplied_digest,
-        "decisionId":decision_id
+        "decisionId":decision_id,
+        "authorityType":target_type.clone()
     });
     let artifact = build_artifact(
         project_id,
@@ -952,18 +1189,23 @@ fn apply_change(
         json!({"changeRequestId":change_id,"requestedChange":requested_change,"impactDigest":supplied_digest,"authorityStatus":"COMMITTED"}),
         json!({"owner":OWNER_NAME,"basedOnRevision":current_revision}),
     );
-    let bundle = build_bundle(
+    let mut bundle = build_bundle(
         project_id,
         command_id,
         idempotency_key,
         current_revision,
         now,
-        vec![artifact],
+        std::iter::once(artifact)
+            .chain(target_artifact)
+            .collect(),
         None,
         vec![stale_state, applied_state],
         decision_update(&decision_id, &change_id, decision_payload),
         "B12_CHANGE",
     )?;
+    if let Some(head) = target_head {
+        bundle.head_updates = Some(vec![head]);
+    }
     let impact_id = impact.impact_set_id.clone();
     let seed = change.impact_seed.clone();
     let receipt =
@@ -996,7 +1238,7 @@ fn apply_change(
     )?;
     Ok(final_response(
         &receipt,
-        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest}),
+        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type,"authorityMutation":target_type.is_some()}),
         postverify,
         "变更已完成并复核。",
     ))
@@ -1183,6 +1425,7 @@ fn create_change(
                 "basedOnRevision":based,
                 "targetRefs":target_refs,
                 "sourceRefs":source_refs,
+                "targetAuthority":input.get("targetAuthority").cloned().unwrap_or(Value::Null),
                 "requestedChange":input.get("requestedChange").cloned().unwrap_or_else(|| json!({})),
                 "reason":input.get("reason").cloned().unwrap_or_else(|| json!(summary)),
                 "requestDigest":request_digest,
@@ -1387,6 +1630,17 @@ fn apply_retcon(
     if change.status != "APPROVED" || plan.status != "APPROVED" {
         return Err("B12_USER_DECISION_REQUIRED".into());
     }
+    let current_plan_digest = retcon_plan_digest(&plan)?;
+    if input
+        .get("planDigest")
+        .and_then(Value::as_str)
+        .is_some_and(|digest| digest != current_plan_digest)
+    {
+        return Err("B12_DECISION_STALE".into());
+    }
+    if change.impact_seed.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str()) {
+        return Err("B12_DECISION_STALE".into());
+    }
     if plan
         .downstream_impact
         .get("impactDigest")
@@ -1408,6 +1662,20 @@ fn apply_retcon(
         if expected != current_revision {
             return Err("REVISION_CONFLICT".into());
         }
+    }
+    let decision_id = change
+        .decision_ref
+        .clone()
+        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
+    let decision = repository::load_decision(&handle, project_id, &decision_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
+    if decision.0 != "APPROVE"
+        || decision.1.get("retconPlanId").and_then(Value::as_str) != Some(plan_id.as_str())
+        || decision.1.get("planDigest").and_then(Value::as_str)
+            != Some(current_plan_digest.as_str())
+    {
+        return Err("B12_DECISION_STALE".into());
     }
     let old = plan
         .target_fact
@@ -1467,13 +1735,6 @@ fn apply_retcon(
         vec![change.decision_ref.clone().unwrap_or_default()],
         now,
     )?;
-    let decision_id = change
-        .decision_ref
-        .clone()
-        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
-    let decision = repository::load_decision(&handle, project_id, &decision_id)
-        .map_err(|error| format!("B12_DB:{error}"))?
-        .ok_or_else(|| "B12_USER_DECISION_REQUIRED".to_string())?;
     let stale_state = state_delta(
         &format!("stale:{change_id}"),
         "b12.stale.activation",

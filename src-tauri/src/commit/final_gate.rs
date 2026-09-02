@@ -317,7 +317,10 @@ fn validate_knowledge(connection: &Connection, bundle: &CommitBundle) -> Result<
 fn transaction_scope(bundle: &CommitBundle) -> Option<(String, String)> {
     bundle.artifacts.iter().find_map(|artifact| {
         let artifact_type = enum_string(&artifact.artifact_type).ok()?;
-        if matches!(artifact_type.as_str(), "GatePolicy" | "ProductionReceipt") {
+        if matches!(
+            artifact_type.as_str(),
+            "GatePolicy" | "ProductionReceipt" | "ChangeRequest" | "RetconPlan" | "ImpactPlan"
+        ) {
             return None;
         }
         Some((

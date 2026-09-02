@@ -55,6 +55,27 @@ pub struct ImpactEdge {
 }
 
 #[derive(Debug, Clone)]
+pub struct ImpactTraversalPage {
+    pub edges: Vec<ImpactEdge>,
+    pub affected_count: i64,
+    pub expanded_count: i64,
+    pub checkpoint_offset: i64,
+    pub frontier_pending: i64,
+    pub max_frontier_batch: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorityHeadRecord {
+    pub artifact_id: String,
+    pub version: i64,
+    pub payload_hash: String,
+    pub artifact_type: String,
+    pub scope_level: String,
+    pub scope_key: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct RetconPlanRecord {
     pub retcon_plan_id: String,
     pub target_fact: Value,
@@ -223,6 +244,257 @@ pub fn update_impact_set(
     Ok(())
 }
 
+/// Seeds the durable traversal frontier.  The frontier is a row-per-reference
+/// queue; the large dependency graph never enters a JSON checkpoint or the
+/// WebView.  A GLOBAL request without explicit seeds is represented by the
+/// distinct dependency sources inserted directly by SQLite, rather than by a
+/// Rust-side graph materialization.
+pub fn initialize_impact_frontier(
+    connection: &Connection,
+    project_id: &str,
+    impact_set_id: &str,
+    source_refs: &Value,
+    global: bool,
+    now: &str,
+) -> Result<(), ChangeRetconRepositoryError> {
+    let refs = source_refs
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|reference| !reference.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if refs.is_empty() && global {
+        connection.execute(
+            "INSERT OR IGNORE INTO impact_frontier(project_id,impact_set_id,frontier_seq,ref,depth,path_json,next_edge_id,processed,created_at)
+             SELECT ?1,?2,ROW_NUMBER() OVER (ORDER BY source_ref)-1,source_ref,0,'[]',NULL,0,?3
+             FROM dependency_edges WHERE project_id=?1 GROUP BY source_ref",
+            libsql_rusqlite::params![project_id, impact_set_id, now],
+        )?;
+        return Ok(());
+    }
+    for (sequence, reference) in refs.iter().enumerate() {
+        connection.execute(
+            "INSERT OR IGNORE INTO impact_frontier(project_id,impact_set_id,frontier_seq,ref,depth,path_json,next_edge_id,processed,created_at) VALUES (?1,?2,?3,?4,0,'[]',NULL,0,?5)",
+            libsql_rusqlite::params![project_id, impact_set_id, sequence as i64, reference, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn propagation_allowed(dependency_type: &str, scope: &str, impact_class: &str) -> bool {
+    !matches!(dependency_type, "EVIDENCE" | "PRESENTATION")
+        && !matches!(scope, "NO_PROPAGATE" | "EVIDENCE_ONLY" | "SOFT")
+        && impact_class != "EVIDENCE"
+}
+
+/// Expands one bounded batch of the durable ImpactSet frontier.  Every call
+/// consumes at most `page_size` dependency edges, keeps a cursor on the
+/// currently expanded source, and enqueues only propagation-eligible targets.
+/// This makes cancellation/resume a durable queue operation instead of an
+/// ever-growing JSON offset list.
+pub fn expand_impact_batch(
+    connection: &Connection,
+    project_id: &str,
+    impact_set_id: &str,
+    page_size: i64,
+    now: &str,
+) -> Result<ImpactTraversalPage, ChangeRetconRepositoryError> {
+    let bound = page_size.clamp(1, 100);
+    let mut frontier_statement = connection.prepare(
+        "SELECT frontier_seq,ref,depth,path_json,next_edge_id FROM impact_frontier WHERE project_id=?1 AND impact_set_id=?2 AND processed=0 ORDER BY frontier_seq LIMIT ?3",
+    )?;
+    let frontier = frontier_statement
+        .query_map(
+            libsql_rusqlite::params![project_id, impact_set_id, bound],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(frontier_statement);
+
+    let mut edges = Vec::new();
+    for (frontier_seq, source_ref, depth, raw_path, next_edge_id) in frontier {
+        let remaining = bound - edges.len() as i64;
+        if remaining <= 0 {
+            break;
+        }
+        let mut edge_statement = connection.prepare(
+            "SELECT edge_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash FROM dependency_edges WHERE project_id=?1 AND source_ref=?2 AND (?3 IS NULL OR edge_id>?3) ORDER BY edge_id LIMIT ?4",
+        )?;
+        let source_edges = edge_statement
+            .query_map(
+                libsql_rusqlite::params![project_id, source_ref, next_edge_id, remaining + 1],
+                |row| {
+                    Ok(ImpactEdge {
+                        edge_id: row.get(0)?,
+                        source_ref: row.get(1)?,
+                        target_ref: row.get(2)?,
+                        dependency_type: row.get(3)?,
+                        scope: row.get(4)?,
+                        impact_class: row.get(5)?,
+                        source_hash: row.get(6)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(edge_statement);
+
+        if source_edges.is_empty() {
+            connection.execute(
+                "UPDATE impact_frontier SET processed=1,next_edge_id=NULL WHERE project_id=?1 AND impact_set_id=?2 AND frontier_seq=?3",
+                libsql_rusqlite::params![project_id, impact_set_id, frontier_seq],
+            )?;
+            continue;
+        }
+        let has_more = source_edges.len() as i64 > remaining;
+        let batch = source_edges.into_iter().take(remaining as usize).collect::<Vec<_>>();
+        for edge in &batch {
+            let mut path = serde_json::from_str::<Vec<String>>(&raw_path).unwrap_or_default();
+            if path.is_empty() {
+                path.push(source_ref.clone());
+            }
+            path.push(edge.target_ref.clone());
+            connection.execute(
+                "INSERT OR IGNORE INTO impact_items(project_id,impact_set_id,item_ref,source_ref,dependency_type,impact_class,depth,path_json,first_edge_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                libsql_rusqlite::params![
+                    project_id,
+                    impact_set_id,
+                    edge.target_ref,
+                    edge.source_ref,
+                    edge.dependency_type,
+                    edge.impact_class,
+                    depth + 1,
+                    serde_json::to_string(&path)?,
+                    edge.edge_id,
+                    now
+                ],
+            )?;
+            if propagation_allowed(&edge.dependency_type, &edge.scope, &edge.impact_class) {
+                let next_sequence: i64 = connection.query_row(
+                    "SELECT COALESCE(MAX(frontier_seq)+1,0) FROM impact_frontier WHERE project_id=?1 AND impact_set_id=?2",
+                    libsql_rusqlite::params![project_id, impact_set_id],
+                    |row| row.get(0),
+                )?;
+                connection.execute(
+                    "INSERT OR IGNORE INTO impact_frontier(project_id,impact_set_id,frontier_seq,ref,depth,path_json,next_edge_id,processed,created_at) VALUES (?1,?2,?3,?4,?5,?6,NULL,0,?7)",
+                    libsql_rusqlite::params![
+                        project_id,
+                        impact_set_id,
+                        next_sequence,
+                        edge.target_ref,
+                        depth + 1,
+                        serde_json::to_string(&path)?,
+                        now
+                    ],
+                )?;
+            }
+        }
+        if has_more {
+            let cursor = batch.last().map(|edge| edge.edge_id.clone());
+            connection.execute(
+                "UPDATE impact_frontier SET next_edge_id=?1 WHERE project_id=?2 AND impact_set_id=?3 AND frontier_seq=?4",
+                libsql_rusqlite::params![cursor, project_id, impact_set_id, frontier_seq],
+            )?;
+            edges.extend(batch);
+            break;
+        }
+        connection.execute(
+            "UPDATE impact_frontier SET processed=1,next_edge_id=NULL WHERE project_id=?1 AND impact_set_id=?2 AND frontier_seq=?3",
+            libsql_rusqlite::params![project_id, impact_set_id, frontier_seq],
+        )?;
+        if edges.len() as i64 + batch.len() as i64 >= bound {
+            edges.extend(batch);
+            break;
+        }
+        edges.extend(batch);
+    }
+    let affected_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM impact_items WHERE project_id=?1 AND impact_set_id=?2",
+        libsql_rusqlite::params![project_id, impact_set_id],
+        |row| row.get(0),
+    )?;
+    let frontier_pending: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM impact_frontier WHERE project_id=?1 AND impact_set_id=?2 AND processed=0",
+        libsql_rusqlite::params![project_id, impact_set_id],
+        |row| row.get(0),
+    )?;
+    let (previous_expanded, previous_checkpoint): (i64, i64) = connection.query_row(
+        "SELECT expanded_edges,checkpoint_offset FROM impact_sets WHERE project_id=?1 AND impact_set_id=?2",
+        libsql_rusqlite::params![project_id, impact_set_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let expanded_count = previous_expanded + edges.len() as i64;
+    let checkpoint_offset = previous_checkpoint + edges.len() as i64;
+    let checkpoint = json!({
+        "lastBatchEdges": edges.len(),
+        "visitedCount": affected_count,
+        "frontierPending": frontier_pending,
+        "maxFrontierBatch": bound
+    });
+    let status = if frontier_pending == 0 { "COMPLETED" } else { "RUNNING" };
+    connection.execute(
+        "UPDATE impact_sets SET processed_pages_json=?1,expanded_edges=?2,checkpoint_offset=?3,total_edges=MAX(total_edges,?4),status=?5,preflight_state='EXPANDED',updated_at=?6 WHERE project_id=?7 AND impact_set_id=?8",
+        libsql_rusqlite::params![
+            checkpoint.to_string(),
+            expanded_count,
+            checkpoint_offset,
+            affected_count + frontier_pending,
+            status,
+            now,
+            project_id,
+            impact_set_id
+        ],
+    )?;
+    Ok(ImpactTraversalPage {
+        edges,
+        affected_count,
+        expanded_count,
+        checkpoint_offset,
+        frontier_pending,
+        max_frontier_batch: bound,
+    })
+}
+
+pub fn impact_item_page(
+    connection: &Connection,
+    project_id: &str,
+    impact_set_id: &str,
+    cursor: i64,
+    limit: i64,
+) -> Result<Vec<Value>, ChangeRetconRepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT item_ref,source_ref,dependency_type,impact_class,depth,path_json,first_edge_id FROM impact_items WHERE project_id=?1 AND impact_set_id=?2 ORDER BY depth,item_ref LIMIT ?3 OFFSET ?4",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, impact_set_id, limit.clamp(1, 100) + 1, cursor.max(0)],
+        |row| {
+            let path: String = row.get(5)?;
+            Ok(json!({
+                "targetRef":row.get::<_,String>(0)?,
+                "sourceRef":row.get::<_,String>(1)?,
+                "dependencyType":row.get::<_,String>(2)?,
+                "impactClass":row.get::<_,String>(3)?,
+                "depth":row.get::<_,i64>(4)?,
+                "path":serde_json::from_str::<Value>(&path).unwrap_or_else(|_| json!([])),
+                "edgeId":row.get::<_,String>(6)?
+            }))
+        },
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 pub fn load_decision(
     connection: &Connection,
     project_id: &str,
@@ -270,6 +542,52 @@ pub fn artifact_reference_exists(
             libsql_rusqlite::params![project_id, artifact_id, version],
             |row| row.get(0),
         )
+        .map_err(Into::into)
+}
+
+pub fn load_authority_head(
+    connection: &Connection,
+    project_id: &str,
+    artifact_type: Option<&str>,
+    artifact_id: Option<&str>,
+    scope_level: Option<&str>,
+    scope_key: Option<&str>,
+) -> Result<Option<AuthorityHeadRecord>, ChangeRetconRepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT h.artifact_id,h.version,h.payload_hash,h.artifact_type,h.scope_level,h.scope_key,p.payload_json
+         FROM canonical_heads h
+         JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version
+         WHERE h.project_id=?1
+           AND (?2 IS NULL OR h.artifact_type=?2)
+           AND (?3 IS NULL OR h.artifact_id=?3)
+           AND (?4 IS NULL OR h.scope_level=?4)
+           AND (?5 IS NULL OR h.scope_key=?5)
+         ORDER BY h.artifact_type,h.scope_key
+         LIMIT 1",
+    )?;
+    statement
+        .query_row(
+            libsql_rusqlite::params![
+                project_id,
+                artifact_type,
+                artifact_id,
+                scope_level,
+                scope_key
+            ],
+            |row| {
+                let raw_payload: String = row.get(6)?;
+                Ok(AuthorityHeadRecord {
+                    artifact_id: row.get(0)?,
+                    version: row.get(1)?,
+                    payload_hash: row.get(2)?,
+                    artifact_type: row.get(3)?,
+                    scope_level: row.get(4)?,
+                    scope_key: row.get(5)?,
+                    payload: serde_json::from_str(&raw_payload).unwrap_or(Value::Null),
+                })
+            },
+        )
+        .optional()
         .map_err(Into::into)
 }
 
@@ -381,6 +699,8 @@ pub struct DependencySnapshot {
     pub total_edges: i64,
     pub class_counts: Value,
     pub fingerprint: String,
+    pub summary_status: String,
+    pub full_graph_synchronous_scan: bool,
 }
 
 const DEPENDENCY_SUMMARY_KEY: &str = "b12.dependencySummary.global";
@@ -442,6 +762,23 @@ fn dependency_snapshot_uncached(
         total_edges: row.0,
         class_counts,
         fingerprint,
+        summary_status: "READY".into(),
+        full_graph_synchronous_scan: true,
+    })
+}
+
+fn not_ready_dependency_snapshot(
+    project_id: &str,
+) -> Result<DependencySnapshot, ChangeRetconRepositoryError> {
+    Ok(DependencySnapshot {
+        total_edges: 0,
+        class_counts: json!({"HARD":0,"REVIEW_REQUIRED":0,"SOFT":0,"EVIDENCE":0}),
+        fingerprint: crate::hash::sha256_canonical(&json!({
+            "projectId":project_id,
+            "summaryStatus":"NOT_READY"
+        }))?,
+        summary_status: "NOT_READY".into(),
+        full_graph_synchronous_scan: false,
     })
 }
 
@@ -469,6 +806,15 @@ pub fn dependency_snapshot(
                         .get("mutationEpoch")
                         .and_then(Value::as_i64)
                         .unwrap_or(0);
+                    let computed_epoch = summary
+                        .get("computedEpoch")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(epoch);
+                    if summary.get("summaryStatus").and_then(Value::as_str) != Some("READY")
+                        || epoch != computed_epoch
+                    {
+                        return not_ready_dependency_snapshot(project_id);
+                    }
                     let fingerprint = crate::hash::sha256_canonical(&json!({
                         "base":fingerprint,
                         "mutationEpoch":epoch
@@ -480,9 +826,19 @@ pub fn dependency_snapshot(
                             .cloned()
                             .unwrap_or_else(|| json!({})),
                         fingerprint,
+                        summary_status: "READY".into(),
+                        full_graph_synchronous_scan: false,
                     });
                 }
             }
+        }
+        let bounded_probe: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM dependency_edges WHERE project_id=?1 LIMIT 1001)",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if bounded_probe > 1000 {
+            return not_ready_dependency_snapshot(project_id);
         }
     }
     dependency_snapshot_uncached(connection, project_id, source_refs, global)
@@ -497,7 +853,9 @@ pub fn rebuild_global_dependency_summary(
         "totalEdges":snapshot.total_edges,
         "classCounts":snapshot.class_counts,
         "fingerprint":snapshot.fingerprint,
-        "mutationEpoch":0
+        "mutationEpoch":0,
+        "computedEpoch":0,
+        "summaryStatus":"READY"
     });
     connection.execute(
         "INSERT INTO project_settings(project_id,setting_key,setting_value,updated_at) VALUES (?1,?2,?3,COALESCE((SELECT updated_at FROM project_settings WHERE project_id=?1 AND setting_key=?2),'1970-01-01T00:00:00Z')) ON CONFLICT(project_id,setting_key) DO UPDATE SET setting_value=excluded.setting_value",
@@ -560,6 +918,12 @@ pub fn record_dependency_delta(
         "impactClass":impact_class,
         "sourceHash":source_hash
     }))?);
+    let mutation_epoch = summary
+        .get("mutationEpoch")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    summary["computedEpoch"] = json!(mutation_epoch);
+    summary["summaryStatus"] = json!("READY");
     connection.execute(
         "UPDATE project_settings SET setting_value=?1 WHERE project_id=?2 AND setting_key=?3",
         libsql_rusqlite::params![summary.to_string(), project_id, DEPENDENCY_SUMMARY_KEY],
@@ -746,10 +1110,47 @@ pub fn activate_stale_queue(
     now: &str,
 ) -> Result<i64, ChangeRetconRepositoryError> {
     let changed = connection.execute(
-        "INSERT OR IGNORE INTO stale_queue(stale_id,project_id,change_request_id,target_ref,stale_reason,revalidate_class,processed,created_at,updated_at) SELECT 'stale:'||?2||':'||edge.edge_id,?1,?2,edge.target_ref,'B12_CHANGE_IMPACT',CASE edge.impact_class WHEN 'HARD' THEN 'RETCON' WHEN 'REVIEW_REQUIRED' THEN 'REWRITE' ELSE 'REVALIDATE_ONLY' END,0,?4,?4 FROM dependency_edges edge WHERE edge.project_id=?1 AND (edge.source_ref IN (SELECT value FROM json_each(json_extract((SELECT impact_seed_json FROM change_requests WHERE project_id=?1 AND change_request_id=?2),'$.sourceRefs'))) OR edge.target_ref IN (SELECT value FROM json_each(json_extract((SELECT impact_seed_json FROM change_requests WHERE project_id=?1 AND change_request_id=?2),'$.targetRefs'))) OR EXISTS (SELECT 1 FROM impact_sets impact WHERE impact.project_id=?1 AND impact.impact_set_id=?3 AND impact.scope_class='GLOBAL'))",
+        "INSERT OR IGNORE INTO stale_queue(stale_id,project_id,change_request_id,target_ref,stale_reason,revalidate_class,processed,created_at,updated_at)
+         SELECT 'stale:'||?2||':'||item.item_ref,?1,?2,item.item_ref,'B12_CHANGE_IMPACT',
+           CASE item.impact_class WHEN 'HARD' THEN 'RETCON' WHEN 'REVIEW_REQUIRED' THEN 'REWRITE' ELSE 'REVALIDATE_ONLY' END,
+           0,?4,?4
+         FROM impact_items item
+         WHERE item.project_id=?1 AND item.impact_set_id=?3",
         libsql_rusqlite::params![project_id, change_request_id, impact_set_id, now],
     )?;
     Ok(changed as i64)
+}
+
+pub fn has_pending_stale_target(
+    connection: &Connection,
+    project_id: &str,
+    target_ref: &str,
+) -> Result<bool, ChangeRetconRepositoryError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM stale_queue WHERE project_id=?1 AND target_ref=?2 AND processed=0)",
+            libsql_rusqlite::params![project_id, target_ref],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+pub fn has_pending_stale_for_refs(
+    connection: &Connection,
+    project_id: &str,
+    refs: &[&str],
+) -> Result<bool, ChangeRetconRepositoryError> {
+    if refs.is_empty() {
+        return Ok(false);
+    }
+    let refs_json = serde_json::to_string(refs)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM stale_queue WHERE project_id=?1 AND processed=0 AND target_ref IN (SELECT value FROM json_each(?2)))",
+            libsql_rusqlite::params![project_id, refs_json],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 pub fn mark_applied(
