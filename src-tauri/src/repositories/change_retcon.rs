@@ -286,6 +286,20 @@ pub fn initialize_impact_frontier(
     Ok(())
 }
 
+pub fn impact_frontier_exists(
+    connection: &Connection,
+    project_id: &str,
+    impact_set_id: &str,
+) -> Result<bool, ChangeRetconRepositoryError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM impact_frontier WHERE project_id=?1 AND impact_set_id=?2)",
+            libsql_rusqlite::params![project_id, impact_set_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
 fn propagation_allowed(dependency_type: &str, scope: &str, impact_class: &str) -> bool {
     !matches!(dependency_type, "EVIDENCE" | "PRESENTATION")
         && !matches!(scope, "NO_PROPAGATE" | "EVIDENCE_ONLY" | "SOFT")

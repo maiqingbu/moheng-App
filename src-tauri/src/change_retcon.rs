@@ -625,15 +625,24 @@ fn preflight(
                     now,
                 )
                 .map_err(|error| format!("B12_DB:{error}"))?;
-                repository::initialize_impact_frontier(
-                    connection,
-                    project_id,
-                    &impact_id,
-                    &refs,
-                    query_global,
-                    now,
-                )
-                .map_err(|error| format!("B12_DB:{error}"))?;
+                // A global preflight is intentionally summary-only.  When no
+                // explicit source refs are supplied, seeding one frontier row
+                // per source would scan the entire graph before the user has
+                // confirmed expansion.  The durable frontier is initialized
+                // by impact_expand/resume immediately before its first page.
+                let defer_global_frontier =
+                    query_global && refs.as_array().is_some_and(|items| items.is_empty());
+                if !defer_global_frontier {
+                    repository::initialize_impact_frontier(
+                        connection,
+                        project_id,
+                        &impact_id,
+                        &refs,
+                        query_global,
+                        now,
+                    )
+                    .map_err(|error| format!("B12_DB:{error}"))?;
+                }
             }
             let seed = merge_seed(
                 &change.impact_seed,
@@ -779,6 +788,24 @@ fn expand(
                 )
                 .map_err(|error| format!("B12_DB:{error}"))?;
                 return Err("B12_IMPACT_STALE".into());
+            }
+            if impact.status != "COMPLETED"
+                && !repository::impact_frontier_exists(
+                    connection,
+                    project_id,
+                    &impact.impact_set_id,
+                )
+                .map_err(|error| format!("B12_DB:{error}"))?
+            {
+                repository::initialize_impact_frontier(
+                    connection,
+                    project_id,
+                    &impact.impact_set_id,
+                    &refs,
+                    query_global,
+                    now,
+                )
+                .map_err(|error| format!("B12_DB:{error}"))?;
             }
             if impact.status == "CANCELLED" {
                 repository::update_impact_set(

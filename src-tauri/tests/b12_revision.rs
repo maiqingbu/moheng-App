@@ -4,6 +4,7 @@ use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleS
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{operation_digest_with_postconditions, RepairPlan};
+use ai_novel_production_system_core::repositories::change_retcon::rebuild_global_dependency_summary;
 use libsql_rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -16,6 +17,64 @@ fn b12_same_revision_with_changed_authority_digest_is_stale() {
         evaluate_plan_stale(7, &"a".repeat(64), 7, &"b".repeat(64)),
         PlanStaleStatus::PlanStale
     );
+}
+
+#[test]
+fn b12_global_preflight_defers_frontier_materialization_until_expansion() {
+    let state = test_state("p-b12-r06");
+    let handle = state.manager.open("p-b12-r06", "", NOW).unwrap();
+    handle.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for index in 0..1_001 {
+        handle
+            .execute(
+                "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES (?1,?2,'scale:source',?3,'PLAN_INPUT','BOOK','HARD',?4,'B12_R06_TEST',?5)",
+                params![
+                    format!("edge:b12:r06:{index}"),
+                    "p-b12-r06",
+                    format!("target:{index}"),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    handle.execute_batch("COMMIT").unwrap();
+    rebuild_global_dependency_summary(&handle, "p-b12-r06").unwrap();
+    drop(handle);
+
+    command(
+        &state,
+        "p-b12-r06",
+        "change_request_create",
+        "cmd:b12:r06:create",
+        0,
+        json!({"changeRequestId":"change:b12:r06","changeType":"CHANGE","scope":"GLOBAL","summary":"延迟全局影响队列","requestedChange":{"target":"全局路线"}}),
+    )
+    .unwrap();
+    let preflight = command(
+        &state,
+        "p-b12-r06",
+        "impact_preflight",
+        "cmd:b12:r06:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r06"}),
+    )
+    .unwrap();
+    let impact_set_id = preflight["result"]["impactSetId"].as_str().unwrap();
+    state
+        .manager
+        .with_read_connection("p-b12-r06", NOW, |connection| {
+            let frontier_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM impact_frontier WHERE project_id=?1 AND impact_set_id=?2",
+                    params!["p-b12-r06", impact_set_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(frontier_count, 0);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
 }
 
 fn test_state(project_id: &str) -> KernelState {
