@@ -77,9 +77,8 @@ pub fn validate_change_target_owner(
         .get("volumeId")
         .and_then(Value::as_str)
         .ok_or("B09_VOLUME_SCOPE_REQUIRED")?;
-    if NarrativeRepository::volume_exists(connection, project_id, volume_id)
+    if !NarrativeRepository::volume_exists(connection, project_id, volume_id)
         .map_err(|error| error.to_string())?
-        == false
     {
         return Err("VOLUME_NOT_FOUND".into());
     }

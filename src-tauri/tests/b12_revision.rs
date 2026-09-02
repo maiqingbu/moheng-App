@@ -255,7 +255,7 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
     DurableJobService::acquire_lease(
         &handle,
         "p-b12-r06-job",
-        &bootstrap["result"]["jobId"].as_str().unwrap(),
+        bootstrap["result"]["jobId"].as_str().unwrap(),
         DEPENDENCY_SUMMARY_WORKER,
         &lease_expiry(NOW),
         NOW,
