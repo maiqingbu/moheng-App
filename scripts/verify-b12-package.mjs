@@ -17,6 +17,10 @@ const required = [
   'src-tauri/migrations/0011_b12_change_retcon_runtime.sql',
   'evidence/B12/B12_PREBATCH_FREEZE.json',
   'evidence/B12/gate-results.json',
+  'evidence/B12/B12_FRONTEND_EVIDENCE.json',
+  'evidence/B12/B12_DEPENDENCY_SUMMARY_BOOTSTRAP.json',
+  'evidence/B12/B12_ASSISTANT_CHANGE_GROUNDING.json',
+  'evidence/B12/B12_R08_NEGATIVE_INJECTIONS.json',
 ]
 const entries = []
 const walk = directory => {

@@ -515,6 +515,8 @@ export interface CanonProjection {
 export interface RetconContextProjection {
   facts: Array<{ factId: string; label: string; current: boolean; predicate?: string; source?: string }>
   evidence: Array<{ artifactId: string; version: number; payloadHash: string; label: string; kind?: string }>
+  grounding?: { status: 'UNIQUE' | 'AMBIGUOUS' | 'NO_MATCH' | 'NEEDS_QUERY'; candidateCount: number; needsUserSelection: boolean }
+  selectedFact?: { factId: string; label: string; current: boolean } | null
 }
 
 export interface DependencySummaryBootstrapProjection {

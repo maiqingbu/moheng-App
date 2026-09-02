@@ -7,7 +7,12 @@ import BaseModal from '../components/BaseModal.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
-import { createGroundedAssistantRetcon } from '../flows/b12RetconFlow'
+import {
+  createGroundedAssistantRetcon,
+  RetconContextSelectionError,
+  startDependencySummaryBootstrap,
+} from '../flows/b12RetconFlow'
+import type { RetconFactOption } from '../flows/b12RetconFlow'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -23,6 +28,8 @@ const queryState = computed(() => store.commandState('assistant-query'))
 const planState = computed(() => store.commandState('assistant-plan'))
 const authState = computed(() => store.commandState('assistant-authorize'))
 const executeState = computed(() => store.commandState('assistant-execute'))
+const groundingOptions = ref<RetconFactOption[]>([])
+const selectedGroundingFactId = ref('')
 
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
@@ -57,16 +64,23 @@ async function proposeChange() {
       const grounded = await createGroundedAssistantRetcon({
         execute: (key, request) => store.runCommand(key, request),
         queryRetconContext: request => store.queryRetconContext(String(request.query ?? '')),
-      }, projectId, question.value)
+      }, projectId, question.value, selectedGroundingFactId.value || undefined)
       const preflight = grounded.preflight
       if (preflight.status === 'SUMMARY_BOOTSTRAP_REQUIRED') {
         changeMessage.value = '正在准备全局影响索引，请稍候。'
-        await store.runCommand('assistant-summary-bootstrap', { type: 'dependency_summary_bootstrap', projectId, payload: {} })
-        const status = await store.queryDependencySummaryBootstrap()
-        if (status.summary.summaryStatus !== 'READY') throw new Error('影响索引尚未准备完成，请稍后重试。')
+        const bootstrap = await startDependencySummaryBootstrap(
+          (key, request) => store.runCommand(key, request),
+          projectId,
+        )
+        if (bootstrap.status !== 'READY') {
+          router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: grounded.changeRequestId, bootstrap: '1' } })
+          return
+        }
         await store.runCommand('assistant-change-impact', { type: 'impact_preflight', projectId, payload: { changeRequestId: grounded.changeRequestId } })
       }
       changeMessage.value = `已找到并核对“${grounded.fact.label}”，依据为“${grounded.evidence.label}”；事实修订提案已建立，请到版本与变更记录查看方案并完成二次确认。`
+      groundingOptions.value = []
+      selectedGroundingFactId.value = ''
       router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: grounded.changeRequestId } })
       return
     }
@@ -91,8 +105,19 @@ async function proposeChange() {
     changeMessage.value = `变更提案已建立，预计影响范围：${result.scopeClass === 'GLOBAL' ? '全局' : result.scopeClass === 'WIDE' ? '较广' : '局部'}；请到版本与变更记录完成最终核对。`
     router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: changeId } })
   } catch (error) {
+    if (error instanceof RetconContextSelectionError) {
+      groundingOptions.value = error.candidates
+      selectedGroundingFactId.value = ''
+      changeMessage.value = error.message
+      return
+    }
     changeMessage.value = error instanceof Error ? error.message : '变更提案未建立。'
   }
+}
+
+function chooseGrounding(factId: string) {
+  selectedGroundingFactId.value = factId
+  void proposeChange()
 }
 </script>
 
@@ -106,6 +131,7 @@ async function proposeChange() {
       <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" @click="ask">查询当前作品记录</button><button class="btn" @click="prepareRepair">准备一次可核对的修复</button><button class="btn warning" @click="proposeChange">建立变更提案</button></div>
       <CommandFeedback :state="queryState" />
       <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
+      <div v-if="groundingOptions.length" class="section" style="display:grid;gap:8px;margin-top:12px"><span class="muted">请选择要修订的当前事实：</span><button v-for="fact in groundingOptions" :key="fact.factId" class="btn" @click="chooseGrounding(fact.factId)">{{ fact.label }}</button></div>
     </section>
 
     <section v-if="presentation" class="card pad section">

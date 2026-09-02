@@ -5,7 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
-import { confirmRetconPlan, createRetconPlan, createRetconProposal, type RetconDraft, type RetconPlanView } from '../flows/b12RetconFlow'
+import { confirmRetconPlan, createRetconPlan, createRetconProposal, monitorDependencySummary, startDependencySummaryBootstrap, type DependencySummaryStatus, type RetconDraft, type RetconPlanView } from '../flows/b12RetconFlow'
 import type { RetconContextProjection } from '../../application/contracts'
 
 const store = useProjectStore()
@@ -96,24 +96,35 @@ function planFactLabel(fact: Record<string, unknown> | undefined) {
   return `${predicate}：${description}`
 }
 
-async function preflightWithBootstrap(changeId: string, initial: Awaited<ReturnType<typeof store.runCommand>>) {
-  let preflight = initial
-  if (preflight.result?.status === 'SUMMARY_BOOTSTRAP_REQUIRED') {
-    actionMessage.value = '正在准备全局影响索引，请稍候。'
-    await store.runCommand('history-summary-bootstrap', {
-      type: 'dependency_summary_bootstrap',
-      projectId: store.currentProjectId ?? undefined,
-      payload: {},
-    })
-    const bootstrapStatus = await store.queryDependencySummaryBootstrap()
-    if (bootstrapStatus.summary.summaryStatus !== 'READY') throw new Error('影响索引尚未准备完成，请稍后重试。')
-    preflight = await store.runCommand('history-impact', {
-      type: 'impact_preflight',
-      projectId: store.currentProjectId ?? undefined,
-      payload: { changeRequestId: changeId },
-    })
-  }
-  return preflight
+function startSummaryBootstrap(changeId: string) {
+  const projectId = store.currentProjectId
+  if (!projectId) return
+  actionMessage.value = '正在准备全局影响索引，可继续浏览当前页面。'
+  void startDependencySummaryBootstrap(
+    (key, request) => store.runCommand(key, request),
+    projectId,
+  ).then(() => monitorDependencySummary(
+    () => store.queryDependencySummaryBootstrap() as Promise<DependencySummaryStatus>,
+    async () => {
+      const preflight = await store.runCommand('history-impact', {
+        type: 'impact_preflight',
+        projectId,
+        payload: { changeRequestId: changeId },
+      })
+      if (activeChange.value?.id !== changeId) return
+      const result = preflight.result ?? {}
+      activeChange.value = {
+        ...activeChange.value,
+        digest: typeof result.impactDigest === 'string' ? result.impactDigest : activeChange.value.digest,
+        scope: typeof result.scopeClass === 'string' ? result.scopeClass : activeChange.value.scope,
+        status: typeof result.status === 'string' ? result.status : activeChange.value.status,
+        expandedEdges: typeof result.expandedEdges === 'number' ? result.expandedEdges : activeChange.value.expandedEdges,
+        totalEdges: typeof result.totalEdges === 'number' ? result.totalEdges : activeChange.value.totalEdges,
+      }
+      actionMessage.value = '影响索引已准备完成，可以重新分析影响范围。'
+    },
+    error => { actionMessage.value = error.message },
+  )).catch(error => { actionMessage.value = error instanceof Error ? error.message : '影响索引准备失败。' })
 }
 
 async function restoreChange(changeId: string) {
@@ -143,6 +154,7 @@ async function restoreChange(changeId: string) {
       planDigest: typeof storedPlan?.planDigest === 'string' ? storedPlan.planDigest : undefined,
       plan: storedPlan as RetconPlanView | undefined,
     }
+    if (route.query.bootstrap === '1') startSummaryBootstrap(changeId)
   } catch (error) {
     actionMessage.value = error instanceof Error ? error.message : '无法恢复这项变更提案。'
   }
@@ -190,14 +202,14 @@ async function create() {
     projectId,
     payload: { changeRequestId: changeId },
   })
-  preflight = await preflightWithBootstrap(changeId, preflight)
+  const summaryBootstrapPending = preflight.result?.status === 'SUMMARY_BOOTSTRAP_REQUIRED'
   const result = preflight.result ?? created.result ?? {}
   activeChange.value = {
     id: changeId,
     type,
     digest: typeof result.impactDigest === 'string' ? result.impactDigest : '',
     scope: typeof result.scopeClass === 'string' ? result.scopeClass : 'LOCAL',
-    status: typeof result.status === 'string' ? result.status : 'PREFLIGHTED',
+    status: summaryBootstrapPending ? 'SUMMARY_BOOTSTRAP_REQUIRED' : typeof result.status === 'string' ? result.status : 'PREFLIGHTED',
     expandedEdges: typeof result.expandedEdges === 'number' ? result.expandedEdges : 0,
     totalEdges: typeof result.totalEdges === 'number' ? result.totalEdges : 0,
     targetFactId: type === 'RETCON' ? retconTargetRef.value.trim() : undefined,
@@ -213,6 +225,7 @@ async function create() {
   retconReplacement.value = ''
   retconEvidenceRef.value = ''
   await store.loadHistory('all', true)
+  if (summaryBootstrapPending) startSummaryBootstrap(changeId)
 }
 async function continueImpact() {
   if (!activeChange.value) return

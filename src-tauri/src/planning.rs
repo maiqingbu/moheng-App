@@ -3,7 +3,7 @@
 //! continuity lifecycle.
 use crate::commit::CommitService;
 use crate::generated::types::ArtifactRef;
-use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt};
+use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt, HeadChange};
 use crate::generated::validators::{
     validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
 };
@@ -114,6 +114,151 @@ pub fn validate_change_target_owner(
         _ => return Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}")),
     }
     Ok(())
+}
+
+/// The typed planning mutation returned to an outer B12 transaction.  The
+/// owner performs all current-head and plan semantics here; B12 only embeds
+/// this exact result in its CommitBundle.
+#[derive(Debug, Clone)]
+pub struct PlanningChangeMutation {
+    pub artifact: ArtifactEnvelope,
+    pub head: HeadChange,
+    pub owner_receipt: Value,
+}
+
+pub struct PlanningOwner;
+
+fn merge_change_patch(target: &mut Value, patch: &Value) {
+    match (target.as_object_mut(), patch.as_object()) {
+        (Some(target), Some(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    target.remove(key);
+                } else {
+                    merge_change_patch(target.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            }
+        }
+        _ => *target = patch.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+impl PlanningOwner {
+    /// Applies one approved typed plan operation without committing it.  The
+    /// caller must later put the returned artifact and head into the same
+    /// CommitBundle as the surrounding B12 lifecycle changes.
+    pub fn apply_typed_change(
+        connection: &Connection,
+        project_id: &str,
+        artifact_type: &str,
+        artifact_id: &str,
+        expected_version: i64,
+        expected_payload_hash: &str,
+        expected_scope: &Value,
+        patch: &Value,
+        decision_id: &str,
+        command_id: &str,
+        now: &str,
+    ) -> Result<PlanningChangeMutation, String> {
+        if !matches!(artifact_type, "BookPlan" | "ChapterPlan") {
+            return Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}"));
+        }
+        if !patch.is_object() {
+            return Err("B12_CHANGE_TARGET_PATCH_REQUIRED".into());
+        }
+        let current = crate::repositories::change_retcon::load_authority_head(
+            connection,
+            project_id,
+            Some(artifact_type),
+            Some(artifact_id),
+            None,
+            None,
+        )
+        .map_err(|error| format!("B07_DB:{error}"))?
+        .ok_or_else(|| "B07_CHANGE_TARGET_NOT_FOUND".to_string())?;
+        let current_scope: Value = serde_json::from_str(&current.scope_key)
+            .map_err(|error| format!("B07_CHANGE_SCOPE_INVALID:{error}"))?;
+        if sha256_canonical(&current_scope).map_err(|error| error.to_string())?
+            != sha256_canonical(expected_scope).map_err(|error| error.to_string())?
+        {
+            return Err("B07_CHANGE_SCOPE_STALE".into());
+        }
+        if current.version != expected_version || current.payload_hash != expected_payload_hash {
+            return Err("B07_CHANGE_TARGET_STALE".into());
+        }
+        let current_hash = sha256_canonical(&current.payload).map_err(|error| error.to_string())?;
+        if current_hash != current.payload_hash {
+            return Err("B07_CHANGE_HEAD_PAYLOAD_MISMATCH".into());
+        }
+
+        let mut candidate = current.payload.clone();
+        merge_change_patch(&mut candidate, patch);
+        validate_change_target_owner(
+            connection,
+            project_id,
+            artifact_type,
+            &candidate,
+            expected_scope,
+        )?;
+        if artifact_type == "ChapterPlan" {
+            let chapter_id = expected_scope
+                .get("chapterId")
+                .and_then(Value::as_str)
+                .ok_or("CHAPTER_PLAN_SCOPE_REQUIRED")?;
+            let active_tasks = candidate
+                .get("activeTaskRefs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            validate_current_chapter_plan(&candidate, chapter_id, &active_tasks, &[])?;
+        }
+        let payload_hash = sha256_canonical(&candidate).map_err(|error| error.to_string())?;
+        let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+            "artifactId":artifact_id,
+            "projectId":project_id,
+            "artifactType":artifact_type,
+            "scope":expected_scope,
+            "version":current.version + 1,
+            "schemaVersion":"m0a.artifact.v1",
+            "artifactStatus":"CANDIDATE",
+            "semanticLifecycle":"APPROVED_PLAN",
+            "authorityLevel":"B",
+            "payload":candidate,
+            "payloadHash":payload_hash,
+            "dependencyRefs":[],
+            "provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"decisionRefs":[decision_id]},
+            "createdAt":now
+        }))
+        .map_err(|error| format!("B07_ARTIFACT:{error}"))?;
+        let head: HeadChange = serde_json::from_value(json!({
+            "artifactType":artifact_type,
+            "scope":expected_scope,
+            "artifactId":artifact.artifact_id,
+            "version":artifact.version,
+            "payloadHash":artifact.payload_hash
+        }))
+        .map_err(|error| format!("B07_HEAD:{error}"))?;
+        let owner_receipt = json!({
+            "owner":"B07::PlanningOwner",
+            "operation":"apply_typed_change",
+            "artifactType":artifact_type,
+            "artifactId":artifact_id,
+            "sourceHead":{"version":current.version,"payloadHash":current.payload_hash},
+            "resultHead":{"version":artifact.version,"payloadHash":artifact.payload_hash},
+            "invocationCount":1,
+            "directB12HeadMutationCount":0,
+            "semanticValidation":"PASS"
+        });
+        Ok(PlanningChangeMutation {
+            artifact,
+            head,
+            owner_receipt,
+        })
+    }
 }
 
 pub fn validate_task_reality(

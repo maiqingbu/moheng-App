@@ -1,5 +1,6 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_dependency_summary_bootstrap_impl, KernelState,
+    execute_command_impl, query_dependency_summary_bootstrap_impl, query_retcon_context_impl,
+    KernelState,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
@@ -230,11 +231,9 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
         json!({}),
     )
     .unwrap();
-    assert_eq!(bootstrap["result"]["summaryStatus"], "READY");
-    let bootstrap_status =
-        query_dependency_summary_bootstrap_impl(&state, json!({"projectId":"p-b12-r06-job"}))
-            .unwrap();
-    assert_eq!(bootstrap_status["summary"]["summaryStatus"], "READY");
+    assert_eq!(bootstrap["result"]["status"], "QUEUED");
+    assert_eq!(bootstrap["result"]["workerDispatched"], true);
+    let bootstrap_status = wait_for_summary_ready(&state, "p-b12-r06-job");
     assert_eq!(bootstrap_status["job"]["status"], "COMPLETED");
     let second = command(
         &state,
@@ -245,6 +244,7 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
         json!({}),
     )
     .unwrap();
+    assert_eq!(second["result"]["status"], "READY");
     assert_eq!(second["result"]["jobId"], bootstrap["result"]["jobId"]);
     let handle = state.manager.open("p-b12-r06-job", "", NOW).unwrap();
     handle
@@ -273,7 +273,9 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
         json!({}),
     )
     .unwrap();
-    assert_eq!(resumed["result"]["summaryStatus"], "READY");
+    assert_eq!(resumed["result"]["status"], "QUEUED");
+    let resumed_status = wait_for_summary_ready(&state, "p-b12-r06-job");
+    assert_eq!(resumed_status["summary"]["summaryStatus"], "READY");
     state
         .manager
         .with_read_connection("p-b12-r06-job", NOW, |connection| {
@@ -452,17 +454,17 @@ fn b12_assistant_natural_language_father_retcon_resolves_current_fact() {
             [NOW],
         )
         .unwrap();
-    let context = ai_novel_production_system_core::repositories::change_retcon::retcon_context(
-        &handle,
-        "p-b12-r05-natural",
-        Some("第一卷父亲已经写死了，我想改成假死。"),
-        20,
+    drop(handle);
+    let context = query_retcon_context_impl(
+        &state,
+        json!({"projectId":"p-b12-r05-natural","query":"第一卷父亲已经写死了，我想改成假死。","pageSize":20}),
     )
     .unwrap();
     assert_eq!(context["grounding"]["status"], "UNIQUE");
     assert_eq!(context["grounding"]["candidateCount"], 1);
     assert_eq!(context["facts"][0]["factId"], "fact:r05:father");
     assert!(context["facts"][0]["matchScore"].as_i64().unwrap() > 0);
+    println!("B12_ASSISTANT_GROUNDING_RESULT naturalLanguage=PASS exactFact=PASS status=PASS");
 }
 
 #[test]
@@ -486,17 +488,17 @@ fn b12_assistant_ambiguous_retcon_requires_user_selection() {
             )
             .unwrap();
     }
-    let context = ai_novel_production_system_core::repositories::change_retcon::retcon_context(
-        &handle,
-        "p-b12-r05-ambiguous",
-        Some("把那个死亡改成假死。"),
-        20,
+    drop(handle);
+    let context = query_retcon_context_impl(
+        &state,
+        json!({"projectId":"p-b12-r05-ambiguous","query":"把那个死亡改成假死。","pageSize":20}),
     )
     .unwrap();
     assert_eq!(context["grounding"]["status"], "AMBIGUOUS");
     assert_eq!(context["grounding"]["candidateCount"], 2);
     assert_eq!(context["grounding"]["needsUserSelection"], true);
     assert_eq!(context["selectedFact"], Value::Null);
+    println!("B12_ASSISTANT_GROUNDING_AMBIGUOUS_RESULT needsUserSelection=PASS status=PASS");
 }
 
 #[test]
@@ -549,20 +551,19 @@ fn b12_summary_bootstrap_command_returns_before_aggregation_complete() {
     )
     .unwrap();
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    assert!(elapsed_ms < 500.0, "bootstrap command waited {elapsed_ms:.2}ms");
+    assert!(
+        elapsed_ms < 500.0,
+        "bootstrap command waited {elapsed_ms:.2}ms"
+    );
     assert_eq!(bootstrap["result"]["status"], "QUEUED");
     assert_eq!(bootstrap["result"]["workerDispatched"], true);
 
     let mut worker_completed = false;
     for _ in 0..10_000 {
-        let status = query_dependency_summary_bootstrap_impl(
-            &state,
-            json!({"projectId":"p-b12-r06-async"}),
-        )
-        .unwrap();
-        if status["summary"]["summaryStatus"] == "READY"
-            && status["job"]["status"] == "COMPLETED"
-        {
+        let status =
+            query_dependency_summary_bootstrap_impl(&state, json!({"projectId":"p-b12-r06-async"}))
+                .unwrap();
+        if status["summary"]["summaryStatus"] == "READY" && status["job"]["status"] == "COMPLETED" {
             worker_completed = true;
             break;
         }
@@ -722,6 +723,19 @@ fn command(
     )
 }
 
+fn wait_for_summary_ready(state: &KernelState, project_id: &str) -> Value {
+    for _ in 0..10_000 {
+        let status =
+            query_dependency_summary_bootstrap_impl(state, json!({"projectId":project_id}))
+                .expect("query summary bootstrap status");
+        if status["summary"]["summaryStatus"] == "READY" && status["job"]["status"] == "COMPLETED" {
+            return status;
+        }
+        thread::yield_now();
+    }
+    panic!("summary worker did not reach READY");
+}
+
 fn insert_dependency(
     state: &KernelState,
     project_id: &str,
@@ -813,7 +827,10 @@ fn insert_chapter_plan(state: &KernelState, project_id: &str, artifact_id: &str)
     });
     let hash = sha256_canonical(&payload).expect("chapter plan hash");
     let scope_key = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
-    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project");
     handle
         .execute(
             "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'ChapterPlan','CHAPTER',?3,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','B',?4,'{}',?5,?5)",
@@ -836,7 +853,10 @@ fn insert_chapter_plan(state: &KernelState, project_id: &str, artifact_id: &str)
 }
 
 fn insert_volume_plan(state: &KernelState, project_id: &str, volume_id: &str) {
-    let handle = state.manager.open(project_id, "", NOW).expect("open project");
+    let handle = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project");
     handle
         .execute(
             "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'B12 测试书','ACTIVE',?3,?3)",
@@ -849,6 +869,28 @@ fn insert_volume_plan(state: &KernelState, project_id: &str, volume_id: &str) {
             params![volume_id, project_id, format!("book:{project_id}"), NOW],
         )
         .expect("insert volume");
+    let book_plan_id = format!("plan:book:{project_id}");
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+    let book_plan_hash = sha256_canonical(&book_plan).expect("approved book plan hash");
+    let book_scope = json!({"level":"PROJECT"}).to_string();
+    handle
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'BookPlan','PROJECT',?3,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','A',?4,'{}',?5,?5)",
+            params![book_plan_id, project_id, book_scope, book_plan_hash, NOW],
+        )
+        .expect("insert approved book plan metadata");
+    handle
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            params![book_plan_id, book_plan.to_string(), book_plan_hash],
+        )
+        .expect("insert approved book plan payload");
+    handle
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'BookPlan','PROJECT',?2,?3,1,?4)",
+            params![project_id, book_scope, book_plan_id, book_plan_hash],
+        )
+        .expect("insert approved book plan head");
     let scope_key = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
     let intent_id = format!("intent:{volume_id}");
     let intent = json!({
@@ -1108,7 +1150,10 @@ fn b12_change_volume_plan_invokes_b09_semantic_owner() {
     )
     .expect("apply volume plan change");
     assert_eq!(result["result"]["authorityType"], "VolumePlan");
-    assert_eq!(result["result"]["authorityOwner"], "B09::VolumeLifecycleOwner");
+    assert_eq!(
+        result["result"]["authorityOwner"],
+        "B09::VolumeLifecycleOwner"
+    );
     assert_eq!(
         result["result"]["semanticOwnerReceipt"]["owner"],
         "B09::VolumeLifecycleOwner"
@@ -1119,6 +1164,44 @@ fn b12_change_volume_plan_invokes_b09_semantic_owner() {
     );
     assert_eq!(
         result["result"]["semanticOwnerReceipt"]["routeIntentReferenceValidated"],
+        true
+    );
+}
+
+#[test]
+fn b12_change_volume_intent_invokes_b09_semantic_owner() {
+    let state = test_state("p-b12-r01-intent");
+    insert_volume_plan(&state, "p-b12-r01-intent", "volume-p-b12-r01-intent-1");
+    let digest = create_and_approve_change(
+        &state,
+        "p-b12-r01-intent",
+        "change:b12:r01:intent",
+        &["intent:volume-p-b12-r01-intent-1"],
+        json!({
+            "targetAuthority":{"artifactType":"VolumeIntent","artifactId":"intent:volume-p-b12-r01-intent-1"},
+            "patch":{"volumeFunction":"修订后的卷主线"}
+        }),
+    );
+    let result = command(
+        &state,
+        "p-b12-r01-intent",
+        "change_request_apply",
+        "cmd:change:b12:r01:intent:apply",
+        0,
+        json!({"changeRequestId":"change:b12:r01:intent","impactDigest":digest}),
+    )
+    .expect("apply volume intent change");
+    assert_eq!(result["result"]["authorityType"], "VolumeIntent");
+    assert_eq!(
+        result["result"]["authorityOwner"],
+        "B09::VolumeLifecycleOwner"
+    );
+    assert_eq!(
+        result["result"]["semanticOwnerReceipt"]["owner"],
+        "B09::VolumeLifecycleOwner"
+    );
+    assert_eq!(
+        result["result"]["semanticOwnerReceipt"]["topologyValidated"],
         true
     );
 }
@@ -1166,6 +1249,51 @@ fn b12_change_owner_reject_has_zero_head_mutation() {
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .expect("verify rejected owner leaves head unchanged");
+}
+
+#[test]
+fn b12_change_b09_owner_reject_has_zero_head_mutation() {
+    let state = test_state("p-b12-r01-reject-volume");
+    insert_volume_plan(
+        &state,
+        "p-b12-r01-reject-volume",
+        "volume-p-b12-r01-reject-volume-1",
+    );
+    let digest = create_and_approve_change(
+        &state,
+        "p-b12-r01-reject-volume",
+        "change:b12:r01:reject-volume",
+        &["plan:volume-p-b12-r01-reject-volume-1"],
+        json!({
+            "targetAuthority":{"artifactType":"VolumePlan","artifactId":"plan:volume-p-b12-r01-reject-volume-1"},
+            "patch":{"volumeIntentRef":{"artifactId":"intent:wrong","version":1,"payloadHash":"a".repeat(64)}}
+        }),
+    );
+    let error = command(
+        &state,
+        "p-b12-r01-reject-volume",
+        "change_request_apply",
+        "cmd:change:b12:r01:reject-volume:apply",
+        0,
+        json!({"changeRequestId":"change:b12:r01:reject-volume","impactDigest":digest}),
+    )
+    .unwrap_err();
+    assert_eq!(error, "VOLUME_PLAN_INTENT_REF_MISMATCH");
+    state
+        .manager
+        .with_read_connection("p-b12-r01-reject-volume", NOW, |connection| {
+            let (version, count): (i64, i64) = connection
+                .query_row(
+                    "SELECT h.version,(SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='VolumePlan') FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='VolumePlan'",
+                    ["p-b12-r01-reject-volume"],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read rejected volume plan");
+            assert_eq!(version, 1);
+            assert_eq!(count, 1);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .expect("verify rejected volume owner leaves head unchanged");
 }
 
 #[test]

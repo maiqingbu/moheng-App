@@ -16,6 +16,12 @@ export interface RetconEvidenceOption {
 export interface RetconContext {
   facts: RetconFactOption[]
   evidence: RetconEvidenceOption[]
+  grounding?: {
+    status: 'UNIQUE' | 'AMBIGUOUS' | 'NO_MATCH' | 'NEEDS_QUERY'
+    candidateCount: number
+    needsUserSelection: boolean
+  }
+  selectedFact?: RetconFactOption | null
 }
 
 export interface RetconDraft {
@@ -44,6 +50,62 @@ export interface RetconPlanView {
 }
 
 type ExecuteCommand = (key: string, request: CommandRequest) => Promise<CommandReceipt>
+
+export class RetconContextSelectionError extends Error {
+  readonly candidates: RetconFactOption[]
+
+  constructor(candidates: RetconFactOption[]) {
+    super('当前描述对应多个正式事实，请先选择要修订的事实。')
+    this.name = 'RetconContextSelectionError'
+    this.candidates = candidates
+  }
+}
+
+export interface DependencySummaryStatus {
+  summary?: { summaryStatus?: string }
+  job?: { status?: string } | null
+}
+
+export async function startDependencySummaryBootstrap(
+  execute: ExecuteCommand,
+  projectId: string,
+): Promise<Record<string, unknown>> {
+  const receipt = await execute('summary-bootstrap', {
+    type: 'dependency_summary_bootstrap',
+    projectId,
+    payload: {},
+  })
+  return resultOf(receipt)
+}
+
+export function monitorDependencySummary(
+  queryStatus: () => Promise<DependencySummaryStatus>,
+  onReady: () => Promise<void> | void,
+  onError: (error: Error) => void,
+  options: { intervalMs?: number; maxAttempts?: number } = {},
+): () => void {
+  const intervalMs = options.intervalMs ?? 250
+  const maxAttempts = options.maxAttempts ?? 120
+  let stopped = false
+  let attempts = 0
+  const poll = async () => {
+    if (stopped) return
+    try {
+      const status = await queryStatus()
+      if (status.summary?.summaryStatus === 'READY' && status.job?.status === 'COMPLETED') {
+        await onReady()
+        return
+      }
+      attempts += 1
+      if (attempts >= maxAttempts) throw new Error('影响索引准备超时，请稍后重试。')
+      setTimeout(() => { void poll() }, intervalMs)
+    } catch (error) {
+      if (!stopped) onError(error instanceof Error ? error : new Error('影响索引准备失败。'))
+    }
+  }
+  void poll()
+  return () => { stopped = true }
+}
 
 function resultOf(receipt: CommandReceipt): Record<string, unknown> {
   return receipt.result && typeof receipt.result === 'object' ? receipt.result : {}
@@ -153,11 +215,21 @@ export async function confirmRetconPlan(
   })
 }
 
-export function selectGroundedRetconContext(context: RetconContext, _question: string): {
+export function selectGroundedRetconContext(context: RetconContext, _question: string, selectedFactId?: string): {
   fact: RetconFactOption
   evidence: RetconEvidenceOption
 } {
-  const fact = context.facts.find(item => item.current)
+  const candidates = context.facts.filter(item => item.current)
+  const fact = selectedFactId
+    ? candidates.find(item => item.factId === selectedFactId)
+    : context.grounding?.status === 'AMBIGUOUS'
+      ? undefined
+      : context.grounding?.status === 'UNIQUE'
+        ? context.selectedFact && context.selectedFact.current
+          ? context.selectedFact
+          : candidates[0]
+        : candidates.length === 1 ? candidates[0] : undefined
+  if (!fact && candidates.length > 1) throw new RetconContextSelectionError(candidates)
   const evidence = context.evidence[0]
   if (!fact) throw new Error('当前作品没有可供修订的正式事实。')
   if (!evidence) throw new Error('当前作品没有可供核验的已有依据。')
@@ -175,6 +247,7 @@ export async function createGroundedAssistantRetcon(
   },
   projectId: string,
   question: string,
+  selectedFactId?: string,
 ): Promise<RetconDraft & { fact: RetconFactOption; evidence: RetconEvidenceOption; preflight: Record<string, unknown> }> {
   const context = await dependencies.queryRetconContext({
     projectId,
@@ -183,7 +256,7 @@ export async function createGroundedAssistantRetcon(
     pageSize: 20,
     query: question,
   })
-  const selected = selectGroundedRetconContext(context, question)
+  const selected = selectGroundedRetconContext(context, question, selectedFactId)
   const draft: RetconDraft = {
     projectId,
     changeRequestId: `change:${projectId}:${Date.now()}`,

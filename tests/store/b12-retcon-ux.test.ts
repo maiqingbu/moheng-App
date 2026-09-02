@@ -6,7 +6,10 @@ import {
   createGroundedAssistantRetcon,
   createRetconPlan,
   createRetconProposal,
+  RetconContextSelectionError,
   selectGroundedRetconContext,
+  startDependencySummaryBootstrap,
+  monitorDependencySummary,
 } from '../../src/ui/flows/b12RetconFlow'
 
 const receipt = (request: CommandRequest, result: Record<string, unknown> = {}): CommandReceipt => ({
@@ -99,5 +102,44 @@ describe('B12 Retcon product flow', () => {
     expect(result.changeRequestId).toContain('change:p1:')
     console.log('B12_FRONTEND_ASSISTANT_RETCON_RESULT groundedQuery=PASS exactFact=PASS evidence=PASS historyContinuity=PASS status=PASS')
     recordFrontendEvidence('B12_FRONTEND_ASSISTANT_RETCON_RESULT', { groundedQuery: true, exactFact: true, evidence: true, historyContinuity: true, status: 'PASS' })
+  })
+
+  it('does not choose the first fact when grounding is ambiguous', () => {
+    const context = {
+      facts: [
+        { factId: 'fact:father', label: '父亲：已经死亡', current: true },
+        { factId: 'fact:master', label: '师父：已经死亡', current: true },
+      ],
+      evidence: [{ artifactId: 'evidence:death', version: 1, payloadHash: 'e'.repeat(64), label: '已有正文依据' }],
+      grounding: { status: 'AMBIGUOUS' as const, candidateCount: 2, needsUserSelection: true },
+    }
+    expect(() => selectGroundedRetconContext(context, '把那个死亡改成假死')).toThrow(RetconContextSelectionError)
+    expect(() => selectGroundedRetconContext(context, '把那个死亡改成假死')).not.toThrow(/fact:father/)
+  })
+
+  it('starts summary bootstrap without waiting for worker completion', async () => {
+    const execute = vi.fn(async (_key: string, request: CommandRequest) => receipt(request, { status: 'QUEUED', workerDispatched: true, returnBeforeWorkerCompletion: true }))
+    let completed = false
+    let resolveReady: (() => void) | undefined
+    const ready = new Promise<void>(resolve => { resolveReady = resolve })
+    let statusCalls = 0
+    const start = await startDependencySummaryBootstrap(execute, 'p1')
+    expect(start).toMatchObject({ status: 'QUEUED', workerDispatched: true, returnBeforeWorkerCompletion: true })
+    const cancel = monitorDependencySummary(
+      async () => {
+        statusCalls += 1
+        return statusCalls === 1
+          ? { summary: { summaryStatus: 'NOT_READY' }, job: { status: 'RUNNING' } }
+          : { summary: { summaryStatus: 'READY' }, job: { status: 'COMPLETED' } }
+      },
+      () => { completed = true; resolveReady?.() },
+      error => { throw error },
+      { intervalMs: 0, maxAttempts: 4 },
+    )
+    await ready
+    cancel()
+    expect(completed).toBe(true)
+    expect(statusCalls).toBe(2)
+    recordFrontendEvidence('B12_FRONTEND_SUMMARY_ASYNC_RESULT', { commandReturnedBeforeWorker: true, workerStatusPolled: true, uiNonBlocking: true, status: 'PASS' })
   })
 })

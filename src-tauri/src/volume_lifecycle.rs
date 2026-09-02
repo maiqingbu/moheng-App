@@ -63,6 +63,13 @@ pub struct NextVolumeHandoffRequest {
 
 pub struct VolumeLifecycleOwner;
 
+#[derive(Debug, Clone)]
+pub struct VolumeChangeMutation {
+    pub artifact: ArtifactEnvelope,
+    pub head: crate::generated::types::HeadChange,
+    pub owner_receipt: Value,
+}
+
 /// B09's semantic adapter for B12 planning targets.  This validates the
 /// candidate against the current volume topology and its existing intent
 /// owner before B12 materializes the versioned authority bundle.
@@ -107,7 +114,137 @@ pub fn validate_change_target_owner(
     }
 }
 
+fn merge_change_patch(target: &mut Value, patch: &Value) {
+    match (target.as_object_mut(), patch.as_object()) {
+        (Some(target), Some(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    target.remove(key);
+                } else {
+                    merge_change_patch(target.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            }
+        }
+        _ => *target = patch.clone(),
+    }
+}
+
 impl VolumeLifecycleOwner {
+    /// Applies one approved typed VolumeIntent/VolumePlan operation without
+    /// committing it. The returned mutation is consumed by the outer B12
+    /// CommitBundle, while all volume topology and route semantics stay here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_typed_change(
+        connection: &Connection,
+        project_id: &str,
+        artifact_type: &str,
+        artifact_id: &str,
+        expected_version: i64,
+        expected_payload_hash: &str,
+        expected_scope: &Value,
+        patch: &Value,
+        decision_id: &str,
+        command_id: &str,
+        now: &str,
+    ) -> Result<VolumeChangeMutation, String> {
+        if !matches!(artifact_type, "VolumeIntent" | "VolumePlan") {
+            return Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}"));
+        }
+        if !patch.is_object() {
+            return Err("B12_CHANGE_TARGET_PATCH_REQUIRED".into());
+        }
+        let volume_id = expected_scope
+            .get("volumeId")
+            .and_then(Value::as_str)
+            .ok_or("B09_VOLUME_SCOPE_REQUIRED")?;
+        if !NarrativeRepository::volume_exists(connection, project_id, volume_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("VOLUME_NOT_FOUND".into());
+        }
+        let current = crate::repositories::change_retcon::load_authority_head(
+            connection,
+            project_id,
+            Some(artifact_type),
+            Some(artifact_id),
+            None,
+            None,
+        )
+        .map_err(|error| format!("B09_DB:{error}"))?
+        .ok_or_else(|| "B09_CHANGE_TARGET_NOT_FOUND".to_string())?;
+        let current_scope: Value = serde_json::from_str(&current.scope_key)
+            .map_err(|error| format!("B09_CHANGE_SCOPE_INVALID:{error}"))?;
+        if sha256_canonical(&current_scope).map_err(|error| error.to_string())?
+            != sha256_canonical(expected_scope).map_err(|error| error.to_string())?
+        {
+            return Err("B09_CHANGE_SCOPE_STALE".into());
+        }
+        if current.version != expected_version || current.payload_hash != expected_payload_hash {
+            return Err("B09_CHANGE_TARGET_STALE".into());
+        }
+        let current_hash = sha256_canonical(&current.payload).map_err(|error| error.to_string())?;
+        if current_hash != current.payload_hash {
+            return Err("B09_CHANGE_HEAD_PAYLOAD_MISMATCH".into());
+        }
+        let mut candidate = current.payload.clone();
+        merge_change_patch(&mut candidate, patch);
+        validate_change_target_owner(
+            connection,
+            project_id,
+            artifact_type,
+            &candidate,
+            expected_scope,
+        )?;
+        let artifact_kind = match artifact_type {
+            "VolumeIntent" => ArtifactType::VolumeIntent,
+            "VolumePlan" => ArtifactType::VolumePlan,
+            _ => unreachable!("artifact type checked above"),
+        };
+        let scope: ArtifactScope = serde_json::from_value(expected_scope.clone())
+            .map_err(|error| format!("B09_CHANGE_SCOPE_INVALID:{error}"))?;
+        let mut artifact = make_artifact(
+            project_id,
+            artifact_id,
+            artifact_kind,
+            scope.clone(),
+            current.version + 1,
+            candidate,
+            Vec::new(),
+            command_id,
+            "B09::VolumeLifecycleOwner",
+            SemanticLifecycle::ApprovedPlan,
+            AuthorityLevel::B,
+            now,
+        )?;
+        artifact.provenance.decision_refs = Some(vec![decision_id.to_string()]);
+        let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
+            "artifactType":artifact_type,
+            "scope":scope,
+            "artifactId":artifact.artifact_id,
+            "version":artifact.version,
+            "payloadHash":artifact.payload_hash
+        }))
+        .map_err(|error| format!("B09_HEAD:{error}"))?;
+        let owner_receipt = json!({
+            "owner":"B09::VolumeLifecycleOwner",
+            "operation":"apply_typed_change",
+            "artifactType":artifact_type,
+            "artifactId":artifact_id,
+            "volumeId":volume_id,
+            "sourceHead":{"version":current.version,"payloadHash":current.payload_hash},
+            "resultHead":{"version":artifact.version,"payloadHash":artifact.payload_hash},
+            "invocationCount":1,
+            "routeIntentReferenceValidated":artifact_type == "VolumePlan",
+            "topologyValidated":true,
+            "semanticValidation":"PASS"
+        });
+        Ok(VolumeChangeMutation {
+            artifact,
+            head,
+            owner_receipt,
+        })
+    }
+
     pub fn rebuild_planning_state(
         connection: &Connection,
         project_id: &str,

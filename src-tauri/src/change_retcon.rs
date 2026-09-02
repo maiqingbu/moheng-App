@@ -279,21 +279,6 @@ fn build_artifact_with_owner(
     .map_err(|error| format!("B12_ARTIFACT:{error}"))
 }
 
-fn merge_json_patch(target: &mut Value, patch: &Value) {
-    match (target.as_object_mut(), patch.as_object()) {
-        (Some(target), Some(patch)) => {
-            for (key, value) in patch {
-                if value.is_null() {
-                    target.remove(key);
-                } else {
-                    merge_json_patch(target.entry(key.clone()).or_insert(Value::Null), value);
-                }
-            }
-        }
-        _ => *target = patch.clone(),
-    }
-}
-
 fn change_target_input<'a>(input: &'a Value, requested_change: &'a Value) -> Option<&'a Value> {
     input
         .get("targetAuthority")
@@ -311,21 +296,6 @@ fn target_patch(requested_change: &Value) -> Option<&Value> {
 fn target_scope_value(record: &repository::AuthorityHeadRecord) -> Result<Value, String> {
     serde_json::from_str(&record.scope_key)
         .map_err(|error| format!("B12_TARGET_SCOPE_INVALID:{error}"))
-}
-
-fn validate_typed_target_payload(artifact_type: &str, payload: &Value) -> Result<(), String> {
-    match artifact_type {
-        "BookPlan" => crate::generated::validators::validate_book_plan_r1(payload)
-            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
-        "VolumeIntent" => crate::generated::validators::validate_volume_intent_r1(payload)
-            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
-        "VolumePlan" => crate::generated::validators::validate_volume_plan_r1(payload)
-            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
-        "ChapterPlan" => crate::generated::validators::validate_chapter_plan_r1(payload)
-            .map_err(|error| format!("B12_TARGET_CONTRACT:{error}")),
-        "StoryConstitution" | "OpeningContract" => Ok(()),
-        _ => Err(format!("B12_CHANGE_TARGET_UNSUPPORTED:{artifact_type}")),
-    }
 }
 
 fn target_class(artifact_type: Option<&str>) -> &'static str {
@@ -523,6 +493,7 @@ struct TypedTargetMutation {
     head: crate::generated::types::HeadChange,
     artifact_type: String,
     owner: &'static str,
+    owner_receipt: Value,
 }
 
 fn materialize_typed_target(
@@ -536,29 +507,41 @@ fn materialize_typed_target(
 ) -> Result<TypedTargetMutation, String> {
     let patch = target_patch(requested_change)
         .ok_or_else(|| "B12_CHANGE_TARGET_PATCH_REQUIRED".to_string())?;
-    let mut target_payload = target.payload.clone();
-    merge_json_patch(&mut target_payload, patch);
+    let scope = target_scope_value(&target)?;
     let owner = target_owner(&target.artifact_type)
         .ok_or_else(|| format!("B12_CHANGE_TARGET_UNSUPPORTED:{}", target.artifact_type))?;
-    validate_typed_target_payload(&target.artifact_type, &target_payload)?;
-    match target.artifact_type.as_str() {
+    let (artifact, head, owner_receipt) = match target.artifact_type.as_str() {
         "BookPlan" | "ChapterPlan" => {
-            crate::planning::validate_change_target_owner(
+            let mutation = crate::planning::PlanningOwner::apply_typed_change(
                 connection,
                 project_id,
                 &target.artifact_type,
-                &target_payload,
-                &target_scope_value(&target)?,
+                &target.artifact_id,
+                target.version,
+                &target.payload_hash,
+                &scope,
+                patch,
+                decision_id,
+                command_id,
+                now,
             )?;
+            (mutation.artifact, mutation.head, mutation.owner_receipt)
         }
         "VolumeIntent" | "VolumePlan" => {
-            crate::volume_lifecycle::validate_change_target_owner(
+            let mutation = crate::volume_lifecycle::VolumeLifecycleOwner::apply_typed_change(
                 connection,
                 project_id,
                 &target.artifact_type,
-                &target_payload,
-                &target_scope_value(&target)?,
+                &target.artifact_id,
+                target.version,
+                &target.payload_hash,
+                &scope,
+                patch,
+                decision_id,
+                command_id,
+                now,
             )?;
+            (mutation.artifact, mutation.head, mutation.owner_receipt)
         }
         _ => {
             return Err(format!(
@@ -566,34 +549,13 @@ fn materialize_typed_target(
                 target.artifact_type
             ))
         }
-    }
-    let scope = target_scope_value(&target)?;
-    let artifact = build_artifact_with_owner(
-        project_id,
-        command_id,
-        &target.artifact_id,
-        &target.artifact_type,
-        scope.clone(),
-        target.version + 1,
-        target_payload,
-        "APPROVED_PLAN",
-        vec![decision_id.to_string()],
-        owner,
-        now,
-    )?;
-    let head: crate::generated::types::HeadChange = serde_json::from_value(json!({
-        "artifactType":target.artifact_type,
-        "scope":scope,
-        "artifactId":artifact.artifact_id,
-        "version":artifact.version,
-        "payloadHash":artifact.payload_hash
-    }))
-    .map_err(|error| format!("B12_TARGET_HEAD:{error}"))?;
+    };
     Ok(TypedTargetMutation {
         artifact,
         head,
         artifact_type: target.artifact_type,
         owner,
+        owner_receipt,
     })
 }
 
@@ -911,6 +873,59 @@ fn preflight(
     )
 }
 
+fn run_dependency_summary_worker(
+    manager: ProjectManager,
+    project_id: String,
+    job_id: String,
+    now: String,
+) -> Result<(), String> {
+    let handle = manager.open(&project_id, "", &now).map_err(manager_error)?;
+    let result = (|| {
+        crate::repositories::runtime::DurableJobService::save_checkpoint(
+            &handle,
+            &project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
+            0,
+            &json!({"phase":"AGGREGATING","summaryStatus":"NOT_READY"}),
+            &now,
+        )
+        .map_err(|error| error.to_string())?;
+        let summary = repository::rebuild_global_dependency_summary(&handle, &project_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        crate::repositories::runtime::DurableJobService::save_checkpoint(
+            &handle,
+            &project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
+            summary.total_edges,
+            &json!({"phase":"READY","summaryStatus":"READY","totalEdges":summary.total_edges}),
+            &now,
+        )
+        .map_err(|error| error.to_string())?;
+        crate::repositories::runtime::DurableJobService::complete_dependency_summary_job(
+            &handle,
+            &project_id,
+            &job_id,
+            crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
+            &now,
+        )
+        .map_err(|error| error.to_string())
+    })();
+    if let Err(error) = &result {
+        let _ = crate::repositories::runtime::DurableJobService::pause_dependency_summary_job(
+            &handle,
+            &project_id,
+            &job_id,
+            "SUMMARY_BOOTSTRAP_FAILED",
+            &now,
+        );
+        return Err(error.clone());
+    }
+    drop(handle);
+    result
+}
+
 pub fn bootstrap_dependency_summary(
     manager: &ProjectManager,
     project_id: &str,
@@ -952,18 +967,22 @@ pub fn bootstrap_dependency_summary(
             },
         )
         .map_err(manager_error)?;
-    let (receipt, claimed) = match outcome {
+    let (receipt, claimed, committed_job_id) = match outcome {
         ProjectCommandOutcome::Committed { value, receipt } => (
             receipt,
             value
                 .get("claimed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            value
+                .get("jobId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
         ),
-        ProjectCommandOutcome::Replayed(receipt) => (receipt, false),
+        ProjectCommandOutcome::Replayed(receipt) => (receipt, false, None),
     };
     if !claimed {
-        let status = manager
+        let job = manager
             .with_read_connection(project_id, now, |connection| {
                 crate::repositories::runtime::DurableJobService::dependency_summary_job_status(
                     connection, project_id,
@@ -977,77 +996,70 @@ pub fn bootstrap_dependency_summary(
                     .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
             })
             .map_err(|error| error.to_string())?;
+        let result_status = if summary_status.get("summaryStatus").and_then(Value::as_str)
+            == Some("READY")
+            && job
+                .as_ref()
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                == Some("COMPLETED")
+        {
+            "READY"
+        } else {
+            "RUNNING"
+        };
         return Ok(control_response(
             &receipt,
             json!({
-                "status":"ALREADY_RUNNING",
+                "status":result_status,
                 "jobId":crate::repositories::runtime::DurableJobService::dependency_summary_job_id(project_id).map_err(|error| error.to_string())?,
                 "summaryStatus":summary_status,
-                "job":status
+                "job":job
             }),
             "影响索引正在由后台任务准备。",
         ));
     }
-    let handle = manager.open(project_id, "", now).map_err(manager_error)?;
-    let job_id =
+    let job_id = committed_job_id.unwrap_or(
         crate::repositories::runtime::DurableJobService::dependency_summary_job_id(project_id)
-            .map_err(|error| error.to_string())?;
-    let result = (|| {
-        crate::repositories::runtime::DurableJobService::save_checkpoint(
-            &handle,
-            project_id,
-            &job_id,
-            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
-            0,
-            &json!({"phase":"AGGREGATING","summaryStatus":"NOT_READY"}),
-            now,
-        )
-        .map_err(|error| error.to_string())?;
-        let summary = repository::rebuild_global_dependency_summary(&handle, project_id)
-            .map_err(|error| format!("B12_DB:{error}"))?;
-        crate::repositories::runtime::DurableJobService::save_checkpoint(
-            &handle,
-            project_id,
-            &job_id,
-            crate::repositories::runtime::DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE,
-            summary.total_edges,
-            &json!({"phase":"READY","summaryStatus":"READY","totalEdges":summary.total_edges}),
-            now,
-        )
-        .map_err(|error| error.to_string())?;
-        crate::repositories::runtime::DurableJobService::complete_dependency_summary_job(
-            &handle,
-            project_id,
-            &job_id,
-            crate::repositories::runtime::DEPENDENCY_SUMMARY_WORKER,
-            now,
-        )
-        .map_err(|error| error.to_string())?;
-        Ok::<_, String>(json!({
-            "status":"COMPLETED",
-            "jobId":job_id,
-            "summaryStatus":"READY",
-            "totalEdges":summary.total_edges,
-            "classCounts":summary.class_counts,
-            "fingerprint":summary.fingerprint,
-            "restartSafe":true
-        }))
-    })();
-    if let Err(error) = &result {
-        let _ = crate::repositories::runtime::DurableJobService::pause_dependency_summary_job(
-            &handle,
-            project_id,
-            &job_id,
-            "SUMMARY_BOOTSTRAP_FAILED",
-            now,
-        );
-        return Err(error.clone());
+            .map_err(|error| error.to_string())?,
+    );
+    let worker_manager = manager.clone();
+    let worker_project_id = project_id.to_owned();
+    let worker_job_id = job_id.clone();
+    let worker_now = now.to_owned();
+    if let Err(error) = std::thread::Builder::new()
+        .name("b12-dependency-summary".into())
+        .spawn(move || {
+            let _ = run_dependency_summary_worker(
+                worker_manager,
+                worker_project_id,
+                worker_job_id,
+                worker_now,
+            );
+        })
+    {
+        if let Ok(handle) = manager.open(project_id, "", now) {
+            let _ = crate::repositories::runtime::DurableJobService::pause_dependency_summary_job(
+                &handle,
+                project_id,
+                &job_id,
+                "SUMMARY_WORKER_SPAWN_FAILED",
+                now,
+            );
+        }
+        return Err(format!("B12_SUMMARY_WORKER_SPAWN:{error}"));
     }
-    drop(handle);
     Ok(control_response(
         &receipt,
-        result?,
-        "影响索引已准备完成，可以重新分析影响范围。",
+        json!({
+            "status":"QUEUED",
+            "jobId":job_id,
+            "summaryStatus":"NOT_READY",
+            "workerDispatched":true,
+            "returnBeforeWorkerCompletion":true,
+            "restartSafe":true
+        }),
+        "影响索引已进入后台准备，可继续浏览当前页面。",
     ))
 }
 
@@ -1614,7 +1626,7 @@ fn apply_change(
         &requested_change,
         &change.impact_seed,
     )?;
-    let (target_artifact, target_head, target_type, target_owner_name) =
+    let (target_artifact, target_head, target_type, target_owner_name, target_owner_receipt) =
         if let Some(target) = typed_target {
             let mutation = materialize_typed_target(
                 &handle,
@@ -1630,9 +1642,10 @@ fn apply_change(
                 Some(mutation.head),
                 Some(mutation.artifact_type),
                 Some(mutation.owner),
+                Some(mutation.owner_receipt),
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
     let change_payload = json!({
         "payloadSchema":"b12-change-request.r1",
@@ -1647,7 +1660,8 @@ fn apply_change(
         "decisionId":decision_id,
         "authorityType":target_type.clone(),
         "targetClass":target_class(target_type.as_deref()),
-        "authorityOwner":target_owner_name
+        "authorityOwner":target_owner_name,
+        "semanticOwnerReceipt":target_owner_receipt
     });
     let artifact = build_artifact(
         project_id,
@@ -1719,7 +1733,7 @@ fn apply_change(
     )?;
     Ok(final_response(
         &receipt,
-        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"authorityMutation":target_type.is_some()}),
+        json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"authorityMutation":target_type.is_some(),"semanticOwnerReceipt":target_owner_receipt}),
         postverify,
         "变更已完成并复核。",
     ))
@@ -1799,7 +1813,7 @@ pub fn apply_approved_on_connection(
         &requested_change,
         &change.impact_seed,
     )?;
-    let (target_artifact, target_head, target_type, target_owner_name) =
+    let (target_artifact, target_head, target_type, target_owner_name, target_owner_receipt) =
         if let Some(target) = typed_target {
             let mutation = materialize_typed_target(
                 connection,
@@ -1815,9 +1829,10 @@ pub fn apply_approved_on_connection(
                 Some(mutation.head),
                 Some(mutation.artifact_type),
                 Some(mutation.owner),
+                Some(mutation.owner_receipt),
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
     let artifact = build_artifact(
         project_id,
@@ -1825,7 +1840,7 @@ pub fn apply_approved_on_connection(
         &change_id,
         "ChangeRequest",
         1,
-        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name}),
+        json!({"payloadSchema":"b12-change-request.r1","changeRequestId":change_id,"changeType":change.change_type,"status":"COMMITTED","summary":change.summary,"requestedChange":requested_change,"basedOnRevision":expected_revision,"impactSetId":impact.impact_set_id,"impactDigest":digest,"decisionId":decision_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"semanticOwnerReceipt":target_owner_receipt}),
         "MATERIALIZED",
         vec![decision_id.clone()],
         now,
@@ -1885,7 +1900,7 @@ pub fn apply_approved_on_connection(
     Ok(json!({
         "receiptId":receipt.receipt_id,
         "receipt":receipt,
-        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name},
+        "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"semanticOwnerReceipt":target_owner_receipt},
         "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"typedRequery":true}
     }))
 }

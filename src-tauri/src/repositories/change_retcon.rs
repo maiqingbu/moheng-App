@@ -1190,6 +1190,128 @@ pub fn current_fact(
         .map_err(Into::into)
 }
 
+fn normalize_grounding_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| {
+            !character.is_whitespace()
+                && !matches!(
+                    character,
+                    '，' | '。'
+                        | '！'
+                        | '？'
+                        | '、'
+                        | '；'
+                        | '：'
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '（'
+                        | '）'
+                        | '('
+                        | ')'
+                        | ','
+                        | '.'
+                        | '!'
+                        | '?'
+                        | ':'
+                        | ';'
+                )
+        })
+        .collect()
+}
+
+fn grounding_stop_term(term: &str) -> bool {
+    matches!(
+        term,
+        "第一卷"
+            | "我想"
+            | "想要"
+            | "请把"
+            | "把那个"
+            | "那个"
+            | "这条"
+            | "事实"
+            | "改成"
+            | "修改"
+            | "变成"
+            | "其实"
+            | "已经"
+            | "原来"
+            | "写死了"
+            | "假死"
+    )
+}
+
+fn grounding_terms(query: &str) -> Vec<String> {
+    let normalized = normalize_grounding_text(query);
+    let chars = normalized.chars().collect::<Vec<_>>();
+    let mut terms = Vec::new();
+    for width in 2..=4 {
+        for window in chars.windows(width) {
+            let term = window.iter().collect::<String>();
+            if !grounding_stop_term(&term) && !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+    }
+    terms
+}
+
+fn grounding_death_signal(value: &str) -> bool {
+    ["死亡", "死了", "写死", "去世", "没了", "不在"]
+        .iter()
+        .any(|term| value.contains(term))
+}
+
+fn score_grounding_candidate(
+    query: &str,
+    terms: &[String],
+    entity_name: Option<&str>,
+    predicate: &str,
+    object_label: &str,
+) -> i64 {
+    let normalized_query = normalize_grounding_text(query);
+    let normalized_entity = entity_name.map(normalize_grounding_text);
+    let normalized_predicate = normalize_grounding_text(predicate);
+    let normalized_object = normalize_grounding_text(object_label);
+    let mut score = 0;
+    if let Some(entity) = normalized_entity
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        if normalized_query.contains(entity) {
+            score += 100 + entity.chars().count() as i64;
+        }
+    }
+    if !normalized_predicate.is_empty() && normalized_query.contains(&normalized_predicate) {
+        score += 35;
+    }
+    if !normalized_object.is_empty() && normalized_query.contains(&normalized_object) {
+        score += 45;
+    }
+    for term in terms {
+        if normalized_entity
+            .as_deref()
+            .is_some_and(|value| value.contains(term))
+        {
+            score += 25;
+        }
+        if normalized_predicate.contains(term) {
+            score += 10;
+        }
+        if normalized_object.contains(term) {
+            score += 15;
+        }
+    }
+    if grounding_death_signal(query) && grounding_death_signal(object_label) {
+        score += 20;
+    }
+    score
+}
+
 pub fn retcon_context(
     connection: &Connection,
     project_id: &str,
@@ -1198,12 +1320,12 @@ pub fn retcon_context(
 ) -> Result<Value, ChangeRetconRepositoryError> {
     let limit = limit.clamp(1, 50);
     let query = query.unwrap_or_default().trim().to_owned();
-    let pattern = format!("%{query}%");
+    let terms = grounding_terms(&query);
     let mut facts = connection.prepare(
-        "SELECT f.fact_id,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND f.superseded_by IS NULL AND (?2='' OR f.fact_id LIKE ?3 OR f.predicate LIKE ?3 OR f.object_json LIKE ?3 OR e.canonical_name LIKE ?3) ORDER BY f.updated_at DESC,f.fact_id LIMIT ?4",
+        "SELECT f.fact_id,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,e.canonical_name FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND f.superseded_by IS NULL ORDER BY f.updated_at DESC,f.fact_id LIMIT ?2",
     )?;
     let fact_rows = facts.query_map(
-        libsql_rusqlite::params![project_id, query, pattern, limit],
+        libsql_rusqlite::params![project_id, (limit * 20).clamp(50, 500)],
         |row| {
             let fact_id: String = row.get(0)?;
             let predicate: String = row.get(1)?;
@@ -1220,6 +1342,18 @@ pub fn retcon_context(
                 .get::<_, Option<String>>(3)?
                 .map(|value| format!("章节记录 {value}"))
                 .unwrap_or_else(|| "当前作品记录".into());
+            let entity_name: Option<String> = row.get(6)?;
+            let match_score = if query.is_empty() {
+                0
+            } else {
+                score_grounding_candidate(
+                    &query,
+                    &terms,
+                    entity_name.as_deref(),
+                    &predicate,
+                    &object_label,
+                )
+            };
             Ok(json!({
                 "factId":fact_id,
                 "label":format!("{predicate}：{object_label}"),
@@ -1228,11 +1362,49 @@ pub fn retcon_context(
                 "source":source,
                 "sourceArtifactId":row.get::<_,Option<String>>(4)?,
                 "sourceVersion":row.get::<_,Option<i64>>(5)?,
-                "objectJson":object
+                "objectJson":object,
+                "entityName":entity_name,
+                "matchScore":match_score
             }))
         },
     )?;
-    let facts = fact_rows.collect::<Result<Vec<_>, _>>()?;
+    let mut fact_candidates = fact_rows.collect::<Result<Vec<_>, _>>()?;
+    if !query.is_empty() {
+        fact_candidates
+            .retain(|fact| fact.get("matchScore").and_then(Value::as_i64).unwrap_or(0) > 0);
+        fact_candidates.sort_by(|left, right| {
+            right
+                .get("matchScore")
+                .and_then(Value::as_i64)
+                .cmp(&left.get("matchScore").and_then(Value::as_i64))
+                .then_with(|| left["factId"].as_str().cmp(&right["factId"].as_str()))
+        });
+        fact_candidates.truncate(limit as usize);
+    }
+    let top_score = fact_candidates
+        .first()
+        .and_then(|fact| fact.get("matchScore"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let top_count = fact_candidates
+        .iter()
+        .filter(|fact| fact.get("matchScore").and_then(Value::as_i64) == Some(top_score))
+        .count();
+    let grounding_status = if query.is_empty() {
+        "NEEDS_QUERY"
+    } else if top_score == 0 {
+        "NO_MATCH"
+    } else if top_count == 1 {
+        "UNIQUE"
+    } else {
+        "AMBIGUOUS"
+    };
+    let selected_fact = if grounding_status == "UNIQUE" {
+        fact_candidates.first().cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let facts = fact_candidates;
     let mut evidence = connection.prepare(
         "SELECT artifact_id,version,payload_hash,artifact_type,scope_key FROM artifacts WHERE project_id=?1 AND artifact_status='COMMITTED' AND artifact_type IN ('ReviewReport','FinalChapter','ChapterSummary','EvidenceBundle','SimulatedSigningReceipt') ORDER BY committed_at DESC,artifact_id,version LIMIT ?2",
     )?;
@@ -1255,7 +1427,14 @@ pub fn retcon_context(
         }))
     })?;
     let evidence = evidence_rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(json!({"facts":facts,"evidence":evidence,"bounded":true,"owner":"B12::ChangeRetconOwner"}))
+    Ok(json!({
+        "facts":facts,
+        "evidence":evidence,
+        "grounding":{"status":grounding_status,"candidateCount":top_count,"needsUserSelection":grounding_status == "AMBIGUOUS"},
+        "selectedFact":selected_fact,
+        "bounded":true,
+        "owner":"B12::ChangeRetconOwner"
+    }))
 }
 
 pub fn activate_stale_queue(
