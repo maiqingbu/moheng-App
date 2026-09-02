@@ -87,7 +87,7 @@ function textOf(value: unknown): string {
 }
 
 function looksInternal(value: string): boolean {
-  return /(?:^|\b)(?:PROTOCOL|IPC_|PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|B12_[A-Z0-9_]+|[A-Za-z]+Id|payloadHash|operationDigest|sourceCommit|ownerReceiptRef|Runtime|Owner|Artifact|CommitBundle|Repository|Pinia|Keychain|Tauri)(?:\b|\s|\/)/.test(value)
+  return /(?:^|\b)(?:PROTOCOL|IPC_|PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|B12_[A-Z0-9_]+|[A-Za-z]+Id|payloadHash|operationDigest|sourceCommit|ownerReceiptRef|Runtime|Owner|Artifact|CommitBundle|Repository|Pinia|Keychain|Tauri)(?:\b|\s|\/)/i.test(value)
 }
 
 export function statusLabel(value: unknown, fallback = '需要继续核对'): string {
@@ -124,7 +124,7 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
   if (/(?:MODEL|PROVIDER|ENDPOINT|API[_ ]KEY|TRANSPORT)/i.test(raw)) {
     return '模型服务连接失败，请检查服务地址和访问密钥后重试。'
   }
-  if (looksInternal(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
+  if (looksInternal(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
     return fallback
   }
   return raw
@@ -133,7 +133,7 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
 export function sanitizeProductText(value: unknown, fallback = ''): string {
   const raw = textOf(value).trim()
   if (!raw) return fallback
-  if (looksInternal(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
+  if (looksInternal(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
     return fallback
   }
   return raw
