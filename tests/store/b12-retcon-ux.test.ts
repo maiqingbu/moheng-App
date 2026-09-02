@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
 import type { CommandReceipt, CommandRequest } from '../../src/application/contracts'
 import {
   confirmRetconPlan,
@@ -18,6 +19,11 @@ const receipt = (request: CommandRequest, result: Record<string, unknown> = {}):
   receiptId: `receipt:${request.type}`,
   result,
 })
+
+function recordFrontendEvidence(marker: string, payload: Record<string, unknown>) {
+  const target = process.env.B12_FRONTEND_EVIDENCE_FILE
+  if (target) fs.appendFileSync(target, `${JSON.stringify({ marker, ...payload })}\n`)
+}
 
 describe('B12 Retcon product flow', () => {
   it('stops after displaying the generated plan until the second confirmation', async () => {
@@ -63,6 +69,7 @@ describe('B12 Retcon product flow', () => {
       'retcon_apply',
     ])
     console.log('B12_FRONTEND_HISTORY_RETCON_RESULT planDisplayed=PASS decisionBeforeConfirm=0 applyBeforeConfirm=0 secondConfirm=PASS status=PASS')
+    recordFrontendEvidence('B12_FRONTEND_HISTORY_RETCON_RESULT', { planDisplayed: true, decisionBeforeConfirm: 0, applyBeforeConfirm: 0, secondConfirm: true, status: 'PASS' })
   })
 
   it('grounds Assistant Retcon in a selected current fact and evidence', async () => {
@@ -91,5 +98,6 @@ describe('B12 Retcon product flow', () => {
     expect(executeCalls[0].payload?.requestedChange).toMatchObject({ evidenceRef: { artifactId: 'evidence:18', version: 3 } })
     expect(result.changeRequestId).toContain('change:p1:')
     console.log('B12_FRONTEND_ASSISTANT_RETCON_RESULT groundedQuery=PASS exactFact=PASS evidence=PASS historyContinuity=PASS status=PASS')
+    recordFrontendEvidence('B12_FRONTEND_ASSISTANT_RETCON_RESULT', { groundedQuery: true, exactFact: true, evidence: true, historyContinuity: true, status: 'PASS' })
   })
 })

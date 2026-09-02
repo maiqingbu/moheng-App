@@ -68,6 +68,16 @@ export const RELEASE_GATES = [
   'fresh_package_node',
   'fresh_package_language',
 ]
+const PACKAGE_SELF_CHECK_DELEGATED_GATES = [
+  'B12-A59',
+  'package_smoke',
+  'fresh_package_architecture',
+  'fresh_package_base_architecture',
+  'fresh_package_module_boundary',
+  'fresh_package_generator',
+  'fresh_package_node',
+  'fresh_package_language',
+]
 export const REQUIRED_BLOCKING_GATES = [
   ...B12_BLOCKING_GATES,
   ...NEGATIVE_BLOCKING_GATES,
@@ -98,7 +108,7 @@ export function sourceBindingPass(report) {
 export function evaluateAcceptance(report = {}, options = {}) {
   const gates = report.gates ?? {}
   const requiredGates = options.excludeSelfGate
-    ? REQUIRED_BLOCKING_GATES.filter(name => !['B12-A59', 'fresh_package_generator'].includes(name))
+    ? REQUIRED_BLOCKING_GATES.filter(name => !PACKAGE_SELF_CHECK_DELEGATED_GATES.includes(name))
     : REQUIRED_BLOCKING_GATES
   const evidenceDir = options.evidenceDir
   const sourceExists = source => {

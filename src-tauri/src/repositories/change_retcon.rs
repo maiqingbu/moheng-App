@@ -1421,6 +1421,8 @@ pub fn change_request_detail(
                 "planDigest":retcon_plan_digest(&plan)?,
                 "oldCanon":plan.target_fact.get("old").cloned().unwrap_or(Value::Null),
                 "replacement":plan.target_fact.get("replacement").cloned().unwrap_or(Value::Null),
+                "replacementFact":plan.target_fact.get("replacement").cloned().unwrap_or(Value::Null),
+                "impactDigest":plan.downstream_impact.get("impactDigest").cloned().unwrap_or(Value::Null),
                 "reason":plan.reason,
                 "fixType":plan.fix_type,
                 "downstreamImpact":plan.downstream_impact,

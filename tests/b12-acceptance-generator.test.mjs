@@ -56,6 +56,16 @@ test('B12 acceptance cannot pass with a false R2 global guard', () => {
   assert.ok(acceptance.failedGates.includes('second_authority'))
 })
 
+test('package self-check delegates package gates to the package verifier', () => {
+  const report = passingReport()
+  for (const name of ['package_smoke', 'fresh_package_architecture', 'fresh_package_base_architecture', 'fresh_package_module_boundary', 'fresh_package_generator', 'fresh_package_node', 'fresh_package_language']) {
+    report.gates[name] = { status: 'FAIL', exitCode: 1 }
+  }
+  const acceptance = evaluateAcceptance(report, { excludeSelfGate: true })
+  assert.equal(acceptance.status, 'READY_FOR_ACCEPTANCE')
+  assert.deepEqual(acceptance.failedGates, [])
+})
+
 test('package verifier pins generator evidence to the package root', () => {
   const packageRoot = '/tmp/b12-package-root'
   const environment = packageGeneratorEnvironment(packageRoot)

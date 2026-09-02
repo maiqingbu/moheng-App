@@ -1,4 +1,6 @@
-use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_dependency_summary_bootstrap_impl, KernelState,
+};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
@@ -138,6 +140,46 @@ fn b12_change_target_head_change_is_decision_stale_before_apply() {
 }
 
 #[test]
+fn b12_unsupported_authority_target_fails_closed_without_apply() {
+    let state = test_state("p-b12-r01-unsupported");
+    command(
+        &state,
+        "p-b12-r01-unsupported",
+        "change_request_create",
+        "cmd:b12:r01:unsupported:create",
+        0,
+        json!({
+            "changeRequestId":"change:b12:r01:unsupported",
+            "changeType":"CHANGE",
+            "scope":"PROJECT",
+            "summary":"尝试绕过故事核心责任方",
+            "requestedChange":{"targetAuthority":{"artifactType":"StoryConstitution","artifactId":"constitution:unsupported"},"patch":{"storyPromise":"不应直接写入"}}
+        }),
+    )
+    .unwrap();
+    let preflight = command(
+        &state,
+        "p-b12-r01-unsupported",
+        "impact_preflight",
+        "cmd:b12:r01:unsupported:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r01:unsupported"}),
+    )
+    .unwrap();
+    let digest = preflight["result"]["impactDigest"].as_str().unwrap();
+    let error = command(
+        &state,
+        "p-b12-r01-unsupported",
+        "change_request_decide",
+        "cmd:b12:r01:unsupported:decision",
+        0,
+        json!({"changeRequestId":"change:b12:r01:unsupported","decision":"APPROVE","impactDigest":digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B12_CHANGE_TARGET_UNSUPPORTED");
+}
+
+#[test]
 fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
     let state = test_state("p-b12-r06-job");
     let handle = state.manager.open("p-b12-r06-job", "", NOW).unwrap();
@@ -188,6 +230,11 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
     )
     .unwrap();
     assert_eq!(bootstrap["result"]["summaryStatus"], "READY");
+    let bootstrap_status =
+        query_dependency_summary_bootstrap_impl(&state, json!({"projectId":"p-b12-r06-job"}))
+            .unwrap();
+    assert_eq!(bootstrap_status["summary"]["summaryStatus"], "READY");
+    assert_eq!(bootstrap_status["job"]["status"], "COMPLETED");
     let second = command(
         &state,
         "p-b12-r06-job",
@@ -332,7 +379,7 @@ fn b12_dependency_summary_bootstrap_concurrent_requests_share_one_job() {
     assert!(first_thread.join().unwrap().is_ok());
     assert!(second_thread.join().unwrap().is_ok());
 
-    setup
+    let jobs = setup
         .manager
         .with_read_connection("p-b12-r06-concurrent", NOW, |connection| {
             let jobs: i64 = connection
@@ -343,10 +390,10 @@ fn b12_dependency_summary_bootstrap_concurrent_requests_share_one_job() {
                 )
                 .unwrap();
             assert_eq!(jobs, 1);
-            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(jobs)
         })
         .unwrap();
-    println!("B12_SUMMARY_BOOTSTRAP_CONCURRENCY_RESULT concurrentJobs=1 status=PASS");
+    println!("B12_SUMMARY_BOOTSTRAP_CONCURRENCY_RESULT concurrentJobs={jobs} status=PASS");
 }
 
 #[test]
@@ -941,14 +988,32 @@ fn b12_retcon_plan_change_invalidates_an_old_decision() {
         json!({"changeRequestId":"change:r04","retconPlanId":"plan:r04:one","planDigest":plan_digest,"decision":"APPROVE","impactDigest":impact_digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
     )
     .expect("approve plan");
+    state
+        .manager
+        .with_read_connection("p-b12-r04", NOW, |connection| {
+            let payload: String = connection
+                .query_row(
+                    "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_id='decision:change:r04:1'",
+                    ["p-b12-r04"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let payload: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["planDigest"], plan["result"]["planDigest"]);
+            assert_eq!(payload["approvedScopeClass"], plan["result"]["approvedScopeClass"]);
+            assert_eq!(payload["approvedRiskClass"], plan["result"]["riskClass"]);
+            assert_eq!(payload["requiresBackup"], plan["result"]["requiresBackup"]);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
     let handle = state
         .manager
         .open("p-b12-r04", "", NOW)
         .expect("open for mutation");
     handle
         .execute(
-            "UPDATE retcon_plans SET downstream_impact_json=?1 WHERE project_id='p-b12-r04' AND retcon_plan_id='plan:r04:one'",
-            [json!({"impactDigest":impact_digest,"changed":true}).to_string()],
+            "UPDATE retcon_plans SET fix_type='SUPPLEMENT' WHERE project_id='p-b12-r04' AND retcon_plan_id='plan:r04:one'",
+            [],
         )
         .expect("mutate plan payload");
     drop(handle);

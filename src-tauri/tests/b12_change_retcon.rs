@@ -238,7 +238,7 @@ fn b12_explicit_decision_then_apply_uses_commit_service_and_is_idempotent() {
         "change_request_apply",
         "cmd:b12:apply:commit",
         0,
-        json!({"changeRequestId":"change:b12:apply","impactDigest":digest,"requestedChange":{"target":"后续策略","operation":"替换"}}),
+        json!({"changeRequestId":"change:b12:apply","impactDigest":digest}),
     )
     .unwrap();
     assert_eq!(applied["finalStatus"], "committed");
@@ -251,7 +251,7 @@ fn b12_explicit_decision_then_apply_uses_commit_service_and_is_idempotent() {
         "change_request_apply",
         "cmd:b12:apply:commit",
         1,
-        json!({"changeRequestId":"change:b12:apply","impactDigest":digest,"requestedChange":{"target":"后续策略","operation":"替换"}}),
+        json!({"changeRequestId":"change:b12:apply","impactDigest":digest}),
     )
     .unwrap();
     assert_eq!(replay["receiptId"], applied["receiptId"]);
@@ -479,7 +479,7 @@ fn b12_h03_execute_change_request_uses_one_time_p3_and_the_same_typed_owner() {
     let operation = RepairOperation {
         operation: "execute_change_request".into(),
         target: "change:b12:h03".into(),
-        params: json!({"changeRequestId":"change:b12:h03","impactDigest":impact_digest,"commandId":"h03:b12:apply","idempotencyKey":"h03:b12:apply:key","requestedChange":{"source":"assistant"}}),
+        params: json!({"changeRequestId":"change:b12:h03","impactDigest":impact_digest,"commandId":"h03:b12:apply","idempotencyKey":"h03:b12:apply:key"}),
         postconditions: json!({"kind":"b12_change_postverify","expected":true}),
     };
     let expected_postconditions = vec![operation.postconditions.clone()];
@@ -644,7 +644,7 @@ fn b12_two_workers_competing_for_the_same_approved_change_have_one_canonical_win
             "change_request_apply",
             "cmd:b12:concurrent:worker-a",
             0,
-            json!({"changeRequestId":"change:b12:concurrent","impactDigest":first_digest,"requestedChange":{"target":"同一方案"}}),
+            json!({"changeRequestId":"change:b12:concurrent","impactDigest":first_digest}),
         )
     });
     let second = thread::spawn(move || {
@@ -655,7 +655,7 @@ fn b12_two_workers_competing_for_the_same_approved_change_have_one_canonical_win
             "change_request_apply",
             "cmd:b12:concurrent:worker-b",
             0,
-            json!({"changeRequestId":"change:b12:concurrent","impactDigest":second_digest,"requestedChange":{"target":"同一方案"}}),
+            json!({"changeRequestId":"change:b12:concurrent","impactDigest":second_digest}),
         )
     });
     let outcomes = [first.join().unwrap(), second.join().unwrap()];
