@@ -20,6 +20,198 @@ fn b12_same_revision_with_changed_authority_digest_is_stale() {
 }
 
 #[test]
+fn b12_change_execute_cannot_replace_approved_patch() {
+    let state = test_state("p-b12-r01-override");
+    insert_book_plan(&state, "p-b12-r01-override", "plan:book:p-b12-r01-override");
+    let digest = create_and_approve_change(
+        &state,
+        "p-b12-r01-override",
+        "change:b12:r01:override",
+        &[],
+        json!({
+            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01-override"},
+            "patch":{"storyPromise":"A→B"}
+        }),
+    );
+    let error = command(
+        &state,
+        "p-b12-r01-override",
+        "change_request_apply",
+        "cmd:b12:r01:override:apply",
+        0,
+        json!({
+            "changeRequestId":"change:b12:r01:override",
+            "impactDigest":digest,
+            "requestedChange":{"targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01-override"},"patch":{"endingBoundary":"C"}}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B12_APPROVED_OPERATION_INPUT_FORBIDDEN");
+}
+
+#[test]
+fn b12_change_execute_cannot_replace_approved_target() {
+    let state = test_state("p-b12-r01-target");
+    insert_book_plan(&state, "p-b12-r01-target", "plan:book:p-b12-r01-target");
+    let digest = create_and_approve_change(
+        &state,
+        "p-b12-r01-target",
+        "change:b12:r01:target",
+        &[],
+        json!({
+            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01-target"},
+            "patch":{"storyPromise":"已批准目标"}
+        }),
+    );
+    let error = command(
+        &state,
+        "p-b12-r01-target",
+        "change_request_apply",
+        "cmd:b12:r01:target:apply",
+        0,
+        json!({
+            "changeRequestId":"change:b12:r01:target",
+            "impactDigest":digest,
+            "targetAuthority":{"artifactType":"ChapterPlan","artifactId":"plan:chapter:other"}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B12_APPROVED_OPERATION_INPUT_FORBIDDEN");
+}
+
+#[test]
+fn b12_change_target_head_change_is_decision_stale_before_apply() {
+    let state = test_state("p-b12-r01-head");
+    insert_book_plan(&state, "p-b12-r01-head", "plan:book:p-b12-r01-head");
+    let digest = create_and_approve_change(
+        &state,
+        "p-b12-r01-head",
+        "change:b12:r01:head",
+        &[],
+        json!({
+            "targetAuthority":{"artifactType":"BookPlan","artifactId":"plan:book:p-b12-r01-head"},
+            "patch":{"storyPromise":"批准版本"}
+        }),
+    );
+    let handle = state.manager.open("p-b12-r01-head", "", NOW).unwrap();
+    let current_hash: String = handle
+        .query_row(
+            "SELECT payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='BookPlan'",
+            ["p-b12-r01-head"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    handle
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) SELECT artifact_id,project_id,artifact_type,scope_level,scope_key,2,schema_version,'COMMITTED',semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at FROM artifacts WHERE project_id=?1 AND artifact_id='plan:book:p-b12-r01-head' AND version=1",
+            ["p-b12-r01-head"],
+        )
+        .unwrap();
+    handle
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) SELECT artifact_id,2,payload_json,payload_hash FROM artifact_payloads WHERE artifact_id='plan:book:p-b12-r01-head' AND version=1",
+            [],
+        )
+        .unwrap();
+    handle
+        .execute(
+            "UPDATE canonical_heads SET version=2 WHERE project_id=?1 AND artifact_type='BookPlan'",
+            ["p-b12-r01-head"],
+        )
+        .unwrap();
+    assert_eq!(current_hash.len(), 64);
+    drop(handle);
+    let error = command(
+        &state,
+        "p-b12-r01-head",
+        "change_request_apply",
+        "cmd:b12:r01:head:apply",
+        0,
+        json!({"changeRequestId":"change:b12:r01:head","impactDigest":digest}),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B12_DECISION_STALE");
+}
+
+#[test]
+fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
+    let state = test_state("p-b12-r06-job");
+    let handle = state.manager.open("p-b12-r06-job", "", NOW).unwrap();
+    handle.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for index in 0..1_001 {
+        handle
+            .execute(
+                "INSERT INTO dependency_edges(edge_id,project_id,source_ref,target_ref,dependency_type,scope,impact_class,source_hash,created_by,created_at) VALUES (?1,?2,'bootstrap:source',?3,'PLAN_INPUT','BOOK','HARD',?4,'B12_R06_TEST',?5)",
+                params![
+                    format!("edge:b12:r06:job:{index}"),
+                    "p-b12-r06-job",
+                    format!("bootstrap:target:{index}"),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    handle.execute_batch("COMMIT").unwrap();
+    drop(handle);
+    command(
+        &state,
+        "p-b12-r06-job",
+        "change_request_create",
+        "cmd:b12:r06:job:create",
+        0,
+        json!({"changeRequestId":"change:b12:r06:job","changeType":"CHANGE","scope":"GLOBAL","summary":"准备影响索引","requestedChange":{"target":"全局路线"}}),
+    )
+    .unwrap();
+    let preflight = command(
+        &state,
+        "p-b12-r06-job",
+        "impact_preflight",
+        "cmd:b12:r06:job:preflight",
+        0,
+        json!({"changeRequestId":"change:b12:r06:job"}),
+    )
+    .unwrap();
+    assert_eq!(preflight["result"]["status"], "SUMMARY_BOOTSTRAP_REQUIRED");
+    assert!(preflight["result"]["bootstrapJobId"].as_str().is_some());
+    let bootstrap = command(
+        &state,
+        "p-b12-r06-job",
+        "dependency_summary_bootstrap",
+        "cmd:b12:r06:job:bootstrap",
+        0,
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(bootstrap["result"]["summaryStatus"], "READY");
+    let second = command(
+        &state,
+        "p-b12-r06-job",
+        "dependency_summary_bootstrap",
+        "cmd:b12:r06:job:bootstrap:again",
+        0,
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(second["result"]["jobId"], bootstrap["result"]["jobId"]);
+    state
+        .manager
+        .with_read_connection("p-b12-r06-job", NOW, |connection| {
+            let (count, status): (i64, String) = connection
+                .query_row(
+                    "SELECT COUNT(*),status FROM jobs WHERE project_id=?1 AND current_stage='DEPENDENCY_SUMMARY_BOOTSTRAP'",
+                    ["p-b12-r06-job"],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            assert_eq!(status, "COMPLETED");
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn b12_global_preflight_defers_frontier_materialization_until_expansion() {
     let state = test_state("p-b12-r06");
     let handle = state.manager.open("p-b12-r06", "", NOW).unwrap();
