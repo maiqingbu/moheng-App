@@ -35,6 +35,8 @@ const boilerplate = [
 ]
 
 const internalStatus = /PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED/g
+const jsonBlock = /[{}\[\]]/
+const internalReference = containsInternalProductToken
 const assistantFallback = '当前信息暂不可展示，请刷新当前作品后重试。'
 
 function safeAssistantFallback(raw: string): string {
@@ -50,7 +52,7 @@ export function sanitizeAssistantText(value: unknown): string {
   let text = original
   for (const phrase of boilerplate) text = text.replaceAll(phrase, '')
   text = text.replace(internalStatus, code => productStatusLabel(code))
-  if (containsInternalProductToken(text)) return safeAssistantFallback(original)
+  if (jsonBlock.test(text) || internalReference(text)) return safeAssistantFallback(original)
   return text
     .replace(/作为\s*AI[：:，,。]?/g, '')
     .replace(/根据你提供的上下文[：:，,]?/g, '')

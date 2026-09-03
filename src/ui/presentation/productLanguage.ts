@@ -96,6 +96,9 @@ function looksInternal(value: string): boolean {
   return containsInternalProductToken(value)
 }
 
+const providerConnectionPattern = /(?:MODEL|ENDPOINT|API[_ ]KEY|TRANSPORT|连接服务|模型服务)/i
+const implementationTokenPattern = /\b(?:Rust|TypeScript|JavaScript|Vue|SQLite|WebView|IPC)\b/i
+
 export function statusLabel(value: unknown, fallback = '需要继续核对'): string {
   const raw = textOf(value).trim()
   if (!raw) return fallback
@@ -127,7 +130,7 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
   for (const [code, message] of Object.entries(errorLabels)) {
     if (raw === code || raw.includes(code)) return message
   }
-  if (/(?:MODEL|ENDPOINT|API[_ ]KEY|TRANSPORT|连接服务|模型服务)/i.test(raw) && !/\b(?:Rust|TypeScript|JavaScript|Vue|SQLite|WebView|IPC)\b/i.test(raw)) {
+  if (providerConnectionPattern.test(raw) && !implementationTokenPattern.test(raw)) {
     return '模型服务连接失败，请检查服务地址和访问密钥后重试。'
   }
   if (containsInternalProductToken(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
