@@ -86,8 +86,14 @@ function textOf(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+const internalProductTokenPattern = /(?:\b(?:Rust|TypeScript|JavaScript|Vue|Pinia|Tauri|IPC|SQLite|SQL|WebView|Keychain|Runtime|Owner|Repository|Artifact|Harness|CommitBundle|CommitService|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|RuntimeCheckRequest|RepairPlan|CandidatePatch|RepairSuggestion)\b|\b(?:projectId|artifactId|payloadHash|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|sourceCommit|ownerReceiptRef|stateDigest|sourceRefs|artifactRef|capabilityId|skillId)\b|\bSkill\s+ID\b|\bskill[:_-][A-Za-z0-9_-]+\b|(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED|B12_[A-Z0-9_]+)\b|PROTOCOL\s*\/|\bP[0-3]\b|(?:B\d{2}|RC\d+)::[A-Za-z0-9_:.-]+|(?:^|[\s(])(?:\/|[A-Za-z]:[\\/]|(?:src|tests|scripts|src-tauri)[\\/])\S+|[{}\[\]]|\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|PRAGMA)\b)/i
+
+export function containsInternalProductToken(value: string): boolean {
+  return internalProductTokenPattern.test(value)
+}
+
 function looksInternal(value: string): boolean {
-  return /(?:^|\b)(?:PROTOCOL|IPC_|PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|B12_[A-Z0-9_]+|[A-Za-z]+Id|payloadHash|operationDigest|sourceCommit|ownerReceiptRef|Runtime|Owner|Artifact|CommitBundle|Repository|Pinia|Keychain|Tauri)(?:\b|\s|\/)/i.test(value)
+  return containsInternalProductToken(value)
 }
 
 export function statusLabel(value: unknown, fallback = '需要继续核对'): string {
@@ -121,10 +127,10 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
   for (const [code, message] of Object.entries(errorLabels)) {
     if (raw === code || raw.includes(code)) return message
   }
-  if (/(?:MODEL|PROVIDER|ENDPOINT|API[_ ]KEY|TRANSPORT)/i.test(raw)) {
+  if (/(?:MODEL|ENDPOINT|API[_ ]KEY|TRANSPORT|连接服务|模型服务)/i.test(raw) && !/\b(?:Rust|TypeScript|JavaScript|Vue|SQLite|WebView|IPC)\b/i.test(raw)) {
     return '模型服务连接失败，请检查服务地址和访问密钥后重试。'
   }
-  if (looksInternal(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
+  if (containsInternalProductToken(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
     return fallback
   }
   return raw
@@ -133,7 +139,7 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
 export function sanitizeProductText(value: unknown, fallback = ''): string {
   const raw = textOf(value).trim()
   if (!raw) return fallback
-  if (looksInternal(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
+  if (containsInternalProductToken(raw) || !/[\u4e00-\u9fff]/.test(raw) || /[{}\[\]]/.test(raw) || /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(raw)) {
     return fallback
   }
   return raw
@@ -141,6 +147,23 @@ export function sanitizeProductText(value: unknown, fallback = ''): string {
 
 export function evidenceLabel(value: unknown): string {
   return sanitizeProductText(value, '这条事实的原始依据')
+}
+
+export type ProductEvidenceIdentity = {
+  artifactId: string
+  version: number
+}
+
+export function evidenceSelector(item: ProductEvidenceIdentity): string {
+  return `${item.artifactId}:${item.version}`
+}
+
+export function evidenceDisplayLabel(item: { label: unknown }, index: number): string {
+  return `${evidenceLabel(item.label)}（${index + 1}）`
+}
+
+export function selectEvidenceBySelector<T extends ProductEvidenceIdentity>(items: readonly T[], selector: string): T | undefined {
+  return items.find(item => evidenceSelector(item) === selector)
 }
 
 export function commandMessage(state: { status?: unknown; message?: unknown } | unknown): string {

@@ -84,11 +84,27 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const volume = sourceReader('src/ui/pages/VolumeWorkspace.vue')
   const reader = sourceReader('src/ui/pages/ManuscriptReader.vue')
   const language = sourceReader('src/ui/presentation/productLanguage.ts')
+  const assistantPresentation = sourceReader('src/ui/presentation/assistantPresentation.ts')
+  const flow = sourceReader('src/ui/flows/b12RetconFlow.ts')
   const router = sourceReader('src/app/router.ts')
+  const dynamicTokenCoverage = /export function containsInternalProductToken/.test(language)
+    && /containsInternalProductToken\(raw\)/.test(language)
+    && /Rust/.test(language)
+    && /TypeScript/.test(language)
+    && /Harness/.test(language)
+    && /skillId/.test(language)
+  const evidenceDataSeparation = !/evidenceLabel/.test(flow) && /return \{ fact, evidence \}/.test(flow)
+  const evidenceSelectionIdentity = /evidenceSelector/.test(history)
+    && /selectEvidenceBySelector/.test(history)
+    && !/evidence\.find\(item => item\.label ===/.test(history)
   const checks = {
     active_ui_language: missing.length === 0 && visibleLeaks.length === 0,
     presentation_mapping: /commandMessage/.test(feedback) && /productErrorMessage/.test(library) && /scopeLabel/.test(history) && /statusLabel/.test(canon) && /productErrorMessage/.test(production) && /sanitizeProductText/.test(volume) && /versionReason/.test(reader) && /export function (?:statusLabel|productErrorMessage|receiptSummary)/.test(language),
     assistant_leakage: /productErrorMessage/.test(assistant) && /sanitizeProductText/.test(assistant) && !forbiddenVisiblePatterns.some(pattern => pattern.test(templateText(assistant))),
+    dynamic_presentation_leakage: dynamicTokenCoverage && /containsInternalProductToken/.test(language),
+    assistant_dynamic_leakage: /containsInternalProductToken/.test(assistantPresentation) && /safeAssistantFallback/.test(assistantPresentation),
+    b12_evidence_data_separation: evidenceDataSeparation,
+    evidence_selection_identity: evidenceSelectionIdentity,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
     future_feature_boundary: /UnavailableFeature/.test(router) && !/LongFormHealth/.test(router) && Boolean(sourceReader('src/ui/pages/LongFormHealth.vue')),
@@ -105,6 +121,10 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     activeUserSurface: { files: ACTIVE_USER_SURFACE, missing, visibleLeaks, status: checks.active_ui_language ? 'PASS' : 'FAIL' },
     presentationMapping: { status: checks.presentation_mapping ? 'PASS' : 'FAIL' },
     assistantLeakage: { status: checks.assistant_leakage ? 'PASS' : 'FAIL' },
+    dynamicPresentationLeakage: { status: checks.dynamic_presentation_leakage ? 'PASS' : 'FAIL', verifiedBy: 'runtime presentation fixtures in verify:product-ux' },
+    assistantDynamicLeakage: { status: checks.assistant_dynamic_leakage ? 'PASS' : 'FAIL', verifiedBy: 'runtime Assistant fixtures in verify:product-ux' },
+    b12EvidenceDataSeparation: { status: checks.b12_evidence_data_separation ? 'PASS' : 'FAIL', verifiedBy: 'B12 flow raw-value assertions' },
+    evidenceSelectionIdentity: { status: checks.evidence_selection_identity ? 'PASS' : 'FAIL', verifiedBy: 'History stable selector checks' },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'] },

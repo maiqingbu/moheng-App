@@ -29,7 +29,7 @@
     "verify:b09-h04": "node scripts/run-b09-h04-evidence-gates.mjs",
     "verify:b10": "node scripts/run-b10-evidence-gates.mjs",
     "verify:b12": "node scripts/run-b12-evidence-gates.mjs && node scripts/generate-b12-acceptance.mjs",
-    "verify:product-ux": "node scripts/verify-product-ux.mjs && vitest run tests/store/product-ux-presentation.test.ts tests/store/b11-assistant-presentation.test.ts"
+    "verify:product-ux": "node scripts/verify-product-ux.mjs && node --test tests/product-ux-copy.test.mjs tests/product-ux-gate.test.mjs && vitest run tests/store/product-ux-presentation.test.ts tests/store/b11-assistant-presentation.test.ts tests/store/b12-retcon-ux.test.ts"
   },
   "dependencies": {
     "ajv": "^8.20.0",

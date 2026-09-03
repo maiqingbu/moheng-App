@@ -55,7 +55,7 @@ test('Product UX gate fails closed when the shared dynamic guard is bypassed', (
   const source = read('src/ui/presentation/productLanguage.ts')
   const result = evaluateProductUx({
     sourceReader: relative => relative === 'src/ui/presentation/productLanguage.ts'
-      ? source.replace('containsInternalProductToken(raw)', 'false')
+      ? source.replaceAll('containsInternalProductToken(raw)', 'false')
       : read(relative),
   })
   assert.equal(result.status, 'FAIL')
@@ -77,7 +77,7 @@ test('Product UX gate fails closed when History uses display text as Evidence id
   const source = read('src/ui/pages/HistoryCenter.vue')
   const result = evaluateProductUx({
     sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
-      ? source.replace('evidenceSelector(item)', 'item.label').replace('selectEvidenceBySelector', 'findEvidenceByLabel')
+      ? source.replaceAll('evidenceSelector(item)', 'item.label').replaceAll('selectEvidenceBySelector', 'findEvidenceByLabel')
       : read(relative),
   })
   assert.equal(result.status, 'FAIL')

@@ -1,5 +1,4 @@
 import type { CommandReceipt, CommandRequest } from '../../application/contracts'
-import { evidenceLabel } from '../presentation/productLanguage'
 
 export interface RetconFactOption {
   factId: string
@@ -247,7 +246,7 @@ export function selectGroundedRetconContext(context: RetconContext, _question: s
   if (!fact) throw new Error('当前作品没有可供修订的正式事实。')
   const evidence = context.evidence.find(item => item.supportsFactId === fact.factId && item.relationship === 'FACT_SOURCE')
   if (!evidence) throw new RetconEvidenceGapError()
-  return { fact, evidence: { ...evidence, label: evidenceLabel(evidence.label) } }
+  return { fact, evidence }
 }
 
 function replacementFromQuestion(question: string): string {

@@ -1,5 +1,5 @@
 import type { SupportSessionProjection } from '../../application/contracts'
-import { statusLabel as productStatusLabel } from './productLanguage'
+import { containsInternalProductToken, statusLabel as productStatusLabel } from './productLanguage'
 
 export type AssistantViewStatus = 'supported' | 'insufficient' | 'conflicting' | 'inferred'
 
@@ -35,25 +35,27 @@ const boilerplate = [
 ]
 
 const internalStatus = /PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED/g
-const internalReference = /\/?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+|(?:sourceRefs|artifactRef|stateDigest|operationDigest|projectId|artifactId|payloadHash|changeRequestId|authorizationId|repairPlanId)\s*[:=][^\s,，。；;]*/gi
-const jsonBlock = /\{[^{}]*\}/g
+const assistantFallback = '当前信息暂不可展示，请刷新当前作品后重试。'
+
+function safeAssistantFallback(raw: string): string {
+  if (raw.includes('PLAN_STALE')) return productStatusLabel('PLAN_STALE')
+  if (raw.includes('AUTHORIZATION_STALE')) return productStatusLabel('AUTHORIZATION_STALE')
+  if (raw.includes('EVIDENCE_GAP')) return productStatusLabel('EVIDENCE_GAP')
+  if (raw.includes('IPC_UNSUPPORTED')) return productStatusLabel('IPC_UNSUPPORTED')
+  return assistantFallback
+}
 
 export function sanitizeAssistantText(value: unknown): string {
-  let text = typeof value === 'string' ? value : ''
+  const original = typeof value === 'string' ? value : ''
+  let text = original
   for (const phrase of boilerplate) text = text.replaceAll(phrase, '')
-  text = text
+  text = text.replace(internalStatus, code => productStatusLabel(code))
+  if (containsInternalProductToken(text)) return safeAssistantFallback(original)
+  return text
     .replace(/作为\s*AI[：:，,。]?/g, '')
     .replace(/根据你提供的上下文[：:，,]?/g, '')
-    .replace(internalStatus, code => productStatusLabel(code))
-    .replace(jsonBlock, '')
-    .replace(internalReference, '')
-    .replace(/\b(?:[A-Z]\d+|RC\d+)::[A-Za-z0-9_:.-]+/g, '')
-    .replace(/\b(?:Runtime|Owner|Artifact|CommitBundle|Repository|Pinia|Keychain|Tauri|IPC)\b/gi, '')
-    .replace(/\bP[0-3]\b/g, '需要优先处理')
-    .replace(/\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
-  return text
 }
 
 function statusOf(finding: Record<string, unknown>): AssistantViewStatus {
