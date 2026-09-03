@@ -105,6 +105,41 @@ describe('B12 Retcon product flow', () => {
     recordFrontendEvidence('B12_FRONTEND_ASSISTANT_RETCON_RESULT', { groundedQuery: true, exactFact: true, evidence: true, historyContinuity: true, status: 'PASS' })
   })
 
+  it('keeps raw Evidence unchanged in proposal and plan command payloads', async () => {
+    const rawEvidence = {
+      artifactId: 'artifact:evidence:1',
+      version: 3,
+      payloadHash: 'hash-raw-1',
+      label: '正式章节依据 · {"chapterId":"chapter:p:1","level":"CHAPTER"}',
+      supportsFactId: 'fact:1',
+      relationship: 'FACT_SOURCE' as const,
+    }
+    const context = {
+      facts: [{ factId: 'fact:1', label: '第一卷核心事实', current: true }],
+      evidence: [rawEvidence],
+    }
+    const calls: CommandRequest[] = []
+    const execute = vi.fn(async (_key: string, request: CommandRequest) => {
+      calls.push(request)
+      if (request.type === 'impact_preflight') return receipt(request, { impactDigest: 'i'.repeat(64), status: 'PREFLIGHTED' })
+      if (request.type === 'retcon_plan_create') return receipt(request, { retconPlanId: 'plan:1', planDigest: 'p'.repeat(64), approvedScopeClass: 'LOCAL', riskClass: 'LOW' })
+      return receipt(request)
+    })
+    const selected = selectGroundedRetconContext(context, '事实改成新内容')
+    expect(selected.evidence).toEqual(rawEvidence)
+    expect(selected.evidence.label).toBe(rawEvidence.label)
+    const draft = await createGroundedAssistantRetcon({ execute, queryRetconContext: vi.fn(async () => context) }, 'p1', '事实改成新内容')
+    await createRetconPlan(execute, draft)
+    const proposalPayload = calls.find(request => request.type === 'change_request_create')?.payload?.requestedChange?.evidenceRef
+    const planPayload = calls.find(request => request.type === 'retcon_plan_create')?.payload?.evidenceRefs?.[0]
+    expect(proposalPayload).toEqual(rawEvidence)
+    expect(planPayload).toEqual(rawEvidence)
+    expect(proposalPayload?.artifactId).toBe('artifact:evidence:1')
+    expect(proposalPayload?.version).toBe(3)
+    expect(proposalPayload?.payloadHash).toBe('hash-raw-1')
+    expect(proposalPayload?.label).toBe(rawEvidence.label)
+  })
+
   it('does not choose the first fact when grounding is ambiguous', () => {
     const context = {
       facts: [
