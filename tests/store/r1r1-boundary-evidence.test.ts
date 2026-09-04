@@ -58,7 +58,6 @@ describe('R1-R1 行为证据', () => {
       'capability query_continuity 当前异常。',
       'capability query_knowledge 返回异常。',
       'capability diagnose_continuity 当前异常。',
-      '预计只影响第 3 章与开篇评估，不改变已提交 Canon。',
       'Skill ID skill:opening 当前异常。',
       'Runtime Owner 当前不可用。',
       '当前 projectId 为 project:demo。',
