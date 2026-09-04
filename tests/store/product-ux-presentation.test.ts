@@ -130,6 +130,7 @@ describe('Product UX 展示语义映射', () => {
   it('blocks dynamic Assistant engineering terms instead of returning a damaged sentence', () => {
     const fallbackInputs = [
       'Harness capability query_knowledge 返回 Owner Runtime 异常。',
+      'capability diagnose_continuity 当前异常。',
       'Skill ID skill:opening 未加载。',
       '当前 payloadHash=abc，projectId=project:demo。',
       '当前由 Rust / TypeScript Runtime 处理。',

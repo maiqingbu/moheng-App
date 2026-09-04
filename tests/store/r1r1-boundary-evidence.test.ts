@@ -71,6 +71,7 @@ describe('R1-R1 行为证据', () => {
     ]
     const assistantInputs = [
       'Harness capability query_knowledge 返回 Owner Runtime 异常。',
+      'capability diagnose_continuity 当前异常。',
       'Skill ID skill:opening 未加载。',
       '当前 payloadHash=abc，projectId=project:demo。',
       '当前由 Rust / TypeScript Runtime 处理。',
