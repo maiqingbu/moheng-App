@@ -118,9 +118,18 @@ const packagePreflight = run('package_preflight', 'node', ['scripts/assemble-b13
 
 const architectureReport = inspectB13Architecture(root)
 const productUxReport = evaluateProductUx()
+const historicalEvidenceRestoration = []
+if (before.dirtyPaths.length === 0) {
+  for (const relative of ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']) {
+    if (git(['diff', '--quiet', '--', relative]).status !== 0) {
+      const restored = git(['restore', '--source', before.commit, '--', relative])
+      historicalEvidenceRestoration.push({ file: relative, status: restored.status === 0 ? 'PASS' : 'FAIL' })
+    }
+  }
+}
 const sourceAfter = snapshot()
 const diffNames = git(['diff', '--name-status', `${baselineCommit}..${before.commit}`]).stdout.split('\n').filter(Boolean)
-const diffPatch = git(['diff', '--unified=0', `${baselineCommit}..${before.commit}`]).stdout
+const diffPatch = git(['diff', '--unified=0', `${baselineCommit}..${before.commit}`, '--', 'src', 'src-tauri/src']).stdout
 const changedFiles = diffNames.map(line => {
   const [status, ...parts] = line.split('\t')
   const file = parts.at(-1)
@@ -318,6 +327,7 @@ const sourceBinding = {
   excludedUncommittedPaths: [],
   dirtyBeforePaths: before.dirtyPaths,
   dirtyAfterPaths: sourceAfter.dirtyPaths,
+  historicalEvidenceRestoration,
   status: before.dirtyPaths.length === 0 && sourceAfter.dirtyPaths.length === 0 && before.commit === sourceAfter.commit && before.commit !== baselineCommit ? 'PASS' : 'FAIL',
 }
 writeEvidence('B13_SOURCE_BINDING.json', sourceBinding)

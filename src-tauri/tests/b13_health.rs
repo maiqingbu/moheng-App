@@ -321,6 +321,7 @@ fn b13_route_and_task_factors_read_existing_planning_reality_without_replanning(
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:route',?1,'VolumePlan','VOLUME','volume:b13:route',2,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params![project_id, route_hash_v2, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:route',2,?1,?2)", libsql_rusqlite::params![route_payload_v2.to_string(), route_hash_v2]).unwrap();
     connection.execute("UPDATE planning_state_ledger_index SET route_plan_version=2 WHERE project_id=?1 AND volume_id='volume:b13:route'", [&project_id]).unwrap();
+    connection.execute("UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b13:required' AND project_id=?2", libsql_rusqlite::params![json!({"taskId":"task:b13:required","status":"SATISFIED"}).to_string(), project_id]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:optional',?1,'volume.task.progress',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, json!({"taskId":"task:b13:optional","status":"BLOCKED"}).to_string(), NOW]).unwrap();
     drop(connection);
     let boundary = query_book_health_impl(

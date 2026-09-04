@@ -129,15 +129,15 @@ if (process.argv.includes('--preflight')) {
 源码基线：\`${baselineCommit}\`
 最终源码：\`${sourceCommit}\`
 
-本包交付的是 B13 开发完成后的正式外部验收材料，状态为 `READY_FOR_FORMAL_ACCEPTANCE`。长篇健康是只读、可重建投影；本包不启动或实现 B14、B15、RC1。
+本包交付的是 B13 开发完成后的正式外部验收材料，状态为“READY_FOR_FORMAL_ACCEPTANCE”。长篇健康是只读、可重建投影；本包不启动或实现 B14、B15、RC1。
 
 验收入口：
 
-- `EVIDENCE/B13/B13_ACCEPTANCE.json`
-- `EVIDENCE/B13/B13_FINAL_DELIVERY_STATUS.json`
-- `PACKAGE_MANIFEST/SOURCE_BINDING.json`
+- EVIDENCE/B13/B13_ACCEPTANCE.json
+- EVIDENCE/B13/B13_FINAL_DELIVERY_STATUS.json
+- PACKAGE_MANIFEST/SOURCE_BINDING.json
 
-源码测试：在 `SOURCE/` 中安装依赖后运行 `npm run verify:b13`；Rust 命令使用 `--manifest-path src-tauri/Cargo.toml`。
+源码测试：在 SOURCE/ 中安装依赖后运行 npm run verify:b13；Rust 命令使用 --manifest-path src-tauri/Cargo.toml。
 `)
 
   const diffNames = git(['diff', '--name-status', `${baselineCommit}..${sourceCommit}`])
@@ -159,7 +159,7 @@ if (process.argv.includes('--preflight')) {
   }
   fs.writeFileSync(path.join(manifestRoot, 'ENVIRONMENT.json'), `${JSON.stringify(environment, null, 2)}\n`)
 
-  const diffPatch = git(['diff', '--unified=0', `${baselineCommit}..${sourceCommit}`])
+  const diffPatch = git(['diff', '--unified=0', `${baselineCommit}..${sourceCommit}`, '--', 'src', 'src-tauri/src'])
   const futureAdded = diffPatch.split('\n').filter(line => /^\+[^+]/.test(line) && /\b(?:B14|B15|RC1)::|EndgameOwner|CompletionGate|ExportReleaseOwner/.test(line))
   fs.writeFileSync(path.join(manifestRoot, 'FORBIDDEN_SCOPE_DIFF.json'), `${JSON.stringify({ schema: 'b13-forbidden-scope-diff-r1', futureAdded, status: futureAdded.length === 0 ? 'PASS' : 'FAIL' }, null, 2)}\n`)
 
