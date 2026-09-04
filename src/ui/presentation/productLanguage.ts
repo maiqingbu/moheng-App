@@ -87,9 +87,10 @@ function textOf(value: unknown): string {
 }
 
 const internalProductTokenPattern = /(?:\b(?:Rust|TypeScript|JavaScript|Vue|Pinia|Tauri|IPC|SQLite|SQL|WebView|Keychain|Runtime|Owner|Repository|Artifact|Harness|CommitBundle|CommitService|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|RuntimeCheckRequest|RepairPlan|CandidatePatch|RepairSuggestion)\b|\b(?:projectId|artifactId|payloadHash|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|sourceCommit|ownerReceiptRef|stateDigest|sourceRefs|artifactRef|capabilityId|skillId)\b|\bSkill\s+ID\b|\bskill[:_-][A-Za-z0-9_-]+\b|(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED|B12_[A-Z0-9_]+)\b|PROTOCOL\s*\/|\bP[0-3]\b|(?:B\d{2}|RC\d+)::[A-Za-z0-9_:.-]+|(?:^|[\s(])(?:\/|[A-Za-z]:[\\/]|(?:src|tests|scripts|src-tauri)[\\/])\S+|[{}\[\]]|\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|PRAGMA)\b)/i
+const capabilityPairPattern = /\bcapability\s+(?:query|diagnose)_[a-z0-9_]+\b/i
 
 export function containsInternalProductToken(value: string): boolean {
-  return internalProductTokenPattern.test(value)
+  return internalProductTokenPattern.test(value) || capabilityPairPattern.test(value)
 }
 
 function looksInternal(value: string): boolean {
@@ -167,6 +168,14 @@ export function evidenceDisplayLabel(item: { label: unknown }, index: number): s
 
 export function selectEvidenceBySelector<T extends ProductEvidenceIdentity>(items: readonly T[], selector: string): T | undefined {
   return items.find(item => evidenceSelector(item) === selector)
+}
+
+export type ProductEvidenceLookup = ProductEvidenceIdentity & { payloadHash?: string }
+
+export function selectEvidenceByIdentity<T extends ProductEvidenceLookup>(items: readonly T[], identity: ProductEvidenceLookup): T | undefined {
+  return items.find(item => item.artifactId === identity.artifactId
+    && item.version === identity.version
+    && (identity.payloadHash === undefined || item.payloadHash === identity.payloadHash))
 }
 
 export function commandMessage(state: { status?: unknown; message?: unknown } | unknown): string {

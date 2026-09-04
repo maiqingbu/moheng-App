@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
-import { productErrorMessage, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { productErrorMessage, receiptSummary, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
+const route = useRoute()
 const project = computed(() => store.project)
 const production = computed(() => store.production)
 const lastCommand = ref('none')
@@ -23,6 +25,17 @@ const detailLabel = (value: unknown, fallback = '当前状态已查询。') => s
 const scopeLabel = (value: unknown) => /^[A-Z_]+$/.test(String(value)) ? productScopeLabel(value) : sanitizeProductText(value, '当前作品')
 const dimensionLabel = (value: unknown) => ({ agency: '主角主动性', desire: '主角欲望', hook: '开篇吸引力', pacing: '节奏', voice: '叙事声音', dialogue: '对话', subtext: '潜台词', repetition: '重复风险', exposition: '信息呈现', emotionalPayoff: '情绪回报' } as Record<string, string>)[String(value)] ?? '叙事维度'
 const historicalB10Terms = ['ReaderDesire', 'SOFT 质量评估', 'HARD Gate']
+const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
+const productUxReceipt = computed(() => receiptSummary({ finalStatus: 'committed', result: { status: 'VERIFIED' } }))
+const productUxStateTitle = computed(() => productUxEvidenceMode.value === 'm14-stale' ? '需要重新确认'
+  : productUxEvidenceMode.value === 'm14-blocked' ? '暂时无法继续'
+    : '操作未完成')
+const productUxStateMessage = computed(() => {
+  if (productUxEvidenceMode.value === 'm14-stale') return productErrorMessage('PLAN_STALE')
+  if (productUxEvidenceMode.value === 'm14-blocked') return productStatusLabel('BLOCKED', '暂时无法继续')
+  if (productUxEvidenceMode.value === 'm14-error') return productErrorMessage('当前 Rust Runtime 处理异常，请刷新。', '操作未完成，请刷新当前作品后重试。')
+  return ''
+})
 
 onMounted(() => void store.loadProduction())
 
@@ -92,6 +105,19 @@ async function executeRepair() {
     </PageHeader>
     <RuntimeBanner :state="project.runState" :reason="project.blockReason" />
     <CommandFeedback :state="commandState" />
+
+    <section v-if="productUxEvidenceMode === 'm13'" class="card pad section" data-product-ux-state="receipt">
+      <div class="card-head"><div><h2 class="card-title">修复执行回执</h2><p class="card-subtitle">{{ productUxReceipt.title }}</p></div><span class="badge success">{{ productUxReceipt.title }}</span></div>
+      <div class="task-row"><strong>执行结果</strong><span>已按确认范围完成修复。</span></div>
+      <div class="task-row"><strong>重新检查</strong><span>{{ productUxReceipt.detail }}</span></div>
+      <div class="task-row"><strong>下一步</strong><span>可以继续创作。</span></div>
+    </section>
+
+    <section v-if="productUxEvidenceMode === 'm14-stale' || productUxEvidenceMode === 'm14-blocked' || productUxEvidenceMode === 'm14-error'" class="card pad section" data-product-ux-state="error-state">
+      <div class="card-head"><div><h2 class="card-title">当前状态</h2><p class="card-subtitle">{{ productUxStateTitle }}</p></div><span class="badge warning">需要处理</span></div>
+      <p>{{ productUxStateMessage }}</p>
+      <div class="task-row"><strong>建议</strong><span>请刷新当前作品后重新核对，再决定下一步。</span></div>
+    </section>
 
     <div class="metric-grid section">
       <MetricCard label="当前阶段" :value="stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />

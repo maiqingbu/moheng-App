@@ -209,7 +209,7 @@ function historyEntries(record: DemoProjectRecord): HistoryEntry[] {
   if (record.bundle.project.id !== 'proj-moheng-demo') return fromVersions
   return [
     { id:'chg-001', kind:'CHANGE_REQUEST', title:'增强第三章主角主动性', status:'impact_ready', createdAt:'2026-08-23 23:20', summary:'保持身份信息不变，调整主角在雨夜来客场景中的主动试探与反击。', impact:'预计只影响第 3 章与开篇评估，不改变已提交 Canon。', scope:'第 3 章 / Opening', receipt:undefined },
-    { id:'retcon-001', kind:'RETCON', title:'示例：调整玄机子掌握真名的时间点', status:'draft', createdAt:'2026-08-23 22:52', summary:'这是尚未应用的 RetconPlan 示例，重大正式事实不能普通保存覆盖。', impact:'预计影响师徒关系、断剑证据与第一卷后段伏笔。', scope:'正式事实 / 第一卷' },
+    { id:'retcon-001', kind:'RETCON', title:'示例：调整玄机子掌握真名的时间点', status:'draft', createdAt:'2026-08-23 22:52', summary:'这是尚未应用的事实修订方案示例，重大正式事实不能普通保存覆盖。', impact:'预计影响师徒关系、断剑证据与第一卷后段伏笔。', scope:'正式事实 / 第一卷' },
     ...fromVersions
   ]
 }
@@ -629,7 +629,7 @@ export class BrowserDemoPort implements FrontendPort {
           case 'chapter_revision_request': message=request.payload?.kind==='chapter_rollback'?'版本回退已提交并生成新的正式版本记录。':'章节修订请求已记录，系统会先分析影响范围。'; break
           case 'change_request_create': message='变更请求已创建，正在计算类型化影响范围；尚未改写正式状态。'; break
           case 'change_request_apply': message='已批准的变更请求已提交，受影响投影将按依赖规则刷新。'; break
-          case 'retcon_plan_create': message='RetconPlan 已建立；正式事实仍保持不变，等待影响确认。'; break
+          case 'retcon_plan_create': message='事实修订方案已建立；正式事实仍保持不变，等待影响确认。'; break
           case 'retcon_apply': message='Retcon 已按批准计划提交，并保留原正式历史与审计回执。'; break
           case 'export_create': message='正式成品导出任务已完成。'; break
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break

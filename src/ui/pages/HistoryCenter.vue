@@ -11,6 +11,7 @@ import { changeStatusLabel, evidenceDisplayLabel, evidenceSelector, productError
 
 const store = useProjectStore()
 const route = useRoute()
+const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
 type HistoryKind = 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
 const filters: { value: HistoryKind; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -71,23 +72,26 @@ function chooseFact(event: Event) {
 }
 
 function retconDraftFromActive(): RetconDraft | null {
-  if (!activeChange.value?.targetFactId || !activeChange.value.replacement || !activeChange.value.evidenceRef) return null
-  const evidence = retconContext.value?.evidence.find(item => item.artifactId === activeChange.value?.evidenceRef)
+  const active = activeChange.value
+  if (!active?.targetFactId || !active.replacement || !active.evidenceRef || active.evidenceVersion === undefined) return null
+  const evidence = retconContext.value?.evidence.find(item => item.artifactId === active.evidenceRef
+    && item.version === active.evidenceVersion
+    && (!active.evidencePayloadHash || item.payloadHash === active.evidencePayloadHash))
     ?? {
-      artifactId: activeChange.value.evidenceRef,
-      version: activeChange.value.evidenceVersion ?? 1,
-      payloadHash: activeChange.value.evidencePayloadHash ?? '',
+      artifactId: active.evidenceRef,
+      version: active.evidenceVersion,
+      payloadHash: active.evidencePayloadHash ?? '',
       label: '已核验依据',
     }
   if (!evidence.payloadHash) return null
   return {
     projectId: store.currentProjectId ?? '',
-    changeRequestId: activeChange.value.id,
+    changeRequestId: active.id,
     summary: '用户确认的事实修订',
-    targetFactId: activeChange.value.targetFactId,
-    replacement: activeChange.value.replacement,
+    targetFactId: active.targetFactId,
+    replacement: active.replacement,
     evidenceRef: evidence,
-    impactDigest: activeChange.value.digest,
+    impactDigest: active.digest,
   }
 }
 
@@ -165,6 +169,23 @@ async function restoreChange(changeId: string) {
 
 onMounted(() => {
   void store.loadHistory()
+  if (productUxEvidenceMode.value === 'm12') {
+    activeChange.value = {
+      id: 'r1r2-demo-change',
+      type: 'RETCON',
+      digest: 'd'.repeat(64),
+      scope: 'LOCAL',
+      status: 'PLAN_READY',
+      expandedEdges: 1,
+      totalEdges: 1,
+      targetFactId: 'fact:demo',
+      replacement: '已确认的新事实',
+      evidenceRef: 'artifact:demo-evidence',
+      evidenceVersion: 4,
+      evidencePayloadHash: 'h'.repeat(64),
+    }
+    actionMessage.value = '本次只确认当前修复方案；确认后系统才会执行，并在完成后重新核对。'
+  }
   const changeId = route.query.changeRequestId
   if (typeof changeId === 'string' && changeId.trim()) void restoreChange(changeId)
 })
@@ -318,6 +339,10 @@ async function approveAndApply() {
       <div class="metric-grid"><div class="metric-card"><div class="metric-label">影响范围</div><div class="metric-value">{{ changeScopeLabel(activeChange.scope) }}</div></div><div class="metric-card"><div class="metric-label">已分析内容</div><div class="metric-value">{{ activeChange.expandedEdges }} / {{ activeChange.totalEdges }}</div></div></div>
       <div v-if="impactItems.length" class="banner info"><div><div class="banner-title">受影响内容</div><div class="banner-copy">{{ impactSummary }}</div></div></div>
       <p v-if="activeChange.type === 'RETCON'" class="banner warning">这项请求涉及已经确认的事实，需先查看原事实、依据和事实修订方案。</p>
+      <div v-if="productUxEvidenceMode === 'm12'" class="banner warning" data-product-ux-state="authorization">
+        <div><div class="banner-title">修复授权</div><div class="banner-copy">本次只授权当前方案一次；确认后才会执行，并在完成后重新核对。</div></div>
+        <div class="actions"><button class="btn small" @click="actionMessage = '已保留当前方案，等待你的确认。'">暂不执行</button><button class="btn primary small" @click="actionMessage = '已确认本次执行，完成后会重新核对。'">确认本次执行</button></div>
+      </div>
       <div v-if="activeChange.plan" class="card pad" style="display:grid;gap:8px;background:var(--surface-muted, #f7f5ef)">
         <div class="card-title">事实修订方案（请先核对）</div>
         <div class="task-row"><strong>当前正式事实</strong><span>{{ planFactLabel(activeChange.plan.oldCanon) }}</span></div>

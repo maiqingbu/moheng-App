@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import BaseModal from '../components/BaseModal.vue'
@@ -16,6 +16,7 @@ import type { RetconFactOption } from '../flows/b12RetconFlow'
 import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
 
 const store = useProjectStore()
+const route = useRoute()
 const router = useRouter()
 const question = ref('当前作品的进度和故事核心是否一致？')
 const presentation = ref<AssistantPresentation | null>(null)
@@ -31,6 +32,7 @@ const authState = computed(() => store.commandState('assistant-authorize'))
 const executeState = computed(() => store.commandState('assistant-execute'))
 const groundingOptions = ref<RetconFactOption[]>([])
 const selectedGroundingFactId = ref('')
+const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
 const displayScopes = (values: unknown) => Array.isArray(values)
   ? values.map(value => sanitizeProductText(value, '当前作品')).filter(Boolean).join('、') || '无'
   : '无'
@@ -129,6 +131,17 @@ function chooseGrounding(factId: string) {
   selectedGroundingFactId.value = factId
   void proposeChange()
 }
+
+onMounted(() => {
+  if (productUxEvidenceMode.value !== 'm11') return
+  presentation.value = presentAssistantSession({
+    plan: {},
+    finding: { claim: '当前查询需要继续核对。', supportStatus: 'INSUFFICIENT', sourceRefs: ['diagnosis:demo'] },
+    calls: [{ capabilityId: 'query_continuity', callId: 'r1r2-diagnosis', result: [{ chapterId: 'chapter:18', status: 'OPEN' }] }],
+    evidenceLedger: [{ callId: 'r1r2-diagnosis', sourceRefs: ['diagnosis:demo'], startedAt: '2026-09-03T02:00:00Z', finishedAt: '2026-09-03T02:00:01Z' }],
+    receipt: { projectRevision: 18 },
+  })
+})
 </script>
 
 <template>
@@ -149,6 +162,12 @@ function chooseGrounding(factId: string) {
       <p style="font-size:16px;line-height:1.8">{{ presentation.answer }}</p>
       <div class="section" style="display:grid;gap:10px"><div v-for="section in presentation.sections" :key="section.title" class="task-row"><strong>{{ section.title }}</strong><span>{{ section.body }}</span></div></div>
       <button class="btn small" @click="evidenceOpen=true">查看依据</button>
+    </section>
+
+    <section v-if="productUxEvidenceMode === 'm11'" class="card pad section" data-product-ux-state="diagnosis">
+      <div class="card-head"><div><h2 class="card-title">诊断结果</h2><p class="card-subtitle">当前查询需要继续核对。</p></div><span class="badge warning">需要关注</span></div>
+      <p>系统已完成当前作品记录检查；暂时不能确认这项内容。</p>
+      <div class="task-row"><strong>下一步</strong><span>可以补充相关章节或设定依据，再重新确认。</span></div>
     </section>
 
     <BaseModal :open="evidenceOpen" title="已核验的项目记录" subtitle="这里只展示依据的中文摘要，不展示内部编号或执行细节。" @close="evidenceOpen=false">

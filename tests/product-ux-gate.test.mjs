@@ -107,7 +107,7 @@ test('Product UX gate fails closed when History drops Evidence version identity'
   const source = read('src/ui/pages/HistoryCenter.vue')
   const result = evaluateProductUx({
     sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
-      ? source.replaceAll('item.version === activeChange.value.evidenceVersion', 'true')
+      ? source.replaceAll('item.version === active.evidenceVersion', 'true')
       : read(relative),
   })
   assert.equal(result.status, 'FAIL')

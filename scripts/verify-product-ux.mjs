@@ -37,7 +37,7 @@ const forbiddenVisiblePatterns = [
   /\bKeychain\b|\bWebView\b/i,
   /\b(?:projectId|artifactId|payloadHash|sourceCommit|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|ownerReceiptRef)\b/i,
   /\b(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED)\b/,
-  /\b(?:CommitBundle|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|CommitService|RepairPlan|CandidatePatch|RepairSuggestion|RuntimeCheckRequest)\b/,
+  /\b(?:CommitBundle|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|CommitService|RepairPlan|CandidatePatch|RepairSuggestion|RuntimeCheckRequest|RetconPlan)\b/,
   /根据架构要求|正式实现必须|不常驻页面内存|AI 推荐理由|根据你提供的上下文|作为 AI|以下是详细分析|希望这些建议/,
 ]
 
@@ -86,6 +86,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const language = sourceReader('src/ui/presentation/productLanguage.ts')
   const assistantPresentation = sourceReader('src/ui/presentation/assistantPresentation.ts')
   const flow = sourceReader('src/ui/flows/b12RetconFlow.ts')
+  const demoPort = sourceReader('src/infrastructure/browser-demo/demoPort.ts')
   const router = sourceReader('src/app/router.ts')
   const dynamicTokenCoverage = /export function containsInternalProductToken/.test(language)
     && /containsInternalProductToken\(raw\)/.test(language)
@@ -97,6 +98,22 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const evidenceSelectionIdentity = /evidenceSelector/.test(history)
     && /selectEvidenceBySelector/.test(history)
     && !/evidence\.find\(item => item\.label ===/.test(history)
+  const dynamicCapabilityCoverage = /const capabilityPairPattern/.test(language)
+    && /capabilityPairPattern\.test\(value\)/.test(language)
+  const compositeEvidenceIdentity = /item\.artifactId === active\.evidenceRef/.test(history)
+    && /item\.version === active\.evidenceVersion/.test(history)
+    && /active\.evidencePayloadHash/.test(history)
+    && /item\.payloadHash === active\.evidencePayloadHash/.test(history)
+  const retconPlanUserSurface = !/\bRetconPlan\b/.test(demoPort)
+  const browserEvidenceFixtures = /productUxEvidenceMode/.test(assistant)
+    && /m11/.test(assistant)
+    && /productUxEvidenceMode/.test(history)
+    && /m12/.test(history)
+    && /productUxEvidenceMode/.test(production)
+    && /m13/.test(production)
+    && /m14-stale/.test(production)
+    && /m14-blocked/.test(production)
+    && /m14-error/.test(production)
   const checks = {
     active_ui_language: missing.length === 0 && visibleLeaks.length === 0,
     presentation_mapping: /commandMessage/.test(feedback) && /productErrorMessage/.test(library) && /scopeLabel/.test(history) && /statusLabel/.test(canon) && /productErrorMessage/.test(production) && /sanitizeProductText/.test(volume) && /versionReason/.test(reader) && /export function (?:statusLabel|productErrorMessage|receiptSummary)/.test(language),
@@ -105,6 +122,10 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     assistant_dynamic_leakage: /containsInternalProductToken/.test(assistantPresentation) && /safeAssistantFallback/.test(assistantPresentation),
     b12_evidence_data_separation: evidenceDataSeparation,
     evidence_selection_identity: evidenceSelectionIdentity,
+    dynamic_capability_leakage: dynamicCapabilityCoverage && /containsInternalProductToken/.test(language),
+    composite_evidence_identity: compositeEvidenceIdentity,
+    retcon_plan_user_surface: retconPlanUserSurface,
+    browser_evidence_fixtures: browserEvidenceFixtures,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
     future_feature_boundary: /UnavailableFeature/.test(router) && !/LongFormHealth/.test(router) && Boolean(sourceReader('src/ui/pages/LongFormHealth.vue')),
@@ -116,7 +137,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     return count > 0 ? [{ file: item.relative, count }] : []
   })
   const result = {
-    schema: 'post-b12-product-ux-gate-r1',
+    schema: 'post-b12-product-ux-gate-r1-r2',
     sourceCommit: sourceCommit(),
     activeUserSurface: { files: ACTIVE_USER_SURFACE, missing, visibleLeaks, status: checks.active_ui_language ? 'PASS' : 'FAIL' },
     presentationMapping: { status: checks.presentation_mapping ? 'PASS' : 'FAIL' },
@@ -125,6 +146,10 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     assistantDynamicLeakage: { status: checks.assistant_dynamic_leakage ? 'PASS' : 'FAIL', verifiedBy: 'runtime Assistant fixtures in verify:product-ux' },
     b12EvidenceDataSeparation: { status: checks.b12_evidence_data_separation ? 'PASS' : 'FAIL', verifiedBy: 'B12 flow raw-value assertions' },
     evidenceSelectionIdentity: { status: checks.evidence_selection_identity ? 'PASS' : 'FAIL', verifiedBy: 'History stable selector checks' },
+    dynamicCapabilityLeakage: { status: checks.dynamic_capability_leakage ? 'PASS' : 'FAIL', verifiedBy: 'bare capability production presentation fixtures' },
+    compositeEvidenceIdentity: { status: checks.composite_evidence_identity ? 'PASS' : 'FAIL', verifiedBy: 'History artifact/version/hash restoration boundary' },
+    retconPlanUserSurface: { status: checks.retcon_plan_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'browser demo user-visible copy scan' },
+    browserEvidenceFixtures: { status: checks.browser_evidence_fixtures ? 'PASS' : 'FAIL', verifiedBy: 'explicit demo-only M11-M14 route fixtures' },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'] },
