@@ -1,0 +1,20 @@
+{
+  "schema": "b13-prebatch-freeze-r1",
+  "baselineCommit": "cd240a7cc0d079c2e2ae09dcdbb3ed73fa48b617",
+  "prdR2Sha256": "2bec0a910c809c7c62b228c5bf8b88348ec8a1857a5a987e2908dc40069a2c06",
+  "batch": "B13",
+  "scope": "Long-form Health / 长篇健康治理",
+  "frozenThrough": "B12",
+  "doNotStart": ["B14", "B15", "RC1"],
+  "healthIsProjection": true,
+  "skillS43": {
+    "id": "S43",
+    "version": "1.2.0",
+    "skillSha256": "5e3d4cc7f70eacd926e9b1fce355b1eb76df141c00b5f4756fae3859a3aecfe2",
+    "manifestSha256": "18715cab419e20fc552685c1160049d731d91fa9d4bb42d00783af4e21e31e1b",
+    "hardAuthority": false,
+    "directAuthorityAccess": "NONE_DIRECT",
+    "controlDecisionAuthority": false
+  },
+  "status": "PASS"
+}
