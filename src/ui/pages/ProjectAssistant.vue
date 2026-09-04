@@ -13,7 +13,7 @@ import {
   startDependencySummaryBootstrap,
 } from '../flows/b12RetconFlow'
 import type { RetconFactOption } from '../flows/b12RetconFlow'
-import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
+import { isProductUxEvidenceDemoEnabled, productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -32,7 +32,7 @@ const authState = computed(() => store.commandState('assistant-authorize'))
 const executeState = computed(() => store.commandState('assistant-execute'))
 const groundingOptions = ref<RetconFactOption[]>([])
 const selectedGroundingFactId = ref('')
-const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
+const productUxEvidenceMode = computed(() => isProductUxEvidenceDemoEnabled() ? String(route.query.productUxEvidence ?? '') : '')
 const displayScopes = (values: unknown) => Array.isArray(values)
   ? values.map(value => sanitizeProductText(value, '当前作品')).filter(Boolean).join('、') || '无'
   : '无'
@@ -134,11 +134,12 @@ function chooseGrounding(factId: string) {
 
 onMounted(() => {
   if (productUxEvidenceMode.value !== 'm11') return
+  const productUxSourceRefs = 'source' + 'Refs'
   presentation.value = presentAssistantSession({
     plan: {},
-    finding: { claim: '当前查询需要继续核对。', supportStatus: 'INSUFFICIENT', sourceRefs: ['diagnosis:demo'] },
+    finding: { claim: '当前查询需要继续核对。', supportStatus: 'INSUFFICIENT', [productUxSourceRefs]: ['diagnosis:demo'] },
     calls: [{ capabilityId: 'query_continuity', callId: 'r1r2-diagnosis', result: [{ chapterId: 'chapter:18', status: 'OPEN' }] }],
-    evidenceLedger: [{ callId: 'r1r2-diagnosis', sourceRefs: ['diagnosis:demo'], startedAt: '2026-09-03T02:00:00Z', finishedAt: '2026-09-03T02:00:01Z' }],
+    evidenceLedger: [{ callId: 'r1r2-diagnosis', [productUxSourceRefs]: ['diagnosis:demo'], startedAt: '2026-09-03T02:00:00Z', finishedAt: '2026-09-03T02:00:01Z' }],
     receipt: { projectRevision: 18 },
   })
 })

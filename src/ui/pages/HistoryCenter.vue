@@ -7,11 +7,11 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { confirmRetconPlan, createRetconPlan, createRetconProposal, monitorDependencySummary, startDependencySummaryBootstrap, type DependencySummaryStatus, type RetconDraft, type RetconPlanView } from '../flows/b12RetconFlow'
 import type { RetconContextProjection } from '../../application/contracts'
-import { changeStatusLabel, evidenceDisplayLabel, evidenceSelector, productErrorMessage, sanitizeProductText, selectEvidenceBySelector, scopeLabel } from '../presentation/productLanguage'
+import { changeStatusLabel, evidenceDisplayLabel, evidenceSelector, isProductUxEvidenceDemoEnabled, productErrorMessage, sanitizeProductText, selectEvidenceBySelector, scopeLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
-const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
+const productUxEvidenceMode = computed(() => isProductUxEvidenceDemoEnabled() ? String(route.query.productUxEvidence ?? '') : '')
 type HistoryKind = 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
 const filters: { value: HistoryKind; label: string }[] = [
   { value: 'all', label: '全部' },

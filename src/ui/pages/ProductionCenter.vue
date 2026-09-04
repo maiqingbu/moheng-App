@@ -6,7 +6,7 @@ import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
-import { productErrorMessage, receiptSummary, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -25,7 +25,7 @@ const detailLabel = (value: unknown, fallback = '当前状态已查询。') => s
 const scopeLabel = (value: unknown) => /^[A-Z_]+$/.test(String(value)) ? productScopeLabel(value) : sanitizeProductText(value, '当前作品')
 const dimensionLabel = (value: unknown) => ({ agency: '主角主动性', desire: '主角欲望', hook: '开篇吸引力', pacing: '节奏', voice: '叙事声音', dialogue: '对话', subtext: '潜台词', repetition: '重复风险', exposition: '信息呈现', emotionalPayoff: '情绪回报' } as Record<string, string>)[String(value)] ?? '叙事维度'
 const historicalB10Terms = ['ReaderDesire', 'SOFT 质量评估', 'HARD Gate']
-const productUxEvidenceMode = computed(() => import.meta.env.VITE_BROWSER_DEMO === 'true' ? String(route.query.productUxEvidence ?? '') : '')
+const productUxEvidenceMode = computed(() => isProductUxEvidenceDemoEnabled() ? String(route.query.productUxEvidence ?? '') : '')
 const productUxReceipt = computed(() => receiptSummary({ finalStatus: 'committed', result: { status: 'VERIFIED' } }))
 const productUxStateTitle = computed(() => productUxEvidenceMode.value === 'm14-stale' ? '需要重新确认'
   : productUxEvidenceMode.value === 'm14-blocked' ? '暂时无法继续'
