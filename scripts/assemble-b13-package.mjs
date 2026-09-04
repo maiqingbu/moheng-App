@@ -147,7 +147,7 @@ if (process.argv.includes('--preflight')) {
   fs.writeFileSync(path.join(manifestRoot, 'GIT_SNAPSHOT.txt'), `HEAD=${sourceCommit}\nBASELINE=${baselineCommit}\ngit status --porcelain\n${git(['status', '--porcelain'])}\ngit diff --name-status BASELINE..HEAD\n${diffNames}\ngit diff --stat BASELINE..HEAD\n${diffStat}\n`)
   fs.writeFileSync(path.join(manifestRoot, 'CHANGED_FILES.txt'), `${diffNames}\n`)
   fs.writeFileSync(path.join(manifestRoot, 'CHANGED_FILES.json'), `${JSON.stringify(JSON.parse(fs.readFileSync(path.join(evidenceRoot, 'B13_CHANGED_FILES.json'), 'utf8')), null, 2)}\n`)
-  const commandsSource = path.join(evidenceRoot, 'COMMANDS_EXECUTED.json')
+  const commandsSource = path.join(evidenceDir, 'COMMANDS_EXECUTED.json')
   fs.copyFileSync(commandsSource, path.join(manifestRoot, 'COMMANDS_EXECUTED.json'))
   const environment = {
     OS: `${process.platform} ${process.arch}`,
