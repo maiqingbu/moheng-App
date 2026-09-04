@@ -7,16 +7,16 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
 
-test('B12 activates the frozen History workspace while keeping Health unavailable', () => {
+test('B12 History remains active and B13 Health now uses its formal workspace', () => {
   const router = read('src/app/router.ts')
   const shell = read('src/ui/components/AppShell.vue')
   assert.match(router, /HistoryCenter/)
   assert.match(router, /path:\s*['"]\/projects\/:id\/history['"]/) 
-  assert.match(router, /path:\s*['"]\/projects\/:id\/health['"].*UnavailableFeature/)
+  assert.match(router, /path:\s*['"]\/projects\/:id\/health['"].*LongFormHealth/)
   assert.match(shell, /版本与变更记录/)
   assert.match(shell, /match: 'history'/)
   assert.match(shell, /长篇健康/)
-  assert.match(shell, /disabled: true/)
+  assert.match(shell, /\/health/)
 })
 
 test('B12 has one formal Change/Retcon owner and no future batch owner', () => {
@@ -37,4 +37,3 @@ test('B12 keeps assistant and UI on execute_command rather than a second write p
   assert.match(history, /change_request_apply/)
   assert.doesNotMatch(`${assistant}\n${history}`, /SELECT\s|INSERT\s|UPDATE\s|DELETE\s|rusqlite|libsql/i)
 })
-

@@ -131,6 +131,11 @@
       "name": "budget",
       "path": "schemas/production/budget.schema.json",
       "version": "m0a.budget.v1"
+    },
+    {
+      "name": "long-form-health-projection-r1",
+      "path": "schemas/health/long-form-health-projection-r1.schema.json",
+      "version": "r1.long-form-health-projection.v1"
     }
   ],
   "artifactStatus": [

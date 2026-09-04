@@ -54,11 +54,12 @@ test('active product UI maps dynamic status and error values before display', ()
   assert.doesNotMatch(library, /\{\{\s*store\.(?:loadError)|\{\{\s*item\.readError\s*\}\}/)
 })
 
-test('future health shell stays explicitly deferred instead of becoming an active UX gate', () => {
+test('B13 health workspace is active behind the formal backend query', () => {
   const router = read('src/app/router.ts')
   const health = read('src/ui/pages/LongFormHealth.vue')
-  assert.match(router, /UnavailableFeature/)
-  assert.match(health, /义务 ID/)
+  assert.match(router, /LongFormHealth/)
+  assert.doesNotMatch(router.split('\n').find(line => line.includes('/projects/:id/health')) ?? '', /UnavailableFeature/)
+  assert.match(health, /八类健康因素/)
 })
 
 test('browser demo keeps internal RetconPlan naming out of user-visible copy', () => {

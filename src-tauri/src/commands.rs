@@ -643,11 +643,11 @@ pub fn query_book_health_impl(state: &KernelState, request: Value) -> Result<Val
     let limit = request
         .get("pageSize")
         .and_then(Value::as_u64)
-        .unwrap_or(50);
+        .unwrap_or(30);
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            crate::repositories::ui_projection::book_health(connection, project_id, cursor, limit)
+            crate::health::query_book_health(connection, project_id, cursor, limit)
                 .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
         .map_err(|error| error.to_string())

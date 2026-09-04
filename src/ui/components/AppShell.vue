@@ -27,7 +27,7 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '决策收件箱', icon: '⌁', to: `/projects/${id.value}/decisions`, match: 'decisions', count: store.pendingDecisionCount },
   { label: '成品阅读', icon: '▤', to: `/projects/${id.value}/read`, match: 'read' },
   { label: '作品图谱', icon: '⌘', to: `/projects/${id.value}/graph`, match: 'graph' },
-  { label: '长篇健康', icon: '♡', to: '', match: 'health', disabled: true },
+  { label: '长篇健康', icon: '♡', to: `/projects/${id.value}/health`, match: 'health' },
   { label: '版本与变更记录', icon: '↺', to: `/projects/${id.value}/history`, match: 'history' }
 ] : [])
 </script>

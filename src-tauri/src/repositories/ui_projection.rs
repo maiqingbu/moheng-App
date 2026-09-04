@@ -244,40 +244,6 @@ pub fn canon(
     )
 }
 
-pub fn book_health(
-    connection: &Connection,
-    project_id: &str,
-    cursor: Option<&str>,
-    limit: u64,
-) -> Result<Value, UiProjectionError> {
-    let checked_at: String = connection.query_row(
-        "SELECT updated_at FROM project_meta WHERE project_id=?1",
-        [project_id],
-        |row| row.get(0),
-    )?;
-    let current_words: i64 = connection.query_row("SELECT COALESCE(SUM(word_count),0) FROM chapters WHERE project_id=?1 AND status='COMMITTED'", [project_id], |row| row.get(0))?;
-    let open_obligations: i64 = connection.query_row("SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1 AND lifecycle IN ('PROPOSED','APPROVED','PLANTED','PROGRESSING')", [project_id], |row| row.get(0))?;
-    let open_foreshadows: i64 = connection.query_row("SELECT COUNT(*) FROM foreshadows WHERE project_id=?1 AND status NOT IN ('RECOVERED','ABANDONED')", [project_id], |row| row.get(0))?;
-    let pending: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND outcome IN ('OPEN','PENDING')",
-        [project_id],
-        |row| row.get(0),
-    )?;
-    let score =
-        (100 - (pending * 4 + open_obligations.min(10) * 2 + open_foreshadows.min(10) * 2)).max(0);
-    let issues = if pending > 0 {
-        vec![
-            json!({"id":"pending-decisions","category":"主线","severity":"attention","title":"有待处理的项目决定","detail":"当前项目仍有待处理记录。","location":"当前作品","suggestedAction":"先处理待决定事项。"}),
-        ]
-    } else {
-        Vec::new()
-    };
-    let issue_page = page(issues, pending.min(1), offset(cursor), bound(limit, 50));
-    Ok(
-        json!({"score":score,"level":if score < 70 { "risk" } else if score < 90 { "attention" } else { "healthy" },"checkedAt":checked_at,"progressToEnding":0,"targetLength":"未设置","currentWords":current_words,"issues":issue_page,"counters":{"openObligations":open_obligations,"overdueObligations":0,"openForeshadows":open_foreshadows,"overdueForeshadows":0,"absentCharacters":0,"repeatedPatterns":0}}),
-    )
-}
-
 pub fn history(
     connection: &Connection,
     project_id: &str,

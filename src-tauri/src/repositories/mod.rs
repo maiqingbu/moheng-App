@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod change_retcon;
+pub mod health;
 pub mod narrative;
 pub mod ops;
 pub mod production;

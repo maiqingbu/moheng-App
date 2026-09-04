@@ -9,7 +9,6 @@ import type {
   CommandStatus,
   DecisionItem,
   FrontendPort,
-  HealthIssue,
   HistoryEntry,
   HistoryProjection,
   MarketStrategyProjection,
@@ -188,7 +187,12 @@ function deriveVolumes(record: DemoProjectRecord): VolumeSummary[] {
   }]
 }
 
-function healthIssues(record: DemoProjectRecord): HealthIssue[] {
+type DemoHealthSummaryIssue = {
+  severity: 'info' | 'attention' | 'risk'
+  [key: string]: unknown
+}
+
+function healthIssues(record: DemoProjectRecord): DemoHealthSummaryIssue[] {
   if (record.bundle.project.id === 'proj-river-archive') return []
   if (!record.bundle.project.committedChapters) return [
     { id:'health-start', category:'主线', severity:'info', title:'长篇健康将在正式章节产生后开始积累', detail:'当前仍处于战略或开篇阶段，没有足够正文样本判断长期漂移。', location:'全书', suggestedAction:'继续完成开篇准入与首卷规划。' }
@@ -199,6 +203,83 @@ function healthIssues(record: DemoProjectRecord): HealthIssue[] {
     { id:'health-repeat', category:'重复', severity:'attention', title:'“陌生人抛出身份谜语”模式已连续出现', detail:'悬疑钩子有效，但若继续使用同构揭示，会让惊奇感递减。', location:'第 1–3 章', suggestedAction:'下一次信息升级改为行动后果，而不是再次口头揭密。', advanced:{ dependencyType:'SOFT' } },
     { id:'health-impact', category:'修改影响', severity:'risk', title:'改动“玄机子知道真实姓名”会影响多处后文', detail:'这项设定同时连接师徒关系、断剑线和后续身份骗局，建议先做影响预览。', location:'故事规则 / 第一卷', suggestedAction:'从“版本 / 修改 / Retcon”创建变更请求。', advanced:{ dependencyType:'HARD', affectedEstimate:'12–18 个后续节点' } }
   ]
+}
+
+const DEMO_FACTOR_CODES = [
+  'OBLIGATION_OVERDUE', 'FORESHADOW_AGING', 'ROUTE_DRIFT', 'TASK_BLOCKAGE',
+  'CONTEXT_GROWTH', 'MODEL_COST_DRIFT', 'READER_DESIRE', 'QUALITY_DRIFT',
+] as const
+
+function demoHealthProjection(record: DemoProjectRecord): BookHealthProjection {
+  const hasChapters = record.bundle.project.committedChapters > 0
+  const hasAttention = record.bundle.project.id !== 'proj-river-archive'
+  type DemoFactor = BookHealthProjection['factors'][number]
+  const factorDefinitions: Array<[string, DemoFactor['truthClass'], DemoFactor['severity'], string]> = [
+    ['剧情义务', 'DETERMINISTIC_RUNTIME', hasAttention ? 'attention' : 'healthy', '卷工作区'],
+    ['伏笔节奏', 'DETERMINISTIC_RUNTIME', hasAttention ? 'attention' : 'healthy', '卷工作区'],
+    ['规划路线', 'DETERMINISTIC_RUNTIME', hasChapters ? (hasAttention ? 'attention' : 'healthy') : 'healthy', '卷工作区'],
+    ['任务推进', 'DETERMINISTIC_RUNTIME', 'healthy', '卷工作区'],
+    ['上下文规模', 'DETERMINISTIC_RUNTIME', hasChapters ? 'healthy' : 'attention', '创作中心'],
+    ['模型与成本', 'DETERMINISTIC_RUNTIME', hasChapters ? 'healthy' : 'attention', '创作中心'],
+    ['读者期待', 'SOFT_ADVISORY', hasChapters && hasAttention ? 'attention' : 'healthy', '卷工作区'],
+    ['质量趋势', 'SOFT_ADVISORY', hasChapters ? 'healthy' : 'attention', '创作中心'],
+  ]
+  const factors: DemoFactor[] = factorDefinitions.map(([label, truthClass, severity, destination], index) => {
+    const code = DEMO_FACTOR_CODES[index]
+    const insufficient = !hasChapters && ['CONTEXT_GROWTH', 'MODEL_COST_DRIFT', 'QUALITY_DRIFT'].includes(code)
+    const status: DemoFactor['status'] = insufficient ? 'INSUFFICIENT_DATA' : 'EVALUATED'
+    return {
+      factorCode: code,
+      truthClass,
+      status,
+      severity,
+      summary: insufficient ? `${label}样本仍在积累` : `${label}已完成检查`,
+      detail: insufficient ? '完成更多正式章节后再判断长期趋势。' : '当前记录已完成确定性检查。',
+      sourceRefs: [],
+      recommendedDestination: destination,
+    }
+  })
+  const issues: BookHealthProjection['issues']['items'] = hasChapters && hasAttention ? [{
+    issueId: 'demo-health:foreshadow:1', factorCode: 'FORESHADOW_AGING', severity: 'attention',
+    title: '伏笔需要安排回收', detail: '请在卷工作区核对下一次有效回收的位置。', location: '第一卷中段', dueChapter: 12,
+    recommendedDestination: '卷工作区', sourceRefs: [],
+  }] : []
+  const evaluated = factors.filter(factor => factor.status === 'EVALUATED')
+  const score = evaluated.length ? Math.round(evaluated.reduce((sum, factor) => sum + (factor.severity === 'risk' ? 20 : factor.severity === 'attention' ? 60 : 100), 0) / evaluated.length) : 100
+  const level = factors.some(factor => factor.truthClass === 'DETERMINISTIC_RUNTIME' && factor.status === 'EVALUATED' && factor.severity === 'risk')
+    ? 'risk'
+    : factors.some(factor => factor.status === 'EVALUATED' && factor.severity !== 'healthy')
+      ? 'attention'
+      : 'healthy'
+  return clone({
+    payloadSchema: 'long-form-health-projection.r1',
+    projectId: record.bundle.project.id,
+    projectRevision: record.bundle.project.revision,
+    checkedAt: record.bundle.project.updatedAt,
+    score,
+    level,
+    coverage: {
+      totalFactors: 8,
+      evaluatedFactors: evaluated.length,
+      insufficientFactors: factors.filter(factor => factor.status === 'INSUFFICIENT_DATA').length,
+      unavailableFactors: 0,
+    },
+    factors,
+    issues: { items: issues, nextCursor: null, total: issues.length },
+    counters: {
+      openObligations: hasChapters ? 12 : 0,
+      overdueObligations: 0,
+      openForeshadows: hasChapters ? 3 : 0,
+      overdueForeshadows: hasChapters ? 1 : 0,
+      blockedRequiredTasks: 0,
+      blockedOptionalTasks: 0,
+      overdueReaderDesires: 0,
+      qualitySamples: hasChapters ? 20 : 0,
+      comparableContextRuns: hasChapters ? 16 : 0,
+      comparableCostRuns: hasChapters ? 8 : 0,
+    },
+    provenance: { queryMode: 'ON_DEMAND', cacheMode: 'NO_CACHE', sourceRevision: record.bundle.project.revision, bounded: true, fullManuscriptScan: false, factorSources: {} },
+  })
 }
 
 function historyEntries(record: DemoProjectRecord): HistoryEntry[] {
@@ -453,18 +534,10 @@ export class BrowserDemoPort implements FrontendPort {
   async queryBookHealth(request: ProjectQueryRequest): Promise<BookHealthProjection> {
     await wait(45)
     const record = this.record(request.projectId)
-    const issues = healthIssues(record)
-    const hasRisk = issues.some(i => i.severity === 'risk')
-    const hasAttention = issues.some(i => i.severity === 'attention')
+    const projection = demoHealthProjection(record)
     return clone({
-      score: record.bundle.project.phase === 'COMPLETED' ? 94 : hasRisk ? 73 : hasAttention ? 84 : 91,
-      level: record.bundle.project.phase === 'COMPLETED' ? 'healthy' : hasRisk ? 'risk' : hasAttention ? 'attention' : 'healthy',
-      checkedAt: record.bundle.project.updatedAt,
-      progressToEnding: record.bundle.project.phase === 'COMPLETED' ? 100 : Math.min(92, Math.round(record.bundle.project.progress * .72)),
-      targetLength:'120–180 万字',
-      currentWords: record.bundle.chapters.filter(ch => ch.status === 'official').reduce((s, ch) => s + ch.wordCount, 0),
-      issues: page(issues, request, 50),
-      counters:{ openObligations:record.bundle.project.phase === 'COMPLETED' ? 0 : 12, overdueObligations:0, openForeshadows:record.bundle.project.phase === 'COMPLETED' ? 0 : 3, overdueForeshadows:record.bundle.project.phase === 'COMPLETED' ? 0 : 1, absentCharacters:record.bundle.project.phase === 'COMPLETED' ? 0 : 1, repeatedPatterns:record.bundle.project.phase === 'COMPLETED' ? 0 : 1 }
+      ...projection,
+      issues: page(projection.issues.items, request, 30),
     })
   }
 

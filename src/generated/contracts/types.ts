@@ -506,3 +506,80 @@ export interface Budget {
   "strategySearchBudget": number
   "frozenAt": Rfc3339Utc
 }
+
+export interface HealthSourceRef {
+  "kind": string
+  "ref": string
+}
+
+export interface HealthFactor {
+  "factorCode": "OBLIGATION_OVERDUE" | "FORESHADOW_AGING" | "ROUTE_DRIFT" | "TASK_BLOCKAGE" | "CONTEXT_GROWTH" | "MODEL_COST_DRIFT" | "READER_DESIRE" | "QUALITY_DRIFT"
+  "truthClass": "DETERMINISTIC_RUNTIME" | "SOFT_ADVISORY"
+  "status": "EVALUATED" | "INSUFFICIENT_DATA" | "SOURCE_UNAVAILABLE"
+  "severity": "healthy" | "attention" | "risk"
+  "summary": string
+  "detail": string
+  "sourceRefs": Array<HealthSourceRef>
+  "recommendedDestination": string
+}
+
+export interface HealthIssue {
+  "issueId": string
+  "factorCode": "OBLIGATION_OVERDUE" | "FORESHADOW_AGING" | "ROUTE_DRIFT" | "TASK_BLOCKAGE" | "CONTEXT_GROWTH" | "MODEL_COST_DRIFT" | "READER_DESIRE" | "QUALITY_DRIFT"
+  "severity": "healthy" | "attention" | "risk"
+  "title": string
+  "detail": string
+  "location": string
+  "dueChapter"?: number | null
+  "recommendedDestination": string
+  "sourceRefs": Array<HealthSourceRef>
+}
+
+export interface HealthIssuesPage {
+  "items": Array<HealthIssue>
+  "nextCursor": string | null
+  "total": number
+}
+
+export interface HealthCoverage {
+  "totalFactors": number
+  "evaluatedFactors": number
+  "insufficientFactors": number
+  "unavailableFactors": number
+}
+
+export interface HealthCounters {
+  "openObligations": number
+  "overdueObligations": number
+  "openForeshadows": number
+  "overdueForeshadows": number
+  "blockedRequiredTasks": number
+  "blockedOptionalTasks": number
+  "overdueReaderDesires": number
+  "qualitySamples": number
+  "comparableContextRuns": number
+  "comparableCostRuns": number
+}
+
+export interface HealthProvenance {
+  "queryMode": "ON_DEMAND"
+  "cacheMode": "PROJECTION_ONLY" | "NO_CACHE"
+  "sourceRevision": number
+  "bounded": boolean
+  "fullManuscriptScan": boolean
+  "factorSources": Record<string, Array<HealthSourceRef>>
+}
+
+export interface LongFormHealthProjectionR1 {
+  "payloadSchema": string
+  "projectId": string
+  "projectRevision": number
+  "checkedAt": string
+  "score": number
+  "level": "healthy" | "attention" | "risk"
+  "coverage": { "totalFactors": number; "evaluatedFactors": number; "insufficientFactors": number; "unavailableFactors": number }
+  "factors": Array<HealthFactor>
+  "issues": HealthIssuesPage
+  "counters": HealthCounters
+  "provenance": HealthProvenance
+}

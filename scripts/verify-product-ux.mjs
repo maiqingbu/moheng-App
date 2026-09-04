@@ -28,6 +28,7 @@ export const ACTIVE_USER_SURFACE = [
   'src/ui/pages/UnavailableFeature.vue',
   'src/ui/pages/VolumeManager.vue',
   'src/ui/pages/VolumeWorkspace.vue',
+  'src/ui/pages/LongFormHealth.vue',
 ]
 
 const forbiddenVisiblePatterns = [
@@ -38,6 +39,7 @@ const forbiddenVisiblePatterns = [
   /\b(?:projectId|artifactId|payloadHash|sourceCommit|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|ownerReceiptRef)\b/i,
   /\b(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED)\b/,
   /\b(?:CommitBundle|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|CommitService|RepairPlan|CandidatePatch|RepairSuggestion|RuntimeCheckRequest|RetconPlan)\b/,
+  /\b(?:OBLIGATION_OVERDUE|FORESHADOW_AGING|ROUTE_DRIFT|TASK_BLOCKAGE|CONTEXT_GROWTH|MODEL_COST_DRIFT|READER_DESIRE|QUALITY_DRIFT|SOURCE_UNAVAILABLE|INSUFFICIENT_DATA)\b/,
   /\bCanon\b/,
   /根据架构要求|正式实现必须|不常驻页面内存|AI 推荐理由|根据你提供的上下文|作为 AI|以下是详细分析|希望这些建议/,
 ]
@@ -89,6 +91,9 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const flow = sourceReader('src/ui/flows/b12RetconFlow.ts')
   const demoPort = sourceReader('src/infrastructure/browser-demo/demoPort.ts')
   const router = sourceReader('src/app/router.ts')
+  const healthPage = sourceReader('src/ui/pages/LongFormHealth.vue')
+  const healthLanguage = sourceReader('src/ui/presentation/healthLanguage.ts')
+  const healthRoute = router.split('\n').find(line => line.includes('/projects/:id/health')) ?? ''
   const dynamicTokenCoverage = /export function containsInternalProductToken/.test(language)
     && /containsInternalProductToken\(raw\)/.test(language)
     && /Rust/.test(language)
@@ -132,7 +137,8 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     canon_user_surface: canonUserSurface,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
-    future_feature_boundary: /UnavailableFeature/.test(router) && !/LongFormHealth/.test(router) && Boolean(sourceReader('src/ui/pages/LongFormHealth.vue')),
+    b13_health_surface: /LongFormHealth\.vue/.test(router) && /factorLabel/.test(healthPage) && /statusLabel/.test(healthPage) && /factorLabel/.test(healthLanguage) && /issueKey/.test(healthLanguage),
+    future_feature_boundary: /LongFormHealth/.test(healthRoute) && !/UnavailableFeature/.test(healthRoute) && Boolean(healthPage),
   }
   const internalCodeOnly = activeFiles.flatMap(item => {
     const source = item.source
@@ -157,7 +163,8 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     canonUserSurface: { status: checks.canon_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'user-visible summary/impact/message surface scan', detectedDisplayLeak: canonDisplayLeak },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
-    futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'] },
+    futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'], note: 'B13 formal health workspace is active.' },
+    b13HealthSurface: { status: checks.b13_health_surface ? 'PASS' : 'FAIL', route: healthRoute },
     internalCodeOnly,
     allowedProviderTerms: ['OpenAI Compatible', 'API Endpoint', 'API Key'],
     checks: Object.fromEntries(Object.entries(checks).map(([name, passed]) => [name, passed ? 'PASS' : 'FAIL'])),

@@ -1,0 +1,26 @@
+{
+  "payloadSchema": "long-form-health-projection.r1",
+  "projectId": "project:b13:fixture",
+  "projectRevision": 12,
+  "checkedAt": "2026-09-04T02:00:00Z",
+  "score": 60,
+  "level": "attention",
+  "coverage": { "totalFactors": 8, "evaluatedFactors": 6, "insufficientFactors": 2, "unavailableFactors": 0 },
+  "factors": [
+    { "factorCode": "OBLIGATION_OVERDUE", "truthClass": "DETERMINISTIC_RUNTIME", "status": "EVALUATED", "severity": "risk", "summary": "有一项剧情义务已到处理节点", "detail": "请在对应卷工作区核对处理安排。", "sourceRefs": [{ "kind": "obligation", "ref": "obligation:b13:1" }], "recommendedDestination": "卷工作区" },
+    { "factorCode": "FORESHADOW_AGING", "truthClass": "DETERMINISTIC_RUNTIME", "status": "EVALUATED", "severity": "healthy", "summary": "伏笔回收节奏稳定", "detail": "当前明确窗口内的伏笔均在可控范围。", "sourceRefs": [{ "kind": "foreshadow", "ref": "foreshadow:b13:1" }], "recommendedDestination": "卷工作区" },
+    { "factorCode": "ROUTE_DRIFT", "truthClass": "DETERMINISTIC_RUNTIME", "status": "EVALUATED", "severity": "attention", "summary": "规划路线需要复核", "detail": "当前路线与项目进度存在轻微偏差。", "sourceRefs": [{ "kind": "volume-plan", "ref": "volume-plan:b13:1" }], "recommendedDestination": "卷工作区" },
+    { "factorCode": "TASK_BLOCKAGE", "truthClass": "DETERMINISTIC_RUNTIME", "status": "EVALUATED", "severity": "healthy", "summary": "任务推进正常", "detail": "没有发现需要立即处理的阻塞任务。", "sourceRefs": [{ "kind": "task", "ref": "task:b13:1" }], "recommendedDestination": "卷工作区" },
+    { "factorCode": "CONTEXT_GROWTH", "truthClass": "DETERMINISTIC_RUNTIME", "status": "INSUFFICIENT_DATA", "severity": "attention", "summary": "上下文样本仍在积累", "detail": "完成更多同类运行后再判断趋势。", "sourceRefs": [], "recommendedDestination": "创作中心" },
+    { "factorCode": "MODEL_COST_DRIFT", "truthClass": "DETERMINISTIC_RUNTIME", "status": "EVALUATED", "severity": "healthy", "summary": "模型与成本趋势稳定", "detail": "当前可比较运行未显示明显偏差。", "sourceRefs": [{ "kind": "model-run", "ref": "model-run:b13:1" }], "recommendedDestination": "创作中心" },
+    { "factorCode": "READER_DESIRE", "truthClass": "SOFT_ADVISORY", "status": "INSUFFICIENT_DATA", "severity": "attention", "summary": "读者期待样本仍在积累", "detail": "当前没有足够的正式记录形成趋势判断。", "sourceRefs": [], "recommendedDestination": "卷工作区" },
+    { "factorCode": "QUALITY_DRIFT", "truthClass": "SOFT_ADVISORY", "status": "EVALUATED", "severity": "healthy", "summary": "质量趋势稳定", "detail": "近期质量记录与基线相近。", "sourceRefs": [{ "kind": "quality", "ref": "quality:b13:1" }], "recommendedDestination": "创作中心" }
+  ],
+  "issues": {
+    "items": [{ "issueId": "health:b13:obligation:1", "factorCode": "OBLIGATION_OVERDUE", "severity": "risk", "title": "剧情义务需要处理", "detail": "这项安排已经到达预定处理节点。", "location": "第 12 章附近", "dueChapter": 12, "recommendedDestination": "卷工作区", "sourceRefs": [{ "kind": "obligation", "ref": "obligation:b13:1" }] }],
+    "nextCursor": null,
+    "total": 1
+  },
+  "counters": { "openObligations": 1, "overdueObligations": 1, "openForeshadows": 2, "overdueForeshadows": 0, "blockedRequiredTasks": 0, "blockedOptionalTasks": 0, "overdueReaderDesires": 0, "qualitySamples": 20, "comparableContextRuns": 16, "comparableCostRuns": 8 },
+  "provenance": { "queryMode": "ON_DEMAND", "cacheMode": "PROJECTION_ONLY", "sourceRevision": 12, "bounded": true, "fullManuscriptScan": false, "factorSources": {} }
+}

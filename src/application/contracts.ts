@@ -619,34 +619,10 @@ export interface VolumeLifecycleProjection {
   owner: string
 }
 
-export interface HealthIssue {
-  id: string
-  category: '主线' | '伏笔' | '角色' | '重复' | '卷目标' | '修改影响'
-  severity: 'info' | 'attention' | 'risk'
-  title: string
-  detail: string
-  location: string
-  suggestedAction: string
-  advanced?: Record<string, string>
-}
-
-export interface BookHealthProjection {
-  score: number
-  level: 'healthy' | 'attention' | 'risk'
-  checkedAt: string
-  progressToEnding: number
-  targetLength: string
-  currentWords: number
-  issues: PageResult<HealthIssue>
-  counters: {
-    openObligations: number
-    overdueObligations: number
-    openForeshadows: number
-    overdueForeshadows: number
-    absentCharacters: number
-    repeatedPatterns: number
-  }
-}
+/** B13 long-form health is a rebuildable projection, never an authority. */
+export type HealthIssue = import('../generated/contracts').HealthIssue
+export type LongFormHealthProjectionR1 = import('../generated/contracts').LongFormHealthProjectionR1
+export type BookHealthProjection = LongFormHealthProjectionR1
 
 export interface HistoryEntry {
   id: string
@@ -842,4 +818,11 @@ export type {
   VolumeProgressProjection,
   VolumeTask,
   VolumeExitStateR1,
+  HealthCoverage,
+  HealthCounters,
+  HealthFactor,
+  HealthIssue as GeneratedHealthIssue,
+  HealthIssuesPage,
+  HealthProvenance,
+  HealthSourceRef,
 } from '../generated/contracts'

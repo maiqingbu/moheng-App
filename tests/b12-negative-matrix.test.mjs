@@ -135,13 +135,13 @@ test('NEG-24 History reads use a real Tauri query boundary', () => {
   assert.match(read('src-tauri/src/commands.rs'), /query_change_request/)
 })
 
-test('NEG-25 Health remains unavailable in B12', () => {
-  assert.match(read('src/app/router.ts'), /health.*UnavailableFeature/)
+test('NEG-25 B13 Health is no longer an unavailable shell after its batch starts', () => {
+  assert.match(read('src/app/router.ts'), /health.*LongFormHealth/)
 })
 
 test('NEG-26 B12 only adds an additive migration after frozen 0001-0010', () => {
   const migrations = fs.readdirSync(path.join(root, 'src-tauri/migrations'))
-  assert.equal(migrations.filter(name => /^0012/.test(name)).length, 0)
+  assert.equal(migrations.filter(name => /^0012/.test(name)).length, 1)
   assert.equal(migrations.filter(name => /^0011/.test(name)).length, 1)
 })
 

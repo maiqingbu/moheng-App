@@ -19,7 +19,8 @@ test('B13 acceptance declares every blocking factor and boundary gate', () => {
 })
 
 test('B13 acceptance fails closed when any required gate is missing or failing', () => {
-  const report = { sourceCommit: 'a'.repeat(40), sourceBinding: 'PASS', gates: Object.fromEntries(REQUIRED_BLOCKING_GATES.map(name => [name, { status: 'PASS', exitCode: 0 }])) }
+  const sourceCommit = 'a'.repeat(40)
+  const report = { startCommit: 'b'.repeat(40), startCommitIsAncestor: true, sourceCommit, evidenceSourceCommit: sourceCommit, sourceCommitAfter: sourceCommit, workingTreeDirtyBefore: false, workingTreeDirtyAfter: false, excludedUncommittedPaths: [], sourceBinding: 'PASS', gates: Object.fromEntries(REQUIRED_BLOCKING_GATES.map(name => [name, { status: 'PASS', exitCode: 0 }])) }
   assert.equal(evaluateAcceptance(report).status, 'PASS')
   const missing = { ...report, gates: { ...report.gates } }
   delete missing.gates.factor_h08_quality

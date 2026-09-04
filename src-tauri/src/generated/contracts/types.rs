@@ -587,6 +587,87 @@ pub struct ReaderDesireDelta {
 
 pub type ReaderDesireDeltaPayloadJson = std::collections::BTreeMap<String, serde_json::Value>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthSourceRef {
+    pub kind: String,
+    pub ref_: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthFactor {
+    pub factor_code: String,
+    pub truth_class: String,
+    pub status: String,
+    pub severity: String,
+    pub summary: String,
+    pub detail: String,
+    pub source_refs: Vec<HealthSourceRef>,
+    pub recommended_destination: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthIssue {
+    pub issue_id: String,
+    pub factor_code: String,
+    pub severity: String,
+    pub title: String,
+    pub detail: String,
+    pub location: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_chapter: Option<i64>,
+    pub recommended_destination: String,
+    pub source_refs: Vec<HealthSourceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthIssuesPage {
+    pub items: Vec<HealthIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthCoverage {
+    pub total_factors: i64,
+    pub evaluated_factors: i64,
+    pub insufficient_factors: i64,
+    pub unavailable_factors: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthCounters {
+    pub open_obligations: i64,
+    pub overdue_obligations: i64,
+    pub open_foreshadows: i64,
+    pub overdue_foreshadows: i64,
+    pub blocked_required_tasks: i64,
+    pub blocked_optional_tasks: i64,
+    pub overdue_reader_desires: i64,
+    pub quality_samples: i64,
+    pub comparable_context_runs: i64,
+    pub comparable_cost_runs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthProvenance {
+    pub query_mode: String,
+    pub cache_mode: String,
+    pub source_revision: i64,
+    pub bounded: bool,
+    pub full_manuscript_scan: bool,
+    pub factor_sources: HealthProvenanceFactorSources,
+}
+
+pub type HealthProvenanceFactorSources = std::collections::BTreeMap<String, Vec<HealthSourceRef>>;
+
 pub type NarrativeDefinitions = serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1038,4 +1119,29 @@ pub struct Budget {
     pub cost_budget_cents: i64,
     pub strategy_search_budget: i64,
     pub frozen_at: Rfc3339Utc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongFormHealthProjectionR1 {
+    pub payload_schema: String,
+    pub project_id: String,
+    pub project_revision: i64,
+    pub checked_at: String,
+    pub score: i64,
+    pub level: String,
+    pub coverage: LongFormHealthProjectionR1Coverage,
+    pub factors: Vec<HealthFactor>,
+    pub issues: HealthIssuesPage,
+    pub counters: HealthCounters,
+    pub provenance: HealthProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongFormHealthProjectionR1Coverage {
+    pub total_factors: i64,
+    pub evaluated_factors: i64,
+    pub insufficient_factors: i64,
+    pub unavailable_factors: i64,
 }

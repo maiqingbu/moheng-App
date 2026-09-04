@@ -13,8 +13,8 @@ import VolumeWorkspace from '../ui/pages/VolumeWorkspace.vue'
 import DecisionInbox from '../ui/pages/DecisionInbox.vue'
 import ManuscriptReader from '../ui/pages/ManuscriptReader.vue'
 import CanonGraph from '../ui/pages/CanonGraph.vue'
-import UnavailableFeature from '../ui/pages/UnavailableFeature.vue'
 import HistoryCenter from '../ui/pages/HistoryCenter.vue'
+import LongFormHealth from '../ui/pages/LongFormHealth.vue'
 import SettingsPage from '../ui/pages/SettingsPage.vue'
 
 export const router = createRouter({
@@ -35,7 +35,7 @@ export const router = createRouter({
     { path: '/projects/:id/decisions', name: 'decisions', component: DecisionInbox, meta: { scope: 'project' } },
     { path: '/projects/:id/read', name: 'read', component: ManuscriptReader, meta: { scope: 'project' } },
     { path: '/projects/:id/graph', name: 'graph', component: CanonGraph, meta: { scope: 'project' } },
-    { path: '/projects/:id/health', name: 'health', component: UnavailableFeature, meta: { scope: 'project', availability: 'unavailable' } },
+    { path: '/projects/:id/health', name: 'health', component: LongFormHealth, meta: { scope: 'project', availability: 'available' } },
     { path: '/projects/:id/history', name: 'history', component: HistoryCenter, meta: { scope: 'project', availability: 'available' } },
     { path: '/projects/:id/settings', name: 'project-settings', component: SettingsPage, meta: { scope: 'project' } },
     { path: '/settings', name: 'settings', component: SettingsPage, meta: { scope: 'global' } },

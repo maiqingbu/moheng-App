@@ -32,11 +32,11 @@ test('b11_frozen_ia_routes_preserved', () => {
   assert.match(router, /path:\s*['"]\/projects\/:id\/history['"]/, 'history route must remain in frozen IA')
 })
 
-test('b11_health_route_unavailable_before_b13', () => {
+test('b11_frozen_health_route_is superseded by B13 formal capability', () => {
   const router = read('src/app/router.ts')
   const healthRoute = router.split('\n').find(line => line.includes('/projects/:id/health')) ?? ''
-  assert.match(healthRoute, /UnavailableFeature/)
-  assert.doesNotMatch(healthRoute, /LongFormHealth|query_book_health/)
+  assert.match(healthRoute, /LongFormHealth/)
+  assert.doesNotMatch(healthRoute, /UnavailableFeature/)
 })
 
 test('b12_history_change_execution_is_active_after_b11_freeze', () => {
@@ -46,10 +46,10 @@ test('b12_history_change_execution_is_active_after_b11_freeze', () => {
   assert.doesNotMatch(historyRoute, /UnavailableFeature/)
 })
 
-test('b11_sidebar_preserves_frozen_ia_without_fake_capability', () => {
+test('b11_sidebar preserves the frozen IA while B13 enables health', () => {
   const shell = read('src/ui/components/AppShell.vue')
   assert.match(shell, /长篇健康/)
   assert.match(shell, /版本与变更记录/)
-  assert.match(shell, /尚未开放/)
+  assert.match(shell, /\/health/)
   assert.match(shell, /match: 'history'/)
 })

@@ -71,6 +71,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const chapterVersions = ref<PageResult<VersionProjection>>(emptyPage())
   const canon = ref<CanonProjection | null>(null)
   const health = ref<BookHealthProjection | null>(null)
+  const healthError = ref('')
   const history = ref<HistoryProjection | null>(null)
   const settings = ref<SettingsProjection | null>(null)
   const searchResults = ref<PageResult<SearchHit>>(emptyPage())
@@ -109,6 +110,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     chapterVersions.value = emptyPage()
     canon.value = null
     health.value = null
+    healthError.value = ''
     history.value = null
     settings.value = null
     searchResults.value = emptyPage()
@@ -234,9 +236,15 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (canon.value && !force) return canon.value
     return withWorkspace('graph', () => frontendPort.queryCanon(queryBase('graph:overview', 60)), v => { canon.value=v })
   }
-  async function loadHealth(force=false) {
-    if (health.value && !force) return health.value
-    return withWorkspace('health', () => frontendPort.queryBookHealth(queryBase('health', 50)), v => { health.value=v })
+  async function loadHealth(force=false, cursor: string | null = null) {
+    if (health.value && !force && cursor === null) return health.value
+    healthError.value = ''
+    try {
+      return await withWorkspace('health', () => frontendPort.queryBookHealth({ ...queryBase('health', 30), cursor }), v => { health.value=v })
+    } catch (error) {
+      healthError.value = error instanceof Error ? error.message : '暂时无法完成这一项检查。'
+      throw error
+    }
   }
   async function loadHistory(kind:'all'|'VERSION'|'CHANGE_REQUEST'|'RETCON'='all', force=false) {
     if (history.value && !force && kind==='all') return history.value
@@ -411,7 +419,7 @@ export const useProjectStore = defineStore('project-projection', () => {
 
   return {
     currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, decisions,
-    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, history, settings, searchResults, volumeLifecycle,
+    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthError, history, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
