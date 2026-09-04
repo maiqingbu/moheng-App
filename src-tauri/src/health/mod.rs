@@ -4,6 +4,7 @@
 //! and aggregation only; all database access is delegated to
 //! `repositories::health::HealthRepository`.
 
+use crate::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use crate::repositories::health::{
     HealthRepository, HealthRepositoryError, HealthSnapshot, QualitySample, RouteInput,
 };
@@ -137,20 +138,6 @@ fn factor_rank(code: &str) -> usize {
 
 fn source(kind: &str, reference: impl Into<String>) -> Value {
     json!({"kind": kind, "ref": reference.into()})
-}
-
-fn chapter_number(value: Option<&String>) -> Option<i64> {
-    let value = value?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    value
-        .strip_prefix("chapter:")
-        .or_else(|| value.strip_prefix("CHAPTER:"))
-        .unwrap_or(value)
-        .parse::<i64>()
-        .ok()
-        .filter(|number| *number >= 0)
 }
 
 fn median_i64(values: &[i64]) -> Option<i64> {
@@ -325,10 +312,63 @@ fn factor_with_sources(
         .with_sources(refs)
 }
 
+fn volume_location(
+    volume_no: Option<i64>,
+    title: Option<&str>,
+    source_unavailable: bool,
+) -> String {
+    let Some(volume_no) = volume_no.filter(|number| *number > 0) else {
+        return "相关分卷".to_string();
+    };
+    let title = title.map(str::trim).filter(|value| !value.is_empty());
+    if source_unavailable {
+        return "相关分卷".to_string();
+    }
+    title.map_or_else(
+        || format!("第 {volume_no} 卷"),
+        |title| format!("第 {volume_no} 卷 · {title}"),
+    )
+}
+
+fn route_is_formally_stale(route: &RouteInput, snapshot: &HealthSnapshot) -> bool {
+    if route.formal_stale {
+        return true;
+    }
+    match (
+        route.compiled_state_digest.as_deref(),
+        route.current_state_digest.as_deref(),
+    ) {
+        (Some(compiled), Some(current)) => matches!(
+            evaluate_plan_stale(
+                route.generated_revision,
+                compiled,
+                snapshot.project_revision,
+                current,
+            ),
+            PlanStaleStatus::PlanStale
+        ),
+        _ => false,
+    }
+}
+
 fn obligation_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>) {
     let mut issues = Vec::new();
     for obligation in &snapshot.obligations {
-        let Some(due) = chapter_number(obligation.deadline.as_ref()) else {
+        if obligation.source_unavailable {
+            issues.push(HealthIssue {
+                issue_id: format!("health:obligation:{}", obligation.obligation_id),
+                factor_code: "OBLIGATION_OVERDUE".to_string(),
+                severity: "attention".to_string(),
+                title: "剧情义务来源暂不可用".to_string(),
+                detail: "关联章节记录暂时无法读取，未将其误判为逾期。".to_string(),
+                location: "相关章节".to_string(),
+                due_chapter: None,
+                recommended_destination: "卷工作区".to_string(),
+                source_refs: vec![source("obligation", &obligation.obligation_id)],
+            });
+            continue;
+        }
+        let Some(due) = obligation.due_chapter_no else {
             continue;
         };
         if due > snapshot.current_chapter_no {
@@ -355,49 +395,66 @@ fn obligation_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
             source_refs: vec![source("obligation", &obligation.obligation_id)],
         });
     }
-    let severity = if snapshot.overdue_obligations == 0 {
-        "healthy"
-    } else if issues.iter().any(|issue| issue.severity == "risk")
-        || snapshot.overdue_obligations
-            > issues
-                .iter()
-                .filter(|issue| issue.severity == "attention")
-                .count() as i64
-    {
+    let status = snapshot.unavailable_obligations > 0;
+    let severity = if snapshot.overdue_obligations_authority_ab > 0 {
         "risk"
-    } else {
+    } else if snapshot.overdue_obligations_authority_c > 0 || status {
         "attention"
+    } else {
+        "healthy"
     };
-    let factor = factor_with_sources(
-        "OBLIGATION_OVERDUE",
-        "DETERMINISTIC_RUNTIME",
-        severity,
-        if severity == "healthy" {
-            "剧情义务节奏稳定"
-        } else {
-            "有剧情义务已到处理节点"
-        },
-        &format!(
-            "当前有 {} 项未完成剧情义务，其中 {} 项已到预定处理章节。",
-            snapshot.open_obligations, snapshot.overdue_obligations
-        ),
-        "卷工作区",
-        snapshot
-            .obligations
-            .iter()
-            .take(51)
-            .map(|item| source("obligation", &item.obligation_id))
-            .collect(),
-    );
+    let mut factor = if status {
+        HealthFactorResult::unavailable("OBLIGATION_OVERDUE", "DETERMINISTIC_RUNTIME", "卷工作区")
+    } else {
+        HealthFactorResult::evaluated("OBLIGATION_OVERDUE", "DETERMINISTIC_RUNTIME", severity)
+    };
+    factor = factor
+        .with_copy(
+            if severity == "healthy" {
+                "剧情义务节奏稳定"
+            } else if status {
+                "部分剧情义务来源需要核对"
+            } else {
+                "有剧情义务已到处理节点"
+            },
+            &format!(
+                "当前有 {} 项未完成剧情义务，其中 {} 项已到预定处理章节。",
+                snapshot.open_obligations, snapshot.overdue_obligations
+            ),
+            "卷工作区",
+        )
+        .with_sources(
+            snapshot
+                .obligations
+                .iter()
+                .take(51)
+                .map(|item| source("obligation", &item.obligation_id))
+                .collect(),
+        );
     (factor, issues)
 }
 
 fn foreshadow_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>) {
     let mut issues = Vec::new();
     for foreshadow in &snapshot.foreshadows {
-        let due = chapter_number(foreshadow.recover_window_end_chapter.as_ref());
+        if foreshadow.source_unavailable {
+            issues.push(HealthIssue {
+                issue_id: format!("health:foreshadow:{}", foreshadow.foreshadow_id),
+                factor_code: "FORESHADOW_AGING".to_string(),
+                severity: "attention".to_string(),
+                title: "伏笔来源暂不可用".to_string(),
+                detail: "关联回收章节记录暂时无法读取，未将其误判为逾期。".to_string(),
+                location: "相关章节".to_string(),
+                due_chapter: None,
+                recommended_destination: "卷工作区".to_string(),
+                source_refs: vec![source("foreshadow", &foreshadow.foreshadow_id)],
+            });
+            continue;
+        }
+        let due = foreshadow.end_chapter_no;
         let overdue = due.is_some_and(|chapter| chapter <= snapshot.current_chapter_no);
-        let stale_before_window = foreshadow.status == "STALE" && !overdue;
+        let stale_before_window = foreshadow.status == "STALE"
+            && due.is_some_and(|chapter| chapter > snapshot.current_chapter_no);
         if !overdue && !stale_before_window {
             continue;
         }
@@ -428,37 +485,44 @@ fn foreshadow_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
     }
     let severity = if snapshot.overdue_foreshadows > 0 {
         "risk"
-    } else if issues.iter().any(|issue| issue.severity == "attention") {
+    } else if snapshot.stale_not_overdue_foreshadows > 0 || snapshot.unavailable_foreshadows > 0 {
         "attention"
     } else {
         "healthy"
     };
-    let factor = factor_with_sources(
-        "FORESHADOW_AGING",
-        "DETERMINISTIC_RUNTIME",
-        severity,
-        if severity == "healthy" {
-            "伏笔回收节奏稳定"
-        } else {
-            "有伏笔需要安排回收"
-        },
-        &format!(
-            "当前有 {} 项活跃伏笔，其中 {} 项已越过明确回收窗口。",
-            snapshot.open_foreshadows, snapshot.overdue_foreshadows
-        ),
-        "卷工作区",
-        snapshot
-            .foreshadows
-            .iter()
-            .take(51)
-            .map(|item| source("foreshadow", &item.foreshadow_id))
-            .collect(),
-    );
+    let mut factor = if snapshot.unavailable_foreshadows > 0 {
+        HealthFactorResult::unavailable("FORESHADOW_AGING", "DETERMINISTIC_RUNTIME", "卷工作区")
+    } else {
+        HealthFactorResult::evaluated("FORESHADOW_AGING", "DETERMINISTIC_RUNTIME", severity)
+    };
+    factor = factor
+        .with_copy(
+            if severity == "healthy" {
+                "伏笔回收节奏稳定"
+            } else if snapshot.unavailable_foreshadows > 0 {
+                "部分伏笔来源需要核对"
+            } else {
+                "有伏笔需要安排回收"
+            },
+            &format!(
+                "当前有 {} 项活跃伏笔，其中 {} 项已越过明确回收窗口。",
+                snapshot.open_foreshadows, snapshot.overdue_foreshadows
+            ),
+            "卷工作区",
+        )
+        .with_sources(
+            snapshot
+                .foreshadows
+                .iter()
+                .take(51)
+                .map(|item| source("foreshadow", &item.foreshadow_id))
+                .collect(),
+        );
     (factor, issues)
 }
 
 fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>) {
-    if snapshot.routes.is_empty() {
+    if snapshot.route_scope_count == 0 {
         return (
             HealthFactorResult::insufficient("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", "卷工作区")
                 .with_copy(
@@ -470,17 +534,18 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
         );
     }
     let mut issues = Vec::new();
-    let mut risk = false;
-    let mut attention = false;
+    let mut risk =
+        snapshot.route_stale_scope_count > 0 || snapshot.route_capacity_risk_scope_count > 0;
+    let mut attention =
+        snapshot.route_capacity_attention_scope_count > 0 || snapshot.unavailable_routes > 0;
     let mut refs = Vec::new();
     for route in &snapshot.routes {
         let (capacity, required) = route_pressure(route);
-        let stale = route.generated_revision < snapshot.project_revision
-            || matches!(route.plan_state.as_str(), "STALE" | "PLAN_STALE");
+        let stale = route_is_formally_stale(route, snapshot);
         let capacity_risk = capacity == Some(0) && required.is_some_and(|value| value > 0);
         let capacity_attention = capacity.is_some_and(|value| value > 0 && value <= 8)
             && required.is_some_and(|value| value > 0);
-        if stale || capacity_risk || capacity_attention {
+        if route.source_unavailable || stale || capacity_risk || capacity_attention {
             let severity = if stale || capacity_risk {
                 "risk"
             } else {
@@ -488,7 +553,9 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
             };
             risk |= severity == "risk";
             attention |= severity == "attention";
-            let detail = if stale {
+            let detail = if route.source_unavailable {
+                "关联分卷记录暂时无法读取，未将其误判为路线风险。"
+            } else if stale {
                 "当前规划版本落后于项目最新变更，需要在卷工作区重新核对。"
             } else if capacity_risk {
                 "剩余章节容量已用尽，但仍有必需任务未完成。"
@@ -499,14 +566,20 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
                 issue_id: format!("health:route:{}", route.volume_id),
                 factor_code: "ROUTE_DRIFT".to_string(),
                 severity: severity.to_string(),
-                title: if stale {
+                title: if route.source_unavailable {
+                    "路线来源暂不可用"
+                } else if stale {
                     "规划路线需要重新核对"
                 } else {
                     "卷内安排需要留出空间"
                 }
                 .to_string(),
                 detail: detail.to_string(),
-                location: format!("第 {} 卷", route.volume_id),
+                location: volume_location(
+                    route.volume_no,
+                    route.volume_title.as_deref(),
+                    route.source_unavailable,
+                ),
                 due_chapter: capacity,
                 recommended_destination: "卷工作区".to_string(),
                 source_refs: vec![source("volume-plan", &route.volume_id)],
@@ -521,19 +594,24 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
     } else {
         "healthy"
     };
-    let factor = factor_with_sources(
-        "ROUTE_DRIFT",
-        "DETERMINISTIC_RUNTIME",
-        severity,
-        if severity == "healthy" {
-            "规划路线与当前进度相符"
-        } else {
-            "规划路线需要复核"
-        },
-        "这项结果只报告既有规划投影的状态，不会自动重新规划。",
-        "卷工作区",
-        refs,
-    );
+    let mut factor = if snapshot.unavailable_routes > 0 {
+        HealthFactorResult::unavailable("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", "卷工作区")
+    } else {
+        HealthFactorResult::evaluated("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", severity)
+    };
+    factor = factor
+        .with_copy(
+            if severity == "healthy" {
+                "规划路线与当前进度相符"
+            } else if snapshot.unavailable_routes > 0 {
+                "部分路线来源需要核对"
+            } else {
+                "规划路线需要复核"
+            },
+            "这项结果只报告既有规划投影的状态，不会自动重新规划。",
+            "卷工作区",
+        )
+        .with_sources(refs);
     (factor, issues)
 }
 
@@ -542,7 +620,9 @@ struct TaskInput {
     task_id: String,
     class: String,
     status: String,
-    volume_id: String,
+    volume_no: Option<i64>,
+    volume_title: Option<String>,
+    source_unavailable: bool,
 }
 
 fn collect_tasks(snapshot: &HealthSnapshot) -> Vec<TaskInput> {
@@ -583,7 +663,9 @@ fn collect_tasks(snapshot: &HealthSnapshot) -> Vec<TaskInput> {
                             .get(task_id)
                             .cloned()
                             .unwrap_or_else(|| "NOT_STARTED".to_string()),
-                        volume_id: route.volume_id.clone(),
+                        volume_no: route.volume_no,
+                        volume_title: route.volume_title.clone(),
+                        source_unavailable: route.source_unavailable,
                     },
                 );
             }
@@ -611,7 +693,7 @@ fn collect_tasks(snapshot: &HealthSnapshot) -> Vec<TaskInput> {
 
 fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>, i64, i64) {
     let tasks = collect_tasks(snapshot);
-    if snapshot.routes.is_empty() {
+    if snapshot.route_scope_count == 0 {
         return (
             HealthFactorResult::insufficient("TASK_BLOCKAGE", "DETERMINISTIC_RUNTIME", "卷工作区"),
             Vec::new(),
@@ -620,15 +702,10 @@ fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssu
         );
     }
     let mut issues = Vec::new();
-    let mut blocked_required = 0;
-    let mut blocked_optional = 0;
+    let blocked_required = snapshot.blocked_required_tasks;
+    let blocked_optional = snapshot.blocked_optional_tasks;
     for task in tasks.iter().filter(|task| task.status == "BLOCKED") {
         let required = matches!(task.class.as_str(), "REQUIRED" | "CLIMAX" | "RESERVED");
-        if required {
-            blocked_required += 1;
-        } else {
-            blocked_optional += 1;
-        }
         issues.push(HealthIssue {
             issue_id: format!("health:task:{}", task.task_id),
             factor_code: "TASK_BLOCKAGE".to_string(),
@@ -640,7 +717,14 @@ fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssu
             }
             .to_string(),
             detail: "请回到卷工作区核对任务条件与现实进度。".to_string(),
-            location: format!("{} 的卷内任务", task.volume_id),
+            location: format!(
+                "{} 的卷内任务",
+                volume_location(
+                    task.volume_no,
+                    task.volume_title.as_deref(),
+                    task.source_unavailable
+                )
+            ),
             due_chapter: None,
             recommended_destination: "卷工作区".to_string(),
             source_refs: vec![source("task", &task.task_id)],
@@ -808,7 +892,21 @@ fn quality_factor(snapshot: &HealthSnapshot) -> HealthFactorResult {
 fn reader_desire_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>) {
     let mut issues = Vec::new();
     for desire in &snapshot.reader_desires {
-        let Some(due) = chapter_number(desire.expected_payoff_chapter.as_ref()) else {
+        if desire.source_unavailable {
+            issues.push(HealthIssue {
+                issue_id: format!("health:reader-desire:{}", desire.desire_id),
+                factor_code: "READER_DESIRE".to_string(),
+                severity: "attention".to_string(),
+                title: "读者期待来源暂不可用".to_string(),
+                detail: "关联回应章节记录暂时无法读取，未将其误判为逾期。".to_string(),
+                location: "相关章节".to_string(),
+                due_chapter: None,
+                recommended_destination: "卷工作区".to_string(),
+                source_refs: vec![source("reader-desire", &desire.desire_id)],
+            });
+            continue;
+        }
+        let Some(due) = desire.payoff_chapter_no else {
             continue;
         };
         if due > snapshot.current_chapter_no {
@@ -829,32 +927,40 @@ fn reader_desire_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<H
             source_refs: vec![source("reader-desire", &desire.desire_id)],
         });
     }
-    let severity = if issues.is_empty() {
-        "healthy"
-    } else {
+    let severity = if snapshot.overdue_reader_desires > 0 || snapshot.unavailable_reader_desires > 0
+    {
         "attention"
+    } else {
+        "healthy"
     };
-    let factor = factor_with_sources(
-        "READER_DESIRE",
-        "SOFT_ADVISORY",
-        severity,
-        if issues.is_empty() {
-            "读者期待记录稳定"
-        } else {
-            "有读者期待到了回应节点"
-        },
-        &format!(
-            "当前有 {} 项未结束的读者期待，其中 {} 项已到预期回应章节。",
-            snapshot.open_reader_desires, snapshot.overdue_reader_desires
-        ),
-        "卷工作区",
-        snapshot
-            .reader_desires
-            .iter()
-            .take(51)
-            .map(|item| source("reader-desire", &item.desire_id))
-            .collect(),
-    );
+    let mut factor = if snapshot.unavailable_reader_desires > 0 {
+        HealthFactorResult::unavailable("READER_DESIRE", "SOFT_ADVISORY", "卷工作区")
+    } else {
+        HealthFactorResult::evaluated("READER_DESIRE", "SOFT_ADVISORY", severity)
+    };
+    factor = factor
+        .with_copy(
+            if severity == "healthy" {
+                "读者期待记录稳定"
+            } else if snapshot.unavailable_reader_desires > 0 {
+                "部分读者期待来源需要核对"
+            } else {
+                "有读者期待到了回应节点"
+            },
+            &format!(
+                "当前有 {} 项未结束的读者期待，其中 {} 项已到预期回应章节。",
+                snapshot.open_reader_desires, snapshot.overdue_reader_desires
+            ),
+            "卷工作区",
+        )
+        .with_sources(
+            snapshot
+                .reader_desires
+                .iter()
+                .take(51)
+                .map(|item| source("reader-desire", &item.desire_id))
+                .collect(),
+        );
     (factor, issues)
 }
 
