@@ -158,6 +158,11 @@ describe('R1-R1 行为证据', () => {
     expect(selectEvidenceBySelector(context.evidence, selectors[1])?.payloadHash).toBe('hash-raw-2')
     expect(selectEvidenceByIdentity(context.evidence, { artifactId: 'artifact:evidence:1', version: 4, payloadHash: 'hash-raw-2' })).toEqual(secondEvidence)
     expect(selectEvidenceByIdentity(context.evidence, { artifactId: 'artifact:evidence:1', version: 4, payloadHash: 'hash-raw-1' })).toBeUndefined()
+    const restoredEvidence = selectEvidenceByIdentity(context.evidence, { artifactId: 'artifact:evidence:1', version: 4, payloadHash: 'hash-raw-2' })
+    expect(restoredEvidence).toBeDefined()
+    await createRetconPlan(execute, { ...draft, evidenceRef: restoredEvidence!, impactDigest: 'i'.repeat(64) })
+    const restoredPlanPayload = calls.filter(request => request.type === 'retcon_plan_create').at(-1)?.payload?.evidenceRefs?.[0]
+    expect(restoredPlanPayload).toEqual(secondEvidence)
     writeEvidence('R1R1_B12_EVIDENCE_SEPARATION.json', {
       schema: 'r1r1-b12-evidence-separation',
       rawInputEvidence: rawEvidence,
@@ -171,6 +176,8 @@ describe('R1-R1 行为证据', () => {
       duplicateDisplayLabelsAreDistinct: new Set(displayLabels).size === 2,
       selectedPayloadHashes: selectors.map(selector => selectEvidenceBySelector(context.evidence, selector)?.payloadHash),
       compositeIdentityRestore: { artifactId: secondEvidence.artifactId, version: secondEvidence.version, payloadHash: secondEvidence.payloadHash },
+      restoredCommandPayloadEvidence: restoredPlanPayload,
+      restoredPayloadEqualsSelectedRaw: JSON.stringify(restoredPlanPayload) === JSON.stringify(secondEvidence),
       status: 'PASS',
     })
   })
