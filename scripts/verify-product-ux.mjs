@@ -38,6 +38,7 @@ const forbiddenVisiblePatterns = [
   /\b(?:projectId|artifactId|payloadHash|sourceCommit|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|ownerReceiptRef)\b/i,
   /\b(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED)\b/,
   /\b(?:CommitBundle|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|CommitService|RepairPlan|CandidatePatch|RepairSuggestion|RuntimeCheckRequest|RetconPlan)\b/,
+  /\bCanon\b/,
   /根据架构要求|正式实现必须|不常驻页面内存|AI 推荐理由|根据你提供的上下文|作为 AI|以下是详细分析|希望这些建议/,
 ]
 
@@ -114,6 +115,8 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     && /m14-stale/.test(production)
     && /m14-blocked/.test(production)
     && /m14-error/.test(production)
+  const canonDisplayLeak = /(?:summary|impact|message)\s*[:=][^\n]*\bCanon\b/.test(demoPort)
+  const canonUserSurface = !canonDisplayLeak
   const checks = {
     active_ui_language: missing.length === 0 && visibleLeaks.length === 0,
     presentation_mapping: /commandMessage/.test(feedback) && /productErrorMessage/.test(library) && /scopeLabel/.test(history) && /statusLabel/.test(canon) && /productErrorMessage/.test(production) && /sanitizeProductText/.test(volume) && /versionReason/.test(reader) && /export function (?:statusLabel|productErrorMessage|receiptSummary)/.test(language),
@@ -126,6 +129,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     composite_evidence_identity: compositeEvidenceIdentity,
     retcon_plan_user_surface: retconPlanUserSurface,
     browser_evidence_fixtures: browserEvidenceFixtures,
+    canon_user_surface: canonUserSurface,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
     future_feature_boundary: /UnavailableFeature/.test(router) && !/LongFormHealth/.test(router) && Boolean(sourceReader('src/ui/pages/LongFormHealth.vue')),
@@ -150,6 +154,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     compositeEvidenceIdentity: { status: checks.composite_evidence_identity ? 'PASS' : 'FAIL', verifiedBy: 'History artifact/version/hash restoration boundary' },
     retconPlanUserSurface: { status: checks.retcon_plan_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'browser demo user-visible copy scan' },
     browserEvidenceFixtures: { status: checks.browser_evidence_fixtures ? 'PASS' : 'FAIL', verifiedBy: 'explicit demo-only M11-M14 route fixtures' },
+    canonUserSurface: { status: checks.canon_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'user-visible summary/impact/message surface scan', detectedDisplayLeak: canonDisplayLeak },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'] },

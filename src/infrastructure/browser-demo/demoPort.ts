@@ -208,7 +208,7 @@ function historyEntries(record: DemoProjectRecord): HistoryEntry[] {
   }))
   if (record.bundle.project.id !== 'proj-moheng-demo') return fromVersions
   return [
-    { id:'chg-001', kind:'CHANGE_REQUEST', title:'增强第三章主角主动性', status:'impact_ready', createdAt:'2026-08-23 23:20', summary:'保持身份信息不变，调整主角在雨夜来客场景中的主动试探与反击。', impact:'预计只影响第 3 章与开篇评估，不改变已提交 Canon。', scope:'第 3 章 / Opening', receipt:undefined },
+    { id:'chg-001', kind:'CHANGE_REQUEST', title:'增强第三章主角主动性', status:'impact_ready', createdAt:'2026-08-23 23:20', summary:'保持身份信息不变，调整主角在雨夜来客场景中的主动试探与反击。', impact:'预计只影响第 3 章与开篇评估，不改变已经确认的正式事实。', scope:'第 3 章 / Opening', receipt:undefined },
     { id:'retcon-001', kind:'RETCON', title:'示例：调整玄机子掌握真名的时间点', status:'draft', createdAt:'2026-08-23 22:52', summary:'这是尚未应用的事实修订方案示例，重大正式事实不能普通保存覆盖。', impact:'预计影响师徒关系、断剑证据与第一卷后段伏笔。', scope:'正式事实 / 第一卷' },
     ...fromVersions
   ]
