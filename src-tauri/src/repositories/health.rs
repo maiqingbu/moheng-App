@@ -36,7 +36,9 @@ WITH route_rows AS (
       WHERE sq.project_id=l.project_id AND sq.processed=0
         AND sq.target_ref IN (l.volume_id, l.route_plan_artifact_id)
     ) THEN 1 ELSE 0 END AS pending_stale,
-    CASE WHEN v.volume_id IS NULL THEN 1 ELSE 0 END AS source_unavailable
+    CASE WHEN v.volume_id IS NULL
+              OR (l.route_plan_artifact_id IS NOT NULL AND a.artifact_id IS NULL)
+         THEN 1 ELSE 0 END AS source_unavailable
   FROM planning_state_ledger_index l
   LEFT JOIN volumes v
     ON v.project_id=l.project_id AND v.volume_id=l.volume_id

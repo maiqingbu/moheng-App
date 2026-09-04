@@ -86,6 +86,11 @@ impl HealthFactorResult {
         self
     }
 
+    fn with_severity(mut self, severity: &str) -> Self {
+        self.severity = severity.to_string();
+        self
+    }
+
     fn as_value(&self) -> Value {
         json!({
             "factorCode": self.factor_code,
@@ -405,6 +410,7 @@ fn obligation_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
     };
     let mut factor = if status {
         HealthFactorResult::unavailable("OBLIGATION_OVERDUE", "DETERMINISTIC_RUNTIME", "卷工作区")
+            .with_severity(severity)
     } else {
         HealthFactorResult::evaluated("OBLIGATION_OVERDUE", "DETERMINISTIC_RUNTIME", severity)
     };
@@ -492,6 +498,7 @@ fn foreshadow_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
     };
     let mut factor = if snapshot.unavailable_foreshadows > 0 {
         HealthFactorResult::unavailable("FORESHADOW_AGING", "DETERMINISTIC_RUNTIME", "卷工作区")
+            .with_severity(severity)
     } else {
         HealthFactorResult::evaluated("FORESHADOW_AGING", "DETERMINISTIC_RUNTIME", severity)
     };
@@ -596,6 +603,7 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
     };
     let mut factor = if snapshot.unavailable_routes > 0 {
         HealthFactorResult::unavailable("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", "卷工作区")
+            .with_severity(severity)
     } else {
         HealthFactorResult::evaluated("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", severity)
     };
@@ -935,6 +943,7 @@ fn reader_desire_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<H
     };
     let mut factor = if snapshot.unavailable_reader_desires > 0 {
         HealthFactorResult::unavailable("READER_DESIRE", "SOFT_ADVISORY", "卷工作区")
+            .with_severity(severity)
     } else {
         HealthFactorResult::evaluated("READER_DESIRE", "SOFT_ADVISORY", severity)
     };
