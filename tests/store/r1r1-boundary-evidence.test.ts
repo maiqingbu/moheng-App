@@ -13,6 +13,7 @@ import {
   evidenceSelector,
   productErrorMessage,
   sanitizeProductText,
+  selectEvidenceByIdentity,
   selectEvidenceBySelector,
 } from '../../src/ui/presentation/productLanguage'
 import { sanitizeAssistantText } from '../../src/ui/presentation/assistantPresentation'
@@ -54,6 +55,9 @@ describe('R1-R1 行为证据', () => {
       'WebView 当前异常。',
       'IPC 当前异常。',
       'Harness capability query_continuity 当前异常。',
+      'capability query_continuity 当前异常。',
+      'capability query_knowledge 返回异常。',
+      'capability diagnose_continuity 当前异常。',
       'Skill ID skill:opening 当前异常。',
       'Runtime Owner 当前不可用。',
       '当前 projectId 为 project:demo。',
@@ -125,7 +129,7 @@ describe('R1-R1 行为证据', () => {
       supportsFactId: 'fact:1',
       relationship: 'FACT_SOURCE' as const,
     }
-    const secondEvidence = { ...rawEvidence, artifactId: 'artifact:evidence:2', payloadHash: 'hash-raw-2' }
+    const secondEvidence = { ...rawEvidence, version: 4, payloadHash: 'hash-raw-2', label: '正式章节依据 · 当前版本' }
     const context = {
       facts: [{ factId: 'fact:1', label: '第一卷核心事实', current: true }],
       evidence: [rawEvidence, secondEvidence],
@@ -151,6 +155,8 @@ describe('R1-R1 行为证据', () => {
     expect(new Set(displayLabels).size).toBe(2)
     expect(selectEvidenceBySelector(context.evidence, selectors[0])?.payloadHash).toBe('hash-raw-1')
     expect(selectEvidenceBySelector(context.evidence, selectors[1])?.payloadHash).toBe('hash-raw-2')
+    expect(selectEvidenceByIdentity(context.evidence, { artifactId: 'artifact:evidence:1', version: 4, payloadHash: 'hash-raw-2' })).toEqual(secondEvidence)
+    expect(selectEvidenceByIdentity(context.evidence, { artifactId: 'artifact:evidence:1', version: 4, payloadHash: 'hash-raw-1' })).toBeUndefined()
     writeEvidence('R1R1_B12_EVIDENCE_SEPARATION.json', {
       schema: 'r1r1-b12-evidence-separation',
       rawInputEvidence: rawEvidence,
@@ -163,6 +169,7 @@ describe('R1-R1 行为证据', () => {
       selectionUsesDisplayLabelAsIdentity: false,
       duplicateDisplayLabelsAreDistinct: new Set(displayLabels).size === 2,
       selectedPayloadHashes: selectors.map(selector => selectEvidenceBySelector(context.evidence, selector)?.payloadHash),
+      compositeIdentityRestore: { artifactId: secondEvidence.artifactId, version: secondEvidence.version, payloadHash: secondEvidence.payloadHash },
       status: 'PASS',
     })
   })

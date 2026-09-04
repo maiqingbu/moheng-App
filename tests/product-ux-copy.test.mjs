@@ -60,3 +60,8 @@ test('future health shell stays explicitly deferred instead of becoming an activ
   assert.match(router, /UnavailableFeature/)
   assert.match(health, /义务 ID/)
 })
+
+test('browser demo keeps internal RetconPlan naming out of user-visible copy', () => {
+  const demoPort = read('src/infrastructure/browser-demo/demoPort.ts')
+  assert.doesNotMatch(demoPort, /\bRetconPlan\b/)
+})

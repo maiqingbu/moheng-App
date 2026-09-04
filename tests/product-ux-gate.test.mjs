@@ -51,6 +51,14 @@ test('Product UX gate exposes independent dynamic and evidence behavior gates', 
   assert.equal(result.checks.evidence_selection_identity, 'PASS')
 })
 
+test('Product UX gate exposes the R1-R2 acceptance gates independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.dynamic_capability_leakage, 'PASS')
+  assert.equal(result.checks.composite_evidence_identity, 'PASS')
+  assert.equal(result.checks.retcon_plan_user_surface, 'PASS')
+  assert.equal(result.checks.browser_evidence_fixtures, 'PASS')
+})
+
 test('Product UX gate fails closed when the shared dynamic guard is bypassed', () => {
   const source = read('src/ui/presentation/productLanguage.ts')
   const result = evaluateProductUx({
@@ -60,6 +68,17 @@ test('Product UX gate fails closed when the shared dynamic guard is bypassed', (
   })
   assert.equal(result.status, 'FAIL')
   assert.equal(result.checks.dynamic_presentation_leakage, 'FAIL')
+})
+
+test('Product UX gate fails closed when bare capability protection is removed', () => {
+  const source = read('src/ui/presentation/productLanguage.ts')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/presentation/productLanguage.ts'
+      ? source.replaceAll('capabilityPairPattern', 'noCapabilityPairPattern')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.dynamic_capability_leakage, 'FAIL')
 })
 
 test('Product UX gate fails closed when the Retcon flow maps Evidence for display', () => {
@@ -82,4 +101,26 @@ test('Product UX gate fails closed when History uses display text as Evidence id
   })
   assert.equal(result.status, 'FAIL')
   assert.equal(result.checks.evidence_selection_identity, 'FAIL')
+})
+
+test('Product UX gate fails closed when History drops Evidence version identity', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replaceAll('item.version === activeChange.value.evidenceVersion', 'true')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.composite_evidence_identity, 'FAIL')
+})
+
+test('Product UX gate fails closed when the internal RetconPlan name reaches demo copy', () => {
+  const source = read('src/infrastructure/browser-demo/demoPort.ts')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/infrastructure/browser-demo/demoPort.ts'
+      ? source.replace('事实修订方案示例', 'RetconPlan 示例')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.retcon_plan_user_surface, 'FAIL')
 })

@@ -7,6 +7,7 @@ import {
   evidenceSelector,
   productErrorMessage,
   receiptSummary,
+  selectEvidenceByIdentity,
   selectEvidenceBySelector,
   sanitizeProductText,
   scopeLabel,
@@ -45,6 +46,10 @@ describe('Product UX 展示语义映射', () => {
       'WebView 当前异常。',
       'IPC 当前异常。',
       'Harness capability query_continuity 当前异常。',
+      'capability query_continuity 当前异常。',
+      'capability query_knowledge 返回异常。',
+      'capability diagnose_continuity 当前异常。',
+      'capabilityId=query_continuity 当前异常。',
       'Skill ID skill:opening 当前异常。',
       'Runtime Owner 当前不可用。',
       '当前 projectId 为 project:demo。',
@@ -104,6 +109,16 @@ describe('Product UX 展示语义映射', () => {
     expect(labels.join('')).not.toMatch(/[{}[\]]|chapterId|level/)
     expect(selectEvidenceBySelector(evidence, selectors[0])?.payloadHash).toBe('hash-raw-1')
     expect(selectEvidenceBySelector(evidence, selectors[1])?.payloadHash).toBe('hash-raw-2')
+  })
+
+  it('restores Evidence by artifact, version and optional payload hash', () => {
+    const evidence = [
+      { artifactId: 'artifact:A', version: 3, payloadHash: 'hash-X', label: '旧版本依据' },
+      { artifactId: 'artifact:A', version: 4, payloadHash: 'hash-Y', label: '当前版本依据' },
+    ]
+    expect(selectEvidenceByIdentity(evidence, { artifactId: 'artifact:A', version: 4, payloadHash: 'hash-Y' })).toEqual(evidence[1])
+    expect(selectEvidenceByIdentity(evidence, { artifactId: 'artifact:A', version: 4, payloadHash: 'hash-X' })).toBeUndefined()
+    expect(selectEvidenceByIdentity(evidence, { artifactId: 'artifact:A', version: 3 })).toEqual(evidence[0])
   })
 
   it('removes internal codes, fields, paths and model self-talk from assistant output', () => {
