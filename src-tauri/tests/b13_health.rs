@@ -373,3 +373,128 @@ fn b13_projection_is_rebuilt_on_demand_after_cache_rows_are_removed() {
     assert_eq!(first, second);
     println!("B13_PROJECTION_REBUILD_RESULT cacheRowsRemoved=PASS sameOutput=PASS sourceRevision=PASS status=PASS");
 }
+
+#[test]
+fn b13_r1_opaque_chapter_references_are_resolved_by_chapter_row() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:b13:r1:chapter-identity");
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:b13:r1:chapter',?1,1,'章节身份测试','ACTIVE',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:b13:r1:chapter',?1,'book:b13:r1:chapter',1,'章节卷','PRODUCING',1,9,9000,?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:fixture:009',?1,'volume:b13:r1:chapter',9,'第九章','NORMAL','COMMITTED',1000,?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:r1:source',?1,'BookPlan','BOOK','book:b13:r1:chapter',1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)",
+        libsql_rusqlite::params![project_id, "a".repeat(64), NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,must_resolve_before_chapter,lifecycle,created_at,updated_at) VALUES ('obligation:b13:r1:opaque',?1,'BOOK','MYSTERY','C','artifact:b13:r1:source',1,'opaque deadline','chapter:fixture:009','PROPOSED',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,must_resolve_before_chapter,lifecycle,created_at,updated_at) VALUES ('obligation:b13:r1:missing',?1,'BOOK','MYSTERY','C','artifact:b13:r1:source',1,'missing deadline','chapter:fixture:missing','PROPOSED',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    drop(connection);
+
+    let result = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":30}),
+    ).unwrap();
+    assert_eq!(result["counters"]["overdueObligations"], 1);
+    assert_eq!(result["factors"][0]["status"], "SOURCE_UNAVAILABLE");
+    assert!(result["issues"]["items"].as_array().unwrap().iter().any(|item| {
+        item["issueId"] == "health:obligation:obligation:b13:r1:opaque"
+            && item["location"] == "第 9 章附近"
+    }));
+}
+
+#[test]
+fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:b13:r1:route-revision");
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    connection.execute(
+        "UPDATE project_meta SET revision=2 WHERE project_id=?1",
+        [&project_id],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:b13:r1:route',?1,1,'路线身份测试','ACTIVE',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:b13:r1:route',?1,'book:b13:r1:route',3,'暗潮','PRODUCING',1,3,3000,?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    let route_hash = "b".repeat(64);
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:r1:route',?1,'VolumePlan','VOLUME','volume:b13:r1:route',1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)",
+        libsql_rusqlite::params![project_id, route_hash, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:route',1,?1,?2)",
+        libsql_rusqlite::params![json!({"tasks":[]}).to_string(), route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO planning_state_ledger_index(project_id,volume_id,entry_state,plan_state,coverage_state,obligation_ids_json,foreshadow_ids_json,evidence_need_ids_json,repair_state,updated_at,route_plan_artifact_id,route_plan_version,task_status_json,active_task_ids_json,blocked_task_ids_json,remaining_chapter_capacity,planning_pressure_json,state_digest,generated_revision) VALUES (?1,'volume:b13:r1:route','OPEN','APPROVED','COMPLETE','[]','[]','[]','NONE',?2,'artifact:b13:r1:route',1,'{}','[]','[]',3,?3,?4,1)",
+        libsql_rusqlite::params![project_id, NOW, json!({"remainingChapterCapacity":3,"requiredTasksRemaining":0}).to_string(), "a".repeat(64)],
+    ).unwrap();
+    drop(connection);
+
+    let result = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":30}),
+    ).unwrap();
+    let route_factor = result["factors"].as_array().unwrap().iter().find(|factor| factor["factorCode"] == "ROUTE_DRIFT").unwrap();
+    assert_eq!(route_factor["severity"], "healthy");
+    assert!(result["issues"]["items"].as_array().unwrap().iter().all(|item| {
+        !item["location"].as_str().unwrap_or_default().contains("volume:b13:r1:route")
+    }));
+}
+
+#[test]
+fn b13_r1_global_truth_is_independent_from_bounded_issue_page() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:b13:r1:truth-page");
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:b13:r1:truth',?1,1,'全局真值测试','ACTIVE',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:b13:r1:truth',?1,'book:b13:r1:truth',1,'真值卷','PRODUCING',1,1,1000,?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b13:r1:truth:1',?1,'volume:b13:r1:truth',1,'第一章','NORMAL','COMMITTED',1000,?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:r1:truth',?1,'BookPlan','BOOK','book:b13:r1:truth',1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)",
+        libsql_rusqlite::params![project_id, "c".repeat(64), NOW],
+    ).unwrap();
+    for index in 0..100 {
+        connection.execute(
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,must_resolve_before_chapter,lifecycle,created_at,updated_at) VALUES (?1,?2,'BOOK','MYSTERY','C','artifact:b13:r1:truth',1,?3,'chapter:b13:r1:truth:1','PROPOSED',?4,?4)",
+            libsql_rusqlite::params![format!("obligation:b13:r1:c:{index}"), project_id, format!("C级义务 {index}"), NOW],
+        ).unwrap();
+    }
+    drop(connection);
+
+    let small = query_book_health_impl(&state, json!({"projectId":project_id,"scope":"health","pageSize":1})).unwrap();
+    let large = query_book_health_impl(&state, json!({"projectId":project_id,"scope":"health","pageSize":50})).unwrap();
+    assert_eq!(small["level"], "attention");
+    assert_eq!(small["score"], large["score"]);
+    assert_eq!(small["level"], large["level"]);
+    assert_eq!(small["coverage"], large["coverage"]);
+    assert_eq!(small["counters"], large["counters"]);
+    assert_eq!(small["counters"]["overdueObligations"], 100);
+}
