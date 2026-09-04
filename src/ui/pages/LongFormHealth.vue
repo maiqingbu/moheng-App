@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import { useProjectStore } from '../stores/projectStore'
-import { destinationLabel, factorLabel, healthLevelLabel, issueKey, severityLabel, statusLabel, truthClassLabel } from '../presentation/healthLanguage'
+import { destinationLabel, factorLabel, healthEvidenceProjection, healthIssueLocation, healthLevelLabel, issueKey, severityLabel, statusLabel, truthClassLabel } from '../presentation/healthLanguage'
+import { isProductUxEvidenceDemoEnabled } from '../presentation/productLanguage'
 
 const store = useProjectStore()
+const route = useRoute()
 const router = useRouter()
 const factorFilter = ref('全部因素')
 const severityFilter = ref('全部状态')
 const pageHistory = ref<string[]>([])
-const health = computed(() => store.health)
+const evidenceMode = computed(() => isProductUxEvidenceDemoEnabled() ? String(route.query.healthEvidence ?? '') : '')
+const health = computed(() => {
+  const base = store.health
+  return base ? healthEvidenceProjection(base, evidenceMode.value, pageHistory.value.at(-1) ?? null) : null
+})
 const loading = computed(() => store.isWorkspaceLoading('health'))
 const error = computed(() => store.healthError)
 const filteredIssues = computed(() => (health.value?.issues.items ?? []).filter(issue =>
@@ -95,7 +101,7 @@ function openDestination(destination: string) {
         <div v-if="filteredIssues.length" style="display:grid;gap:10px">
           <article v-for="issue in filteredIssues" :key="issueKey(issue)" class="card pad">
             <div class="card-head"><div><span class="badge" :class="issue.severity === 'risk' ? 'danger' : issue.severity === 'attention' ? 'warning' : 'info'">{{ factorLabel(issue.factorCode) }} · {{ severityLabel(issue.severity) }}</span><h3 style="margin:8px 0 4px">{{ issue.title }}</h3><p class="muted">{{ issue.detail }}</p></div><button class="btn small" @click="openDestination(issue.recommendedDestination)">{{ destinationLabel(issue.recommendedDestination) }}</button></div>
-            <div class="banner info"><div><div class="banner-title">相关位置</div><div class="banner-copy">{{ issue.location }}<span v-if="issue.dueChapter"> · 预定第 {{ issue.dueChapter }} 章</span></div></div></div>
+            <div class="banner info"><div><div class="banner-title">相关位置</div><div class="banner-copy">{{ healthIssueLocation(issue) }}<span v-if="issue.dueChapter"> · 预定第 {{ issue.dueChapter }} 章</span></div></div></div>
           </article>
         </div>
         <div v-else class="empty">当前筛选下没有需要处理的事项。</div>
