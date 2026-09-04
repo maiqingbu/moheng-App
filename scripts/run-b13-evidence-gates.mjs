@@ -11,7 +11,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidence = path.resolve(process.env.B13_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b13-evidence-')))
 const baselineCommit = 'cd240a7cc0d079c2e2ae09dcdbb3ed73fa48b617'
 const prdR2Sha256 = '2bec0a910c809c7c62b228c5bf8b88348ec8a1857a5a987e2908dc40069a2c06'
-const skillSha256 = '5e3d4cc7f70eacd926ee9b1fce355b1eb76df141c00b5f4756fae3859a3aecfe2'
+const skillSha256 = '5e3d4cc7f70eacd926e9b1fce355b1eb76df141c00b5f4756fae3859a3aecfe2'
 const skillManifestSha256 = '18715cab419e20fc552685c1160049d731d91fa9d4bb42d00783af4e21e31e1b'
 const frozenMigrations = {
   '0001_catalog.sql': 'b56e29641a2edeb1cae02508c8c38363c9abdd97ef56c86d926668c121ab22e1',
