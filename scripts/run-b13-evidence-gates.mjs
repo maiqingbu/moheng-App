@@ -380,6 +380,8 @@ const gateResults = {
   schema: 'b13-gate-results-r1',
   batch: 'B13',
   baselineCommit,
+  startCommit: baselineCommit,
+  startCommitIsAncestor: git(['merge-base', '--is-ancestor', baselineCommit, before.commit]).status === 0,
   sourceCommit: before.commit,
   evidenceSourceCommit: before.commit,
   sourceCommitAfter: sourceAfter.commit,
