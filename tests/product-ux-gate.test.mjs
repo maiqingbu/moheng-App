@@ -59,6 +59,11 @@ test('Product UX gate exposes the R1-R2 acceptance gates independently', () => {
   assert.equal(result.checks.browser_evidence_fixtures, 'PASS')
 })
 
+test('Product UX gate exposes the R1-R3 Canon surface gate independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.canon_user_surface, 'PASS')
+})
+
 test('Product UX gate fails closed when the shared dynamic guard is bypassed', () => {
   const source = read('src/ui/presentation/productLanguage.ts')
   const result = evaluateProductUx({
@@ -123,4 +128,15 @@ test('Product UX gate fails closed when the internal RetconPlan name reaches dem
   })
   assert.equal(result.status, 'FAIL')
   assert.equal(result.checks.retcon_plan_user_surface, 'FAIL')
+})
+
+test('Product UX gate fails closed when Canon returns to user-visible impact copy', () => {
+  const source = read('src/infrastructure/browser-demo/demoPort.ts')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/infrastructure/browser-demo/demoPort.ts'
+      ? source.replace('不改变已经确认的正式事实', '不改变已提交 Canon')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.canon_user_surface, 'FAIL')
 })

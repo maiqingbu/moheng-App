@@ -65,3 +65,8 @@ test('browser demo keeps internal RetconPlan naming out of user-visible copy', (
   const demoPort = read('src/infrastructure/browser-demo/demoPort.ts')
   assert.doesNotMatch(demoPort, /\bRetconPlan\b/)
 })
+
+test('browser demo keeps internal Canon naming out of user-visible impact copy', () => {
+  const demoPort = read('src/infrastructure/browser-demo/demoPort.ts')
+  assert.doesNotMatch(demoPort, /(?:summary|impact|message)\s*[:=][^\n]*\bCanon\b/)
+})
