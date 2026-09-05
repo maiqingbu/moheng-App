@@ -74,7 +74,9 @@ function numberMarker(line, key) {
 function jsonMarker(line, key) {
   if (!line) return null
   const start = line.indexOf(`${key}=`)
-  const end = line.indexOf(' after=', start)
+  const end = key === 'before'
+    ? line.indexOf(' after=', start)
+    : line.indexOf(' allNonEmpty=', start)
   if (start < 0 || end < 0) return null
   try { return JSON.parse(line.slice(start + key.length + 1, end)) } catch { return null }
 }
