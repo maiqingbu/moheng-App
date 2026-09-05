@@ -123,15 +123,15 @@ function main() {
     'disconnect H03/H04 from the formal B07/B09 adapter; integration must fail closed',
   )
 
-  const queryPath = 'src-tauri/src/health/mod.rs'
+  const queryPath = 'src-tauri/src/commands.rs'
   const queryFile = path.join(root, queryPath)
   const queryOriginal = fs.readFileSync(queryFile)
   const queryText = queryOriginal.toString('utf8')
-  const queryMarker = 'projection["projectId"] = json!(project_id);'
+  const queryMarker = 'let cursor = request.get("cursor").and_then(Value::as_str);'
   if (!queryText.includes(queryMarker)) throw new Error('B13_R2_MUTATION_AUTHORITY_MARKER_MISSING')
   const queryMutated = Buffer.from(queryText.replace(
     queryMarker,
-    `${queryMarker}\n    let _ = connection.execute("UPDATE narrative_obligations SET description=description || ' [MUT-R2-02]' WHERE project_id=?1", [project_id]);`,
+    `${queryMarker}\n    let mutation_handle = state.manager.open(project_id, "", "1970-01-01T00:00:00Z").map_err(|error| error.to_string())?;\n    mutation_handle.execute("UPDATE narrative_obligations SET description=description || ' [MUT-R2-02]' WHERE project_id=?1", [project_id]).map_err(|error| error.to_string())?;\n    drop(mutation_handle);`,
   ), 'utf8')
   const authorityMutation = writeMutation(
     'MUT-R2-02',
@@ -139,7 +139,7 @@ function main() {
     queryOriginal,
     queryMutated,
     ['--test', 'b13_r2_authority'],
-    'inject an authority-table UPDATE into the formal health query; count/digest gate must fail',
+    'inject an authority-table UPDATE into the formal query command path; count/digest gate must fail',
   )
   const forbiddenScopeMutation = writeForbiddenScopeMutation()
 
