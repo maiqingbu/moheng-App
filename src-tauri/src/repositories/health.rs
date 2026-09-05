@@ -16,6 +16,9 @@ const TASK_ROW_BOUND: i64 = 201;
 const ROUTE_ROW_BOUND: i64 = 101;
 const TREND_ROW_BOUND: i64 = 20;
 
+pub const FORMAL_ROUTE_ROWS_SQL: &str = "SELECT v.volume_id, v.volume_no, v.title, v.updated_at, i.plan_state, i.plan_artifact_id, i.plan_version, i.updated_at, vp.projection_revision, vp.state_digest, vp.payload_json, vp.updated_at FROM volumes v LEFT JOIN volume_plan_index i ON i.project_id=v.project_id AND i.volume_id=v.volume_id LEFT JOIN volume_planning_state_projection vp ON vp.project_id=v.project_id AND vp.volume_id=v.volume_id WHERE v.project_id=?1 AND (i.volume_id IS NOT NULL OR EXISTS (SELECT 1 FROM canonical_heads h WHERE h.project_id=v.project_id AND h.artifact_type='VolumePlan' AND h.scope_key IN (v.volume_id, json_object('level','VOLUME','volumeId',v.volume_id)))) ORDER BY v.volume_no, v.volume_id";
+pub const HEALTH_SOURCE_TIME_SQL: &str = "SELECT MAX(source_time) FROM (SELECT updated_at AS source_time FROM project_meta WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM chapters WHERE project_id=?1 AND status='COMMITTED' UNION ALL SELECT MAX(updated_at) FROM narrative_obligations WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM foreshadows WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM reader_desires WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM volume_plan_index WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM volume_planning_state_projection WHERE project_id=?1 UNION ALL SELECT MAX(updated_at) FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' UNION ALL SELECT MAX(updated_at) FROM model_runs WHERE project_id=?1 UNION ALL SELECT MAX(recorded_at) FROM model_usage WHERE project_id=?1 UNION ALL SELECT MAX(created_at) FROM budget_reservations WHERE project_id=?1 UNION ALL SELECT MAX(sampled_at) FROM quality_trend_projection WHERE project_id=?1)";
+
 #[derive(Debug, thiserror::Error)]
 pub enum HealthRepositoryError {
     #[error("sqlite: {0}")]
@@ -223,24 +226,7 @@ fn formal_route_rows(
     connection: &Connection,
     project_id: &str,
 ) -> Result<Vec<RouteInput>, HealthRepositoryError> {
-    let mut statement = connection.prepare(
-        "SELECT v.volume_id, v.volume_no, v.title, v.updated_at,
-                i.plan_state, i.plan_artifact_id, i.plan_version, i.updated_at,
-                vp.projection_revision, vp.state_digest, vp.payload_json, vp.updated_at
-         FROM volumes v
-         LEFT JOIN volume_plan_index i
-           ON i.project_id=v.project_id AND i.volume_id=v.volume_id
-         LEFT JOIN volume_planning_state_projection vp
-           ON vp.project_id=v.project_id AND vp.volume_id=v.volume_id
-         WHERE v.project_id=?1
-           AND (i.volume_id IS NOT NULL OR EXISTS (
-             SELECT 1 FROM canonical_heads h
-             WHERE h.project_id=v.project_id
-               AND h.artifact_type='VolumePlan'
-               AND h.scope_key IN (v.volume_id, json_object('level','VOLUME','volumeId',v.volume_id))
-           ))
-         ORDER BY v.volume_no, v.volume_id",
-    )?;
+    let mut statement = connection.prepare(FORMAL_ROUTE_ROWS_SQL)?;
     let rows = statement.query_map([project_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -327,7 +313,7 @@ fn formal_route_rows(
         let task_ids = route_task_ids(route_payload.as_ref());
         let task_id_refs = task_ids.iter().map(String::as_str).collect::<Vec<_>>();
         let task_states =
-            NarrativeRepository::task_states_by_ids(connection, project_id, &task_id_refs, 500)
+            NarrativeRepository::task_states_by_ids_complete(connection, project_id, &task_id_refs)
                 .map_err(|error| HealthRepositoryError::Authority(error.to_string()))?;
         let mut task_statuses = Map::new();
         for state in task_states {
@@ -475,24 +461,9 @@ impl HealthRepository {
             |row| row.get(0),
         )?;
         let checked_at: String = connection
-            .query_row(
-                "SELECT MAX(source_time) FROM (
-                   SELECT updated_at AS source_time FROM project_meta WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM chapters WHERE project_id=?1 AND status='COMMITTED'
-                   UNION ALL SELECT MAX(updated_at) FROM narrative_obligations WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM foreshadows WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM reader_desires WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM volume_plan_index WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM volume_planning_state_projection WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress'
-                   UNION ALL SELECT MAX(updated_at) FROM model_runs WHERE project_id=?1
-                   UNION ALL SELECT MAX(recorded_at) FROM model_usage WHERE project_id=?1
-                   UNION ALL SELECT MAX(created_at) FROM budget_reservations WHERE project_id=?1
-                   UNION ALL SELECT MAX(sampled_at) FROM quality_trend_projection WHERE project_id=?1
-                 )",
-                [project_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
+            .query_row(HEALTH_SOURCE_TIME_SQL, [project_id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
             .optional()?
             .flatten()
             .unwrap_or(project_updated_at);

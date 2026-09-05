@@ -2,6 +2,11 @@ use crate::generated::types::ArtifactRef;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const TASK_STATE_CHUNK_SIZE: usize = 100;
+pub const TASK_STATES_BY_IDS_SQL: &str = "SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3";
+pub const ARTIFACT_PAYLOAD_BY_REF_SQL: &str = "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NarrativeRepositoryError {
@@ -662,7 +667,7 @@ impl NarrativeRepository {
         limit: i64,
     ) -> Result<Vec<TaskStateRecord>, NarrativeRepositoryError> {
         let task_ids = Self::ids_json(task_ids)?;
-        let mut statement = connection.prepare("SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3")?;
+        let mut statement = connection.prepare(TASK_STATES_BY_IDS_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, task_ids, Self::limit(limit)],
             |row| {
@@ -676,6 +681,45 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Reads the complete current Task Reality for a caller-provided set of
+    /// task IDs without widening the shared bounded reader.  Each chunk stays
+    /// within the repository's existing 100-row contract, and the final
+    /// result follows the caller's stable, de-duplicated ID order.
+    pub fn task_states_by_ids_complete(
+        connection: &Connection,
+        project_id: &str,
+        task_ids: &[&str],
+    ) -> Result<Vec<TaskStateRecord>, NarrativeRepositoryError> {
+        let mut seen = BTreeSet::new();
+        let unique_task_ids = task_ids
+            .iter()
+            .copied()
+            .filter(|task_id| seen.insert(*task_id))
+            .collect::<Vec<_>>();
+        if unique_task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut states = Vec::new();
+        for chunk in unique_task_ids.chunks(TASK_STATE_CHUNK_SIZE) {
+            states.extend(Self::task_states_by_ids(
+                connection,
+                project_id,
+                chunk,
+                chunk.len() as i64,
+            )?);
+        }
+
+        let states_by_id = states
+            .into_iter()
+            .map(|state| (state.state_id.clone(), state))
+            .collect::<BTreeMap<_, _>>();
+        Ok(unique_task_ids
+            .into_iter()
+            .filter_map(|task_id| states_by_id.get(task_id).cloned())
+            .collect())
     }
 
     pub fn recent_evidence(
@@ -1161,7 +1205,22 @@ impl NarrativeRepository {
         project_id: &str,
         reference: &ArtifactRef,
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
-        connection.query_row("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4", libsql_rusqlite::params![project_id, reference.artifact_id, reference.version, reference.payload_hash], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
+        connection
+            .query_row(
+                ARTIFACT_PAYLOAD_BY_REF_SQL,
+                libsql_rusqlite::params![
+                    project_id,
+                    reference.artifact_id,
+                    reference.version,
+                    reference.payload_hash
+                ],
+                |row| {
+                    let raw: String = row.get(0)?;
+                    Ok(serde_json::from_str(&raw).unwrap_or(Value::Null))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn canonical_project_head_ref(

@@ -969,8 +969,9 @@ fn build_planning_state(
         .iter()
         .filter_map(|task| task.get("taskId").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    let states = NarrativeRepository::task_states_by_ids(connection, project_id, &task_ids, 500)
-        .map_err(|error| error.to_string())?;
+    let states =
+        NarrativeRepository::task_states_by_ids_complete(connection, project_id, &task_ids)
+            .map_err(|error| error.to_string())?;
     let state_map = states
         .into_iter()
         .map(|state| {

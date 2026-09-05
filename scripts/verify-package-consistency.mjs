@@ -88,6 +88,7 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   const sourceBinding = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/SOURCE_BINDING.json'))
   const forbiddenScope = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/FORBIDDEN_SCOPE_DIFF.json'))
   const utf8Validation = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/PACKAGE_UTF8_VALIDATION.json'))
+  const batch = fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R3')) ? 'B13_R3' : 'B13_R2'
   if (!inventory || typeof inventory.countingRule !== 'string') failures.push('inventory counting rule missing')
   const count = prefix => ordinary.filter(relative => relative.startsWith(prefix)).length
   const expectedInventory = {
@@ -96,9 +97,9 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
     frozenInputFiles: count('FROZEN_INPUTS/'),
     evidenceFiles: count('EVIDENCE/'),
     manifestFiles: count('PACKAGE_MANIFEST/'),
-    manualBrowserFiles: count('EVIDENCE/B13_R2/MANUAL_BROWSER/'),
-    mutationFiles: count('EVIDENCE/B13_R2/MUTATIONS/'),
-    performanceFiles: count('EVIDENCE/B13_R2/PERFORMANCE/'),
+    manualBrowserFiles: count(`EVIDENCE/${batch}/MANUAL_BROWSER/`),
+    mutationFiles: count(`EVIDENCE/${batch}/MUTATIONS/`),
+    performanceFiles: count(`EVIDENCE/${batch}/PERFORMANCE/`),
     forbiddenFilesFound: forbiddenFiles.length,
   }
   for (const [key, value] of Object.entries(expectedInventory)) {
@@ -106,6 +107,23 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   }
   if (forbiddenScope?.status !== 'PASS' || !Array.isArray(forbiddenScope?.findings) || forbiddenScope.findings.length !== 0) failures.push('forbidden scope manifest is not PASS with empty findings')
   if (utf8Validation?.status !== 'PASS' || utf8Validation?.rootAscii !== true) failures.push('UTF-8 validation manifest is not PASS')
+  if (batch === 'B13_R3') {
+    const requiredReaderFiles = [
+      'reader-a-version.log', 'reader-a-list.log', 'reader-a-extract.log',
+      'reader-b-version.log', 'reader-b-list.log', 'reader-b-extract.log',
+      'reader-content-compare.json',
+    ]
+    for (const file of requiredReaderFiles) {
+      if (!fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R3/PACKAGE_READERS', file))) failures.push(`R3 reader evidence missing: ${file}`)
+    }
+    if (utf8Validation?.readerA !== 'python-zipfile'
+      || typeof utf8Validation?.readerB !== 'string'
+      || utf8Validation.readerB === 'python-zipfile'
+      || utf8Validation?.entrySetsEqual !== true
+      || utf8Validation?.contentHashesEqual !== true
+      || utf8Validation?.utf8FlagFailures !== 0
+      || utf8Validation?.mojibakeFindings !== 0) failures.push('R3 dual-reader UTF-8 validation is incomplete')
+  }
   if (expectedSourceCommit && sourceBinding?.sourceCommit !== expectedSourceCommit) failures.push('source binding commit mismatch')
   if (sourceBinding?.sourceCommit !== sourceBinding?.evidenceSourceCommit || sourceBinding?.sourceCommit !== sourceBinding?.sourceCommitAfter) failures.push('source binding fields disagree')
   if (sourceBinding?.workingTreeDirtyBefore !== false || sourceBinding?.workingTreeDirtyAfter !== false) failures.push('source binding reports dirty tree')
@@ -113,7 +131,7 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   const checksums = checkInternalSums(resolvedRoot)
   if (checksums.status !== 'PASS') failures.push(...checksums.mismatches)
   const result = {
-    schema: 'b13-r2-package-consistency',
+    schema: batch === 'B13_R3' ? 'b13-r3-package-consistency' : 'b13-r2-package-consistency',
     root: `${rootName}/`,
     rootAscii: /^[\x00-\x7F]+$/.test(rootName),
     inventory: expectedInventory,
@@ -121,7 +139,7 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
     forbiddenScope: { status: forbiddenScope?.status ?? 'FAIL', findings: forbiddenScope?.findings ?? null },
     sourceCommit: sourceBinding?.sourceCommit ?? null,
     expectedSourceCommit,
-    utf8: { status: utf8Validation?.status ?? 'FAIL', replacementCharacterEntries: utf8Names },
+    utf8: { status: utf8Validation?.status ?? 'FAIL', replacementCharacterEntries: utf8Names, batch },
     failures,
     status: failures.length === 0 ? 'PASS' : 'FAIL',
   }
