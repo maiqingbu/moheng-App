@@ -196,6 +196,18 @@ function main() {
   const rustCheck = run('rust_check', 'cargo', ['check', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
   const rustClippy = run('rust_clippy', 'cargo', ['clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings'])
 
+  const historicalEvidenceFiles = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']
+  const historicalRestoration = historicalEvidenceFiles.map(file => {
+    const changed = spawnSync('git', ['diff', '--quiet', '--', file], { cwd: root }).status !== 0
+    if (!changed) return { file, changed: false, status: 'UNCHANGED' }
+    const restored = spawnSync('git', ['restore', '--source', sourceCommit, '--', file], { cwd: root, encoding: 'utf8' })
+    return { file, changed: true, status: restored.status === 0 ? 'RESTORED' : 'FAIL' }
+  })
+  writeJson('B13_R2_HISTORICAL_EVIDENCE_RESTORATION.json', {
+    schema: 'b13-r2-historical-evidence-restoration', files: historicalRestoration,
+    status: historicalRestoration.every(item => item.status !== 'FAIL') ? 'PASS' : 'FAIL',
+  })
+
   const browserScratch = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b13-r2-browser-'))
   const browser = run('manual_browser', 'node', ['scripts/capture-b13-r1-browser-evidence.mjs'], { B13_R1_EVIDENCE_DIR: browserScratch, B13_R1_SOURCE_COMMIT: sourceCommit })
   copyR2BrowserEvidence(browserScratch, browser)
