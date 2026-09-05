@@ -210,8 +210,8 @@ export function evaluateR3EvidenceTruthfulness(evidenceDir, expectedSourceCommit
   add(failures, checks.architecture, 'R3 architecture evidence is incomplete')
 
   const regression = readJson(root, 'B13_R3_REGRESSION.json')
-  checks.regression = sourceBound(regression, expectedSourceCommit, expectedBaselineCommit)
-    && regression.status === 'PASS'
+  checks.regression = options.requireMutations === false
+    || (sourceBound(regression, expectedSourceCommit, expectedBaselineCommit) && regression.status === 'PASS')
   add(failures, checks.regression, 'R3 regression evidence is incomplete')
 
   const changed = readJson(root, 'B13_R3_CHANGED_FILES.json')

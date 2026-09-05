@@ -392,6 +392,17 @@ function main() {
     r2Regression, r3Targeted, b09Boundary, node, vitest, typecheck, build, buildDemo,
     verify, contracts, productUxFormal, rustAll, rustFmt, rustCheck, rustClippy,
   ].every(item => item.status === 'PASS')
+  const postRegressionRestoration = historicalEvidenceFiles.map(file => {
+    const changed = spawnSync('git', ['diff', '--quiet', '--', file], { cwd: root }).status !== 0
+    if (!changed) return { file, changed: false, status: 'UNCHANGED' }
+    const restored = spawnSync('git', ['restore', '--source', sourceCommit, '--', file], { cwd: root, encoding: 'utf8' })
+    return { file, changed: true, status: restored.status === 0 ? 'RESTORED' : 'FAIL' }
+  })
+  writeRoot('B13_R3_HISTORICAL_EVIDENCE_RESTORATION.json', {
+    schema: 'b13-r3-historical-evidence-restoration',
+    files: postRegressionRestoration,
+    status: postRegressionRestoration.every(item => item.status !== 'FAIL') ? 'PASS' : 'FAIL',
+  })
   writeEvidence('B13_R3_REGRESSION.json', {
     schema: 'b13-r3-regression',
     r2Regression: r2Regression.status,
