@@ -12,6 +12,7 @@ export const REQUIRED_B14_GATES = [
   'b14_ui_surface',
   'b14_rust_quality',
   'b01_b13_regression',
+  'b14_historical_evidence',
   'b14_source_binding',
   'b15_boundary',
 ]

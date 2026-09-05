@@ -36,6 +36,10 @@ const rustCheck = run('b01_b13_rust_check', 'cargo', ['check', '--manifest-path'
 const rustTests = run('b01_b13_rust_tests', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
 const rustFmt = run('b01_b13_rust_fmt', 'cargo', ['fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--all', '--', '--check'])
 const rustClippy = run('b01_b13_rust_clippy', 'cargo', ['clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings'])
+const historicalFiles = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']
+const historicalRestore = dirtyBefore
+  ? { status: 'FAIL', command: 'skipped because working tree was dirty before gates' }
+  : run('b14_historical_restore', 'git', ['restore', '--source', sourceCommit, '--', ...historicalFiles])
 const dirtyAfter = git(['status', '--porcelain', '--untracked-files=all']) !== ''
 const changedSinceFrozen = git(['diff', '--name-only', '1a85e8f57c2098973d89977b02d33665cc054066..HEAD']).split('\n').filter(Boolean)
 const gates = {
@@ -46,6 +50,7 @@ const gates = {
   b14_ui_surface: gate(typecheck.status === 'PASS' && build.status === 'PASS', 'b14_typecheck.log + b14_build.log'),
   b14_rust_quality: gate([rustCheck, rustTests, rustFmt, rustClippy].every(item => item.status === 'PASS'), 'B01_B13 rust quality logs'),
   b01_b13_regression: gate(nodeFull.status === 'PASS' && architectureRegression.status === 'PASS' && rustTests.status === 'PASS', 'B01_B13 regression logs'),
+  b14_historical_evidence: gate(historicalRestore.status === 'PASS', 'b14_historical_restore.log', { restoredFiles: historicalFiles }),
   b14_source_binding: gate(!dirtyBefore && !dirtyAfter && sourceCommit === git(['rev-parse', 'HEAD']), 'git status --porcelain'),
   b15_boundary: gate(!changedSinceFrozen.some(file => /B15|ExportRelease|RC1/.test(file)), 'git diff against B13 frozen baseline', { nextBatchStarted: false }),
 }
