@@ -16,6 +16,7 @@ import CanonGraph from '../ui/pages/CanonGraph.vue'
 import HistoryCenter from '../ui/pages/HistoryCenter.vue'
 import LongFormHealth from '../ui/pages/LongFormHealth.vue'
 import SettingsPage from '../ui/pages/SettingsPage.vue'
+import Completion from '../ui/pages/Completion.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -36,6 +37,7 @@ export const router = createRouter({
     { path: '/projects/:id/read', name: 'read', component: ManuscriptReader, meta: { scope: 'project' } },
     { path: '/projects/:id/graph', name: 'graph', component: CanonGraph, meta: { scope: 'project' } },
     { path: '/projects/:id/health', name: 'health', component: LongFormHealth, meta: { scope: 'project', availability: 'available' } },
+    { path: '/projects/:id/completion', name: 'completion', component: Completion, meta: { scope: 'project', availability: 'available' } },
     { path: '/projects/:id/history', name: 'history', component: HistoryCenter, meta: { scope: 'project', availability: 'available' } },
     { path: '/projects/:id/settings', name: 'project-settings', component: SettingsPage, meta: { scope: 'project' } },
     { path: '/settings', name: 'settings', component: SettingsPage, meta: { scope: 'global' } },

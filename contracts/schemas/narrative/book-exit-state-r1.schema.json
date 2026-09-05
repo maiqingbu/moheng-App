@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/narrative/book-exit-state-r1.schema.json",
+  "title": "BookExitStateR1",
+  "type": "object",
+  "properties": {
+    "payloadSchema": { "const": "book-exit-state.r1" },
+    "closedAt": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "projectRevision": { "type": "integer", "minimum": 0 },
+    "relevantStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "endgameContractRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "finalChapterCount": { "type": "integer", "minimum": 0 },
+    "firstFinalChapterRef": { "anyOf": [{ "$ref": "../artifact/artifact-ref.schema.json" }, { "type": "null" }] },
+    "lastFinalChapterRef": { "anyOf": [{ "$ref": "../artifact/artifact-ref.schema.json" }, { "type": "null" }] },
+    "manuscriptInventoryDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "canonDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "knowledgeDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "continuityDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "reservationDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "obligationDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "finalVolumeExitStateRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "completionReportRef": { "type": "string", "minLength": 1 }
+  },
+  "required": ["payloadSchema", "closedAt", "projectRevision", "relevantStateDigest", "endgameContractRef", "finalChapterCount", "firstFinalChapterRef", "lastFinalChapterRef", "manuscriptInventoryDigest", "canonDigest", "knowledgeDigest", "continuityDigest", "reservationDigest", "obligationDigest", "finalVolumeExitStateRef", "completionReportRef"],
+  "additionalProperties": false
+}

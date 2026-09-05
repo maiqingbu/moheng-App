@@ -583,3 +583,74 @@ export interface LongFormHealthProjectionR1 {
   "counters": HealthCounters
   "provenance": HealthProvenance
 }
+
+export interface EndgameContractR1 {
+  "payloadSchema": unknown
+  "compiledFromProjectRevision": number
+  "compiledFromRelevantStateDigest": string
+  "bookPlanRef": ArtifactRef
+  "endingBoundaryDigest": string
+  "requestedEnding": { "summary": string; "confirmationSource": unknown; "confirmedAt": string }
+  "hardResponsibilities": Array<{ "responsibilityId": string; "kind": "OBLIGATION" | "MYSTERY" | "PAYOFF" | "FUTURE_RESERVATION" | "CONTINUITY" | "TASK" | "ENDING_BOUNDARY"; "sourceRefs": Array<string>; "authorityClass": "A" | "B" | "C"; "requiredDisposition": string }>
+  "createdAt": string
+}
+
+export interface EndgameConstraintSnapshotR1 {
+  "payloadSchema": unknown
+  "projectId": string
+  "projectRevision": number
+  "relevantStateDigest": string
+  "requestedEndingConfirmed": boolean
+  "hardResponsibilityCount": number
+  "unresolvedHardObligations": number
+  "unmappedMysteries": number
+  "unresolvedHardPayoffs": number
+  "unfulfilledHardReservations": number
+  "openHardContinuity": number
+  "blockedRequiredTasks": number
+  "finalVolumeClosed": boolean
+  "planStale": boolean
+}
+
+export interface CompletionSnapshotR1 {
+  "payloadSchema": unknown
+  "projectId": string
+  "projectRevision": number
+  "relevantStateDigest": string
+  "status": "READY" | "BLOCKED" | "NEEDS_DECISION" | "SOURCE_UNAVAILABLE"
+  "blockerCount": number
+  "advisoryCount": number
+  "checks": Array<{  }>
+}
+
+export interface BookExitStateR1 {
+  "payloadSchema": unknown
+  "closedAt": string
+  "projectRevision": number
+  "relevantStateDigest": string
+  "endgameContractRef": ArtifactRef
+  "finalChapterCount": number
+  "firstFinalChapterRef": unknown
+  "lastFinalChapterRef": unknown
+  "manuscriptInventoryDigest": string
+  "canonDigest": string
+  "knowledgeDigest": string
+  "continuityDigest": string
+  "reservationDigest": string
+  "obligationDigest": string
+  "finalVolumeExitStateRef": ArtifactRef
+  "completionReportRef": string
+}
+
+export interface BookCompletionReportR1 {
+  "payloadSchema": unknown
+  "completedAt": string
+  "projectRevision": number
+  "relevantStateDigest": string
+  "endgameContractRef": ArtifactRef
+  "completionGateResult": string
+  "checkSummaries": Array<{  }>
+  "exportPreflightDigest": string
+  "bookExitStateRef": ArtifactRef
+  "completionReceiptRef": string
+}

@@ -1145,3 +1145,107 @@ pub struct LongFormHealthProjectionR1Coverage {
     pub insufficient_factors: i64,
     pub unavailable_factors: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1 {
+    pub payload_schema: serde_json::Value,
+    pub compiled_from_project_revision: i64,
+    pub compiled_from_relevant_state_digest: String,
+    pub book_plan_ref: ArtifactRef,
+    pub ending_boundary_digest: String,
+    pub requested_ending: EndgameContractR1RequestedEnding,
+    pub hard_responsibilities: Vec<EndgameContractR1HardResponsibilitiesItem>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1RequestedEnding {
+    pub summary: String,
+    pub confirmation_source: serde_json::Value,
+    pub confirmed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1HardResponsibilitiesItem {
+    pub responsibility_id: String,
+    pub kind: String,
+    pub source_refs: Vec<String>,
+    pub authority_class: String,
+    pub required_disposition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameConstraintSnapshotR1 {
+    pub payload_schema: serde_json::Value,
+    pub project_id: String,
+    pub project_revision: i64,
+    pub relevant_state_digest: String,
+    pub requested_ending_confirmed: bool,
+    pub hard_responsibility_count: i64,
+    pub unresolved_hard_obligations: i64,
+    pub unmapped_mysteries: i64,
+    pub unresolved_hard_payoffs: i64,
+    pub unfulfilled_hard_reservations: i64,
+    pub open_hard_continuity: i64,
+    pub blocked_required_tasks: i64,
+    pub final_volume_closed: bool,
+    pub plan_stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletionSnapshotR1 {
+    pub payload_schema: serde_json::Value,
+    pub project_id: String,
+    pub project_revision: i64,
+    pub relevant_state_digest: String,
+    pub status: String,
+    pub blocker_count: i64,
+    pub advisory_count: i64,
+    pub checks: Vec<CompletionSnapshotR1ChecksItem>,
+}
+
+pub type CompletionSnapshotR1ChecksItem = std::collections::BTreeMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookExitStateR1 {
+    pub payload_schema: serde_json::Value,
+    pub closed_at: String,
+    pub project_revision: i64,
+    pub relevant_state_digest: String,
+    pub endgame_contract_ref: ArtifactRef,
+    pub final_chapter_count: i64,
+    pub first_final_chapter_ref: serde_json::Value,
+    pub last_final_chapter_ref: serde_json::Value,
+    pub manuscript_inventory_digest: String,
+    pub canon_digest: String,
+    pub knowledge_digest: String,
+    pub continuity_digest: String,
+    pub reservation_digest: String,
+    pub obligation_digest: String,
+    pub final_volume_exit_state_ref: ArtifactRef,
+    pub completion_report_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BookCompletionReportR1 {
+    pub payload_schema: serde_json::Value,
+    pub completed_at: String,
+    pub project_revision: i64,
+    pub relevant_state_digest: String,
+    pub endgame_contract_ref: ArtifactRef,
+    pub completion_gate_result: String,
+    pub check_summaries: Vec<BookCompletionReportR1CheckSummariesItem>,
+    pub export_preflight_digest: String,
+    pub book_exit_state_ref: ArtifactRef,
+    pub completion_receipt_ref: String,
+}
+
+pub type BookCompletionReportR1CheckSummariesItem =
+    std::collections::BTreeMap<String, serde_json::Value>;

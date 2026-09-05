@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/narrative/endgame-constraint-snapshot-r1.schema.json",
+  "title": "EndgameConstraintSnapshotR1",
+  "type": "object",
+  "properties": {
+    "payloadSchema": { "const": "endgame-constraint-snapshot.r1" },
+    "projectId": { "type": "string", "minLength": 1 },
+    "projectRevision": { "type": "integer", "minimum": 0 },
+    "relevantStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "requestedEndingConfirmed": { "type": "boolean" },
+    "hardResponsibilityCount": { "type": "integer", "minimum": 0 },
+    "unresolvedHardObligations": { "type": "integer", "minimum": 0 },
+    "unmappedMysteries": { "type": "integer", "minimum": 0 },
+    "unresolvedHardPayoffs": { "type": "integer", "minimum": 0 },
+    "unfulfilledHardReservations": { "type": "integer", "minimum": 0 },
+    "openHardContinuity": { "type": "integer", "minimum": 0 },
+    "blockedRequiredTasks": { "type": "integer", "minimum": 0 },
+    "finalVolumeClosed": { "type": "boolean" },
+    "planStale": { "type": "boolean" }
+  },
+  "required": ["payloadSchema", "projectId", "projectRevision", "relevantStateDigest", "requestedEndingConfirmed", "hardResponsibilityCount", "unresolvedHardObligations", "unmappedMysteries", "unresolvedHardPayoffs", "unfulfilledHardReservations", "openHardContinuity", "blockedRequiredTasks", "finalVolumeClosed", "planStale"],
+  "additionalProperties": false
+}

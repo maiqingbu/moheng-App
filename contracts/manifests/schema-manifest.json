@@ -136,6 +136,31 @@
       "name": "long-form-health-projection-r1",
       "path": "schemas/health/long-form-health-projection-r1.schema.json",
       "version": "r1.long-form-health-projection.v1"
+    },
+    {
+      "name": "endgame-contract-r1",
+      "path": "schemas/narrative/endgame-contract-r1.schema.json",
+      "version": "r1.endgame-contract.v1"
+    },
+    {
+      "name": "endgame-constraint-snapshot-r1",
+      "path": "schemas/narrative/endgame-constraint-snapshot-r1.schema.json",
+      "version": "r1.endgame-constraint-snapshot.v1"
+    },
+    {
+      "name": "completion-snapshot-r1",
+      "path": "schemas/narrative/completion-snapshot-r1.schema.json",
+      "version": "r1.completion-snapshot.v1"
+    },
+    {
+      "name": "book-exit-state-r1",
+      "path": "schemas/narrative/book-exit-state-r1.schema.json",
+      "version": "r1.book-exit-state.v1"
+    },
+    {
+      "name": "book-completion-report-r1",
+      "path": "schemas/narrative/book-completion-report-r1.schema.json",
+      "version": "r1.book-completion-report.v1"
     }
   ],
   "artifactStatus": [

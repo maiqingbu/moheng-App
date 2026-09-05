@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/narrative/book-completion-report-r1.schema.json",
+  "title": "BookCompletionReportR1",
+  "type": "object",
+  "properties": {
+    "payloadSchema": { "const": "book-completion-report.r1" },
+    "completedAt": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "projectRevision": { "type": "integer", "minimum": 0 },
+    "relevantStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "endgameContractRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "completionGateResult": { "type": "string", "const": "READY" },
+    "checkSummaries": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "exportPreflightDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "bookExitStateRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "completionReceiptRef": { "type": "string", "minLength": 1 }
+  },
+  "required": ["payloadSchema", "completedAt", "projectRevision", "relevantStateDigest", "endgameContractRef", "completionGateResult", "checkSummaries", "exportPreflightDigest", "bookExitStateRef", "completionReceiptRef"],
+  "additionalProperties": false
+}

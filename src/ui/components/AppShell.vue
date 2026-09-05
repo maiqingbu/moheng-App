@@ -28,6 +28,7 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
   { label: '成品阅读', icon: '▤', to: `/projects/${id.value}/read`, match: 'read' },
   { label: '作品图谱', icon: '⌘', to: `/projects/${id.value}/graph`, match: 'graph' },
   { label: '长篇健康', icon: '♡', to: `/projects/${id.value}/health`, match: 'health' },
+  { label: '终局与完结', icon: '✓', to: `/projects/${id.value}/completion`, match: 'completion' },
   { label: '版本与变更记录', icon: '↺', to: `/projects/${id.value}/history`, match: 'history' }
 ] : [])
 </script>

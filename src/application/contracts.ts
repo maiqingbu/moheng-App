@@ -744,6 +744,8 @@ export type CommandType =
   | 'export_create'
   | 'backup_create'
   | 'integrity_check_run'
+  | 'endgame_contract_create'
+  | 'complete_book'
   | 'settings_save'
   | 'global_settings_save'
   | 'signing_demo_pass'
@@ -797,6 +799,8 @@ export interface FrontendPort {
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection>
   queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection>
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection>
+  queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
+  queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
@@ -826,3 +830,28 @@ export type {
   HealthProvenance,
   HealthSourceRef,
 } from '../generated/contracts'
+
+export type CompletionGateStatus = 'READY' | 'BLOCKED' | 'NEEDS_DECISION' | 'SOURCE_UNAVAILABLE'
+
+export interface CompletionCheckProjection {
+  kind: string
+  status: CompletionGateStatus
+  summary: string
+  blockerCount: number
+  advisoryCount: number
+  sourceRefs: string[]
+}
+
+export interface CompletionStatusProjection {
+  projectId: string
+  projectRevision: number
+  status: CompletionGateStatus
+  checks: CompletionCheckProjection[]
+  blockerCount: number
+  advisoryCount: number
+  relevantStateDigest: string
+  sourceAvailable: boolean
+  requestedEndingConfirmed: boolean
+  completed: boolean
+  owner: string
+}

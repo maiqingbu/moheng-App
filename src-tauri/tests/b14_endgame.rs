@@ -39,7 +39,10 @@ fn unmapped_mystery_requires_user_decision() {
     input.unmapped_mysteries = 1;
     let result = evaluate_completion(&input);
     assert_eq!(result.status, CompletionStatus::NeedsDecision);
-    assert_eq!(result.check("MYSTERY").status, CompletionStatus::NeedsDecision);
+    assert_eq!(
+        result.check("MYSTERY").status,
+        CompletionStatus::NeedsDecision
+    );
 }
 
 #[test]
@@ -69,8 +72,14 @@ fn detail_page_limit_does_not_change_global_truth_or_digest() {
     small_page.detail_limit = 1;
     let mut large_page = small_page.clone();
     large_page.detail_limit = 50;
-    assert_eq!(evaluate_completion(&small_page), evaluate_completion(&large_page));
-    assert_eq!(relevant_state_digest(&small_page).unwrap(), relevant_state_digest(&large_page).unwrap());
+    assert_eq!(
+        evaluate_completion(&small_page),
+        evaluate_completion(&large_page)
+    );
+    assert_eq!(
+        relevant_state_digest(&small_page).unwrap(),
+        relevant_state_digest(&large_page).unwrap()
+    );
 }
 
 #[test]

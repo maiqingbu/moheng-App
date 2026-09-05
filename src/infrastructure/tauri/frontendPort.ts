@@ -38,6 +38,7 @@ import type {
   VolumeProgressProjection,
   VolumeSummary,
   VolumeLifecycleProjection,
+  CompletionStatusProjection,
 } from '../../application/contracts'
 
 export interface TauriInvoke {
@@ -72,6 +73,8 @@ export class TauriFrontendPort implements FrontendPort {
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection> { return invokeQuery(this.ipc, 'query_plan_stale', { request }) }
   queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection> { return invokeQuery(this.ipc, 'query_plan_route', { request }) }
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { return invokeQuery(this.ipc, 'query_volume_lifecycle', { request }) }
+  queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_endgame_status', { request }) }
+  queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_completion_status', { request }) }
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection> { return invokeQuery(this.ipc, 'support_checkpoint_resume', { request }) }
   testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {

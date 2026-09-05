@@ -158,12 +158,20 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
 
     checks.push(check(
         "PAYOFF",
-        if unresolved_payoffs > 0 || unfulfilled_reservations > 0 || open_continuity > 0 || blocked_tasks > 0 {
+        if unresolved_payoffs > 0
+            || unfulfilled_reservations > 0
+            || open_continuity > 0
+            || blocked_tasks > 0
+        {
             CompletionStatus::Blocked
         } else {
             CompletionStatus::Ready
         },
-        if unresolved_payoffs > 0 || unfulfilled_reservations > 0 || open_continuity > 0 || blocked_tasks > 0 {
+        if unresolved_payoffs > 0
+            || unfulfilled_reservations > 0
+            || open_continuity > 0
+            || blocked_tasks > 0
+        {
             "仍有关键回报、未来约束、连续性或正式任务未完成。"
         } else if input.soft_advisories > 0 {
             "硬性回报已通过检查，仍有创作建议可关注。"
@@ -191,7 +199,7 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
         } else {
             "用户确认的完结目标与当前终局约束一致。"
         },
-        i64::from(input.endgame_contract_fresh == false && input.requested_ending_confirmed),
+        i64::from(!input.endgame_contract_fresh && input.requested_ending_confirmed),
         0,
     ));
 
@@ -254,8 +262,6 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
 pub fn relevant_state_digest(input: &CompletionInput) -> Result<String, serde_json::Error> {
     let value = json!({
         "sourceAvailable": input.source_available,
-        "requestedEndingConfirmed": input.requested_ending_confirmed,
-        "endgameContractFresh": input.endgame_contract_fresh,
         "unmappedMysteries": input.unmapped_mysteries,
         "unresolvedHardObligations": input.unresolved_hard_obligations,
         "unresolvedHardPayoffs": input.unresolved_hard_payoffs,

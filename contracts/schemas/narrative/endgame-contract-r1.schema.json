@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/narrative/endgame-contract-r1.schema.json",
+  "title": "EndgameContractR1",
+  "type": "object",
+  "properties": {
+    "payloadSchema": { "const": "endgame-contract.r1" },
+    "compiledFromProjectRevision": { "type": "integer", "minimum": 0 },
+    "compiledFromRelevantStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "bookPlanRef": { "$ref": "../artifact/artifact-ref.schema.json" },
+    "endingBoundaryDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "requestedEnding": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "confirmationSource": { "const": "USER_CONFIRMED" },
+        "confirmedAt": { "type": "string", "format": "date-time", "pattern": "Z$" }
+      },
+      "required": ["summary", "confirmationSource", "confirmedAt"],
+      "additionalProperties": false
+    },
+    "hardResponsibilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "responsibilityId": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["OBLIGATION", "MYSTERY", "PAYOFF", "FUTURE_RESERVATION", "CONTINUITY", "TASK", "ENDING_BOUNDARY"] },
+          "sourceRefs": { "type": "array", "items": { "type": "string" } },
+          "authorityClass": { "type": "string", "enum": ["A", "B", "C"] },
+          "requiredDisposition": { "type": "string", "minLength": 1 }
+        },
+        "required": ["responsibilityId", "kind", "sourceRefs", "authorityClass", "requiredDisposition"],
+        "additionalProperties": false
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time", "pattern": "Z$" }
+  },
+  "required": ["payloadSchema", "compiledFromProjectRevision", "compiledFromRelevantStateDigest", "bookPlanRef", "endingBoundaryDigest", "requestedEnding", "hardResponsibilities", "createdAt"],
+  "additionalProperties": false
+}

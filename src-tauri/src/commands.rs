@@ -1509,6 +1509,406 @@ pub fn query_volume_lifecycle_impl(state: &KernelState, request: Value) -> Resul
         .map_err(|error| error.to_string())
 }
 
+fn b14_completion_response(
+    project_id: &str,
+    revision: i64,
+    input: &crate::endgame::CompletionInput,
+    completed: bool,
+) -> Result<Value, String> {
+    let evaluation = crate::endgame::evaluate_completion(input);
+    let digest = crate::endgame::relevant_state_digest(input).map_err(|error| error.to_string())?;
+    let status = serde_json::to_value(evaluation.status).map_err(|error| error.to_string())?;
+    Ok(json!({
+        "projectId": project_id,
+        "projectRevision": revision,
+        "status": status,
+        "checks": evaluation.checks,
+        "blockerCount": evaluation.blocker_count,
+        "advisoryCount": evaluation.advisory_count,
+        "relevantStateDigest": digest,
+        "sourceAvailable": input.source_available,
+        "requestedEndingConfirmed": input.requested_ending_confirmed,
+        "completed": completed,
+        "owner": "B14::EndgameCompletionOwner"
+    }))
+}
+
+pub fn query_endgame_status_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let (input, revision, _) =
+                crate::repositories::endgame::EndgameRepository::read_completion_input(
+                    connection, project_id,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let completed =
+                crate::repositories::endgame::EndgameRepository::completion_already_committed(
+                    connection, project_id,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            b14_completion_response(project_id, revision, &input, completed)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_completion_status_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    query_endgame_status_impl(state, request)
+}
+
+fn b14_project_scope() -> Value {
+    json!({"level":"PROJECT"})
+}
+
+fn b14_hard_responsibilities(input: &crate::endgame::CompletionInput) -> Value {
+    let mut responsibilities = Vec::new();
+    let mut add = |kind: &str, count: i64, authority_class: &str, source_ref: &str| {
+        if count > 0 {
+            responsibilities.push(json!({
+                "responsibilityId": format!("b14:{kind}"),
+                "kind": kind,
+                "sourceRefs": [source_ref],
+                "authorityClass": authority_class,
+                "requiredDisposition": "RESOLVED_BEFORE_COMPLETION"
+            }));
+        }
+    };
+    add(
+        "OBLIGATION",
+        input.unresolved_hard_obligations,
+        "A",
+        "narrative_obligations",
+    );
+    add(
+        "MYSTERY",
+        input.unmapped_mysteries,
+        "B",
+        "book_plan.majorMysteryGoals",
+    );
+    add(
+        "PAYOFF",
+        input.unresolved_hard_payoffs,
+        "B",
+        "payoff_registry",
+    );
+    add(
+        "FUTURE_RESERVATION",
+        input.unfulfilled_hard_reservations,
+        "A",
+        "book_plan.futureReservations",
+    );
+    add(
+        "CONTINUITY",
+        input.open_hard_continuity,
+        "A",
+        "character_arc_states",
+    );
+    add(
+        "TASK",
+        input.blocked_required_tasks,
+        "B",
+        "state_deltas.volume.task.progress",
+    );
+    responsibilities.push(json!({
+        "responsibilityId": "b14:ending-boundary",
+        "kind": "ENDING_BOUNDARY",
+        "sourceRefs": ["user.requestedEnding"],
+        "authorityClass": "A",
+        "requiredDisposition": "USER_CONFIRMED"
+    }));
+    Value::Array(responsibilities)
+}
+
+fn b14_replayed_receipt(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+) -> Result<Option<Value>, String> {
+    let Some(receipt) = CommitService::find_receipt(connection, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    if receipt.command_id != command_id {
+        return Err("IDEMPOTENCY_CONFLICT".into());
+    }
+    Ok(Some(
+        json!({"finalStatus":"committed","receipt":receipt,"owner":"B14::EndgameCompletionOwner"}),
+    ))
+}
+
+pub fn create_endgame_contract_impl(
+    state: &KernelState,
+    request: &Value,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for B14 command".to_string())?;
+    let ending = request
+        .pointer("/payload/requestedEnding")
+        .or_else(|| request.get("requestedEnding"))
+        .ok_or_else(|| "B14_REQUESTED_ENDING_REQUIRED".to_string())?;
+    let summary = ending
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "B14_REQUESTED_ENDING_SUMMARY_REQUIRED".to_string())?;
+    if ending.get("confirmationSource").and_then(Value::as_str) != Some("USER_CONFIRMED") {
+        return Err("B14_REQUESTED_ENDING_CONFIRMATION_REQUIRED".into());
+    }
+    let confirmed_at = ending
+        .get("confirmedAt")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_at);
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    if let Some(replayed) = b14_replayed_receipt(&handle, project_id, command_id, idempotency_key)?
+    {
+        return Ok(replayed);
+    }
+    let (input, revision, _) =
+        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
+            .map_err(|error| error.to_string())?;
+    if revision != expected_revision {
+        return Err("REVISION_CONFLICT".into());
+    }
+    if crate::repositories::endgame::EndgameRepository::completion_already_committed(
+        &handle, project_id,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("B14_ALREADY_COMPLETED".into());
+    }
+    let book_plan_ref = crate::repositories::endgame::EndgameRepository::latest_project_head_ref(
+        &handle, project_id, "BookPlan",
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "B14_BOOK_PLAN_REQUIRED".to_string())?;
+    let digest =
+        crate::endgame::relevant_state_digest(&input).map_err(|error| error.to_string())?;
+    let ending_boundary_digest =
+        sha256_canonical(&json!({"summary":summary})).map_err(|error| error.to_string())?;
+    let contract_payload = json!({
+        "payloadSchema": "endgame-contract.r1",
+        "compiledFromProjectRevision": revision + 1,
+        "compiledFromRelevantStateDigest": digest,
+        "bookPlanRef": book_plan_ref,
+        "endingBoundaryDigest": ending_boundary_digest,
+        "requestedEnding": {
+            "summary": summary,
+            "confirmationSource": "USER_CONFIRMED",
+            "confirmedAt": confirmed_at
+        },
+        "hardResponsibilities": b14_hard_responsibilities(&input),
+        "createdAt": requested_at
+    });
+    let artifact_id = format!("endgame-contract:{project_id}");
+    let version =
+        crate::repositories::artifacts::ArtifactRepository::next_version(&handle, &artifact_id)
+            .map_err(|error| error.to_string())?;
+    let payload_hash = sha256_canonical(&contract_payload).map_err(|error| error.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId": artifact_id,
+        "projectId": project_id,
+        "artifactType": "EndgameContract",
+        "scope": b14_project_scope(),
+        "version": version,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "semanticLifecycle": "APPROVED_PLAN",
+        "payload": contract_payload,
+        "payloadHash": payload_hash,
+        "dependencyRefs": [book_plan_ref],
+        "provenance": {"createdBy":"B14::EndgameCompletionOwner","commandId":command_id},
+        "createdAt": requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId": format!("commit:b14:endgame:{command_id}"),
+        "projectId": project_id,
+        "commandId": command_id,
+        "idempotencyKey": idempotency_key,
+        "expectedProjectRevision": expected_revision,
+        "contractVersion": "m0a.v1",
+        "createdAt": requested_at,
+        "artifacts": [artifact],
+        "headUpdates": [{"artifactType":"EndgameContract","scope":b14_project_scope(),"artifactId":artifact_id,"version":version,"payloadHash":payload_hash}],
+        "receiptDraft": {"domain":"B14_ENDGAME_CONTRACT","payload":{"status":"COMMITTED","compiledFromProjectRevision":revision + 1,"relevantStateDigest":digest}}
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt =
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|error| error.to_string())?;
+    Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B14::EndgameCompletionOwner"}))
+}
+
+pub fn complete_book_impl(
+    state: &KernelState,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for B14 command".to_string())?;
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    if let Some(replayed) = b14_replayed_receipt(&handle, project_id, command_id, idempotency_key)?
+    {
+        return Ok(replayed);
+    }
+    let (input, revision, _) =
+        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
+            .map_err(|error| error.to_string())?;
+    if revision != expected_revision {
+        return Err("REVISION_CONFLICT".into());
+    }
+    if crate::repositories::endgame::EndgameRepository::completion_already_committed(
+        &handle, project_id,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err("B14_ALREADY_COMPLETED".into());
+    }
+    let evaluation = crate::endgame::evaluate_completion(&input);
+    if evaluation.status != crate::endgame::CompletionStatus::Ready {
+        let status =
+            serde_json::to_string(&evaluation.status).map_err(|error| error.to_string())?;
+        return Err(format!("B14_COMPLETION_NOT_READY:{status}"));
+    }
+    let digest =
+        crate::endgame::relevant_state_digest(&input).map_err(|error| error.to_string())?;
+    let endgame_contract_ref =
+        crate::repositories::endgame::EndgameRepository::latest_project_head_ref(
+            &handle,
+            project_id,
+            "EndgameContract",
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B14_ENDGAME_CONTRACT_REQUIRED".to_string())?;
+    let final_volume_exit_state_ref =
+        crate::repositories::endgame::EndgameRepository::final_volume_exit_ref(&handle, project_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "B14_FINAL_VOLUME_EXIT_STATE_REQUIRED".to_string())?;
+    let (final_chapter_count, first_final_chapter_ref, last_final_chapter_ref) =
+        crate::repositories::endgame::EndgameRepository::final_chapter_summary(&handle, project_id)
+            .map_err(|error| error.to_string())?;
+    let exit_artifact_id = format!("book-exit-state:{project_id}:{command_id}");
+    let report_artifact_id = format!("book-completion-report:{project_id}:{command_id}");
+    let completion_receipt_id = format!("completion-receipt:{command_id}");
+    let exit_payload = json!({
+        "payloadSchema": "book-exit-state.r1",
+        "closedAt": requested_at,
+        "projectRevision": revision + 1,
+        "relevantStateDigest": digest,
+        "endgameContractRef": endgame_contract_ref,
+        "finalChapterCount": final_chapter_count,
+        "firstFinalChapterRef": first_final_chapter_ref,
+        "lastFinalChapterRef": last_final_chapter_ref,
+        "manuscriptInventoryDigest": sha256_canonical(&json!({"projectId":project_id,"finalChapterCount":final_chapter_count,"stateDigest":digest})).map_err(|error| error.to_string())?,
+        "canonDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"CANON","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "knowledgeDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"KNOWLEDGE","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "continuityDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"CONTINUITY","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "reservationDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"RESERVATION","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "obligationDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"OBLIGATION","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "finalVolumeExitStateRef": final_volume_exit_state_ref,
+        "completionReportRef": report_artifact_id
+    });
+    let exit_version = crate::repositories::artifacts::ArtifactRepository::next_version(
+        &handle,
+        &exit_artifact_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let exit_hash = sha256_canonical(&exit_payload).map_err(|error| error.to_string())?;
+    let exit_ref =
+        json!({"artifactId":exit_artifact_id,"version":exit_version,"payloadHash":exit_hash});
+    let report_payload = json!({
+        "payloadSchema": "book-completion-report.r1",
+        "completedAt": requested_at,
+        "projectRevision": revision + 1,
+        "relevantStateDigest": digest,
+        "endgameContractRef": endgame_contract_ref,
+        "completionGateResult": "READY",
+        "checkSummaries": evaluation.checks,
+        "exportPreflightDigest": sha256_canonical(&json!({"projectId":project_id,"stateDigest":digest,"finalVolumeExitStateRef":final_volume_exit_state_ref})).map_err(|error| error.to_string())?,
+        "bookExitStateRef": exit_ref,
+        "completionReceiptRef": completion_receipt_id
+    });
+    let report_version = crate::repositories::artifacts::ArtifactRepository::next_version(
+        &handle,
+        &report_artifact_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let report_hash = sha256_canonical(&report_payload).map_err(|error| error.to_string())?;
+    let exit_artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId": exit_artifact_id,
+        "projectId": project_id,
+        "artifactType": "BookExitState",
+        "scope": b14_project_scope(),
+        "version": exit_version,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "semanticLifecycle": "CANON",
+        "payload": exit_payload,
+        "payloadHash": exit_hash,
+        "dependencyRefs": [endgame_contract_ref, final_volume_exit_state_ref],
+        "provenance": {"createdBy":"B14::EndgameCompletionOwner","commandId":command_id},
+        "createdAt": requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let report_artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId": report_artifact_id,
+        "projectId": project_id,
+        "artifactType": "BookCompletionReport",
+        "scope": b14_project_scope(),
+        "version": report_version,
+        "schemaVersion": "m0a.artifact.v1",
+        "artifactStatus": "CANDIDATE",
+        "semanticLifecycle": "CANON",
+        "payload": report_payload,
+        "payloadHash": report_hash,
+        "dependencyRefs": [endgame_contract_ref, exit_ref],
+        "provenance": {"createdBy":"B14::EndgameCompletionOwner","commandId":command_id},
+        "createdAt": requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId": format!("commit:b14:complete:{command_id}"),
+        "projectId": project_id,
+        "commandId": command_id,
+        "idempotencyKey": idempotency_key,
+        "expectedProjectRevision": expected_revision,
+        "contractVersion": "m0a.v1",
+        "createdAt": requested_at,
+        "artifacts": [exit_artifact, report_artifact],
+        "headUpdates": [
+            {"artifactType":"BookExitState","scope":b14_project_scope(),"artifactId":exit_artifact_id,"version":exit_version,"payloadHash":exit_hash},
+            {"artifactType":"BookCompletionReport","scope":b14_project_scope(),"artifactId":report_artifact_id,"version":report_version,"payloadHash":report_hash}
+        ],
+        "receiptDraft": {
+            "domain":"B14_BOOK_COMPLETION",
+            "receiptId":completion_receipt_id,
+            "artifactRefs":[exit_ref,{"artifactId":report_artifact_id,"version":report_version,"payloadHash":report_hash}],
+            "payload":{"status":"COMPLETED","relevantStateDigest":digest,"projectRevision":revision + 1}
+        }
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt =
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|error| error.to_string())?;
+    Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B14::EndgameCompletionOwner"}))
+}
+
 pub fn query_context_manifest_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let revision = state
@@ -4128,6 +4528,29 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 expected_revision,
             )
         }
+        "endgame_contract_create" | "complete_book" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if command_type == "endgame_contract_create" {
+                create_endgame_contract_impl(
+                    state,
+                    &request,
+                    id,
+                    command_id,
+                    idempotency_key,
+                    requested_at,
+                    expected_revision,
+                )
+            } else {
+                complete_book_impl(
+                    state,
+                    id,
+                    command_id,
+                    idempotency_key,
+                    requested_at,
+                    expected_revision,
+                )
+            }
+        }
         "project_create_from_idea" | "project_create_from_market" => {
             let title = request
                 .pointer("/payload/title")
@@ -4674,6 +5097,22 @@ pub fn support_checkpoint_resume(
 }
 
 #[tauri::command]
+pub fn query_endgame_status(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_endgame_status_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_completion_status(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_completion_status_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -4858,6 +5297,8 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_lifecycle,
         support_session,
         support_checkpoint_resume,
+        query_endgame_status,
+        query_completion_status,
         execute_command,
         query_global_settings,
         query_project_settings,

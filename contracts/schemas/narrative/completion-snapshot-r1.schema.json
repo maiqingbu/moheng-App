@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "m0a://schemas/narrative/completion-snapshot-r1.schema.json",
+  "title": "CompletionSnapshotR1",
+  "type": "object",
+  "properties": {
+    "payloadSchema": { "const": "completion-snapshot.r1" },
+    "projectId": { "type": "string", "minLength": 1 },
+    "projectRevision": { "type": "integer", "minimum": 0 },
+    "relevantStateDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "status": { "type": "string", "enum": ["READY", "BLOCKED", "NEEDS_DECISION", "SOURCE_UNAVAILABLE"] },
+    "blockerCount": { "type": "integer", "minimum": 0 },
+    "advisoryCount": { "type": "integer", "minimum": 0 },
+    "checks": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+  },
+  "required": ["payloadSchema", "projectId", "projectRevision", "relevantStateDigest", "status", "blockerCount", "advisoryCount", "checks"],
+  "additionalProperties": false
+}
