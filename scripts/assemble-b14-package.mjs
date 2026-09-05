@@ -48,7 +48,9 @@ function copyFile(source, target) {
   fs.copyFileSync(source, target)
 }
 function trackedSourceFiles() {
-  return git(['ls-files']).split('\n').filter(Boolean).filter(file => {
+  const result = spawnSync('git', ['-c', 'core.quotePath=false', 'ls-files', '-z'], { cwd: root })
+  if (result.status !== 0) throw new Error('B14_SOURCE_INVENTORY_FAILED')
+  return result.stdout.toString('utf8').split('\0').filter(Boolean).filter(file => {
     if (file.startsWith('evidence/')) return false
     if (/(^|\/)(node_modules|target|dist|\.git)(\/|$)/.test(file)) return false
     if (/\.(db|db-shm|db-wal|log|zip|7z)$/i.test(file)) return false
@@ -109,4 +111,3 @@ const zipSha256 = sha256File(zipPath)
 const shaPath = path.join(deliveryDir, `${packageName}.SHA256SUMS.txt`)
 fs.writeFileSync(shaPath, `${zipSha256}  ${path.basename(zipPath)}\n`)
 console.log(JSON.stringify({ status: 'PASS', sourceCommit, zip: zipPath, sha256File: shaPath, zipSha256, packageRoot: `${packageName}/`, entryCount: inventory.length }, null, 2))
-
