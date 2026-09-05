@@ -170,6 +170,19 @@ const mutations = run('real_mutations', 'node', ['scripts/run-b13-r1-mutations.m
 const architectureReport = inspectB13Architecture(root)
 const productUxReport = evaluateProductUx()
 const scaleLine = rustScale.output.match(/B13_R1_SCALE_RESULT[^\n]*/)?.[0] ?? null
+const scalePassed = rustScale.status === 'PASS'
+  && Boolean(scaleLine)
+  && numberMarker(scaleLine, 'words') >= 10_000_000
+  && numberMarker(scaleLine, 'chapters') >= 4000
+  && numberMarker(scaleLine, 'obligations') > 51
+  && numberMarker(scaleLine, 'routeScopes') > 101
+  && numberMarker(scaleLine, 'tasks') > 201
+  && numberMarker(scaleLine, 'readerDesires') > 50
+  && numberMarker(scaleLine, 'contextRuns') >= 16
+  && numberMarker(scaleLine, 'costRuns') >= 8
+  && numberMarker(scaleLine, 'qualitySamples') >= 20
+  && scaleLine.includes('pageIndependentTruth=PASS')
+  && scaleLine.includes('noFullChapterBody=PASS')
 const scaleData = {
   schema: 'b13-r1-scale-certification',
   words: numberMarker(scaleLine, 'words'),
@@ -183,7 +196,7 @@ const scaleData = {
   qualitySamples: numberMarker(scaleLine, 'qualitySamples'),
   pageIndependentTruth: scaleLine?.includes('pageIndependentTruth=PASS') ?? false,
   noFullChapterBody: scaleLine?.includes('noFullChapterBody=PASS') ?? false,
-  status: rustScale.status === 'PASS' && Boolean(scaleLine),
+  status: scalePassed ? 'PASS' : 'FAIL',
 }
 writeEvidence('B13_R1_SCALE.json', scaleData, rustScale)
 
@@ -334,7 +347,7 @@ writeEvidence('B13_R1_GLOBAL_TRUTH_SCALE.json', {
   schema: 'b13-r1-global-truth-scale',
   ...scaleData,
   queryPlans: queryPlansValid,
-  status: scaleData.status && queryPlansValid ? 'PASS' : 'FAIL',
+  status: scaleData.status === 'PASS' && queryPlansValid ? 'PASS' : 'FAIL',
 }, rustScale)
 
 const mutationResults = ['MUT-R1-01', 'MUT-R1-02', 'MUT-R1-03', 'MUT-R1-04'].map(id => {
@@ -358,6 +371,23 @@ if (fs.existsSync(manualEvidencePath)) {
   manualEvidence.status = browser.status === 'PASS' && manualEvidence.status === 'PASS' ? 'PASS' : 'FAIL'
   fs.writeFileSync(manualEvidencePath, `${JSON.stringify(manualEvidence, null, 2)}\n`)
 }
+
+const historicalEvidenceFiles = [
+  'evidence/B01/registry_integrity.json',
+  'evidence/B01/schema_inventory.json',
+]
+const historicalEvidenceRestoration = historicalEvidenceFiles.map(file => {
+  const changed = gitResult(['diff', '--quiet', '--', file]).status !== 0
+  if (!changed) return { file, changed: false, status: 'UNCHANGED' }
+  const restored = gitResult(['restore', '--source', sourceCommit, '--', file])
+  return { file, changed: true, status: restored.status === 0 ? 'RESTORED' : 'FAIL' }
+})
+writeEvidence('B13_R1_HISTORICAL_EVIDENCE_RESTORATION.json', {
+  schema: 'b13-r1-historical-evidence-restoration',
+  files: historicalEvidenceRestoration,
+  noHistoricalEvidenceDiff: historicalEvidenceRestoration.every(item => gitResult(['diff', '--quiet', '--', item.file]).status === 0),
+  status: historicalEvidenceRestoration.every(item => item.status !== 'FAIL') ? 'PASS' : 'FAIL',
+})
 
 const sourceAfterCommit = gitText(['rev-parse', 'HEAD'])
 const statusAfter = gitText(['status', '--porcelain', '--untracked-files=all'])
@@ -401,7 +431,7 @@ writeEvidence('B13_R1_REGRESSION.json', {
 const gates = {
   b13_r1_01_chapter_identity: gate(rustHealth.status === 'PASS' && architectureReport.checks.r1_chapter_identity === 'PASS', 'B13_R1_CHAPTER_IDENTITY.json'),
   b13_r1_02_plan_stale_semantics: gate(rustHealth.status === 'PASS' && architectureReport.checks.r1_plan_stale_owner === 'PASS', 'B13_R1_PLAN_STALE_SEMANTICS.json'),
-  b13_r1_03_global_truth_scale: gate(scaleData.status && queryPlansValid && architectureReport.checks.r1_global_truth_aggregate === 'PASS', 'B13_R1_GLOBAL_TRUTH_SCALE.json'),
+  b13_r1_03_global_truth_scale: gate(scaleData.status === 'PASS' && queryPlansValid && architectureReport.checks.r1_global_truth_aggregate === 'PASS', 'B13_R1_GLOBAL_TRUTH_SCALE.json'),
   b13_r1_04_product_identity: gate(productUxCommand.status === 'PASS' && productUxReport.status === 'PASS' && architectureReport.checks.r1_volume_display_metadata === 'PASS', 'B13_R1_PRODUCT_IDENTITY.json'),
   b13_r1_05_evidence_truthfulness: gate(truthfulness.status === 'PASS' && truthfulnessCommand.status === 'PASS', 'B13_R1_EVIDENCE_TRUTHFULNESS.json'),
   architecture: gate(architecture.status === 'PASS' && architectureReport.status === 'PASS', 'B13_R1_ARCHITECTURE.json'),
@@ -412,6 +442,7 @@ const gates = {
   B14_boundary: gate(!changedFiles.some(item => /B14|Endgame|Completion/.test(item.file)), 'B13_R1_PREBATCH_FREEZE.json'),
   B15_boundary: gate(!changedFiles.some(item => /B15|ExportRelease/.test(item.file)), 'B13_R1_PREBATCH_FREEZE.json'),
   RC1_boundary: gate(!changedFiles.some(item => /RC1/.test(item.file)), 'B13_R1_PREBATCH_FREEZE.json'),
+  historical_evidence_restoration: gate(historicalEvidenceRestoration.every(item => item.status !== 'FAIL'), 'B13_R1_HISTORICAL_EVIDENCE_RESTORATION.json'),
   rust_fmt: gate(rustFmt.status === 'PASS', 'AUTOMATIC/rust_fmt.log', { exitCode: rustFmt.exitCode }),
   rust_check: gate(rustCheck.status === 'PASS', 'AUTOMATIC/rust_check.log', { exitCode: rustCheck.exitCode }),
   rust_clippy: gate(rustClippy.status === 'PASS', 'AUTOMATIC/rust_clippy.log', { exitCode: rustClippy.exitCode }),
