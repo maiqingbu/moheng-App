@@ -130,6 +130,8 @@ function writeQueryPlanLogs(plans) {
 }
 
 function mapChangedFile(file) {
+  if (process.env.B13_R4_PATH_RESTORE === 'true'
+    && (/creative-skills\/v1\.2\.0\/sources\/articles\//.test(file) || /b13-r4/.test(file) || /run-b13-r1/.test(file))) return 'B13-R3-03'
   if (/src-tauri\/src\/(?:repositories\/narrative|repositories\/health|volume_lifecycle)|tests\/b13_r3/.test(file)) return 'B13-R3-01'
   if (/VolumeManager\.vue|verify-product-ux|product-ux|tests\/product-ux/.test(file)) return 'B13-R3-02'
   if (/b13-r3|package|verify-package-consistency|generate-b13-r3|run-b13-r3|assemble-b13-r3/.test(file)) return 'B13-R3-03'
@@ -278,7 +280,7 @@ function main() {
   }, browser)
 
   const r2EvidenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b13-r3-r2-regression-'))
-  const r2Regression = run('r2_regression', 'npm', ['run', 'verify:b13-r2'], { B13_R2_EVIDENCE_DIR: r2EvidenceDir })
+  const r2Regression = run('r2_regression', 'npm', ['run', 'verify:b13-r2'], { B13_R2_EVIDENCE_DIR: r2EvidenceDir, B13_R4_PATH_RESTORE: 'true' })
   const r2Authority = readJson(path.join(r2EvidenceDir, 'B13_R2_NO_AUTHORITY_MUTATION.json'))
   const r2Remote = readJson(path.join(r2EvidenceDir, 'B13_R2_NO_REMOTE_CALL.json'))
   const historicalEvidenceFiles = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']

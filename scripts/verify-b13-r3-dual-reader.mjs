@@ -106,7 +106,8 @@ function readerB(zipPath, extractDir, outputDir, reader) {
   }
   const listOutput = outputOf(list)
   writeLog(outputDir, 'reader-b-list.log', 'command=' + reader.name + ' list\n' + listOutput)
-  writeLog(outputDir, 'reader-b-extract.log', 'command=' + reader.name + ' test\n' + outputOf(test) + 'command=' + reader.name + ' extract\n' + outputOf(extract))
+  writeLog(outputDir, 'reader-b-test.log', 'command=' + reader.name + ' test\n' + outputOf(test))
+  writeLog(outputDir, 'reader-b-extract.log', 'command=' + reader.name + ' extract\n' + outputOf(extract))
   const names = list.status === 0
     ? (reader.name === '7z'
       ? listOutput.split(/\r?\n/).filter(line => line.startsWith('Path = ')).map(line => line.slice(7)).filter(line => line !== zipPath && !line.endsWith('/'))
@@ -138,6 +139,7 @@ export function verifyDualReaders(zipPath, outputDir = fs.mkdtempSync(path.join(
   if (!reader) {
     writeLog(outputDir, 'reader-b-version.log', 'reader B unavailable: unzip, 7z, bsdtar and jar were not found')
     writeLog(outputDir, 'reader-b-list.log', 'reader B unavailable')
+    writeLog(outputDir, 'reader-b-test.log', 'reader B unavailable')
     writeLog(outputDir, 'reader-b-extract.log', 'reader B unavailable')
   }
   const b = reader ? readerB(zipPath, extractB, outputDir, reader) : { ok: false, version: '', names: [], error: 'no independent reader available' }

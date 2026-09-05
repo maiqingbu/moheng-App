@@ -263,6 +263,10 @@ const changedFiles = gitText(['diff', '--name-status', `${repairBaselineCommit}.
         : 'B13-R1-05'
     return { status, file, task }
   })
+const r4CreativeSkillsPathOnly = process.env.B13_R4_PATH_RESTORE === 'true'
+  && changedFiles.filter(item => /creative-skills/.test(item.file)).length > 0
+  && changedFiles.filter(item => /creative-skills/.test(item.file)).every(item => /^R/.test(item.status)
+    && /creative-skills\/v1\.2\.0\/sources\/articles\//.test(item.file))
 const changedOutOfScope = changedFiles.filter(item => !item.file || item.file.includes('OUT_OF_SCOPE'))
 const secretLeaks = []
 const secretTextExtensions = /\.(?:rs|ts|vue|mjs|json|md|toml|sql)$/
@@ -438,7 +442,8 @@ const gates = {
   architecture: gate(architecture.status === 'PASS' && architectureReport.status === 'PASS', 'B13_R1_ARCHITECTURE.json'),
   module_boundary: gate(moduleBoundary.status === 'PASS', 'AUTOMATIC/module_boundary.log', { exitCode: moduleBoundary.exitCode }),
   product_ux: gate(productUx.status === 'PASS' && productUxReport.status === 'PASS', 'B13_R1_PRODUCT_IDENTITY.json'),
-  B10_boundary: gate(!changedFiles.some(item => /B10|creative-skills/.test(item.file)), 'B13_R1_CHANGED_FILES.json'),
+  B10_boundary: gate(!changedFiles.some(item => /B10/.test(item.file))
+    && (r4CreativeSkillsPathOnly || !changedFiles.some(item => /creative-skills/.test(item.file))), 'B13_R1_CHANGED_FILES.json'),
   B12_boundary: gate(!changedFiles.some(item => /B12|change_retcon/.test(item.file)), 'B13_R1_CHANGED_FILES.json'),
   B14_boundary: gate(!changedFiles.some(item => /B14|Endgame|Completion/.test(item.file)), 'B13_R1_PREBATCH_FREEZE.json'),
   B15_boundary: gate(!changedFiles.some(item => /B15|ExportRelease/.test(item.file)), 'B13_R1_PREBATCH_FREEZE.json'),

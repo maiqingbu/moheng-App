@@ -88,7 +88,9 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   const sourceBinding = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/SOURCE_BINDING.json'))
   const forbiddenScope = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/FORBIDDEN_SCOPE_DIFF.json'))
   const utf8Validation = readJson(path.join(resolvedRoot, 'PACKAGE_MANIFEST/PACKAGE_UTF8_VALIDATION.json'))
-  const batch = fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R3')) ? 'B13_R3' : 'B13_R2'
+  const batch = fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R4'))
+    ? 'B13_R4'
+    : fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R3')) ? 'B13_R3' : 'B13_R2'
   if (!inventory || typeof inventory.countingRule !== 'string') failures.push('inventory counting rule missing')
   const count = prefix => ordinary.filter(relative => relative.startsWith(prefix)).length
   const expectedInventory = {
@@ -107,14 +109,14 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   }
   if (forbiddenScope?.status !== 'PASS' || !Array.isArray(forbiddenScope?.findings) || forbiddenScope.findings.length !== 0) failures.push('forbidden scope manifest is not PASS with empty findings')
   if (utf8Validation?.status !== 'PASS' || utf8Validation?.rootAscii !== true) failures.push('UTF-8 validation manifest is not PASS')
-  if (batch === 'B13_R3') {
+  if (batch === 'B13_R4' || batch === 'B13_R3') {
     const requiredReaderFiles = [
       'reader-a-version.log', 'reader-a-list.log', 'reader-a-extract.log',
-      'reader-b-version.log', 'reader-b-list.log', 'reader-b-extract.log',
+      'reader-b-version.log', 'reader-b-list.log', 'reader-b-test.log', 'reader-b-extract.log',
       'reader-content-compare.json',
     ]
     for (const file of requiredReaderFiles) {
-      if (!fs.existsSync(path.join(resolvedRoot, 'EVIDENCE/B13_R3/PACKAGE_READERS', file))) failures.push(`R3 reader evidence missing: ${file}`)
+      if (!fs.existsSync(path.join(resolvedRoot, `EVIDENCE/${batch}/PACKAGE_READERS`, file))) failures.push(`${batch} reader evidence missing: ${file}`)
     }
     if (utf8Validation?.readerA !== 'python-zipfile'
       || typeof utf8Validation?.readerB !== 'string'
@@ -122,7 +124,20 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
       || utf8Validation?.entrySetsEqual !== true
       || utf8Validation?.contentHashesEqual !== true
       || utf8Validation?.utf8FlagFailures !== 0
-      || utf8Validation?.mojibakeFindings !== 0) failures.push('R3 dual-reader UTF-8 validation is incomplete')
+      || utf8Validation?.mojibakeFindings !== 0) failures.push(`${batch} dual-reader UTF-8 validation is incomplete`)
+    if (batch === 'B13_R4'
+      && (utf8Validation?.replacementFindings !== 0
+        || utf8Validation?.knownMojibakeFindings !== 0
+        || utf8Validation?.cp437MojibakeFindings !== 0
+        || utf8Validation?.frozenPathMismatches !== 0
+        || utf8Validation?.nonNfcPaths !== 0
+        || utf8Validation?.sourcePathValidation !== 'PASS'
+        || utf8Validation?.candidateZipValidation !== 'PASS'
+        || utf8Validation?.finalZipValidation !== 'PASS'
+        || utf8Validation?.correctPathCountA !== 20
+        || utf8Validation?.correctPathCountB !== 20
+        || utf8Validation?.oldMojibakePathsA !== 0
+        || utf8Validation?.oldMojibakePathsB !== 0)) failures.push('B13_R4 path/reader validation is incomplete')
   }
   if (expectedSourceCommit && sourceBinding?.sourceCommit !== expectedSourceCommit) failures.push('source binding commit mismatch')
   if (sourceBinding?.sourceCommit !== sourceBinding?.evidenceSourceCommit || sourceBinding?.sourceCommit !== sourceBinding?.sourceCommitAfter) failures.push('source binding fields disagree')
@@ -131,7 +146,7 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
   const checksums = checkInternalSums(resolvedRoot)
   if (checksums.status !== 'PASS') failures.push(...checksums.mismatches)
   const result = {
-    schema: batch === 'B13_R3' ? 'b13-r3-package-consistency' : 'b13-r2-package-consistency',
+    schema: batch === 'B13_R4' ? 'b13-r4-package-consistency' : batch === 'B13_R3' ? 'b13-r3-package-consistency' : 'b13-r2-package-consistency',
     root: `${rootName}/`,
     rootAscii: /^[\x00-\x7F]+$/.test(rootName),
     inventory: expectedInventory,

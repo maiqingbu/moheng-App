@@ -41,7 +41,7 @@ export function inspectB13R3Architecture(projectRoot = root, baseline = 'e6419ce
       && /7z/.test(dualReader)
       && /entrySetsEqual/.test(dualReader)
       && /contentHashesEqual/.test(dualReader),
-    packageVerifierR3ReaderGate: /batch === 'B13_R3'/.test(packageVerifier)
+    packageVerifierR3ReaderGate: /batch === 'B13_R3'|batch === 'B13_R4'/.test(packageVerifier)
       && /reader-b-list\.log/.test(packageVerifier),
     noMigrationChanges: !changedFiles.some(file => /src-tauri\/migrations\//.test(file)),
     noFutureBatchImplementation: !/(?:EndgameContract|CompletionGate|BookExitState|ExportReleaseOwner|RC1 certification)/i.test(narrative + volume + health),
