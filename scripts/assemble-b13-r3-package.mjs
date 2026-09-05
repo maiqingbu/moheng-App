@@ -87,7 +87,19 @@ function runPython(script, args) {
 }
 
 function makeZip(stageRoot, zipPath) {
-  const script = 'import os,sys,zipfile\\nroot=sys.argv[1]\\nout=sys.argv[2]\\nwith zipfile.ZipFile(out,\"w\",zipfile.ZIP_DEFLATED) as z:\\n    for base,dirs,files in os.walk(root):\\n        dirs.sort(); files.sort()\\n        for name in files:\\n            p=os.path.join(base,name)\\n            arc=os.path.relpath(p,os.path.dirname(root)).replace(os.sep,\"/\")\\n            z.write(p,arc)\\n'
+  const script = [
+    'import os,sys,zipfile',
+    'root=sys.argv[1]',
+    'out=sys.argv[2]',
+    'with zipfile.ZipFile(out,\"w\",zipfile.ZIP_DEFLATED) as z:',
+    '    for base,dirs,files in os.walk(root):',
+    '        dirs.sort(); files.sort()',
+    '        for name in files:',
+    '            p=os.path.join(base,name)',
+    '            arc=os.path.relpath(p,os.path.dirname(root)).replace(os.sep,\"/\")',
+    '            z.write(p,arc)',
+    '',
+  ].join('\n')
   const result = runPython(script, [stageRoot, zipPath])
   if (result.status !== 0) throw new Error('B13_R3_ZIP_CREATE_FAILED:' + result.stderr)
 }
