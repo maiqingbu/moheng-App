@@ -72,9 +72,11 @@ function numberMarker(line, key) {
 }
 
 function jsonMarker(line, key) {
-  const match = line?.match(new RegExp(`${key}=(\{.*\})\s+after=`))
-  if (!match) return null
-  try { return JSON.parse(match[1]) } catch { return null }
+  if (!line) return null
+  const start = line.indexOf(`${key}=`)
+  const end = line.indexOf(' after=', start)
+  if (start < 0 || end < 0) return null
+  try { return JSON.parse(line.slice(start + key.length + 1, end)) } catch { return null }
 }
 
 function writeJson(relativePath, value) {
@@ -113,7 +115,7 @@ function copyR2BrowserEvidence(browserEvidenceDir, command) {
       const item = raw.items.find(candidate => candidate.id === id)
       if (!item) continue
       const filename = path.basename(item.screenshotPath)
-      const sourcePng = path.join(browserEvidenceDir, filename)
+      const sourcePng = path.join(browserEvidenceDir, 'MANUAL_BROWSER', filename)
       const targetPng = path.join(manualDir, filename)
       if (fs.existsSync(sourcePng)) fs.copyFileSync(sourcePng, targetPng)
       items.push({ ...item, screenshotPath: `MANUAL_BROWSER/${filename}` })
@@ -266,6 +268,8 @@ function main() {
   writeJson('B13_R2_CHANGED_FILES.json', { schema: 'b13-r2-changed-files', diffBase: repairBaselineCommit, paths: git(['diff', '--name-status', `${repairBaselineCommit}..${sourceCommit}`]).split('\n').filter(Boolean).map(line => { const [status, ...parts] = line.split('\t'); return { status, file: parts.at(-1), task: /health|b13/.test(parts.at(-1) ?? '') ? 'B13-R2-01/02' : /package|forbidden|acceptance|scripts/.test(parts.at(-1) ?? '') ? 'B13-R2-03' : 'OUT_OF_SCOPE' } }), outOfScope: [], status: 'PASS' })
   const secrets = []
   writeEvidence('B13_R2_SECRET_SCAN.json', { schema: 'b13-r2-secret-scan', realSecretFindings: secrets, status: 'PASS' })
+  const cleanBeforePackage = git(['status', '--porcelain', '--untracked-files=all'])
+  writeJson('B13_R2_SOURCE_BINDING.json', { schema: 'b13-r2-source-binding', batch: 'B13-R2', startCommit: sourceCommit, repairBaselineShort, repairBaselineCommit, postB12FrozenCommit, sourceCommit, evidenceSourceCommit: sourceCommit, sourceCommitAfter: sourceCommit, workingTreeDirtyBefore: statusBefore !== '', workingTreeDirtyAfter: cleanBeforePackage !== '', excludedUncommittedPaths: [], status: statusBefore === '' && cleanBeforePackage === '' ? 'PASS' : 'FAIL' })
   const preflight = run('package_preflight', 'node', ['scripts/assemble-b13-r2-package.mjs', '--preflight'], { B13_R2_EVIDENCE_DIR: evidenceDir })
   const packageMutation = packageInventoryMutation(preflight.output)
   mutationReport.mutations = [...(mutationReport.mutations ?? []), packageMutation]

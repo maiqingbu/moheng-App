@@ -462,7 +462,7 @@ fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
         libsql_rusqlite::params![project_id, NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:route',2,?2,?3,?4,?5)",
+        "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:route',1,?2,?3,?4,?5)",
         libsql_rusqlite::params![project_id, "a".repeat(64), "e".repeat(64), json!({"remainingChapterCapacity":3,"requiredTasksRemaining":0,"planningPressure":{"remainingChapterCapacity":3,"requiredTasksRemaining":0}}).to_string(), NOW],
     ).unwrap();
     connection.execute(
