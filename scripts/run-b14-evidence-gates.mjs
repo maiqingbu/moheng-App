@@ -22,7 +22,10 @@ function run(name, command, args) {
   commands[name] = record
   return record
 }
-function gate(status, source, actual = {}) { return { status, blocking: true, source, ...actual } }
+function gate(condition, source, actual = {}) {
+  const passed = condition === true || condition === 'PASS'
+  return { status: passed ? 'PASS' : 'FAIL', blocking: true, source, ...actual }
+}
 
 const architecture = run('b14_architecture', process.execPath, ['scripts/verify-b14-architecture.mjs'])
 const deterministic = run('b14_deterministic', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame'])
