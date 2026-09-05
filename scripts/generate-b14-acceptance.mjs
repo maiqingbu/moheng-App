@@ -10,6 +10,8 @@ export const REQUIRED_B14_GATES = [
   'b14_contracts',
   'b14_architecture',
   'b14_ui_surface',
+  'b14_rust_quality',
+  'b01_b13_regression',
   'b14_source_binding',
   'b15_boundary',
 ]
@@ -62,4 +64,3 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   console.log(JSON.stringify(acceptance, null, 2))
   if (acceptance.status !== 'PASS') process.exitCode = 1
 }
-
