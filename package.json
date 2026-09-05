@@ -28,7 +28,7 @@
     "verify:b05": "export B05_EVIDENCE_DIR=\"${B05_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b05-evidence.XXXXXX)}\" && node scripts/run-b05-evidence-gates.mjs && node scripts/assemble-b05-evidence.mjs && node scripts/generate-b05-acceptance.mjs",
     "verify:b09-h04": "node scripts/run-b09-h04-evidence-gates.mjs",
     "verify:b10": "node scripts/run-b10-evidence-gates.mjs",
-    "verify:b13": "node scripts/run-b13-r1-evidence-gates.mjs && node scripts/generate-b13-r1-acceptance.mjs",
+    "verify:b13": "export B13_R1_EVIDENCE_DIR=\"${B13_R1_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b13-r1-evidence.XXXXXX)}\" && node scripts/run-b13-r1-evidence-gates.mjs && node scripts/generate-b13-r1-acceptance.mjs",
     "package:b13-r1": "node scripts/assemble-b13-r1-package.mjs",
     "verify:b12": "node scripts/run-b12-evidence-gates.mjs && node scripts/generate-b12-acceptance.mjs",
     "verify:product-ux": "node scripts/verify-product-ux.mjs && node --test tests/product-ux-copy.test.mjs tests/product-ux-gate.test.mjs && vitest run tests/store/product-ux-presentation.test.ts tests/store/b11-assistant-presentation.test.ts tests/store/b12-retcon-ux.test.ts tests/store/r1r1-boundary-evidence.test.ts"
