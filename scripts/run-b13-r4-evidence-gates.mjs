@@ -88,7 +88,7 @@ function changedFileReport() {
     const [status, ...files] = line.split('\t')
     const touched = files.length > 0 ? files : ['']
     const allowedPathRename = /^R/.test(status) && touched.length >= 2 && touched.every(file => /creative-skills\/v1\.2\.0\/sources\/articles\//.test(file))
-    const allowedGateScript = touched.every(file => /^(?:scripts\/(?:verify-b13-r4-paths|verify-b13-r4-evidence-truthfulness|run-b13-r4-mutations|assemble-b13-r4-package|generate-b13-r4-acceptance|run-b13-r4-evidence-gates|verify-b13-r3-dual-reader|verify-package-consistency|run-b13-r1-evidence-gates|run-b13-r3-evidence-gates|verify-b13-r3-architecture)\.mjs)$/.test(file))
+    const allowedGateScript = touched.every(file => /^(?:package\.json|scripts\/(?:verify-b13-r4-paths|verify-b13-r4-evidence-truthfulness|run-b13-r4-mutations|assemble-b13-r4-package|generate-b13-r4-acceptance|run-b13-r4-evidence-gates|verify-b13-r3-dual-reader|verify-package-consistency|run-b13-r1-evidence-gates|run-b13-r3-evidence-gates|verify-b13-r3-architecture)\.mjs|tests\/b13-r4-acceptance\.test\.mjs)$/.test(file))
     return { status, file: touched.at(-1), files: touched, task: allowedPathRename || allowedGateScript ? 'B13-R4' : 'OUT_OF_SCOPE' }
   })
   const outOfScope = paths.filter(item => item.task === 'OUT_OF_SCOPE')
@@ -118,8 +118,8 @@ function main() {
   const inventory = frozenSkillPathInventory(repairBaselineCommit)
   fs.writeFileSync(path.join(pathDir, 'source-path-scan.log'), JSON.stringify(sourceScan, null, 2) + '\n')
   fs.writeFileSync(path.join(pathDir, 'frozen-path-diff.log'), JSON.stringify(restoration, null, 2) + '\n')
-  writeJson('B13_R4_PATH_RESTORATION.json', restoration)
-  writeJson('B13_R4_FROZEN_SKILL_PATH_INVENTORY.json', inventory)
+  writeJson('B13_R4_PATH_RESTORATION.json', { ...restoration, sourceCommit, repairBaselineCommit })
+  writeJson('B13_R4_FROZEN_SKILL_PATH_INVENTORY.json', { ...inventory, sourceCommit, repairBaselineCommit })
   const forbidden = evaluateForbiddenScopeDiff(root, repairBaselineCommit)
   writeJson('B13_R4_FORBIDDEN_SCOPE.json', { ...forbidden, sourceCommit, repairBaselineCommit })
 

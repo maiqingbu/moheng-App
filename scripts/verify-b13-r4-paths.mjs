@@ -245,7 +245,7 @@ export function pathRestorationReport(baselineCommit = 'a479b28') {
     }
   })
   const summary = gitText(['diff', '--summary', baselineCommit + '..HEAD'])
-  const actualRenameCount = summary.split('\n').filter(line => /^ rename /.test(line)).length
+  const actualRenameCount = summary.split('\n').filter(line => /^\s*rename /.test(line)).length
   return {
     schema: 'b13-r4-path-restoration',
     baselineCommit,
