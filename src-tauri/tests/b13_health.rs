@@ -481,6 +481,28 @@ fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
                 .unwrap_or_default()
                 .contains("volume:b13:r1:route")
         }));
+
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:route',2,?2,?3,'{}',?4)",
+            libsql_rusqlite::params![project_id, "d".repeat(64), "e".repeat(64), NOW],
+        )
+        .unwrap();
+    drop(connection);
+    let digest_changed = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":30}),
+    )
+    .unwrap();
+    let digest_route_factor = digest_changed["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "ROUTE_DRIFT")
+        .unwrap();
+    assert_eq!(digest_route_factor["severity"], "risk");
+    println!("B13_R1_PLAN_STALE_RESULT revisionOnly=PASS digestChanged=PASS status=PASS");
 }
 
 #[test]
@@ -789,4 +811,158 @@ fn b13_r1_hidden_a_obligation_and_reader_desire_change_global_truth_only() {
     let issue_json = result["issues"]["items"].to_string();
     assert!(!issue_json.contains("obligation:b13:r1:zz-hidden"));
     assert!(!issue_json.contains("desire:b13:r1:zz-hidden"));
+}
+
+#[test]
+fn b13_r1_health_query_does_not_create_model_runs_or_authority_rows() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:b13:r1:no-remote-mutation");
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    let before_model_runs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_authority: (i64, i64, i64, i64, i64, i64, i64, i64) = (
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_relations WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM foreshadows WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM reader_desires WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    );
+    drop(connection);
+
+    let _ = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":30}),
+    )
+    .unwrap();
+
+    let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
+    let after_model_runs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let after_authority: (i64, i64, i64, i64, i64, i64, i64, i64) = (
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_relations WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM foreshadows WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM reader_desires WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    );
+    assert_eq!(before_model_runs, after_model_runs);
+    assert_eq!(before_authority, after_authority);
+    println!(
+        "B13_R1_NO_REMOTE_RESULT modelRunsBefore={before_model_runs} modelRunsAfter={after_model_runs} unchanged=PASS status=PASS"
+    );
+    println!(
+        "B13_R1_NO_AUTHORITY_RESULT before={before_authority:?} after={after_authority:?} unchanged=PASS status=PASS"
+    );
 }

@@ -97,6 +97,19 @@ export function inspectB13Architecture(projectRoot = root) {
     migration_0012: fs.existsSync(path.join(projectRoot, 'src-tauri/migrations/0012_b13_longform_health_indexes.sql')) && /CREATE INDEX IF NOT EXISTS/.test(migration) && !/CREATE TABLE|CREATE TRIGGER|ALTER TABLE/i.test(migration),
     migration_history_12: /B13_LONGFORM_HEALTH_MIGRATION/.test(connection) && /version = 12/.test(connection) && /apply_numbered_migration\(connection, 12/.test(connection),
     frozen_migrations: frozenMigrations,
+    r1_chapter_identity: !/(?:chapter_number|parse_chapter_no|strip_prefix\(["']chapter:|CAST\([^)]*chapter)/i.test(`${health}\n${repository}`)
+      && /JOIN chapters/.test(repository)
+      && /due\.chapter_no/.test(repository),
+    r1_plan_stale_owner: /evaluate_plan_stale/.test(health)
+      && /PlanStaleStatus/.test(health)
+      && /state_digest|stale_queue/.test(repository)
+      && !/generated_revision\s*<\s*.*project_revision/.test(health),
+    r1_global_truth_aggregate: /overdue_obligations_authority_ab|route_scope_count|blocked_required_tasks|unavailable_reader_desires/.test(repository)
+      && /COUNT\(\*\)/.test(repository)
+      && /bounded_page\(issues/.test(health),
+    r1_volume_display_metadata: /volume_no|volume_title/.test(repository)
+      && /volume_location/.test(health)
+      && !/format!\([^\n]*volume\.volume_id/.test(health),
     no_future_owner: !/(?:B14|B15|RC1|EndgameOwner|CompletionGate|ExportReleaseOwner)/.test(`${health}\n${repository}`),
     product_surface_closed: !forbiddenPage,
     no_health_authority_table: !/CREATE\s+TABLE[^\n]*health/i.test(`${migration}\n${health}\n${repository}`),
