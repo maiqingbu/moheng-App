@@ -130,12 +130,14 @@ export function validatePackageTree(stageRoot, expectedSourceCommit = null) {
 
 function validateZip(zipPath, expectedSourceCommit = null) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b13-r2-zip-'))
-  const python = `import json, os, sys, tempfile, zipfile\nzip_path=sys.argv[1]\nout=sys.argv[2]\nwith zipfile.ZipFile(zip_path) as archive:\n    names=[name for name in archive.namelist() if not name.endswith('/') ]\n    roots={name.split('/',1)[0] for name in names}\n    with tempfile.TemporaryDirectory(dir=out) as extracted:\n        archive.extractall(extracted)\n        root=next(iter(roots)) if len(roots)==1 else ''\n        print(json.dumps({'entryCount':len(names),'root':root,'utf8Flags':sum(1 for info in archive.infolist() if not info.is_dir() and any(ord(ch)>127 for ch in info.filename) and not (info.flag_bits & 0x800))}))\n        print(extracted)\n`
-  const result = spawnSync('python3', ['-c', python, zipPath, temp], { encoding: 'utf8' })
+  const extracted = path.join(temp, 'extracted')
+  fs.mkdirSync(extracted, { recursive: true })
+  const python = `import json, os, sys, zipfile\nzip_path=sys.argv[1]\nout=sys.argv[2]\nwith zipfile.ZipFile(zip_path) as archive:\n    names=[name for name in archive.namelist() if not name.endswith('/') ]\n    roots={name.split('/',1)[0] for name in names}\n    archive.extractall(out)\n    root=next(iter(roots)) if len(roots)==1 else ''\n    print(json.dumps({'entryCount':len(names),'root':root,'utf8Flags':sum(1 for info in archive.infolist() if not info.is_dir() and any(ord(ch)>127 for ch in info.filename) and not (info.flag_bits & 0x800))}))\n`
+  const result = spawnSync('python3', ['-c', python, zipPath, extracted], { encoding: 'utf8' })
   if (result.status !== 0) return { status: 'FAIL', error: result.stderr.trim() }
   const lines = result.stdout.trim().split('\n')
   const archive = JSON.parse(lines[0])
-  const stageRoot = path.join(temp, archive.root)
+  const stageRoot = path.join(extracted, archive.root)
   const tree = validatePackageTree(stageRoot, expectedSourceCommit)
   const actualEntries = archive.entryCount
   const expectedEntries = tree.inventory.totalFilesExcludingChecksums + 1
