@@ -13,15 +13,20 @@ const postB12FrozenCommit = 'cd240a7cc0d079c2e2ae09dcdbb3ed73fa48b617'
 const originalInstructionCandidates = [
   process.env.B13_ORIGINAL_INSTRUCTION_PATH,
   '/Users/mac/Downloads/墨衡_V2.1_B13_LongFormHealth_长篇健康治理_开发与正式验收打包执行指令_R1_2026-09-04.md',
+  '/Users/mac/Desktop/墨衡_V2.1_B13_LongFormHealth_长篇健康治理_开发与正式验收打包执行指令_R1_2026-09-04.md',
 ].filter(Boolean)
 const r1InstructionCandidates = [
   process.env.B13_R1_INSTRUCTION_PATH,
   '/Users/mac/Downloads/墨衡_V2.1_B13_LongFormHealth_R1_定点修复与重新打包执行指令_2026-09-04.md',
+  '/Users/mac/Desktop/墨衡_V2.1_B13_LongFormHealth_R1_定点修复与重新打包执行指令_2026-09-04.md',
 ].filter(Boolean)
 const r2InstructionCandidates = [
   process.env.B13_R2_INSTRUCTION_PATH,
   '/Users/mac/Downloads/墨衡_V2.1_B13_LongFormHealth_R2_最终集成修复与重新打包执行指令_2026-09-05.md',
 ].filter(Boolean)
+const expectedOriginalInstructionSha256 = '54a10882729ae79497231f49e465740d39bfb67e6683d0feb0446403bbe416cb'
+const expectedR1InstructionSha256 = '1566138e7a1f3100f54415badd9f148dd9cbaa17a7725e6363af690db4666d65'
+const expectedR2InstructionSha256 = '2407c392e496dae0677f2dfd0c5fa0d7414af56e47f963bf544e7ea5bffabfce'
 
 function gitResult(args) {
   return spawnSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
@@ -172,6 +177,11 @@ function buildStage({ sourceCommit, repairBaselineCommit, evidenceDir, preflight
   const r2InstructionSha256 = sha256(r2Instruction)
   const r1InstructionSha256 = sha256(r1Instruction)
   const originalInstructionSha256 = sha256(originalInstruction)
+  if (originalInstructionSha256 !== expectedOriginalInstructionSha256
+    || r1InstructionSha256 !== expectedR1InstructionSha256
+    || r2InstructionSha256 !== expectedR2InstructionSha256) {
+    throw new Error('B13_R2_FROZEN_INPUT_HASH_MISMATCH')
+  }
   fs.writeFileSync(path.join(frozenRoot, 'FROZEN_INPUT_HASHES.json'), `${JSON.stringify({
     batch: 'B13-R2',
     originalDevelopmentInstructionSha256: originalInstructionSha256,
