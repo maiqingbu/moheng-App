@@ -281,6 +281,18 @@ function main() {
   const r2Regression = run('r2_regression', 'npm', ['run', 'verify:b13-r2'], { B13_R2_EVIDENCE_DIR: r2EvidenceDir })
   const r2Authority = readJson(path.join(r2EvidenceDir, 'B13_R2_NO_AUTHORITY_MUTATION.json'))
   const r2Remote = readJson(path.join(r2EvidenceDir, 'B13_R2_NO_REMOTE_CALL.json'))
+  const historicalEvidenceFiles = ['evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json']
+  const historicalRestoration = historicalEvidenceFiles.map(file => {
+    const changed = spawnSync('git', ['diff', '--quiet', '--', file], { cwd: root }).status !== 0
+    if (!changed) return { file, changed: false, status: 'UNCHANGED' }
+    const restored = spawnSync('git', ['restore', '--source', sourceCommit, '--', file], { cwd: root, encoding: 'utf8' })
+    return { file, changed: true, status: restored.status === 0 ? 'RESTORED' : 'FAIL' }
+  })
+  writeRoot('B13_R3_HISTORICAL_EVIDENCE_RESTORATION.json', {
+    schema: 'b13-r3-historical-evidence-restoration',
+    files: historicalRestoration,
+    status: historicalRestoration.every(item => item.status !== 'FAIL') ? 'PASS' : 'FAIL',
+  })
   writeRoot('B13_R3_NO_AUTHORITY_MUTATION.json', {
     schema: 'b13-r3-no-authority-mutation',
     sourceCommit,
@@ -470,7 +482,7 @@ function main() {
     postB12FrozenCommit,
     sourceCommit,
     evidenceSourceCommit: sourceCommit,
-    sourceCommitAfter,
+    sourceCommitAfter: sourceAfterCommit,
     workingTreeDirtyBefore: statusBefore !== '',
     workingTreeDirtyAfter: statusAfter !== '',
     excludedUncommittedPaths: [],

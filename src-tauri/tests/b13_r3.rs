@@ -308,8 +308,7 @@ fn b13_r3_task_reality_is_complete_for_b09_and_b13_health() {
     assert_eq!(page_one["score"], page_fifty["score"]);
     assert_eq!(page_one["counters"], page_fifty["counters"]);
 
-    let task_chunk_count =
-        (fixture.task_ids.len() + TASK_STATE_CHUNK_SIZE - 1) / TASK_STATE_CHUNK_SIZE;
+    let task_chunk_count = fixture.task_ids.len().div_ceil(TASK_STATE_CHUNK_SIZE);
     println!(
         "B13_R3_TASK_REALITY_RESULT requestedTaskIds={} uniqueTaskIds={} chunkSize={} chunkCount={} legacyReturnedStates={} legacyIncludesTask501={} returnedTaskStates={} blockedRequiredTasks={} h04Severity={} b09BlockedRequiredTasks={} task100Chunks={} task101Chunks={} duplicateReturnedStates={} missingStatePreserved=true pageIndependent=PASS status=PASS",
         fixture.task_ids.len(),
