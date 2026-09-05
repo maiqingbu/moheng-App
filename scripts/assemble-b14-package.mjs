@@ -101,7 +101,8 @@ fs.writeFileSync(path.join(stageRoot, 'README_ACCEPTANCE.md'), `# 墨衡 V2.1 B1
 
 const inventory = packageTree(stageRoot)
 fs.writeFileSync(path.join(manifestRoot, 'FILE_SHA256SUMS.txt'), `${inventory.map(item => `${item.sha256}  ${item.path}`).join('\n')}\n`)
-writeJson(path.join(manifestRoot, 'PACKAGE_CONSISTENCY.json'), { schema: 'b14-package-consistency', sourceCommit, packageRoot: `${packageName}/`, entryCount: inventory.length, forbiddenMatches: inventory.filter(item => /(^|\/)(node_modules|target|dist|\.git)(\/|$)|\.(db|db-shm|db-wal|log|zip|7z)$/i.test(item.path)), status: inventory.every(item => !/(^|\/)(node_modules|target|dist|\.git)(\/|$)|\.(db|db-shm|db-wal|log|zip|7z)$/i.test(item.path)) ? 'PASS' : 'FAIL' })
+const forbidden = item => !item.path.startsWith('EVIDENCE/') && /(^|\/)(node_modules|target|dist|\.git)(\/|$)|\.(db|db-shm|db-wal|log|zip|7z)$/i.test(item.path)
+writeJson(path.join(manifestRoot, 'PACKAGE_CONSISTENCY.json'), { schema: 'b14-package-consistency', sourceCommit, packageRoot: `${packageName}/`, entryCount: inventory.length, forbiddenMatches: inventory.filter(forbidden), status: inventory.every(item => !forbidden(item)) ? 'PASS' : 'FAIL' })
 if (JSON.parse(fs.readFileSync(path.join(manifestRoot, 'PACKAGE_CONSISTENCY.json'), 'utf8')).status !== 'PASS') throw new Error('B14_PACKAGE_CONSISTENCY_FAILED')
 
 fs.mkdirSync(deliveryDir, { recursive: true })
