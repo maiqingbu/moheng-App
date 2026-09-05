@@ -171,6 +171,7 @@ function main() {
   }
   const candidate = preflightJson?.candidateScan || { status: 'FAIL' }
   const final = preflightJson?.finalScan || { status: 'FAIL' }
+  const findings = (value, key) => Array.isArray(value?.[key]) ? value[key].length : -1
   writeJson('B13_R4_MOJIBAKE_SCAN.json', { schema: 'b13-r4-mojibake-scan', sourceCommit, repairBaselineCommit, source: sourceScan, candidate, final, status: sourceScan.status === 'PASS' && candidate.status === 'PASS' && final.status === 'PASS' ? 'PASS' : 'FAIL' })
   const dual = readJson(path.join(evidenceDir, 'B13_R4_DUAL_READER_UTF8.json'))
   const mutations = run('real_mutations', process.execPath, ['scripts/run-b13-r4-mutations.mjs'], { B13_R4_EVIDENCE_DIR: evidenceDir, B13_R4_SOURCE_COMMIT: sourceCommit, B13_R4_REPAIR_BASELINE_COMMIT: repairBaselineCommit })
@@ -188,7 +189,7 @@ function main() {
     source_mojibake: gate(sourceScan.status === 'PASS', 'B13_R4/PATH_VALIDATION/source-path-scan.log'),
     candidate_mojibake: gate(candidate.status === 'PASS', 'B13_R4/PATH_VALIDATION/candidate-zip-path-scan.log'),
     final_mojibake: gate(final.status === 'PASS', 'B13_R4/PATH_VALIDATION/final-zip-path-scan.log'),
-    non_nfc: gate(sourceScan.nonNfcPaths.length === 0 && candidate.nonNfcPaths.length === 0 && final.nonNfcPaths.length === 0, 'B13_R4_MOJIBAKE_SCAN.json'),
+    non_nfc: gate(sourceScan.nonNfcPaths.length === 0 && findings(candidate, 'nonNfcPaths') === 0 && findings(final, 'nonNfcPaths') === 0, 'B13_R4_MOJIBAKE_SCAN.json'),
     cp437_mutation: gate(mutation('MUT-R4-01')?.status === 'PASS', 'B13_R4/MUTATIONS/MUT-R4-01/result.json'),
     frozen_path_mutation: gate(mutation('MUT-R4-02')?.status === 'PASS', 'B13_R4/MUTATIONS/MUT-R4-02/result.json'),
     mojibake_gate: gate(r4Checks.mojibake, 'B13_R4_EVIDENCE_TRUTHFULNESS.json'),
@@ -220,7 +221,7 @@ function main() {
   }
   const statusAfter = gitText(['status', '--porcelain', '--untracked-files=all'])
   const allStatus = Object.values(gates).every(item => item.status === 'PASS') && truthfulness.status === 'PASS' && changed.status === 'PASS' && statusBefore === '' && statusAfter === '' && sourceCommit === gitText(['rev-parse', 'HEAD'])
-  const gateResults = { schema: 'b13-r4-gate-results', batch: 'B13-R4', repairBaselineShort, repairBaselineCommit, postB12FrozenCommit, sourceCommit, evidenceSourceCommit: sourceCommit, sourceCommitAfter: gitText(['rev-parse', 'HEAD']), workingTreeDirtyBefore: statusBefore !== '', workingTreeDirtyAfter: statusAfter !== '', excludedUncommittedPaths: [], expectedRenamePaths: 20, actualRenamePaths: restoration.actualRenameCount, creativeSkillContentChanges: restoration.contentChanges, frozenPathMismatches: final.frozenPathMismatches, sourceMojibakeFindings: sourceScan.knownMojibakeFindings.length + sourceScan.cp437MojibakeFindings.length + sourceScan.replacementFindings.length, candidateZipMojibakeFindings: candidate.knownMojibakeFindings.length + candidate.cp437MojibakeFindings.length + candidate.replacementFindings.length, finalZipMojibakeFindings: final.knownMojibakeFindings.length + final.cp437MojibakeFindings.length + final.replacementFindings.length, nonNfcPaths: final.nonNfcPaths.length, commands, gates, status: allStatus ? 'PASS' : 'FAIL', deliveryStatus: allStatus ? 'READY_FOR_FORMAL_ACCEPTANCE' : 'FAIL', nextBatchAllowed: false }
+  const gateResults = { schema: 'b13-r4-gate-results', batch: 'B13-R4', repairBaselineShort, repairBaselineCommit, postB12FrozenCommit, sourceCommit, evidenceSourceCommit: sourceCommit, sourceCommitAfter: gitText(['rev-parse', 'HEAD']), workingTreeDirtyBefore: statusBefore !== '', workingTreeDirtyAfter: statusAfter !== '', excludedUncommittedPaths: [], expectedRenamePaths: 20, actualRenamePaths: restoration.actualRenameCount, creativeSkillContentChanges: restoration.contentChanges, frozenPathMismatches: final.frozenPathMismatches ?? -1, sourceMojibakeFindings: sourceScan.knownMojibakeFindings.length + sourceScan.cp437MojibakeFindings.length + sourceScan.replacementFindings.length, candidateZipMojibakeFindings: findings(candidate, 'knownMojibakeFindings') + findings(candidate, 'cp437MojibakeFindings') + findings(candidate, 'replacementFindings'), finalZipMojibakeFindings: findings(final, 'knownMojibakeFindings') + findings(final, 'cp437MojibakeFindings') + findings(final, 'replacementFindings'), nonNfcPaths: findings(final, 'nonNfcPaths'), commands, gates, status: allStatus ? 'PASS' : 'FAIL', deliveryStatus: allStatus ? 'READY_FOR_FORMAL_ACCEPTANCE' : 'FAIL', nextBatchAllowed: false }
   writeJson('gate-results.json', gateResults)
   writeJson('COMMANDS_EXECUTED.json', { schema: 'b13-r4-commands-executed', sourceCommit, repairBaselineCommit, commands })
   const acceptance = generateR4Acceptance(evidenceDir)

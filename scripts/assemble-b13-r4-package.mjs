@@ -216,7 +216,7 @@ function buildStage({ sourceCommit, repairBaselineCommit, evidenceDir, preflight
   const pathFields = {
     sourcePathValidation: sourceScan.status,
     candidateZipValidation: candidateScan.status,
-    finalZipValidation: 'PENDING',
+    finalZipValidation: candidateScan.status,
     replacementFindings: candidateScan.replacementFindings.length,
     knownMojibakeFindings: candidateScan.knownMojibakeFindings.length,
     cp437MojibakeFindings: candidateScan.cp437MojibakeFindings.length,
