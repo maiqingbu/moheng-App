@@ -292,6 +292,8 @@ fn b13_route_and_task_factors_read_existing_planning_reality_without_replanning(
     let route_payload = json!({"tasks":[{"taskId":"task:b13:required","class":"REQUIRED","objective":"完成关键推进"}]});
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:route',?1,'VolumePlan','VOLUME','volume:b13:route',1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params![project_id, route_hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:route',1,?1,?2)", libsql_rusqlite::params![route_payload.to_string(), route_hash]).unwrap();
+    connection.execute("INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,'volume:b13:route','artifact:b13:route',1,'APPROVED',10,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
+    connection.execute("INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:route',?2,?3,?4,?5,?6)", libsql_rusqlite::params![project_id, revision, "d".repeat(64), "e".repeat(64), json!({"remainingChapterCapacity":0,"requiredTasksRemaining":1,"planningPressure":{"remainingChapterCapacity":0,"requiredTasksRemaining":1}}).to_string(), NOW]).unwrap();
     connection.execute("INSERT INTO planning_state_ledger_index(project_id,volume_id,entry_state,plan_state,coverage_state,obligation_ids_json,foreshadow_ids_json,evidence_need_ids_json,repair_state,updated_at,route_plan_artifact_id,route_plan_version,task_status_json,active_task_ids_json,blocked_task_ids_json,remaining_chapter_capacity,planning_pressure_json,state_digest,generated_revision) VALUES (?1,'volume:b13:route','OPEN','APPROVED','INCOMPLETE','[]','[]','[]','NONE',?2,'artifact:b13:route',1,?3,'[]','[\"task:b13:required\"]',0,?4,'',?5)", libsql_rusqlite::params![project_id, NOW, json!({"task:b13:required":{"status":"BLOCKED"}}).to_string(), json!({"remainingChapterCapacity":0,"requiredTasksRemaining":1}).to_string(), revision]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:required',?1,'volume.task.progress',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, json!({"taskId":"task:b13:required","status":"BLOCKED"}).to_string(), NOW]).unwrap();
     drop(connection);
@@ -323,6 +325,8 @@ fn b13_route_and_task_factors_read_existing_planning_reality_without_replanning(
     let route_payload_v2 = json!({"tasks":[{"taskId":"task:b13:required","class":"REQUIRED","objective":"完成关键推进"},{"taskId":"task:b13:optional","class":"OPTIONAL","objective":"补充描写"}]});
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:route',?1,'VolumePlan','VOLUME','volume:b13:route',2,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params![project_id, route_hash_v2, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:route',2,?1,?2)", libsql_rusqlite::params![route_payload_v2.to_string(), route_hash_v2]).unwrap();
+    connection.execute("UPDATE volume_plan_index SET plan_artifact_id='artifact:b13:route', plan_version=2, updated_at=?1 WHERE project_id=?2 AND volume_id='volume:b13:route'", libsql_rusqlite::params![NOW, project_id]).unwrap();
+    connection.execute("UPDATE volume_planning_state_projection SET state_digest=?1, projection_digest=?2, payload_json=?3, updated_at=?4 WHERE project_id=?5 AND volume_id='volume:b13:route'", libsql_rusqlite::params!["d".repeat(64), "f".repeat(64), json!({"remainingChapterCapacity":4,"requiredTasksRemaining":1,"planningPressure":{"remainingChapterCapacity":4,"requiredTasksRemaining":1}}).to_string(), NOW, project_id]).unwrap();
     connection.execute("UPDATE planning_state_ledger_index SET route_plan_version=2 WHERE project_id=?1 AND volume_id='volume:b13:route'", [&project_id]).unwrap();
     connection.execute("UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b13:required' AND project_id=?2", libsql_rusqlite::params![json!({"taskId":"task:b13:required","status":"SATISFIED"}).to_string(), project_id]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:optional',?1,'volume.task.progress',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, json!({"taskId":"task:b13:optional","status":"BLOCKED"}).to_string(), NOW]).unwrap();
@@ -451,7 +455,15 @@ fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
     ).unwrap();
     connection.execute(
         "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:route',1,?1,?2)",
-        libsql_rusqlite::params![json!({"tasks":[]}).to_string(), route_hash],
+        libsql_rusqlite::params![json!({"tasks":[],"compiledFromStateDigest":"a".repeat(64)}).to_string(), route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,'volume:b13:r1:route','artifact:b13:r1:route',1,'APPROVED',3,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:route',2,?2,?3,?4,?5)",
+        libsql_rusqlite::params![project_id, "a".repeat(64), "e".repeat(64), json!({"remainingChapterCapacity":3,"requiredTasksRemaining":0,"planningPressure":{"remainingChapterCapacity":3,"requiredTasksRemaining":0}}).to_string(), NOW],
     ).unwrap();
     connection.execute(
         "INSERT INTO planning_state_ledger_index(project_id,volume_id,entry_state,plan_state,coverage_state,obligation_ids_json,foreshadow_ids_json,evidence_need_ids_json,repair_state,updated_at,route_plan_artifact_id,route_plan_version,task_status_json,active_task_ids_json,blocked_task_ids_json,remaining_chapter_capacity,planning_pressure_json,state_digest,generated_revision) VALUES (?1,'volume:b13:r1:route','OPEN','APPROVED','COMPLETE','[]','[]','[]','NONE',?2,'artifact:b13:r1:route',1,'{}','[]','[]',3,?3,?4,1)",
@@ -485,8 +497,8 @@ fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
     let connection = state.manager.open(&project_id, "B13 R1", NOW).unwrap();
     connection
         .execute(
-            "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:route',2,?2,?3,'{}',?4)",
-            libsql_rusqlite::params![project_id, "d".repeat(64), "e".repeat(64), NOW],
+            "UPDATE volume_planning_state_projection SET projection_revision=2,state_digest=?1,projection_digest=?2,payload_json='{}',updated_at=?3 WHERE project_id=?4 AND volume_id='volume:b13:r1:route'",
+            libsql_rusqlite::params!["d".repeat(64), "e".repeat(64), NOW, project_id],
         )
         .unwrap();
     drop(connection);
@@ -645,6 +657,14 @@ fn b13_r1_route_stale_truth_covers_scope_beyond_detail_page() {
         "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:b13:r1:route-scale',?1,1,'路线规模测试','ACTIVE',?2,?2)",
         libsql_rusqlite::params![project_id, NOW],
     ).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b13:r1:route',?1,'VolumePlan','VOLUME','volume:b13:r1:route-scale',1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)",
+        libsql_rusqlite::params![project_id, "b".repeat(64), NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:route',1,?1,?2)",
+        libsql_rusqlite::params![json!({"tasks":[]}).to_string(), "b".repeat(64)],
+    ).unwrap();
     for index in 1..=102_i64 {
         let volume_id = format!("volume:b13:r1:scope:{index:03}");
         connection.execute(
@@ -654,6 +674,14 @@ fn b13_r1_route_stale_truth_covers_scope_beyond_detail_page() {
         connection.execute(
             "INSERT INTO planning_state_ledger_index(project_id,volume_id,entry_state,plan_state,coverage_state,obligation_ids_json,foreshadow_ids_json,evidence_need_ids_json,repair_state,updated_at,task_status_json,active_task_ids_json,blocked_task_ids_json,remaining_chapter_capacity,planning_pressure_json,state_digest,generated_revision) VALUES (?1,?2,'OPEN',?3,'COMPLETE','[]','[]','[]','NONE',?4,'{}','[]','[]',1,?5,?6,1)",
             libsql_rusqlite::params![project_id, volume_id, if index == 102 { "PLAN_STALE" } else { "APPROVED" }, NOW, json!({"remainingChapterCapacity":1,"requiredTasksRemaining":0}).to_string(), "a".repeat(64)],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,?2,'artifact:b13:r1:route',1,?3,1,?4)",
+            libsql_rusqlite::params![project_id, volume_id, if index == 102 { "PLAN_STALE" } else { "APPROVED" }, NOW],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,?2,1,?3,?4,?5,?6)",
+            libsql_rusqlite::params![project_id, volume_id, "a".repeat(64), "b".repeat(64), json!({"remainingChapterCapacity":1,"requiredTasksRemaining":0,"planningPressure":{"remainingChapterCapacity":1,"requiredTasksRemaining":0}}).to_string(), NOW],
         ).unwrap();
     }
     drop(connection);
@@ -714,6 +742,22 @@ fn b13_r1_task_truth_covers_required_blockage_beyond_detail_page() {
     connection.execute(
         "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:task-scale',1,?1,?2)",
         libsql_rusqlite::params![route_payload.to_string(), route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumePlan','VOLUME','volume:b13:r1:task-scale','artifact:b13:r1:task-scale',1,?2)",
+        libsql_rusqlite::params![project_id, route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,'volume:b13:r1:task-scale','artifact:b13:r1:task-scale',1,'APPROVED',1,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,'volume:b13:r1:task-scale',1,?2,?3,?4,?5)",
+        libsql_rusqlite::params![project_id, "c".repeat(64), "d".repeat(64), json!({"remainingChapterCapacity":1,"requiredTasksRemaining":1,"planningPressure":{"remainingChapterCapacity":1,"requiredTasksRemaining":1}}).to_string(), NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:r1:201',?1,'volume.task.progress',?2,'{}',?3,?3)",
+        libsql_rusqlite::params![project_id, json!({"taskId":"task:b13:r1:201","status":"BLOCKED"}).to_string(), NOW],
     ).unwrap();
     connection.execute(
         "INSERT INTO planning_state_ledger_index(project_id,volume_id,entry_state,plan_state,coverage_state,obligation_ids_json,foreshadow_ids_json,evidence_need_ids_json,repair_state,updated_at,route_plan_artifact_id,route_plan_version,task_status_json,active_task_ids_json,blocked_task_ids_json,remaining_chapter_capacity,planning_pressure_json,state_digest,generated_revision) VALUES (?1,'volume:b13:r1:task-scale','OPEN','APPROVED','COMPLETE','[]','[]','[]','NONE',?2,'artifact:b13:r1:task-scale',1,?3,'[]','[]',1,?4,?5,1)",

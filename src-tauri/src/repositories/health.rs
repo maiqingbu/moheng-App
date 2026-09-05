@@ -4,94 +4,24 @@
 //! It deliberately returns bounded, typed inputs; factor policy and user-facing
 //! presentation live in `crate::health`.
 
+use crate::narrative::{evaluate_plan_stale, PlanStaleStatus};
+use crate::repositories::change_retcon;
+use crate::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 
 const ISSUE_ROW_BOUND: i64 = 51;
 const TASK_ROW_BOUND: i64 = 201;
 const ROUTE_ROW_BOUND: i64 = 101;
 const TREND_ROW_BOUND: i64 = 20;
 
-// The route projection is the formal B07/B09 stale input.  It deliberately
-// carries both the compiled and current relevant-state digests; project
-// revision is retained as metadata only and is never used as a stale verdict.
-const ROUTE_ROWS_CTE: &str = r#"
-WITH route_rows AS (
-  SELECT
-    l.volume_id,
-    v.volume_no,
-    v.title AS volume_title,
-    l.plan_state,
-    l.generated_revision,
-    l.remaining_chapter_capacity,
-    l.planning_pressure_json,
-    l.task_status_json,
-    l.route_plan_artifact_id,
-    l.route_plan_version,
-    l.updated_at,
-    p.payload_json AS route_payload_json,
-    l.state_digest AS ledger_state_digest,
-    vp.state_digest AS current_projection_digest,
-    CASE WHEN EXISTS (
-      SELECT 1 FROM stale_queue sq
-      WHERE sq.project_id=l.project_id AND sq.processed=0
-        AND sq.target_ref IN (l.volume_id, l.route_plan_artifact_id)
-    ) THEN 1 ELSE 0 END AS pending_stale,
-    CASE WHEN v.volume_id IS NULL
-              OR (l.route_plan_artifact_id IS NOT NULL AND a.artifact_id IS NULL)
-         THEN 1 ELSE 0 END AS source_unavailable
-  FROM planning_state_ledger_index l
-  LEFT JOIN volumes v
-    ON v.project_id=l.project_id AND v.volume_id=l.volume_id
-  LEFT JOIN artifacts a
-    ON a.project_id=l.project_id
-   AND a.artifact_id=l.route_plan_artifact_id
-   AND a.version=l.route_plan_version
-  LEFT JOIN artifact_payloads p
-    ON p.artifact_id=a.artifact_id AND p.version=a.version
-  LEFT JOIN volume_planning_state_projection vp
-    ON vp.project_id=l.project_id AND vp.volume_id=l.volume_id
-  WHERE l.project_id=?1
-), normalized_routes AS (
-  SELECT route_rows.*,
-    CASE WHEN json_valid(route_payload_json)
-      THEN json_extract(route_payload_json, '$.compiledFromStateDigest')
-      ELSE NULL END AS payload_compiled_digest,
-    CASE WHEN json_valid(route_payload_json)
-      THEN COALESCE(
-        json_extract(route_payload_json, '$.currentStateDigest'),
-        json_extract(route_payload_json, '$.relevantStateDigest')
-      )
-      ELSE NULL END AS payload_current_digest,
-    CASE WHEN json_valid(planning_pressure_json)
-      THEN json_extract(planning_pressure_json, '$.remainingChapterCapacity')
-      ELSE NULL END AS pressure_capacity,
-    CASE WHEN json_valid(planning_pressure_json)
-      THEN json_extract(planning_pressure_json, '$.requiredTasksRemaining')
-      ELSE NULL END AS pressure_required
-  FROM route_rows
-), route_status AS (
-  SELECT normalized_routes.*,
-    COALESCE(payload_compiled_digest, ledger_state_digest) AS compiled_state_digest,
-    COALESCE(current_projection_digest, payload_current_digest, ledger_state_digest) AS current_state_digest,
-    CASE WHEN plan_state IN ('STALE','PLAN_STALE')
-         OR pending_stale=1
-         OR (
-           COALESCE(payload_compiled_digest, ledger_state_digest) IS NOT NULL
-           AND COALESCE(current_projection_digest, payload_current_digest, ledger_state_digest) IS NOT NULL
-           AND COALESCE(payload_compiled_digest, ledger_state_digest)
-               <> COALESCE(current_projection_digest, payload_current_digest, ledger_state_digest)
-         )
-      THEN 1 ELSE 0 END AS formal_stale,
-    COALESCE(remaining_chapter_capacity, pressure_capacity) AS effective_capacity,
-    pressure_required AS required_tasks_remaining
-    FROM normalized_routes
-)
-"#;
-
 #[derive(Debug, thiserror::Error)]
 pub enum HealthRepositoryError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] libsql_rusqlite::Error),
+    #[error("authority: {0}")]
+    Authority(String),
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +148,312 @@ pub struct HealthSnapshot {
 
 pub struct HealthRepository;
 
+fn parse_value(raw: Option<&str>) -> Option<Value> {
+    raw.and_then(|value| serde_json::from_str(value).ok())
+}
+
+fn task_status(value: &Value) -> String {
+    value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("NOT_STARTED")
+        .to_string()
+}
+
+fn route_task_ids(route: Option<&Value>) -> Vec<String> {
+    route
+        .and_then(|value| value.get("tasks"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn route_required_tasks(route: &RouteInput) -> Option<i64> {
+    parse_value(Some(&route.planning_pressure_json))
+        .and_then(|value| value.get("requiredTasksRemaining").and_then(Value::as_i64))
+}
+
+fn route_compiled_state_digest(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+    artifact_id: Option<&str>,
+    version: Option<i64>,
+    payload: Option<&Value>,
+) -> Result<Option<String>, HealthRepositoryError> {
+    if let Some(digest) = payload
+        .and_then(|value| value.get("compiledFromStateDigest"))
+        .and_then(Value::as_str)
+    {
+        return Ok(Some(digest.to_string()));
+    }
+    let Some(artifact_id) = artifact_id else {
+        return Ok(None);
+    };
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let input_refs: Option<String> = connection.query_row(
+        "SELECT input_refs_json FROM volume_route_replans WHERE project_id=?1 AND volume_id=?2 AND new_artifact_id=?3 AND new_version=?4 ORDER BY created_at DESC, replan_id DESC LIMIT 1",
+        libsql_rusqlite::params![project_id, volume_id, artifact_id, version],
+        |row| row.get(0),
+    ).optional()?;
+    Ok(input_refs.and_then(|raw| {
+        parse_value(Some(&raw)).and_then(|value| {
+            value
+                .pointer("/actualReality/stateDigest")
+                .or_else(|| value.pointer("/compiledInput/actualReality/stateDigest"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+    }))
+}
+
+/// Read-only adapter for the formal B07/B09 planning chain.
+///
+/// `planning_state_ledger_index` is intentionally absent here. It is a
+/// compatibility projection owned by earlier batches, not the source of H03
+/// route truth or H04 task reality. Current route authority is resolved from
+/// the B07 canonical head, with `volume_plan_index` and the B09 planning
+/// projection supplying the formal persisted projection inputs.
+fn formal_route_rows(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<RouteInput>, HealthRepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT v.volume_id, v.volume_no, v.title, v.updated_at,
+                i.plan_state, i.plan_artifact_id, i.plan_version, i.updated_at,
+                vp.projection_revision, vp.state_digest, vp.payload_json, vp.updated_at
+         FROM volumes v
+         LEFT JOIN volume_plan_index i
+           ON i.project_id=v.project_id AND i.volume_id=v.volume_id
+         LEFT JOIN volume_planning_state_projection vp
+           ON vp.project_id=v.project_id AND vp.volume_id=v.volume_id
+         WHERE v.project_id=?1
+           AND (i.volume_id IS NOT NULL OR EXISTS (
+             SELECT 1 FROM canonical_heads h
+             WHERE h.project_id=v.project_id
+               AND h.artifact_type='VolumePlan'
+               AND h.scope_key IN (v.volume_id, json_object('level','VOLUME','volumeId',v.volume_id))
+           ))
+         ORDER BY v.volume_no, v.volume_id",
+    )?;
+    let rows = statement.query_map([project_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
+        ))
+    })?;
+    let raw_rows = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut routes = Vec::with_capacity(raw_rows.len());
+
+    for (
+        volume_id,
+        volume_no,
+        volume_title,
+        volume_updated_at,
+        index_plan_state,
+        index_artifact_id,
+        index_version,
+        index_updated_at,
+        projection_revision,
+        projection_state_digest,
+        projection_raw,
+        projection_updated_at,
+    ) in raw_rows
+    {
+        let canonical_ref =
+            NarrativeRepository::volume_plan_route(connection, project_id, &volume_id)
+                .map_err(|error| HealthRepositoryError::Authority(error.to_string()))?;
+        let route_artifact_id = canonical_ref
+            .as_ref()
+            .map(|reference| reference.artifact_id.clone())
+            .or(index_artifact_id);
+        let route_version = canonical_ref
+            .as_ref()
+            .map(|reference| reference.version)
+            .or(index_version);
+        let expected_hash = canonical_ref
+            .as_ref()
+            .map(|reference| reference.payload_hash.as_str());
+        let artifact = match (route_artifact_id.as_deref(), route_version) {
+            (Some(artifact_id), Some(version)) => connection
+                .query_row(
+                    "SELECT a.artifact_type, a.artifact_status, a.payload_hash, p.payload_json
+                     FROM artifacts a
+                     LEFT JOIN artifact_payloads p
+                       ON p.artifact_id=a.artifact_id AND p.version=a.version
+                     WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3",
+                    libsql_rusqlite::params![project_id, artifact_id, version],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?,
+            _ => None,
+        };
+        let source_unavailable = match artifact.as_ref() {
+            Some((artifact_type, status, artifact_hash, payload)) => {
+                artifact_type != "VolumePlan"
+                    || status != "COMMITTED"
+                    || expected_hash.is_some_and(|hash| hash != artifact_hash)
+                    || payload.is_none()
+                    || parse_value(payload.as_deref()).is_none()
+            }
+            None => true,
+        };
+        let route_payload_json = artifact
+            .as_ref()
+            .and_then(|(_, _, _, payload)| payload.clone());
+        let route_payload = parse_value(route_payload_json.as_deref());
+        let task_ids = route_task_ids(route_payload.as_ref());
+        let task_id_refs = task_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let task_states =
+            NarrativeRepository::task_states_by_ids(connection, project_id, &task_id_refs, 500)
+                .map_err(|error| HealthRepositoryError::Authority(error.to_string()))?;
+        let mut task_statuses = Map::new();
+        for state in task_states {
+            task_statuses.insert(state.state_id, json!(task_status(&state.value)));
+        }
+        let projection = parse_value(projection_raw.as_deref());
+        let planning_pressure_json = projection
+            .as_ref()
+            .and_then(|value| value.get("planningPressure"))
+            .map(Value::to_string)
+            .unwrap_or_else(|| "{}".to_string());
+        let remaining_chapter_capacity = projection
+            .as_ref()
+            .and_then(|value| value.get("remainingChapterCapacity"))
+            .and_then(Value::as_i64);
+        let generated_revision = projection
+            .as_ref()
+            .and_then(|value| value.get("generatedRevision"))
+            .and_then(Value::as_i64)
+            .or(projection_revision)
+            .unwrap_or(0);
+        let compiled_state_digest = route_compiled_state_digest(
+            connection,
+            project_id,
+            &volume_id,
+            route_artifact_id.as_deref(),
+            route_version,
+            route_payload.as_ref(),
+        )?;
+        let current_state_digest = projection_state_digest.or_else(|| {
+            projection
+                .as_ref()
+                .and_then(|value| value.get("stateDigest"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+        let pending_stale = if let Some(artifact_id) = route_artifact_id.as_deref() {
+            change_retcon::has_pending_stale_for_refs(
+                connection,
+                project_id,
+                &[artifact_id, volume_id.as_str()],
+            )
+            .map_err(|error| HealthRepositoryError::Authority(error.to_string()))?
+        } else {
+            false
+        };
+        let digest_stale = match (
+            compiled_state_digest.as_deref(),
+            current_state_digest.as_deref(),
+        ) {
+            (Some(compiled), Some(current)) => matches!(
+                evaluate_plan_stale(generated_revision, compiled, generated_revision, current),
+                PlanStaleStatus::PlanStale
+            ),
+            _ => false,
+        };
+        let formal_stale = pending_stale
+            || digest_stale
+            || index_plan_state
+                .as_deref()
+                .is_some_and(|state| matches!(state, "STALE" | "PLAN_STALE"));
+        let updated_at = projection_updated_at
+            .or(index_updated_at)
+            .unwrap_or(volume_updated_at);
+        routes.push(RouteInput {
+            volume_id,
+            volume_no: Some(volume_no),
+            volume_title: Some(volume_title),
+            plan_state: index_plan_state.unwrap_or_else(|| "APPROVED".to_string()),
+            generated_revision,
+            remaining_chapter_capacity,
+            planning_pressure_json,
+            task_status_json: Value::Object(task_statuses).to_string(),
+            route_plan_artifact_id: route_artifact_id,
+            route_plan_version: route_version,
+            updated_at,
+            route_payload_json,
+            compiled_state_digest,
+            current_state_digest,
+            formal_stale,
+            source_unavailable,
+        });
+    }
+    Ok(routes)
+}
+
+fn formal_blocked_task_counts(routes: &[RouteInput]) -> (i64, i64) {
+    let mut seen = BTreeSet::new();
+    let mut required = 0;
+    let mut optional = 0;
+    for route in routes {
+        let Some(Value::Array(tasks)) =
+            route_payload(route).and_then(|payload| payload.get("tasks").cloned())
+        else {
+            continue;
+        };
+        let statuses = parse_value(Some(&route.task_status_json));
+        for task in tasks {
+            let Some(task_id) = task.get("taskId").and_then(Value::as_str) else {
+                continue;
+            };
+            if !seen.insert(task_id.to_string()) {
+                continue;
+            }
+            let status = statuses
+                .as_ref()
+                .and_then(|value| value.get(task_id))
+                .and_then(|value| value.as_str())
+                .unwrap_or("NOT_STARTED");
+            if status != "BLOCKED" {
+                continue;
+            }
+            match task.get("class").and_then(Value::as_str) {
+                Some("REQUIRED" | "CLIMAX" | "RESERVED") => required += 1,
+                Some("OPTIONAL" | "FLEXIBLE") => optional += 1,
+                _ => {}
+            }
+        }
+    }
+    (required, optional)
+}
+
+fn route_payload(route: &RouteInput) -> Option<Value> {
+    parse_value(route.route_payload_json.as_deref())
+}
+
 impl HealthRepository {
     pub fn load(
         connection: &Connection,
@@ -246,7 +482,9 @@ impl HealthRepository {
                    UNION ALL SELECT MAX(updated_at) FROM narrative_obligations WHERE project_id=?1
                    UNION ALL SELECT MAX(updated_at) FROM foreshadows WHERE project_id=?1
                    UNION ALL SELECT MAX(updated_at) FROM reader_desires WHERE project_id=?1
-                   UNION ALL SELECT MAX(updated_at) FROM planning_state_ledger_index WHERE project_id=?1
+                   UNION ALL SELECT MAX(updated_at) FROM volume_plan_index WHERE project_id=?1
+                   UNION ALL SELECT MAX(updated_at) FROM volume_planning_state_projection WHERE project_id=?1
+                   UNION ALL SELECT MAX(updated_at) FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress'
                    UNION ALL SELECT MAX(updated_at) FROM model_runs WHERE project_id=?1
                    UNION ALL SELECT MAX(recorded_at) FROM model_usage WHERE project_id=?1
                    UNION ALL SELECT MAX(created_at) FROM budget_reservations WHERE project_id=?1
@@ -365,38 +603,12 @@ impl HealthRepository {
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        let routes = {
-            let mut statement = connection.prepare(&format!(
-                "{ROUTE_ROWS_CTE}
-                 SELECT * FROM route_status
-                 ORDER BY COALESCE(volume_no, 9223372036854775807), volume_id
-                 LIMIT ?2",
-            ))?;
-            let rows = statement.query_map(
-                libsql_rusqlite::params![project_id, ROUTE_ROW_BOUND],
-                |row| {
-                    Ok(RouteInput {
-                        volume_id: row.get(0)?,
-                        volume_no: row.get(1)?,
-                        volume_title: row.get(2)?,
-                        plan_state: row.get(3)?,
-                        generated_revision: row.get(4)?,
-                        remaining_chapter_capacity: row.get(5)?,
-                        planning_pressure_json: row.get(6)?,
-                        task_status_json: row.get(7)?,
-                        route_plan_artifact_id: row.get(8)?,
-                        route_plan_version: row.get(9)?,
-                        updated_at: row.get(10)?,
-                        route_payload_json: row.get(11)?,
-                        compiled_state_digest: row.get(20)?,
-                        current_state_digest: row.get(21)?,
-                        formal_stale: row.get::<_, i64>(22)? != 0,
-                        source_unavailable: row.get::<_, i64>(15)? != 0,
-                    })
-                },
-            )?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
+        let all_routes = formal_route_rows(connection, project_id)?;
+        let routes = all_routes
+            .iter()
+            .take(ROUTE_ROW_BOUND as usize)
+            .cloned()
+            .collect::<Vec<_>>();
 
         let (
             route_scope_count,
@@ -404,83 +616,26 @@ impl HealthRepository {
             route_capacity_risk_scope_count,
             route_capacity_attention_scope_count,
             unavailable_routes,
-        ): (i64, i64, i64, i64, i64) = connection.query_row(
-            &format!(
-                "{ROUTE_ROWS_CTE}
-                 SELECT COUNT(*),
-                        COALESCE(SUM(formal_stale),0),
-                        COALESCE(SUM(CASE WHEN COALESCE(effective_capacity, -1)=0
-                                               AND COALESCE(required_tasks_remaining, 0)>0
-                                          THEN 1 ELSE 0 END),0),
-                        COALESCE(SUM(CASE WHEN COALESCE(effective_capacity, -1)>0
-                                               AND effective_capacity<=8
-                                               AND COALESCE(required_tasks_remaining, 0)>0
-                                          THEN 1 ELSE 0 END),0),
-                        COALESCE(SUM(source_unavailable),0)
-                 FROM route_status",
-            ),
-            [project_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
+        ): (i64, i64, i64, i64, i64) = all_routes.iter().fold(
+            (0, 0, 0, 0, 0),
+            |(scope_count, stale_count, capacity_risk, capacity_attention, unavailable), route| {
+                let capacity = route.remaining_chapter_capacity;
+                let required = route_required_tasks(route).unwrap_or(0);
+                (
+                    scope_count + 1,
+                    stale_count + i64::from(route.formal_stale),
+                    capacity_risk + i64::from(capacity == Some(0) && required > 0),
+                    capacity_attention
+                        + i64::from(
+                            capacity.is_some_and(|value| value > 0 && value <= 8) && required > 0,
+                        ),
+                    unavailable + i64::from(route.source_unavailable),
+                )
             },
-        )?;
+        );
 
-        let (blocked_required_tasks, blocked_optional_tasks): (i64, i64) = connection.query_row(
-            r#"
-            WITH route_rows AS (
-              SELECT l.project_id, l.volume_id, l.task_status_json, p.payload_json
-              FROM planning_state_ledger_index l
-              LEFT JOIN artifacts a
-                ON a.project_id=l.project_id
-               AND a.artifact_id=l.route_plan_artifact_id
-               AND a.version=l.route_plan_version
-              LEFT JOIN artifact_payloads p
-                ON p.artifact_id=a.artifact_id AND p.version=a.version
-              WHERE l.project_id=?1
-            ), route_tasks AS (
-              SELECT json_extract(task_entry.value, '$.class') AS task_class,
-                     COALESCE(
-                       CASE WHEN json_valid(reality.value_json)
-                            THEN json_extract(reality.value_json, '$.status') END,
-                       CASE WHEN status_entry.type='object' AND json_valid(status_entry.value)
-                            THEN json_extract(status_entry.value, '$.status')
-                            WHEN status_entry.type='text' THEN status_entry.value END,
-                       'NOT_STARTED'
-                     ) AS task_status
-              FROM route_rows
-              JOIN json_each(
-                CASE WHEN json_valid(route_rows.payload_json)
-                     THEN COALESCE(json_extract(route_rows.payload_json, '$.tasks'), '[]')
-                     ELSE '[]' END
-              ) task_entry
-              LEFT JOIN json_each(
-                CASE WHEN json_valid(route_rows.task_status_json)
-                     THEN route_rows.task_status_json ELSE '{}' END
-              ) status_entry
-                ON status_entry.key=json_extract(task_entry.value, '$.taskId')
-              LEFT JOIN state_deltas reality
-                ON reality.project_id=route_rows.project_id
-               AND reality.state_id=json_extract(task_entry.value, '$.taskId')
-               AND reality.state_type='volume.task.progress'
-            )
-            SELECT
-              COALESCE(SUM(CASE WHEN task_status='BLOCKED'
-                                    AND task_class IN ('REQUIRED','CLIMAX','RESERVED')
-                               THEN 1 ELSE 0 END),0),
-              COALESCE(SUM(CASE WHEN task_status='BLOCKED'
-                                    AND task_class IN ('OPTIONAL','FLEXIBLE')
-                               THEN 1 ELSE 0 END),0)
-            FROM route_tasks
-            "#,
-            [project_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let (blocked_required_tasks, blocked_optional_tasks) =
+            formal_blocked_task_counts(&all_routes);
 
         let task_reality = {
             let mut statement = connection.prepare(

@@ -136,6 +136,18 @@ fn b13_scale_health_query_materializes_the_full_r1_fixture_and_keeps_truth_globa
             libsql_rusqlite::params![route_payload.to_string(), route_hash],
         )
         .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('scale','VolumePlan','VOLUME','volume:scale','artifact:scale:route',1,?1)",
+            [&route_hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:scale:201','scale','volume.task.progress',?1,'{}',?2,?2)",
+            libsql_rusqlite::params![json!({"taskId":"task:scale:201","status":"BLOCKED"}).to_string(), NOW],
+        )
+        .unwrap();
 
     for volume_no in 1..=102_i64 {
         let volume_id = if volume_no == 1 {
@@ -161,6 +173,31 @@ fn b13_scale_health_query_materializes_the_full_r1_fixture_and_keeps_truth_globa
                     task_status,
                     json!({"remainingChapterCapacity":10,"requiredTasksRemaining":if volume_no == 1 {1} else {0}}).to_string(),
                     "c".repeat(64),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES ('scale',?1,'artifact:scale:route',1,?2,100,?3)",
+                libsql_rusqlite::params![volume_id, if volume_no == 102 { "PLAN_STALE" } else { "APPROVED" }, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES ('scale',?1,1,?2,?3,?4,?5)",
+                libsql_rusqlite::params![
+                    volume_id,
+                    "c".repeat(64),
+                    "d".repeat(64),
+                    json!({
+                        "remainingChapterCapacity":if volume_no == 1 {0} else {10},
+                        "requiredTasksRemaining":if volume_no == 1 {1} else {0},
+                        "planningPressure":{
+                            "remainingChapterCapacity":if volume_no == 1 {0} else {10},
+                            "requiredTasksRemaining":if volume_no == 1 {1} else {0}
+                        }
+                    }).to_string(),
+                    NOW
                 ],
             )
             .unwrap();

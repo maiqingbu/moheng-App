@@ -110,6 +110,18 @@ export function inspectB13Architecture(projectRoot = root) {
     r1_volume_display_metadata: /volume_no|volume_title/.test(repository)
       && /volume_location/.test(health)
       && !/format!\([^\n]*volume\.volume_id/.test(health),
+    r2_formal_planning_source: /volume_plan_index/.test(repository)
+      && /volume_planning_state_projection/.test(repository)
+      && /NarrativeRepository::volume_plan_route/.test(repository),
+    r2_formal_task_reality_source: /task_states_by_ids/.test(repository)
+      && /state_deltas/.test(repository)
+      && /formal_blocked_task_counts/.test(repository),
+    r2_compatibility_not_authoritative: !/(?:FROM|JOIN)\s+planning_state_ledger_index/i.test(repository)
+      && !/planning_state_ledger_index\s+(?:SET|WHERE)/i.test(repository),
+    r2_health_read_only_planning: !/(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+)?(?:volume_plan_index|volume_planning_state_projection|planning_state_ledger_index)/i.test(repository),
+    r2_formal_stale_reuse: /has_pending_stale_for_refs/.test(repository)
+      && /evaluate_plan_stale/.test(repository)
+      && /PlanStaleStatus/.test(repository),
     no_future_owner: !/(?:B14|B15|RC1|EndgameOwner|CompletionGate|ExportReleaseOwner)/.test(`${health}\n${repository}`),
     product_surface_closed: !forbiddenPage,
     no_health_authority_table: !/CREATE\s+TABLE[^\n]*health/i.test(`${migration}\n${health}\n${repository}`),
