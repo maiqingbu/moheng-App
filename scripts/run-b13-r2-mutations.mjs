@@ -127,7 +127,7 @@ function main() {
   const queryFile = path.join(root, queryPath)
   const queryOriginal = fs.readFileSync(queryFile)
   const queryText = queryOriginal.toString('utf8')
-  const queryMarker = 'let cursor = request.get("cursor").and_then(Value::as_str);'
+  const queryMarker = 'pub fn query_book_health_impl(state: &KernelState, request: Value) -> Result<Value, String> {\n    let project_id = required_string(&request, "projectId")?;\n    let cursor = request.get("cursor").and_then(Value::as_str);'
   if (!queryText.includes(queryMarker)) throw new Error('B13_R2_MUTATION_AUTHORITY_MARKER_MISSING')
   const queryMutated = Buffer.from(queryText.replace(
     queryMarker,
