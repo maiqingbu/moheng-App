@@ -93,9 +93,9 @@ export function evaluateR4EvidenceTruthfulness(evidenceDir, expectedSourceCommit
     && scanPass(mojibake.source, sourceRaw)
     && scanPass(mojibake.candidate, candidateRaw)
     && scanPass(mojibake.final, finalRaw)
-    && mojibake.source.cp437MojibakeFindings === 0
-    && mojibake.candidate.cp437MojibakeFindings === 0
-    && mojibake.final.cp437MojibakeFindings === 0
+    && count(mojibake.source, 'cp437MojibakeFindings') === 0
+    && count(mojibake.candidate, 'cp437MojibakeFindings') === 0
+    && count(mojibake.final, 'cp437MojibakeFindings') === 0
   add(failures, checks.mojibake, 'mojibake scan does not match raw logs')
 
   const dual = readJson(root, 'B13_R4_DUAL_READER_UTF8.json')
