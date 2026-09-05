@@ -8,6 +8,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SKILL_RELATIVE_ROOT = 'creative-skills/v1.2.0'
 const ARTICLE_RELATIVE_ROOT = SKILL_RELATIVE_ROOT + '/sources/articles'
 const PATH_LAYER_A_PATTERN = /[\uFFFDÃÂΣσΦΘ╕┐åèòû]/
+const mappingCache = new Map()
+const contentHashCache = new Map()
+const expectedPathCache = new Map()
 
 function sha256Bytes(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex')
@@ -35,6 +38,7 @@ function frozenSourceIndex(baselineCommit) {
 }
 
 function frozenArticleMapping(baselineCommit) {
+  if (mappingCache.has(baselineCommit)) return mappingCache.get(baselineCommit)
   const paths = frozenSkillFiles(baselineCommit)
   const articlePaths = paths.filter(file => file.startsWith(ARTICLE_RELATIVE_ROOT + '/') && file.endsWith('.md')).sort((left, right) => left.localeCompare(right))
   const documents = []
@@ -53,16 +57,20 @@ function frozenArticleMapping(baselineCommit) {
     oldToNew.set(oldPath, restored)
     newToOld.set(restored, oldPath)
   }
-  return { paths, articlePaths, documents, oldToNew, newToOld }
+  const result = { paths, articlePaths, documents, oldToNew, newToOld }
+  mappingCache.set(baselineCommit, result)
+  return result
 }
 
 function frozenContentHashes(baselineCommit, mapping) {
+  if (contentHashCache.has(baselineCommit)) return contentHashCache.get(baselineCommit)
   const hashes = new Map()
   for (const file of mapping.paths) {
     const sourcePath = mapping.oldToNew.get(file) || file
     const bytes = git(['show', baselineCommit + ':' + file], null)
     hashes.set(sourcePath, sha256Bytes(bytes))
   }
+  contentHashCache.set(baselineCommit, hashes)
   return hashes
 }
 
@@ -124,10 +132,13 @@ function scanPathNames(paths) {
 }
 
 function expectedPathMap(baselineCommit) {
+  if (expectedPathCache.has(baselineCommit)) return expectedPathCache.get(baselineCommit)
   const mapping = frozenArticleMapping(baselineCommit)
   const expectedPaths = mapping.paths.map(file => mapping.oldToNew.get(file) || file).sort((left, right) => left.localeCompare(right))
   const expectedHashes = frozenContentHashes(baselineCommit, mapping)
-  return { mapping, expectedPaths, expectedHashes }
+  const result = { mapping, expectedPaths, expectedHashes }
+  expectedPathCache.set(baselineCommit, result)
+  return result
 }
 
 function compareToFrozen(actualFiles, actualHashes, baselineCommit) {
