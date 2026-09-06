@@ -108,6 +108,27 @@ fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift
         .unwrap();
     assert_eq!(task_count, 501);
     assert_eq!(continuity_count, 501);
+    let query_plans = [
+        ("QP-01-obligation-aggregate", "SELECT COUNT(*) FROM narrative_obligations WHERE project_id='proj-b14-r2-scale'"),
+        ("QP-02-continuity-projection", "SELECT obligation_id,authority_level,lifecycle FROM narrative_obligations WHERE project_id='proj-b14-r2-scale' ORDER BY obligation_id"),
+        ("QP-03-volume-plan-task-class", "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='proj-b14-r2-scale' AND h.artifact_type='VolumePlan'"),
+        ("QP-04-task-reality-chunk", "SELECT state_id,value_json FROM state_deltas WHERE project_id='proj-b14-r2-scale' AND state_type='volume.task.progress' ORDER BY updated_at,state_id LIMIT 100"),
+        ("QP-05-mapping-lookup", "SELECT artifact_id,version FROM canonical_heads WHERE project_id='proj-b14-r2-scale' AND artifact_type IN ('BookPlan','FinalChapter')"),
+        ("QP-06-change-instance-ref", "SELECT change_request_id,impact_seed_json FROM change_requests WHERE project_id='proj-b14-r2-scale' AND status IN ('DRAFT','APPROVED')"),
+        ("QP-07-formal-stale", "SELECT target_ref FROM stale_queue WHERE project_id='proj-b14-r2-scale' AND processed=0"),
+        ("QP-08-final-chapter-inventory", "SELECT chapter_id,chapter_no,final_artifact_id,final_version FROM chapters WHERE project_id='proj-b14-r2-scale' ORDER BY chapter_no,chapter_id"),
+        ("QP-09-structured-receipt", "SELECT a.artifact_id,r.receipt_id FROM artifacts a JOIN commit_receipts r ON r.project_id=a.project_id AND r.command_id=json_extract(a.provenance_json,'$.commandId') WHERE a.project_id='proj-b14-r2-scale'"),
+        ("QP-10-latest-completion", "SELECT artifact_id,version FROM canonical_heads WHERE project_id='proj-b14-r2-scale' AND artifact_type='BookCompletionReport' ORDER BY version DESC LIMIT 1"),
+    ];
+    for (name, sql) in query_plans {
+        let plan: String = connection
+            .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get(3))
+            .unwrap();
+        let sql_digest = sha256_canonical(&json!({"sql":sql})).unwrap();
+        let plan_digest = sha256_canonical(&json!({"plan":plan})).unwrap();
+        println!("B14_R3_QUERY_PLAN|name={name}|sqlDigest={sql_digest}|planDigest={plan_digest}|plan={plan}");
+        assert!(!plan.trim().is_empty());
+    }
     let snapshots = [1, 30, 50].map(|page_size| {
         let request = json!({"projectId":PROJECT_ID,"scope":"completion","pageSize":page_size});
         let start = std::time::Instant::now();
