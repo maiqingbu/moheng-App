@@ -204,6 +204,31 @@ impl EndgameRepository {
         Ok(true)
     }
 
+    fn fulfillment_evidence_refs_valid(
+        connection: &Connection,
+        project_id: &str,
+        refs: Option<&Value>,
+    ) -> Result<bool, EndgameRepositoryError> {
+        let Some(refs) = refs.and_then(Value::as_array) else {
+            return Ok(false);
+        };
+        if refs.is_empty() {
+            return Ok(false);
+        }
+        for reference in refs.iter().filter_map(Value::as_str) {
+            let artifact_id = reference.strip_prefix("final-chapter:").unwrap_or(reference);
+            let current_final: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED')",
+                libsql_rusqlite::params![project_id, artifact_id],
+                |row| row.get(0),
+            )?;
+            if !current_final {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn mystery_count(
         connection: &Connection,
         project_id: &str,
@@ -258,7 +283,7 @@ impl EndgameRepository {
         let mut count = 0;
         for mapping in mappings {
             let fulfilled = mapping.get("fulfilled").and_then(Value::as_bool) == Some(true);
-            let evidence_valid = Self::mapping_refs_valid(
+            let evidence_valid = Self::fulfillment_evidence_refs_valid(
                 connection,
                 project_id,
                 mapping.get("fulfillmentEvidenceRefs"),
@@ -302,7 +327,7 @@ impl EndgameRepository {
             });
             let valid = mapping.is_some_and(|item| {
                 item.get("mappingConfirmation").and_then(Value::as_str) == Some("USER_CONFIRMED")
-            }) && Self::mapping_refs_valid(
+            }) && Self::fulfillment_evidence_refs_valid(
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("fulfillmentEvidenceRefs")),

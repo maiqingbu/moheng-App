@@ -423,6 +423,26 @@ fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
 }
 
 #[test]
+fn b14_hard_payoff_rejects_non_final_artifact_as_fulfillment_evidence() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-payoff-invalid-evidence","idempotencyKey":"b14-payoff-invalid-evidence:key","expectedRevision":0,"requestedAt":NOW,
+            "payload":{
+                "requestedEnding":{"summary":"完成最终回报","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW},
+                "hardPayoffMappings":[{"payoffId":"payoff:b14:final","fulfillmentEvidenceRefs":["book-plan:b14"],"fulfilled":true}]
+            }
+        }),
+    )
+    .unwrap();
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let payoff = result["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "PAYOFF").unwrap();
+    assert_eq!(payoff["status"], "BLOCKED");
+}
+
+#[test]
 fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     let (state, _root) = test_state_with_skill_gateway();
     seed_ready_project(&state);
