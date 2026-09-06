@@ -48,7 +48,7 @@ function completionEvidenceMode() {
 }
 
 function completionDemo(mode: string): CompletionStatusProjection {
-  const status = mode === 'm07' || mode === 'm09' ? 'READY' : mode === 'm12' ? 'NEEDS_RECHECK' : mode === 'm01' || mode === 'm03' ? 'NEEDS_DECISION' : 'BLOCKED'
+  const status = ['m07','m09','m11'].includes(mode) ? 'READY' : mode === 'm12' ? 'NEEDS_RECHECK' : mode === 'm01' || mode === 'm03' ? 'NEEDS_DECISION' : 'BLOCKED'
   const blocked = status === 'READY' || status === 'NEEDS_DECISION' ? 0 : mode === 'm13' ? 50 : 1
   const checks = [
     ['OBLIGATION', mode === 'm02' ? 'BLOCKED' : 'READY'], ['MYSTERY', mode === 'm03' ? 'NEEDS_DECISION' : 'READY'],

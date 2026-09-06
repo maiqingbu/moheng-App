@@ -3,7 +3,7 @@ import path from 'node:path'
 
 export const R3_REPAIR_BASELINE = '7a3a30fe997ea956cf8da12ef5384ae7a9ac65'
 export const REQUIRED_R3_GATES = [
-  'formal_completion_truth','mapping_workflow','skill_runtime','product_ux','scale_10m','page_independent_truth','browser_m01_m17','mutation_gates','architecture','rust_fmt','rust_check','rust_clippy','rust_tests','node_tests','typecheck','build','contracts','module_boundary','b15_boundary','rc1_boundary','package_ascii_root','package_no_macosx','package_utf8','package_mojibake','package_dual_reader','package_inventory','files_sha256','package_integrity','secret_scan',
+  'formal_completion_truth','mapping_workflow','skill_runtime','product_ux','scale_10m','page_independent_truth','query_plans','browser_m01_m17','mutation_gates','architecture','rust_fmt','rust_check','rust_clippy','rust_tests','node_tests','typecheck','build','contracts','module_boundary','b15_boundary','rc1_boundary','package_ascii_root','package_no_macosx','package_utf8','package_mojibake','package_dual_reader','package_inventory','files_sha256','package_integrity','secret_scan',
 ]
 export function evaluateB14R3Acceptance(report) {
   const missingGates = REQUIRED_R3_GATES.filter(name => report.gates?.[name]?.status !== 'PASS')
