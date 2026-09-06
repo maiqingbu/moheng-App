@@ -422,10 +422,34 @@ impl EndgameRepository {
                     .filter_map(Value::as_str)
                     .map(ToOwned::to_owned),
             );
+            for (mapping_key, ref_keys) in [
+                ("mysteryMappings", ["sourceMysteryId", "mappedResponsibilityRefs"].as_slice()),
+                ("reservationMappings", ["reservationId", "fulfillmentEvidenceRefs"].as_slice()),
+                ("hardPayoffMappings", ["payoffId", "fulfillmentEvidenceRefs"].as_slice()),
+            ] {
+                for mapping in value.get(mapping_key).and_then(Value::as_array).into_iter().flatten() {
+                    for key in ref_keys {
+                        match mapping.get(*key) {
+                            Some(Value::String(reference)) => refs.push(reference.clone()),
+                            Some(Value::Array(items)) => refs.extend(items.iter().filter_map(Value::as_str).map(ToOwned::to_owned)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
         refs.sort();
         refs.dedup();
         refs
+    }
+
+    fn value_contains_ref(value: &Value, refs: &[String]) -> bool {
+        match value {
+            Value::String(item) => refs.iter().any(|reference| reference == item),
+            Value::Array(items) => items.iter().any(|item| Self::value_contains_ref(item, refs)),
+            Value::Object(items) => items.values().any(|item| Self::value_contains_ref(item, refs)),
+            _ => false,
+        }
     }
 
     fn relevant_change_pending(
@@ -441,7 +465,8 @@ impl EndgameRepository {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })? {
             let (scope, payload) = row?;
-            if scope == "GLOBAL" || refs.iter().any(|reference| payload.contains(reference)) {
+            let payload = serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null);
+            if scope == "GLOBAL" || Self::value_contains_ref(&payload, refs) {
                 relevant_change = true;
             }
         }
@@ -452,10 +477,9 @@ impl EndgameRepository {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })? {
             let (target, downstream) = row?;
-            if refs
-                .iter()
-                .any(|reference| target.contains(reference) || downstream.contains(reference))
-            {
+            let target = serde_json::from_str::<Value>(&target).unwrap_or(Value::Null);
+            let downstream = serde_json::from_str::<Value>(&downstream).unwrap_or(Value::Null);
+            if Self::value_contains_ref(&target, refs) || Self::value_contains_ref(&downstream, refs) {
                 relevant_change = true;
             }
         }
