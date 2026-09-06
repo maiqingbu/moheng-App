@@ -245,6 +245,31 @@ impl EndgameRepository {
         Ok(count)
     }
 
+    fn hard_payoff_count(
+        connection: &Connection,
+        project_id: &str,
+        contract: Option<&Value>,
+    ) -> Result<i64, EndgameRepositoryError> {
+        let mappings = contract
+            .and_then(|value| value.get("hardPayoffMappings"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut count = 0;
+        for mapping in mappings {
+            let fulfilled = mapping.get("fulfilled").and_then(Value::as_bool) == Some(true);
+            let evidence_valid = Self::mapping_refs_valid(
+                connection,
+                project_id,
+                mapping.get("fulfillmentEvidenceRefs"),
+            )?;
+            if !fulfilled || !evidence_valid {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     fn reservation_count(
         connection: &Connection,
         project_id: &str,
@@ -543,10 +568,10 @@ impl EndgameRepository {
             [project_id],
             |row| row.get(0),
         )?;
-        let unresolved_hard_payoffs: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') AND UPPER(obligation_type) LIKE '%PAYOFF%'",
-            [project_id],
-            |row| row.get(0),
+        let unresolved_hard_payoffs = Self::hard_payoff_count(
+            connection,
+            project_id,
+            endgame_contract.as_ref(),
         )?;
         let continuity_threads = NarrativeRepository::continuity_threads_complete(connection, project_id)?;
         let open_hard_continuity = continuity_threads

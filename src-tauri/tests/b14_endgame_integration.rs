@@ -367,6 +367,32 @@ fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
 }
 
 #[test]
+fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-payoff-contract","idempotencyKey":"b14-payoff-contract:key","expectedRevision":0,"requestedAt":NOW,
+            "payload":{
+                "requestedEnding":{"summary":"完成最终回报","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW},
+                "hardPayoffMappings":[{"payoffId":"payoff:b14:final","fulfillmentEvidenceRefs":[],"fulfilled":false}]
+            }
+        }),
+    )
+    .unwrap();
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let payoff = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "PAYOFF")
+        .unwrap();
+    assert_eq!(payoff["status"], "BLOCKED");
+    assert_eq!(payoff["blockerCount"], 1);
+}
+
+#[test]
 fn b14_s44_s45_are_explicit_soft_only_actions_without_model_runs() {
     let (state, _root) = test_state();
     seed_ready_project(&state);
