@@ -8,6 +8,7 @@ fn ready_input() -> CompletionInput {
         requested_ending_confirmed: true,
         endgame_contract_fresh: true,
         unmapped_mysteries: 0,
+        unresolved_mapped_mysteries: 0,
         unresolved_hard_obligations: 0,
         unresolved_hard_payoffs: 0,
         unfulfilled_hard_reservations: 0,
