@@ -4,6 +4,7 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::path::PathBuf;
@@ -90,6 +91,26 @@ fn seed_ready_project(state: &KernelState) {
         &volume_scope,
         &volume_exit,
     );
+}
+
+fn insert_obligation(
+    connection: &Connection,
+    obligation_id: &str,
+    authority_level: &str,
+    lifecycle: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','PROMISE',?2,'book-plan:b14',1,'终局连续性责任',?3,?4,?5,?5)",
+            libsql_rusqlite::params![
+                obligation_id,
+                authority_level,
+                json!({"kind":"AFTER_CHAPTER","value":0}).to_string(),
+                lifecycle,
+                NOW
+            ],
+        )
+        .unwrap();
 }
 
 #[test]
@@ -307,6 +328,42 @@ fn b14_task_truth_uses_volume_plan_class_and_current_task_progress() {
         .unwrap();
     assert_eq!(task_check["status"], "BLOCKED");
     assert_eq!(task_check["blockerCount"], 1);
+}
+
+#[test]
+fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_obligation(&handle, "obligation:b14:a", "A", "PROGRESSING");
+    let threads = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+    assert_eq!(threads[0].thread_id, "thread:obligation:b14:a");
+    assert_eq!(threads[0].logical_status, "OPEN");
+    drop(handle);
+
+    let blocked = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let payoff = blocked["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "PAYOFF")
+        .unwrap();
+    assert_eq!(payoff["status"], "BLOCKED");
+
+    let (advisory_state, _root) = test_state();
+    seed_ready_project(&advisory_state);
+    let handle = advisory_state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_obligation(&handle, "obligation:b14:c", "C", "PROGRESSING");
+    drop(handle);
+    let advisory = query_completion_status_impl(&advisory_state, json!({"projectId":"proj-b14"})).unwrap();
+    let payoff = advisory["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "PAYOFF")
+        .unwrap();
+    assert_eq!(payoff["status"], "READY");
+    assert_eq!(payoff["advisoryCount"], 1);
 }
 
 #[test]

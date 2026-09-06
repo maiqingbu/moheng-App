@@ -548,11 +548,21 @@ impl EndgameRepository {
             [project_id],
             |row| row.get(0),
         )?;
-        let open_hard_continuity: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND lifecycle IN ('APPROVED','PLANTED','PROGRESSING')",
-            [project_id],
-            |row| row.get(0),
-        )?;
+        let continuity_threads = NarrativeRepository::continuity_threads_complete(connection, project_id)?;
+        let open_hard_continuity = continuity_threads
+            .iter()
+            .filter(|thread| {
+                matches!(thread.authority_level.as_str(), "A" | "B")
+                    && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+            })
+            .count() as i64;
+        let continuity_advisories = continuity_threads
+            .iter()
+            .filter(|thread| {
+                thread.authority_level == "C"
+                    && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+            })
+            .count() as i64;
         let blocked_required_tasks = Self::blocked_hard_tasks(connection, project_id)?;
         let (pending_relevant_change, plan_stale) = Self::relevant_change_pending(
             connection,
@@ -613,7 +623,7 @@ impl EndgameRepository {
             pending_relevant_change,
             plan_stale,
             export_integrity_failures,
-            soft_advisories: 0,
+            soft_advisories: continuity_advisories,
             detail_limit: 30,
         };
         let current_digest = Self::rich_relevant_state_digest(

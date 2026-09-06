@@ -1,4 +1,5 @@
 use crate::generated::types::ArtifactRef;
+use crate::narrative::{build_continuity_threads, ContinuityThreadView, ResumeContext};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +15,8 @@ pub enum NarrativeRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("continuity projection: {0}")]
+    ContinuityProjection(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -153,6 +156,59 @@ pub struct CanonEventRecord {
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
+    /// Builds the complete, formal B06 continuity projection for a project.
+    /// Consumers such as B14 receive thread state, not a second obligation
+    /// count, so current logical status remains owned by the narrative layer.
+    pub fn continuity_threads_complete(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<ContinuityThreadView>, NarrativeRepositoryError> {
+        let current_chapter: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(chapter_no), 0) FROM chapters WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        let current_volume = connection
+            .query_row(
+                "SELECT volume_id FROM volumes WHERE project_id=?1 ORDER BY volume_no DESC, volume_id DESC LIMIT 1",
+                [project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let mut statement = connection.prepare(
+            "SELECT o.obligation_id,o.obligation_type,o.authority_level,o.lifecycle,o.source_event_id,o.prerequisites_json,(SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL) FROM narrative_obligations o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING','RESOLVED','ABANDONED') ORDER BY o.obligation_id",
+        )?;
+        let mut obligations = Vec::new();
+        for row in statement.query_map([project_id], |row| {
+            let resume_condition: String = row.get(5)?;
+            let participants: String = row.get(6)?;
+            Ok(ObligationRecord {
+                obligation_id: row.get(0)?,
+                obligation_type: row.get(1)?,
+                authority_level: row.get(2)?,
+                lifecycle: row.get(3)?,
+                source_event_id: row.get(4)?,
+                resume_condition: serde_json::from_str(&resume_condition)
+                    .unwrap_or_else(|_| Value::Object(Default::default())),
+                participant_entities: serde_json::from_str(&participants).unwrap_or_default(),
+            })
+        })? {
+            obligations.push(row?);
+        }
+        build_continuity_threads(
+            &obligations,
+            &[],
+            &[],
+            &[],
+            &ResumeContext {
+                current_chapter,
+                current_volume,
+                ..Default::default()
+            },
+        )
+        .map_err(NarrativeRepositoryError::ContinuityProjection)
+    }
+
     fn volume_scope_key(volume_id: &str) -> Result<String, NarrativeRepositoryError> {
         let bytes = crate::hash::canonical_bytes(
             &serde_json::json!({"level":"VOLUME","volumeId":volume_id}),
