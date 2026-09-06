@@ -33,6 +33,25 @@ pub struct CompletionHistory {
 }
 
 impl EndgameRepository {
+    pub fn mapping_workflow(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Value, EndgameRepositoryError> {
+        let book_plan = Self::payload_for_head(connection, project_id, "BookPlan")?
+            .unwrap_or_else(|| json!({}));
+        let mysteries = book_plan.get("majorMysteryGoals").and_then(Value::as_array).into_iter().flatten().filter_map(|goal| {
+            let id = goal.get("id").or_else(|| goal.get("mysteryId")).and_then(Value::as_str)?;
+            Some(json!({"key":format!("mystery:{id}"),"id":id,"label":goal.get("description").or_else(|| goal.get("summary")).and_then(Value::as_str).unwrap_or("重要谜团")}))
+        }).collect::<Vec<_>>();
+        let reservations = book_plan.get("futureReservations").and_then(Value::as_array).into_iter().flatten().filter_map(|item| {
+            let id = item.get("reservationId").and_then(Value::as_str)?;
+            matches!(item.get("authorityLevel").and_then(Value::as_str), Some("A" | "B")).then(|| json!({"key":format!("reservation:{id}"),"id":id,"label":item.get("description").and_then(Value::as_str).unwrap_or("未来约束")}))
+        }).collect::<Vec<_>>();
+        let mut candidates = Vec::new();
+        let mut statement = connection.prepare("SELECT a.artifact_id,COALESCE(c.title,'最终章节') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version LEFT JOIN chapters c ON c.project_id=a.project_id AND c.final_artifact_id=a.artifact_id AND c.final_version=a.version WHERE h.project_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' ORDER BY a.artifact_id")?;
+        for row in statement.query_map([project_id], |row| Ok(json!({"ref":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { candidates.push(row?); }
+        Ok(json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":[],"fulfillmentCandidates":candidates}))
+    }
     pub fn latest_head_ref(
         connection: &Connection,
         project_id: &str,

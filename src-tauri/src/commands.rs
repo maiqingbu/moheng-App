@@ -1570,6 +1570,14 @@ pub fn query_completion_status_impl(state: &KernelState, request: Value) -> Resu
     query_endgame_status_impl(state, request)
 }
 
+pub fn query_endgame_mapping_options_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    state.manager.with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+        crate::repositories::endgame::EndgameRepository::mapping_workflow(connection, project_id)
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+    }).map_err(|error| error.to_string())
+}
+
 pub fn query_endgame_advice_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     query_b14_skill_runtime(state, request, "S44", "B14_S44_ENDGAME_ADVICE", "proposal")
 }
@@ -5201,6 +5209,11 @@ pub fn query_completion_status(
 }
 
 #[tauri::command]
+pub fn query_endgame_mapping_options(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_endgame_mapping_options_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_endgame_advice(
     state: State<'_, KernelState>,
     request: Value,
@@ -5403,6 +5416,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,
+        query_endgame_mapping_options,
         query_endgame_advice,
         query_completion_quality,
         execute_command,

@@ -801,6 +801,7 @@ export interface FrontendPort {
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection>
   queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
   queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
+  queryEndgameMappingOptions(request: ProjectQueryRequest): Promise<EndgameMappingWorkflowProjection>
   queryEndgameAdvice(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection>
   queryCompletionQuality(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection>
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
@@ -866,4 +867,11 @@ export interface SoftCreativeAdviceProjection {
   sourceAvailable: boolean
   runtimeCheckRequests: unknown[]
   userAction: string
+}
+
+export interface EndgameMappingWorkflowProjection {
+  mysteries: Array<{ key: string; id: string; label: string }>
+  reservations: Array<{ key: string; id: string; label: string }>
+  hardPayoffs: Array<{ key: string; id: string; label: string }>
+  fulfillmentCandidates: Array<{ ref: string; label: string }>
 }

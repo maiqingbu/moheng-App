@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { getFrontendPort } from '../../app/providers/runtimePort'
-import type { CommandStatus, CompletionStatusProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
+import type { CommandStatus, CompletionStatusProjection, EndgameMappingWorkflowProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
 
 const route = useRoute()
 const frontendPort = getFrontendPort()
@@ -18,6 +18,9 @@ const error = ref('')
 const message = ref('')
 const endgameAdvice = ref<SoftCreativeAdviceProjection | null>(null)
 const qualityReview = ref<SoftCreativeAdviceProjection | null>(null)
+const mappingWorkflow = ref<EndgameMappingWorkflowProjection | null>(null)
+const mappingSelections = ref<Record<string, string>>({})
+const mappingLoading = ref(false)
 
 const statusText = computed(() => {
   switch (status.value?.status) {
@@ -91,13 +94,28 @@ async function submit(type: 'endgame_contract_create' | 'complete_book', payload
 
 async function createContract() {
   if (!endingConfirmed.value || !summary.value.trim()) return
+  const workflow = mappingWorkflow.value
   await submit('endgame_contract_create', {
     requestedEnding: {
       summary: summary.value.trim(),
       confirmationSource: 'USER_CONFIRMED',
       confirmedAt: new Date().toISOString(),
     },
+    mysteryMappings: (workflow?.mysteries ?? []).flatMap(item => mappingSelections.value[item.key] ? [{ sourceMysteryId: item.id, mappedResponsibilityRefs: [mappingSelections.value[item.key]], mappingConfirmation: 'USER_CONFIRMED' }] : []),
+    reservationMappings: (workflow?.reservations ?? []).flatMap(item => mappingSelections.value[item.key] ? [{ reservationId: item.id, fulfillmentEvidenceRefs: [mappingSelections.value[item.key]], mappingConfirmation: 'USER_CONFIRMED' }] : []),
   }, '终局目标与收束安排已保存，正在重新检查作品状态。')
+}
+
+async function loadMappingWorkflow() {
+  if (!projectId.value) return
+  mappingLoading.value = true
+  try {
+    mappingWorkflow.value = await frontendPort.queryEndgameMappingOptions({ projectId: projectId.value, scope: 'completion-mapping', pageSize: 30 })
+  } catch (cause) {
+    error.value = cause instanceof Error ? userError(cause.message) : '暂时无法读取可确认的收束依据。'
+  } finally {
+    mappingLoading.value = false
+  }
 }
 
 async function completeBook() {
@@ -148,6 +166,15 @@ onMounted(() => { void load() })
         <label class="field-label" style="margin-top:14px">你希望本书如何结束？<textarea v-model="summary" rows="4" placeholder="用一句或几句明确描述结局边界。" /></label>
         <label class="check-line"><input v-model="endingConfirmed" type="checkbox" />我确认以上内容是本次正式完结目标。</label>
         <button class="btn primary" :disabled="submitting || !endingConfirmed || !summary.trim()" @click="createContract">确认终局目标并保存约束</button>
+      </section>
+
+      <section v-if="!status.completed" class="card pad section">
+        <div class="card-head"><div><h2 class="card-title">需要确认的终局责任</h2><p class="card-subtitle">仅可选择当前作品已保存的责任与完成依据；不会自动建立对应关系。</p></div><button class="btn small" :disabled="mappingLoading || submitting" @click="loadMappingWorkflow">{{ mappingLoading ? '正在读取' : '查看可确认内容' }}</button></div>
+        <template v-if="mappingWorkflow">
+          <label v-for="item in mappingWorkflow.mysteries" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+          <label v-for="item in mappingWorkflow.reservations" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+          <p v-if="!mappingWorkflow.mysteries.length && !mappingWorkflow.reservations.length" class="muted" style="margin-top:12px">当前没有需要确认的谜团或未来约束。</p>
+        </template>
       </section>
 
       <section class="card pad section">

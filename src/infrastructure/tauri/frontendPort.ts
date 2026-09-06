@@ -39,6 +39,7 @@ import type {
   VolumeSummary,
   VolumeLifecycleProjection,
   CompletionStatusProjection,
+  EndgameMappingWorkflowProjection,
   SoftCreativeAdviceProjection,
 } from '../../application/contracts'
 
@@ -76,6 +77,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { return invokeQuery(this.ipc, 'query_volume_lifecycle', { request }) }
   queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_endgame_status', { request }) }
   queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_completion_status', { request }) }
+  queryEndgameMappingOptions(request: ProjectQueryRequest): Promise<EndgameMappingWorkflowProjection> { return invokeQuery(this.ipc, 'query_endgame_mapping_options', { request }) }
   queryEndgameAdvice(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { return invokeQuery(this.ipc, 'query_endgame_advice', { request }) }
   queryCompletionQuality(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { return invokeQuery(this.ipc, 'query_completion_quality', { request }) }
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }

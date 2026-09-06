@@ -605,6 +605,7 @@ export class BrowserDemoPort implements FrontendPort {
   async queryVolumeLifecycle(_request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { throw new Error('IPC_UNSUPPORTED:query_volume_lifecycle') }
   async queryEndgameStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { throw new Error('IPC_UNSUPPORTED:query_endgame_status') }
   async queryCompletionStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { throw new Error('IPC_UNSUPPORTED:query_completion_status') }
+  async queryEndgameMappingOptions(_request: ProjectQueryRequest): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_endgame_mapping_options') }
   async queryEndgameAdvice(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { throw new Error('IPC_UNSUPPORTED:query_endgame_advice') }
   async queryCompletionQuality(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { throw new Error('IPC_UNSUPPORTED:query_completion_quality') }
   async supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string }): Promise<SupportSessionProjection> {
