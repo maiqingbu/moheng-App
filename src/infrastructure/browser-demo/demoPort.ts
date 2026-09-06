@@ -33,6 +33,7 @@ import type {
   VolumeSummary,
   VolumeLifecycleProjection,
   CompletionStatusProjection,
+  EndgameMappingWorkflowProjection,
   SoftCreativeAdviceProjection
 } from '../../application/contracts'
 import { demoBundle, demoProjectRecords, starterMarket, type DemoProjectRecord } from './fixtures'
@@ -40,6 +41,22 @@ import { demoBundle, demoProjectRecords, starterMarket, type DemoProjectRecord }
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const clone = <T>(value: T): T => structuredClone(value)
 const nowLabel = () => new Date().toLocaleString('zh-CN', { hour12: false })
+
+function completionEvidenceMode() {
+  if (typeof location === 'undefined') return 'm01'
+  return new URLSearchParams(location.search).get('completionEvidence') ?? 'm01'
+}
+
+function completionDemo(mode: string): CompletionStatusProjection {
+  const status = mode === 'm07' || mode === 'm09' ? 'READY' : mode === 'm12' ? 'NEEDS_RECHECK' : mode === 'm01' || mode === 'm03' ? 'NEEDS_DECISION' : 'BLOCKED'
+  const blocked = status === 'READY' || status === 'NEEDS_DECISION' ? 0 : mode === 'm13' ? 50 : 1
+  const checks = [
+    ['OBLIGATION', mode === 'm02' ? 'BLOCKED' : 'READY'], ['MYSTERY', mode === 'm03' ? 'NEEDS_DECISION' : 'READY'],
+    ['PAYOFF', ['m04','m16','m17'].includes(mode) ? 'BLOCKED' : 'READY'], ['REQUESTED_ENDING', mode === 'm01' ? 'NEEDS_DECISION' : 'READY'],
+    ['CHANGE_STALE', mode === 'm05' || mode === 'm12' ? 'BLOCKED' : 'READY'], ['EXPORT_INTEGRITY', mode === 'm06' ? 'BLOCKED' : 'READY'],
+  ].map(([kind, checkStatus]) => ({ kind, status: checkStatus as CompletionStatusProjection['status'], summary: checkStatus === 'READY' ? '当前条件已满足。' : '还有必须解决的问题。', blockerCount: checkStatus === 'READY' || checkStatus === 'NEEDS_DECISION' ? 0 : 1, advisoryCount: kind === 'PAYOFF' && mode === 'm04' ? 1 : 0, sourceRefs: [] }))
+  return { projectId: 'proj-moheng-demo', projectRevision: 1, status, checks, blockerCount: blocked, advisoryCount: mode === 'm04' ? 1 : 0, relevantStateDigest: 'demo', sourceAvailable: true, requestedEndingConfirmed: mode !== 'm01', completed: mode === 'm11', hasHistoricalCompletion: mode === 'm12' }
+}
 
 function page<T>(items: T[], request: PageRequest, defaultSize = 30): PageResult<T> {
   const start = Math.max(0, Number(request.cursor ?? 0) || 0)
@@ -603,11 +620,11 @@ export class BrowserDemoPort implements FrontendPort {
   async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }
   async queryPlanRoute(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_route') }
   async queryVolumeLifecycle(_request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { throw new Error('IPC_UNSUPPORTED:query_volume_lifecycle') }
-  async queryEndgameStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { throw new Error('IPC_UNSUPPORTED:query_endgame_status') }
-  async queryCompletionStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { throw new Error('IPC_UNSUPPORTED:query_completion_status') }
-  async queryEndgameMappingOptions(_request: ProjectQueryRequest): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_endgame_mapping_options') }
-  async queryEndgameAdvice(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { throw new Error('IPC_UNSUPPORTED:query_endgame_advice') }
-  async queryCompletionQuality(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { throw new Error('IPC_UNSUPPORTED:query_completion_quality') }
+  async queryEndgameStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return clone(completionDemo(completionEvidenceMode())) }
+  async queryCompletionStatus(_request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return clone(completionDemo(completionEvidenceMode())) }
+  async queryEndgameMappingOptions(_request: ProjectQueryRequest): Promise<EndgameMappingWorkflowProjection> { return clone({ mysteries:[{key:'mystery:demo',id:'mystery:demo',label:'身份谜团'}], reservations:[{key:'reservation:demo',id:'reservation:demo',label:'最终承诺'}], hardPayoffs:[{key:'payoff:demo',id:'payoff:demo',label:'关键回报'}], fulfillmentCandidates:[{ref:'final:demo',label:'终章：选择与回应'}] }) }
+  async queryEndgameAdvice(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { return clone({ softOnly:true, proposal:{summary:'可将最后的选择与前文承诺形成呼应。',suggestions:['先确认硬性条件，再比较不同收束方案。']}, projectRevision:1, sourceAvailable:true, runtimeCheckRequests:[], userAction:'demo' }) }
+  async queryCompletionQuality(_request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection> { return clone({ softOnly:true, review:{summary:'回报层次仍可加强，但不改变当前正式结论。',suggestions:['检查人物选择与读者期待是否同时得到回应。']}, projectRevision:1, sourceAvailable:true, runtimeCheckRequests:[], userAction:'demo' }) }
   async supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string }): Promise<SupportSessionProjection> {
     await wait(45)
     const supported = !request.question.includes('没有')

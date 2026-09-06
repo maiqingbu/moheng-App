@@ -40,7 +40,7 @@ const forbiddenVisiblePatterns = [
   /\b(?:projectId|artifactId|payloadHash|sourceCommit|changeRequestId|authorizationId|repairPlanId|operationDigest|expectedRevision|ownerReceiptRef)\b/i,
   /\b(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED)\b/,
   /\b(?:CommitBundle|Narrative Authority|PlanningOwner|ProjectionOwner|VolumeLifecycleOwner|CommitService|RepairPlan|CandidatePatch|RepairSuggestion|RuntimeCheckRequest|RetconPlan)\b/,
-  /\b(?:BookExitState|BookCompletionReport|EndgameContract|CompletionSnapshot|CompletionGate|READY|BLOCKED|NEEDS_DECISION|SOURCE_UNAVAILABLE)\b/,
+  /\b(?:BookExitState|BookCompletionReport|EndgameContract|CompletionSnapshot|CompletionGate|ExitState|CompletionReport|READY|BLOCKED|NEEDS_DECISION|SOURCE_UNAVAILABLE)\b/,
   /\b(?:BookPlan|VolumePlan)\b/,
   /\b(?:OBLIGATION_OVERDUE|FORESHADOW_AGING|ROUTE_DRIFT|TASK_BLOCKAGE|CONTEXT_GROWTH|MODEL_COST_DRIFT|READER_DESIRE|QUALITY_DRIFT|SOURCE_UNAVAILABLE|INSUFFICIENT_DATA)\b/,
   /\bCanon\b/,
