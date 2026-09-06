@@ -443,6 +443,22 @@ fn b14_hard_payoff_rejects_non_final_artifact_as_fulfillment_evidence() {
 }
 
 #[test]
+fn b14_export_preflight_blocks_uncommitted_chapter_in_final_sequence() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,arc_id,chapter_no,title,status,word_count,created_at,updated_at) VALUES ('chapter:b14:draft','proj-b14','volume:b14',NULL,1,'尚未定稿','PRODUCING',0,?1,?1)",
+        [NOW],
+    ).unwrap();
+    drop(handle);
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let export = result["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "EXPORT_INTEGRITY").unwrap();
+    assert_eq!(export["status"], "BLOCKED");
+    assert_eq!(export["blockerCount"], 1);
+}
+
+#[test]
 fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     let (state, _root) = test_state_with_skill_gateway();
     seed_ready_project(&state);

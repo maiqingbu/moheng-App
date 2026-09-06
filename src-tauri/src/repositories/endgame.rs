@@ -677,7 +677,7 @@ impl EndgameRepository {
             Self::final_volume_exit_ref(connection, project_id)?.is_some();
 
         let export_integrity_failures: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM chapters c WHERE c.project_id=?1 AND c.status='COMMITTED' AND (c.final_artifact_id IS NULL OR c.final_version IS NULL OR NOT EXISTS(SELECT 1 FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND a.payload_hash=p.payload_hash) OR NOT EXISTS(SELECT 1 FROM commit_receipts r WHERE r.project_id=c.project_id AND r.receipt_json LIKE '%' || c.final_artifact_id || '%'))",
+            "SELECT COUNT(*) FROM chapters c WHERE c.project_id=?1 AND (c.status!='COMMITTED' OR c.final_artifact_id IS NULL OR c.final_version IS NULL OR NOT EXISTS(SELECT 1 FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version WHERE a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND a.payload_hash=p.payload_hash) OR NOT EXISTS(SELECT 1 FROM artifacts a JOIN commit_receipts r ON r.project_id=a.project_id AND r.command_id=json_extract(a.provenance_json,'$.commandId') WHERE a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version))",
             [project_id],
             |row| row.get(0),
         )?;
