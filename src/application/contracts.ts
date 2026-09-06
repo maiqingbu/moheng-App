@@ -873,5 +873,6 @@ export interface EndgameMappingWorkflowProjection {
   mysteries: Array<{ key: string; id: string; label: string }>
   reservations: Array<{ key: string; id: string; label: string }>
   hardPayoffs: Array<{ key: string; id: string; label: string }>
+  responsibilityCandidates: Array<{ ref: string; label: string }>
   fulfillmentCandidates: Array<{ ref: string; label: string }>
 }
