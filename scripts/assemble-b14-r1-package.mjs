@@ -37,7 +37,17 @@ function allFiles(directory, base = directory) {
   return result.sort()
 }
 function zip(stageRoot, output) {
-  const result = spawnSync('zip', ['-qr', '-X', '-UN=UTF8', output, path.basename(stageRoot)], { cwd: path.dirname(stageRoot), encoding: 'utf8' })
+  const python = [
+    'import os, sys, zipfile',
+    'output, stage = sys.argv[1], sys.argv[2]',
+    'with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:',
+    '    for current, directories, files in os.walk(stage):',
+    '        directories.sort()',
+    '        for name in sorted(files):',
+    '            filename = os.path.join(current, name)',
+    '            archive.write(filename, os.path.relpath(filename, os.path.dirname(stage)))',
+  ].join('\n')
+  const result = spawnSync('python3', ['-c', python, output, stageRoot], { encoding: 'utf8' })
   if (result.status !== 0) throw new Error(`B14_R1_ZIP_FAILED:${result.stderr || result.stdout}`)
 }
 
