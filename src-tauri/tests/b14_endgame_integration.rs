@@ -459,7 +459,7 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
 
 #[test]
 fn b14_status_and_soft_queries_do_not_mutate_authority() {
-    let (state, _root) = test_state();
+    let (state, _root) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let count = |connection: &libsql_rusqlite::Connection, table: &str| -> i64 {
         connection
