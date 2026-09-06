@@ -33,6 +33,66 @@ pub struct CompletionHistory {
 }
 
 impl EndgameRepository {
+    pub fn instance_responsibilities(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Value, EndgameRepositoryError> {
+        let mut result = Vec::new();
+        let mut statement = connection.prepare("SELECT obligation_id,authority_level FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
+        for row in statement.query_map([project_id], |row| Ok(json!({"kind":"OBLIGATION","responsibilityId":format!("obligation:{}",row.get::<_,String>(0)?),"sourceRefs":[format!("obligation:{}",row.get::<_,String>(0)?)],"authorityClass":row.get::<_,String>(1)?,"requiredDisposition":"RESOLVED_BEFORE_COMPLETION"})))? { result.push(row?); }
+        for thread in NarrativeRepository::continuity_threads_complete(connection, project_id)? {
+            if matches!(thread.authority_level.as_str(), "A" | "B")
+                && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+            {
+                result.push(json!({"kind":"CONTINUITY","responsibilityId":thread.thread_id,"sourceRefs":thread.source_refs.iter().map(|item| format!("{}:{}",item.kind,item.ref_)).collect::<Vec<_>>(),"authorityClass":thread.authority_level,"requiredDisposition":"RESOLVED_BEFORE_COMPLETION"}));
+            }
+        }
+        let book_plan = Self::payload_for_head(connection, project_id, "BookPlan")?
+            .unwrap_or_else(|| json!({}));
+        for goal in book_plan
+            .get("majorMysteryGoals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = goal
+                .get("id")
+                .or_else(|| goal.get("mysteryId"))
+                .and_then(Value::as_str)
+            {
+                result.push(json!({"kind":"MYSTERY","responsibilityId":format!("mystery:{id}"),"sourceRefs":[format!("mystery:{id}")],"authorityClass":"B","requiredDisposition":"USER_CONFIRMED"}));
+            }
+        }
+        for reservation in book_plan
+            .get("futureReservations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if matches!(
+                reservation.get("authorityLevel").and_then(Value::as_str),
+                Some("A" | "B")
+            ) {
+                if let Some(id) = reservation.get("reservationId").and_then(Value::as_str) {
+                    result.push(json!({"kind":"FUTURE_RESERVATION","responsibilityId":format!("reservation:{id}"),"sourceRefs":[format!("reservation:{id}")],"authorityClass":reservation.get("authorityLevel"),"requiredDisposition":"RESOLVED_BEFORE_COMPLETION"}));
+                }
+            }
+        }
+        let mut statement =
+            connection.prepare("SELECT volume_id FROM volumes WHERE project_id=?1")?;
+        for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let id = row?;
+            result.push(json!({"kind":"VOLUME","responsibilityId":format!("volume:{id}"),"sourceRefs":[format!("volume:{id}")],"authorityClass":"A","requiredDisposition":"CLOSED_BEFORE_COMPLETION"}));
+        }
+        let mut statement = connection.prepare(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 ORDER BY chapter_no,chapter_id",
+        )?;
+        for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let id = row?;
+            result.push(json!({"kind":"FINAL_CHAPTER","responsibilityId":format!("chapter:{id}"),"sourceRefs":[format!("chapter:{id}")],"authorityClass":"A","requiredDisposition":"COMMITTED_BEFORE_COMPLETION"}));
+        }
+        Ok(Value::Array(result))
+    }
     pub fn project_updated_at(
         connection: &Connection,
         project_id: &str,

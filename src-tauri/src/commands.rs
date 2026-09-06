@@ -1746,63 +1746,16 @@ fn b14_project_scope() -> Value {
     json!({"level":"PROJECT"})
 }
 
-fn b14_hard_responsibilities(input: &crate::endgame::CompletionInput) -> Value {
-    let mut responsibilities = Vec::new();
-    let mut add = |kind: &str, count: i64, authority_class: &str, source_ref: &str| {
-        if count > 0 {
-            responsibilities.push(json!({
-                "responsibilityId": format!("b14:{kind}"),
-                "kind": kind,
-                "sourceRefs": [source_ref],
-                "authorityClass": authority_class,
-                "requiredDisposition": "RESOLVED_BEFORE_COMPLETION"
-            }));
-        }
-    };
-    add(
-        "OBLIGATION",
-        input.unresolved_hard_obligations,
-        "A",
-        "narrative_obligations",
-    );
-    add(
-        "MYSTERY",
-        input.unmapped_mysteries,
-        "B",
-        "book_plan.majorMysteryGoals",
-    );
-    add(
-        "PAYOFF",
-        input.unresolved_hard_payoffs,
-        "B",
-        "payoff_registry",
-    );
-    add(
-        "FUTURE_RESERVATION",
-        input.unfulfilled_hard_reservations,
-        "A",
-        "book_plan.futureReservations",
-    );
-    add(
-        "CONTINUITY",
-        input.open_hard_continuity,
-        "A",
-        "continuity_threads",
-    );
-    add(
-        "TASK",
-        input.blocked_required_tasks,
-        "B",
-        "state_deltas.volume.task.progress",
-    );
-    responsibilities.push(json!({
-        "responsibilityId": "b14:ending-boundary",
-        "kind": "ENDING_BOUNDARY",
-        "sourceRefs": ["user.requestedEnding"],
-        "authorityClass": "A",
-        "requiredDisposition": "USER_CONFIRMED"
-    }));
-    Value::Array(responsibilities)
+fn b14_hard_responsibilities(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+) -> Result<Value, String> {
+    let responsibilities =
+        crate::repositories::endgame::EndgameRepository::instance_responsibilities(
+            connection, project_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(responsibilities)
 }
 
 fn b14_replayed_receipt(
@@ -1862,7 +1815,6 @@ pub fn create_endgame_contract_impl(
     let read =
         crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
             .map_err(|error| error.to_string())?;
-    let input = read.input;
     let revision = read.revision;
     if revision != expected_revision {
         return Err("REVISION_CONFLICT".into());
@@ -1910,7 +1862,7 @@ pub fn create_endgame_contract_impl(
             "confirmationSource": "USER_CONFIRMED",
             "confirmedAt": confirmed_at
         },
-        "hardResponsibilities": b14_hard_responsibilities(&input),
+        "hardResponsibilities": b14_hard_responsibilities(&handle, project_id)?,
         "mysteryMappings": mystery_mappings,
         "reservationMappings": reservation_mappings,
         "hardPayoffMappings": hard_payoff_mappings,
