@@ -37,7 +37,7 @@ function allFiles(directory, base = directory) {
   return result.sort()
 }
 function zip(stageRoot, output) {
-  const result = spawnSync('zip', ['-qr', '-X', output, path.basename(stageRoot)], { cwd: path.dirname(stageRoot), encoding: 'utf8' })
+  const result = spawnSync('zip', ['-qr', '-X', '-UN=UTF8', output, path.basename(stageRoot)], { cwd: path.dirname(stageRoot), encoding: 'utf8' })
   if (result.status !== 0) throw new Error(`B14_R1_ZIP_FAILED:${result.stderr || result.stdout}`)
 }
 
