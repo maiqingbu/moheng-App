@@ -1,8 +1,10 @@
 use crate::endgame::CompletionInput;
 use crate::generated::types::ArtifactRef;
 use crate::hash::sha256_canonical;
+use crate::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndgameRepositoryError {
@@ -10,6 +12,8 @@ pub enum EndgameRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("narrative: {0}")]
+    Narrative(#[from] crate::repositories::narrative::NarrativeRepositoryError),
 }
 
 pub struct EndgameRepository;
@@ -285,6 +289,62 @@ impl EndgameRepository {
         Ok(count)
     }
 
+    /// Combines the class declared by the authoritative VolumePlan with the
+    /// B13 current-state reader. TaskProgress deliberately carries no class,
+    /// so B14 must never infer one from a state delta payload.
+    fn blocked_hard_tasks(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<i64, EndgameRepositoryError> {
+        let mut classes = BTreeMap::new();
+        let mut statement = connection.prepare(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND h.scope_level='VOLUME' ORDER BY h.scope_key,h.artifact_id",
+        )?;
+        for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let payload = serde_json::from_str::<Value>(&row?)?;
+            for task in payload
+                .get("tasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (Some(task_id), Some(class)) = (
+                    task.get("taskId").and_then(Value::as_str),
+                    task.get("class").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                classes.insert(task_id.to_string(), class.to_string());
+            }
+        }
+        let task_ids = classes.keys().map(String::as_str).collect::<Vec<_>>();
+        let states = NarrativeRepository::task_states_by_ids_complete(
+            connection,
+            project_id,
+            &task_ids,
+        )?;
+        let statuses = states
+            .into_iter()
+            .filter_map(|state| {
+                state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|status| (state.state_id, status.to_string()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(classes
+            .into_iter()
+            .filter(|(task_id, class)| {
+                matches!(class.as_str(), "REQUIRED" | "CLIMAX" | "RESERVED")
+                    && matches!(
+                        statuses.get(task_id).map(String::as_str).unwrap_or("NOT_STARTED"),
+                        "NOT_STARTED" | "ACTIVE" | "BLOCKED"
+                    )
+            })
+            .count() as i64)
+    }
+
     fn relevant_refs(contract: Option<&Value>) -> Vec<String> {
         let mut refs = Vec::new();
         if let Some(value) = contract {
@@ -493,11 +553,7 @@ impl EndgameRepository {
             [project_id],
             |row| row.get(0),
         )?;
-        let blocked_required_tasks: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM state_deltas s WHERE s.project_id=?1 AND s.state_type='volume.task.progress' AND NOT EXISTS (SELECT 1 FROM state_deltas newer WHERE newer.project_id=s.project_id AND newer.state_id=s.state_id AND newer.state_type=s.state_type AND (newer.updated_at > s.updated_at OR (newer.updated_at=s.updated_at AND newer.rowid>s.rowid))) AND COALESCE(json_extract(s.value_json,'$.status'),json_extract(s.payload_json,'$.status')) IN ('NOT_STARTED','ACTIVE','BLOCKED') AND COALESCE(json_extract(s.value_json,'$.class'),json_extract(s.payload_json,'$.class')) IN ('REQUIRED','CLIMAX','RESERVED')",
-            [project_id],
-            |row| row.get(0),
-        )?;
+        let blocked_required_tasks = Self::blocked_hard_tasks(connection, project_id)?;
         let (pending_relevant_change, plan_stale) = Self::relevant_change_pending(
             connection,
             project_id,

@@ -268,6 +268,48 @@ fn b14_unrelated_revision_does_not_make_endgame_contract_stale() {
 }
 
 #[test]
+fn b14_task_truth_uses_volume_plan_class_and_current_task_progress() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "volume-plan:b14",
+        "VolumePlan",
+        "VOLUME",
+        r#"{"level":"VOLUME","volumeId":"volume:b14"}"#,
+        &json!({
+            "payloadSchema":"volume-plan.r1",
+            "volumeId":"volume:b14",
+            "tasks":[{"taskId":"task:b14:required","class":"REQUIRED"}]
+        }),
+    );
+    handle
+        .execute(
+            "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES (?1,?2,'volume.task.progress',?3,NULL,'{}',?4,?4)",
+            libsql_rusqlite::params![
+                "task:b14:required",
+                "proj-b14",
+                json!({"taskId":"task:b14:required","status":"BLOCKED","evidenceRefs":[],"remainingConditions":[]}).to_string(),
+                NOW
+            ],
+        )
+        .unwrap();
+    drop(handle);
+
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let task_check = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "PAYOFF")
+        .unwrap();
+    assert_eq!(task_check["status"], "BLOCKED");
+    assert_eq!(task_check["blockerCount"], 1);
+}
+
+#[test]
 fn b14_s44_s45_are_explicit_soft_only_actions_without_model_runs() {
     let (state, _root) = test_state();
     seed_ready_project(&state);
