@@ -408,6 +408,39 @@ fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
 }
 
 #[test]
+fn b14_continuity_projection_includes_foreshadow_mystery_and_evidence_sources() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let chapter_id = "chapter:b14:continuity";
+    let artifact_id = "final:b14:continuity";
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        artifact_id,
+        "FinalChapter",
+        "CHAPTER",
+        &format!(r#"{{"level":"CHAPTER","chapterId":"{chapter_id}"}}"#),
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":"终章"}),
+    );
+    insert_obligation(&handle, "obligation:b14:evidence", "A", "RESOLVED");
+    handle.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES (?1,'proj-b14','volume:b14',1,'连续性章','COMMITTED',2,?2,1,?3,?3)", libsql_rusqlite::params![chapter_id,artifact_id,NOW]).unwrap();
+    handle.execute("INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:thread','proj-b14','回收身份线索','PLANTED','B06',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES ('mystery:b14:thread','proj-b14','身份谜团','OPEN',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES ('evidence:b14:thread','proj-b14','obligation:b14:evidence','chapter:b14:continuity',?1,1,'CANON','终章证据',?2)", libsql_rusqlite::params![artifact_id,NOW]).unwrap();
+    let threads = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+    assert!(threads
+        .iter()
+        .any(|thread| thread.thread_id == "thread:foreshadow:b14:thread"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread.thread_id == "thread:mystery:b14:thread"));
+    assert!(threads
+        .iter()
+        .any(|thread| !thread.evidence_refs.is_empty()));
+}
+
+#[test]
 fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
     let (state, _root) = test_state();
     seed_ready_project(&state);
@@ -512,6 +545,22 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     assert_eq!(after_runs, before_runs + 2);
     assert!(advice["provenance"]["modelRunId"].as_str().is_some());
     assert!(quality["provenance"]["modelRunId"].as_str().is_some());
+    assert!(advice["provenance"]["loadedSkillRefs"]
+        .as_array()
+        .is_some_and(|refs| refs.iter().any(|item| item
+            .as_str()
+            .unwrap_or("")
+            .contains("endgame-design/SKILL.md"))));
+    assert!(quality["provenance"]["loadedSkillRefs"]
+        .as_array()
+        .is_some_and(|refs| refs.iter().any(|item| item
+            .as_str()
+            .unwrap_or("")
+            .contains("completion-payoff-audit/SKILL.md"))));
+    assert!(advice["provenance"]["guidanceDigest"].as_str().is_some());
+    assert!(quality["provenance"]["skillTaskContextDigest"]
+        .as_str()
+        .is_some());
 }
 
 #[test]

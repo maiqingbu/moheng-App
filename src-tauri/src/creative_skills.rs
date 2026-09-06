@@ -736,7 +736,10 @@ fn method_signals(text: &str) -> Vec<&'static str> {
     .collect()
 }
 
-fn build_method_guidance(skill_texts: &[LoadedSkillText], resources: &[LoadedResource]) -> String {
+pub fn build_method_guidance(
+    skill_texts: &[LoadedSkillText],
+    resources: &[LoadedResource],
+) -> String {
     skill_texts
         .iter()
         .map(|loaded| {

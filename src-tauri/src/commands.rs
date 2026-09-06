@@ -1624,6 +1624,39 @@ fn query_b14_skill_runtime(
             model_calls: 1,
         },
     )?;
+    let required_resources = if skill_id == "S44" {
+        vec![
+            "resources/operating_method.md".to_string(),
+            "resources/decision_rules.md".to_string(),
+        ]
+    } else {
+        vec![
+            "resources/operating_method.md".to_string(),
+            "resources/eval_rubric.md".to_string(),
+        ]
+    };
+    let loader = crate::creative_skills::SkillBundleLoader::tracked_package();
+    let (loaded_skills, loaded_resources, loading) =
+        loader.load_selected(&selection, &required_resources)?;
+    let method_guidance =
+        crate::creative_skills::build_method_guidance(&loaded_skills, &loaded_resources);
+    let guidance_digest = sha256_canonical(&json!({"guidance":method_guidance}))
+        .map_err(|error| error.to_string())?;
+    let skill_context = crate::creative_skills::build_skill_task_context(
+        project_id,
+        &format!("task:b14:{skill_id}"),
+        read.revision,
+        "context:b14:endgame",
+        &json!({
+            "artifactId":"endgame-context",
+            "chapterGoal":read.endgame_contract.as_ref()
+                .and_then(|value| value.get("requestedEnding"))
+                .and_then(|value| value.get("summary"))
+                .and_then(Value::as_str)
+                .unwrap_or("完成全书终局检查"),
+            "activeTaskRefs":[]
+        }),
+    )?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
@@ -1653,7 +1686,21 @@ fn query_b14_skill_runtime(
         attempt_no: 1,
         repair_round: 0,
     };
-    let input = json!({"skillId":selection.primary.id,"skillVersion":selection.primary.version,"projectId":project_id,"projectRevision":read.revision,"boundedContext":{"requestedEnding":read.endgame_contract.as_ref().and_then(|value| value.get("requestedEnding")),"hardSummary":{"blockers":crate::endgame::evaluate_completion(&read.input).blocker_count},"finalVolume":"bounded"},"prompt":"仅输出软性创作建议 JSON；不得改变正式完结状态。"});
+    let input = json!({
+        "skillId":selection.primary.id,
+        "skillVersion":selection.primary.version,
+        "bundleDigest":selection.primary.bundle_digest,
+        "loadedSkillRefs":loaded_skills.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
+        "resourceDigests":loaded_resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+        "guidanceDigest":guidance_digest,
+        "skillLoading":loading,
+        "skillTaskContext":skill_context,
+        "projectId":project_id,
+        "projectRevision":read.revision,
+        "boundedContext":{"requestedEnding":read.endgame_contract.as_ref().and_then(|value| value.get("requestedEnding")),"hardSummary":{"blockers":crate::endgame::evaluate_completion(&read.input).blocker_count},"finalVolume":"bounded"},
+        "methodGuidance":method_guidance,
+        "prompt":"仅输出软性创作建议 JSON；不得改变正式完结状态。"
+    });
     let outcome = crate::production::execute_production_model(
         &handle,
         state.production_gateway.as_ref(),
@@ -1670,9 +1717,29 @@ fn query_b14_skill_runtime(
     let output_digest =
         sha256_canonical(&serde_json::to_value(&output).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    Ok(
-        json!({"softOnly":true,output_key:output,"projectRevision":read.revision,"sourceAvailable":read.input.source_available,"runtimeCheckRequests":[],"userAction":format!("{skill_id}_EXPLICIT_ACTION"),"provenance":{"skillId":skill_id,"skillVersion":selection.primary.version,"modelRunId":model_run_id,"provider":spec.provider,"model":spec.model,"contextDigest":sha256_canonical(&json!({"projectId":project_id,"revision":read.revision})).map_err(|error| error.to_string())?,"outputDigest":output_digest,"explicitUserAction":true}}),
-    )
+    Ok(json!({
+        "softOnly":true,
+        output_key:output,
+        "projectRevision":read.revision,
+        "sourceAvailable":read.input.source_available,
+        "runtimeCheckRequests":[],
+        "userAction":format!("{skill_id}_EXPLICIT_ACTION"),
+        "provenance":{
+            "skillId":skill_id,
+            "skillVersion":selection.primary.version,
+            "bundleDigest":selection.primary.bundle_digest,
+            "loadedSkillRefs":loaded_skills.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
+            "resourceDigests":loaded_resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+            "guidanceDigest":guidance_digest,
+            "skillTaskContextDigest":skill_context.context_digest,
+            "modelRunId":model_run_id,
+            "provider":spec.provider,
+            "model":spec.model,
+            "contextDigest":skill_context.context_digest,
+            "outputDigest":output_digest,
+            "explicitUserAction":true
+        }
+    }))
 }
 
 fn b14_project_scope() -> Value {

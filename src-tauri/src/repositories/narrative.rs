@@ -195,11 +195,14 @@ impl NarrativeRepository {
         })? {
             obligations.push(row?);
         }
+        let foreshadows = Self::active_foreshadows(connection, project_id, &[], &[], 100)?;
+        let mysteries = Self::open_mysteries(connection, project_id, &[], 100)?;
+        let evidence = Self::recent_evidence(connection, project_id, &[], &[], 100)?;
         build_continuity_threads(
             &obligations,
-            &[],
-            &[],
-            &[],
+            &foreshadows,
+            &mysteries,
+            &evidence,
             &ResumeContext {
                 current_chapter,
                 current_volume,
@@ -655,7 +658,7 @@ impl NarrativeRepository {
     ) -> Result<Vec<ForeshadowRecord>, NarrativeRepositoryError> {
         let chapters = Self::ids_json(chapter_refs)?;
         let refs = Self::ids_json(responsibility_refs)?;
-        let mut statement = connection.prepare("SELECT foreshadow_id, intent, status, plant_chapter_id, recover_window_end_chapter, secret_payload_ref FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') AND (plant_chapter_id IN (SELECT value FROM json_each(?2)) OR recover_window_end_chapter IN (SELECT value FROM json_each(?2)) OR foreshadow_id IN (SELECT value FROM json_each(?3)) OR secret_payload_ref IN (SELECT value FROM json_each(?3))) ORDER BY updated_at DESC, foreshadow_id LIMIT ?4")?;
+        let mut statement = connection.prepare("SELECT foreshadow_id, intent, status, plant_chapter_id, recover_window_end_chapter, secret_payload_ref FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') AND ((plant_chapter_id IN (SELECT value FROM json_each(?2)) OR recover_window_end_chapter IN (SELECT value FROM json_each(?2)) OR foreshadow_id IN (SELECT value FROM json_each(?3)) OR secret_payload_ref IN (SELECT value FROM json_each(?3))) OR (?2='[]' AND ?3='[]')) ORDER BY updated_at DESC, foreshadow_id LIMIT ?4")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, chapters, refs, Self::limit(limit)],
             |row| {
@@ -691,7 +694,7 @@ impl NarrativeRepository {
         limit: i64,
     ) -> Result<Vec<MysteryRecord>, NarrativeRepositoryError> {
         let refs = Self::ids_json(references)?;
-        let mut statement = connection.prepare("SELECT mystery_id, mystery_type, status, core_fact_id FROM mystery_states WHERE project_id=?1 AND status IN ('OPEN','PROGRESSING') AND (mystery_id IN (SELECT value FROM json_each(?2)) OR core_fact_id IN (SELECT value FROM json_each(?2))) ORDER BY updated_at DESC, mystery_id LIMIT ?3")?;
+        let mut statement = connection.prepare("SELECT mystery_id, mystery_type, status, core_fact_id FROM mystery_states WHERE project_id=?1 AND status IN ('OPEN','PROGRESSING') AND ((mystery_id IN (SELECT value FROM json_each(?2)) OR core_fact_id IN (SELECT value FROM json_each(?2))) OR ?2='[]') ORDER BY updated_at DESC, mystery_id LIMIT ?3")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, refs, Self::limit(limit)],
             |row| {
@@ -801,7 +804,7 @@ impl NarrativeRepository {
         let chapters = Self::ids_json(chapter_ids)?;
         let refs = Self::ids_json(source_refs)?;
         let bound = Self::limit(limit);
-        let mut statement = connection.prepare("SELECT evidence_id, fact_id, relation_id, event_id, final_chapter_id, source_artifact_id, source_version, evidence_type, quote, range_start, range_end FROM canon_evidence WHERE project_id=?1 AND (final_chapter_id IN (SELECT value FROM json_each(?2)) OR source_artifact_id IN (SELECT value FROM json_each(?3))) ORDER BY created_at DESC, evidence_id LIMIT ?4")?;
+        let mut statement = connection.prepare("SELECT evidence_id, fact_id, relation_id, event_id, final_chapter_id, source_artifact_id, source_version, evidence_type, quote, range_start, range_end FROM canon_evidence WHERE project_id=?1 AND ((final_chapter_id IN (SELECT value FROM json_each(?2)) OR source_artifact_id IN (SELECT value FROM json_each(?3))) OR (?2='[]' AND ?3='[]')) ORDER BY created_at DESC, evidence_id LIMIT ?4")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, chapters, refs, bound + 1],
             |row| {

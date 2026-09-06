@@ -238,20 +238,24 @@ impl EndgameRepository {
             .map_err(Into::into)
     }
 
-    fn ref_exists(
+    fn responsibility_satisfied(
         connection: &Connection,
         project_id: &str,
         reference: &str,
     ) -> Result<bool, EndgameRepositoryError> {
-        let bare = reference.split(':').skip(1).collect::<Vec<_>>().join(":");
-        Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1 AND artifact_id IN (?2,?3)) OR EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id IN (?2,?3)) OR EXISTS(SELECT 1 FROM foreshadows WHERE project_id=?1 AND foreshadow_id IN (?2,?3)) OR EXISTS(SELECT 1 FROM state_deltas WHERE project_id=?1 AND state_id IN (?2,?3)) OR EXISTS(SELECT 1 FROM canon_evidence WHERE project_id=?1 AND evidence_id IN (?2,?3))",
-            libsql_rusqlite::params![project_id, reference, bare],
-            |row| row.get(0),
-        )?)
+        let Some((kind, id)) = reference.split_once(':') else {
+            return Ok(false);
+        };
+        match kind {
+            "obligation" => Ok(connection.query_row("SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2", libsql_rusqlite::params![project_id,id], |row| row.get::<_,String>(0)).optional()?.is_some_and(|value| matches!(value.as_str(),"RESOLVED"|"ABANDONED"|"SUPERSEDED"))),
+            "foreshadow" => Ok(connection.query_row("SELECT status FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2", libsql_rusqlite::params![project_id,id], |row| row.get::<_,String>(0)).optional()?.is_some_and(|value| matches!(value.as_str(),"RECOVERED"|"RESOLVED"|"ABANDONED"))),
+            "thread" => Ok(NarrativeRepository::continuity_threads_complete(connection, project_id)?.into_iter().find(|thread| thread.thread_id == reference).is_some_and(|thread| matches!(thread.logical_status.as_str(),"RESOLVED"|"ABANDONED"))),
+            "task" => Ok(NarrativeRepository::task_states_by_ids_complete(connection, project_id, &[id])?.into_iter().find(|state| state.state_id == id).and_then(|state| state.value.get("status").and_then(Value::as_str).map(|value| matches!(value,"SATISFIED"|"INVALIDATED"))).unwrap_or(false)),
+            _ => Ok(false),
+        }
     }
 
-    fn mapping_refs_valid(
+    fn responsibility_refs_satisfied(
         connection: &Connection,
         project_id: &str,
         refs: Option<&Value>,
@@ -263,7 +267,7 @@ impl EndgameRepository {
             return Ok(false);
         }
         for reference in refs.iter().filter_map(Value::as_str) {
-            if !Self::ref_exists(connection, project_id, reference)? {
+            if !Self::responsibility_satisfied(connection, project_id, reference)? {
                 return Ok(false);
             }
         }
@@ -274,6 +278,7 @@ impl EndgameRepository {
         connection: &Connection,
         project_id: &str,
         refs: Option<&Value>,
+        responsibility_ref: &str,
     ) -> Result<bool, EndgameRepositoryError> {
         let Some(refs) = refs.and_then(Value::as_array) else {
             return Ok(false);
@@ -286,8 +291,8 @@ impl EndgameRepository {
                 .strip_prefix("final-chapter:")
                 .unwrap_or(reference);
             let current_final: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED')",
-                libsql_rusqlite::params![project_id, artifact_id],
+                "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND (json_extract(p.payload_json,'$.responsibilityRef')=?3 OR json_extract(p.payload_json,'$.payoffId')=?4 OR json_extract(p.payload_json,'$.reservationId')=?5 OR EXISTS(SELECT 1 FROM dependency_edges d WHERE d.project_id=a.project_id AND ((d.source_ref=?3 AND d.target_ref=a.artifact_id) OR (d.target_ref=?3 AND d.source_ref=a.artifact_id)))))",
+                libsql_rusqlite::params![project_id, artifact_id, responsibility_ref, responsibility_ref, responsibility_ref],
                 |row| row.get(0),
             )?;
             if !current_final {
@@ -326,7 +331,7 @@ impl EndgameRepository {
             });
             let valid = mapping.is_some_and(|item| {
                 item.get("mappingConfirmation").and_then(Value::as_str) == Some("USER_CONFIRMED")
-            }) && Self::mapping_refs_valid(
+            }) && Self::responsibility_refs_satisfied(
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("mappedResponsibilityRefs")),
@@ -355,6 +360,13 @@ impl EndgameRepository {
                 connection,
                 project_id,
                 mapping.get("fulfillmentEvidenceRefs"),
+                &format!(
+                    "payoff:{}",
+                    mapping
+                        .get("payoffId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                ),
             )?;
             if !fulfilled || !evidence_valid {
                 count += 1;
@@ -399,6 +411,7 @@ impl EndgameRepository {
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("fulfillmentEvidenceRefs")),
+                &format!("reservation:{}", id.unwrap_or_default()),
             )?;
             if !valid {
                 count += 1;
