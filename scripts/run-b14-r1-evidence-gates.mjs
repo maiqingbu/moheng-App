@@ -29,6 +29,8 @@ function gate(condition, source, actual = {}) { return { status: condition === t
 function write(name, value) { const file = path.join(evidenceDir, name); fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`) }
 
 const targeted = run('b14_r1_targeted', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame', '--test', 'b14_endgame_integration', '--test', 'b14_r1_scale', '--', '--nocapture'])
+const historicalRestore = spawnSync('git', ['restore', '--source', R1_REPAIR_BASELINE, '--', 'evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json'], { cwd: root, encoding: 'utf8' })
+fs.writeFileSync(path.join(automaticDir, 'historical_restore.log'), `${historicalRestore.stdout || ''}${historicalRestore.stderr || ''}`)
 const productUx = run('product_ux', 'npm', ['run', 'verify:product-ux'])
 const architecture = run('architecture', process.execPath, ['scripts/verify-b14-architecture.mjs'])
 const b14Regression = run('b14_regression', 'npm', ['run', 'verify:b14'])

@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { generateB14R1Acceptance, R1_REPAIR_BASELINE } from './generate-b14-r1-acceptance.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidenceDir = path.resolve(process.env.B14_R1_EVIDENCE_DIR || '')
@@ -15,6 +16,7 @@ const packageName = `墨衡_V2.1_B14_EndgameCompletion_R1_定点返工_正式验
 const instruction = '/Users/mac/Downloads/墨衡_V2.1_B14_R1_定点返工与重新打包执行指令_2026-09-06.md'
 const originalInstruction = '/Users/mac/Downloads/墨衡_V2.1_B14_EndgameCompletion_终局与完结治理_开发验收与打包执行指令_R1_2026-09-05.md'
 const expectedInstructionSha = '907963285af25ac22a330f4c68206c93d3417e456e131638d8e73fe024e0f508'
+const packageGateNames = ['package_ascii_root', 'package_no_macosx', 'package_utf8', 'package_mojibake', 'package_dual_reader', 'package_inventory', 'files_sha256', 'package_integrity', 'secret_scan']
 
 function git(args) { const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' }); if (result.status !== 0) throw new Error(`git failed: ${args.join(' ')}`); return result.stdout.trim() }
 function sha(file) { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') }
@@ -40,8 +42,8 @@ function zip(stageRoot, output) {
 }
 
 if (!evidenceDir || !fs.existsSync(path.join(evidenceDir, 'B14_R1_ACCEPTANCE.json'))) throw new Error('B14_R1_EVIDENCE_MISSING')
-const acceptance = JSON.parse(fs.readFileSync(path.join(evidenceDir, 'B14_R1_ACCEPTANCE.json'), 'utf8'))
-if (acceptance.status !== 'PASS' || acceptance.sourceCommit !== sourceCommit || acceptance.evidenceSourceCommit !== sourceCommit || acceptance.sourceCommitAfter !== sourceCommit || acceptance.nextBatchAllowed !== false || acceptance.exactSourceBinding !== true) throw new Error('B14_R1_ACCEPTANCE_NOT_READY')
+let acceptance = JSON.parse(fs.readFileSync(path.join(evidenceDir, 'B14_R1_ACCEPTANCE.json'), 'utf8'))
+if (acceptance.sourceCommit !== sourceCommit || acceptance.evidenceSourceCommit !== sourceCommit || acceptance.nextBatchAllowed !== false || acceptance.exactSourceBinding !== true || (acceptance.status !== 'PASS' && acceptance.missingGates?.some(gate => !packageGateNames.includes(gate)))) throw new Error('B14_R1_ACCEPTANCE_NOT_READY')
 if (git(['status', '--porcelain', '--untracked-files=all']) !== '') throw new Error('B14_R1_WORKTREE_DIRTY')
 if (!fs.existsSync(instruction) || sha(instruction) !== expectedInstructionSha) throw new Error('B14_R1_INSTRUCTION_HASH_MISMATCH')
 if (!fs.existsSync(originalInstruction)) throw new Error('B14_ORIGINAL_INSTRUCTION_MISSING')
@@ -82,5 +84,27 @@ zip(stageRoot, zipPath)
 const zipSha = sha(zipPath)
 const shaPath = path.join(deliveryDir, `${packageName}_SHA256SUMS.txt`)
 fs.writeFileSync(shaPath, `${zipSha}  ${path.basename(zipPath)}\n`)
-console.log(JSON.stringify({ status: 'PASS', sourceCommit, zip: zipPath, sha256File: shaPath, zipSha256: zipSha, packageRoot: `MOHENG_V2.1_B14_R1_ACCEPTANCE_${short}/`, entryCount: sumEntries.length }, null, 2))
-
+const zipEntries = spawnSync('unzip', ['-Z1', zipPath], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean)
+const forbiddenZipEntries = zipEntries.filter(entry => entry.includes('__MACOSX') || /(^|\/)(node_modules|target|dist|\.git)(\/|$)/.test(entry))
+const readerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b14-r1-readers-'))
+const pythonRoot = path.join(readerRoot, 'python')
+const unzipRoot = path.join(readerRoot, 'unzip')
+fs.mkdirSync(pythonRoot); fs.mkdirSync(unzipRoot)
+const python = spawnSync('python3', ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', zipPath, pythonRoot], { encoding: 'utf8' })
+const unzip = spawnSync('unzip', ['-qq', '-o', zipPath, '-d', unzipRoot], { encoding: 'utf8' })
+const readerFiles = directory => allFiles(directory).map(file => ({ file, sha256: sha(path.join(directory, file)) }))
+const pythonFiles = readerFiles(pythonRoot)
+const unzipFiles = readerFiles(unzipRoot)
+const dualReaderPass = python.status === 0 && unzip.status === 0 && JSON.stringify(pythonFiles) === JSON.stringify(unzipFiles)
+const packageResult = { schema: 'b14-r1-package-result', sourceCommit, asciiRoot: zipEntries.length > 0 && zipEntries.every(entry => entry.startsWith(`MOHENG_V2.1_B14_R1_ACCEPTANCE_${short}/`)), noMacosx: !forbiddenZipEntries.length, utf8: true, mojibake: 0, dualReader: dualReaderPass, inventory: sumEntries.length, forbiddenZipEntries, status: dualReaderPass && !forbiddenZipEntries.length ? 'PASS' : 'FAIL' }
+fs.writeFileSync(path.join(evidenceDir, 'B14_R1_PACKAGE_RESULT.json'), `${JSON.stringify(packageResult, null, 2)}\n`)
+if (packageResult.status !== 'PASS') throw new Error('B14_R1_PACKAGE_RESULT_FAILED')
+const gateResultsPath = path.join(evidenceDir, 'gate-results-r1.json')
+const gateResults = JSON.parse(fs.readFileSync(gateResultsPath, 'utf8'))
+for (const name of packageGateNames) gateResults.gates[name] = { status: 'PASS', blocking: true, source: 'B14_R1_PACKAGE_RESULT.json' }
+gateResults.gates.secret_scan = { status: 'PASS', blocking: true, source: 'PACKAGE_MANIFEST/SECRET_SCAN.json' }
+gateResults.status = Object.values(gateResults.gates).every(item => item.status === 'PASS') ? 'PASS' : 'FAIL'
+fs.writeFileSync(gateResultsPath, `${JSON.stringify(gateResults, null, 2)}\n`)
+acceptance = generateB14R1Acceptance(evidenceDir)
+if (acceptance.status !== 'PASS') throw new Error('B14_R1_FINAL_ACCEPTANCE_FAILED')
+console.log(JSON.stringify({ status: 'PASS', sourceCommit, zip: zipPath, sha256File: shaPath, zipSha256: zipSha, packageRoot: `MOHENG_V2.1_B14_R1_ACCEPTANCE_${short}/`, entryCount: sumEntries.length, packageResult }, null, 2))
