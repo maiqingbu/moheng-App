@@ -1,17 +1,18 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_completion_quality_impl, query_completion_status_impl,
-    query_endgame_advice_impl, KernelState,
+    query_endgame_advice_impl, query_endgame_status_impl, KernelState,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::endgame::EndgameRepository;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-06T00:00:00Z";
 
@@ -24,7 +25,9 @@ fn test_state() -> (KernelState, PathBuf) {
     (state, root)
 }
 
-struct EndgameSkillGateway;
+struct EndgameSkillGateway {
+    inputs: Arc<Mutex<Vec<serde_json::Value>>>,
+}
 
 impl ProductionModelGateway for EndgameSkillGateway {
     fn provider(&self) -> &str {
@@ -36,8 +39,9 @@ impl ProductionModelGateway for EndgameSkillGateway {
     fn invoke(
         &self,
         capability: &str,
-        _input: &serde_json::Value,
+        input: &serde_json::Value,
     ) -> Result<ProductionModelResponse, String> {
+        self.inputs.lock().unwrap().push(input.clone());
         Ok(ProductionModelResponse::deterministic(json!({
             "kind": if capability == "B14_S45_COMPLETION_QUALITY" { "QualityFinding" } else { "CreativeProposal" },
             "status":"OK",
@@ -48,16 +52,19 @@ impl ProductionModelGateway for EndgameSkillGateway {
     }
 }
 
-fn test_state_with_skill_gateway() -> (KernelState, PathBuf) {
+fn test_state_with_skill_gateway() -> (KernelState, PathBuf, Arc<Mutex<Vec<serde_json::Value>>>) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     std::mem::forget(temp);
+    let inputs = Arc::new(Mutex::new(Vec::new()));
     let state = KernelState::with_production_gateway(
         AppPaths::new(root.clone()),
-        Arc::new(EndgameSkillGateway),
+        Arc::new(EndgameSkillGateway {
+            inputs: inputs.clone(),
+        }),
     );
     drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
-    (state, root)
+    (state, root, inputs)
 }
 
 fn insert_committed_artifact(
@@ -476,6 +483,45 @@ fn b14_mystery_mapping_requires_current_responsibility_disposition() {
 }
 
 #[test]
+fn b14_hard_responsibilities_are_instance_level_and_change_matchable() {
+    let (state, _root) = test_state();
+    seed_ready_project_with_plan(
+        &state,
+        json!({
+            "payloadSchema":"book-plan.r1",
+            "majorMysteryGoals":[{"id":"mystery:b14:instance"}],
+            "futureReservations":[{"reservationId":"reservation:b14:instance","authorityLevel":"A"}]
+        }),
+    );
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_obligation(&handle, "obligation:b14:instance", "A", "PROGRESSING");
+    let responsibilities =
+        EndgameRepository::instance_responsibilities(&handle, "proj-b14").unwrap();
+    let items = responsibilities.as_array().unwrap();
+    assert!(items
+        .iter()
+        .any(|item| item["responsibilityId"] == "obligation:obligation:b14:instance"));
+    assert!(items
+        .iter()
+        .any(|item| item["responsibilityId"] == "mystery:mystery:b14:instance"));
+    assert!(items
+        .iter()
+        .any(|item| item["responsibilityId"] == "reservation:reservation:b14:instance"));
+    assert!(items
+        .iter()
+        .all(|item| item["sourceRefs"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().all(|reference| reference
+                .as_str()
+                .is_some_and(|value| !value.contains("narrative_obligations")
+                    && !value.contains("continuity_threads"))))));
+    println!(
+        "B14_R3_INSTANCE_REFS|{}",
+        serde_json::to_string(&responsibilities).unwrap()
+    );
+}
+
+#[test]
 fn b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff() {
     let (state, _root) = test_state();
     let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[{"reservationId":"reservation:b14:future","description":"未来承诺","authorityLevel":"A"}]});
@@ -576,7 +622,7 @@ fn b14_export_preflight_blocks_uncommitted_chapter_in_final_sequence() {
 
 #[test]
 fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
-    let (state, _root) = test_state_with_skill_gateway();
+    let (state, _root, inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let before = state.manager.open("proj-b14", "", NOW).unwrap();
     let before_runs: i64 = before
@@ -629,11 +675,36 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     assert!(quality["provenance"]["resourceDigests"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
+    let inputs = inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    for input in inputs.iter() {
+        assert_eq!(
+            input["skillTaskContext"]["runtimeStage"],
+            "ENDGAME_COMPLETION"
+        );
+        assert_eq!(
+            input["skillTaskContext"]["qualityInputs"]["source"],
+            "B14_ENDGAME_BOUNDED"
+        );
+        assert!(input["methodGuidance"]
+            .as_str()
+            .is_some_and(|guidance| guidance.contains("methodRef=")));
+    }
+    println!(
+        "B14_R3_SKILL_PROVENANCE|{}",
+        serde_json::to_string(&json!({
+            "S44": advice["provenance"],
+            "S45": quality["provenance"],
+            "boundedRuntimeStage": "ENDGAME_COMPLETION",
+            "guidanceConsumed": true
+        }))
+        .unwrap()
+    );
 }
 
 #[test]
 fn b14_status_and_soft_queries_do_not_mutate_authority() {
-    let (state, _root) = test_state_with_skill_gateway();
+    let (state, _root, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let count = |connection: &libsql_rusqlite::Connection, table: &str| -> i64 {
         connection
@@ -663,6 +734,12 @@ fn b14_status_and_soft_queries_do_not_mutate_authority() {
         drop(handle);
         values
     };
+    let before_digests = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let value = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        value
+    };
     query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
@@ -685,5 +762,103 @@ fn b14_status_and_soft_queries_do_not_mutate_authority() {
         drop(handle);
         values
     };
+    let after_digests = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let value = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        value
+    };
     assert_eq!(before, after);
+    assert_eq!(before_digests, after_digests);
+}
+
+#[test]
+fn b14_core_queries_and_completion_do_not_schedule_remote_models() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-no-remote-contract","idempotencyKey":"b14-no-remote-contract:key","expectedRevision":0,"requestedAt":NOW,
+            "payload":{"requestedEnding":{"summary":"不调用远程模型的正式结局","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+        }),
+    )
+    .unwrap();
+    let before = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let model_runs: i64 = handle
+            .query_row(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='proj-b14'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let digests = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        (model_runs, digests)
+    };
+    query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    execute_command_impl(
+        &state,
+        json!({"type":"complete_book","projectId":"proj-b14","commandId":"b14-no-remote-complete","idempotencyKey":"b14-no-remote-complete:key","expectedRevision":1,"requestedAt":NOW}),
+    )
+    .unwrap();
+    let after = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let model_runs: i64 = handle
+            .query_row(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='proj-b14'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let digests = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        (model_runs, digests)
+    };
+    assert_eq!(before.0, after.0);
+    for key in [
+        "canonDigest",
+        "knowledgeDigest",
+        "continuityDigest",
+        "reservationDigest",
+        "obligationDigest",
+        "taskRealityDigest",
+        "finalChapterInventoryDigest",
+    ] {
+        assert_eq!(
+            before.1[key], after.1[key],
+            "domain digest changed for {key}"
+        );
+    }
+    println!("B14_R3_NO_REMOTE_CORE|modelRunsDelta=0|domainDigestsUnchanged=true");
+}
+
+#[test]
+fn b14_domain_digests_use_independent_authoritative_sources() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let before = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let value = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        value
+    };
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle
+        .execute(
+            "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:digest','proj-b14','独立摘要','PLANTED','B06',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    drop(handle);
+    let after = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let value = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+        drop(handle);
+        value
+    };
+    assert_ne!(before["continuityDigest"], after["continuityDigest"]);
+    assert_eq!(before["obligationDigest"], after["obligationDigest"]);
 }

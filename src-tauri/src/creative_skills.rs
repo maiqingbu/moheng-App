@@ -578,6 +578,59 @@ pub fn build_skill_task_context(
     })
 }
 
+/// Builds the bounded endgame context used by B14 S44/S45. It reuses the
+/// frozen B10 context builder and only narrows the stage/profile; it never
+/// reads manuscript bodies or opens a second skill runtime.
+pub fn build_endgame_skill_task_context(
+    project_id: &str,
+    task_id: &str,
+    project_revision: i64,
+    context_manifest_ref: &str,
+    endgame_payload: &Value,
+) -> Result<SkillTaskContext, String> {
+    let summary = endgame_payload
+        .get("requestedEnding")
+        .and_then(|value| value.get("summary"))
+        .and_then(Value::as_str)
+        .unwrap_or("完成全书终局检查");
+    let mut context = build_skill_task_context(
+        project_id,
+        task_id,
+        project_revision,
+        context_manifest_ref,
+        &serde_json::json!({
+            "artifactId": "endgame-context",
+            "chapterGoal": summary,
+            "activeTaskRefs": []
+        }),
+    )?;
+    context.runtime_stage = "ENDGAME_COMPLETION".into();
+    context.bounded_refs.push(BoundedRef {
+        kind: "EndgameConstraintSnapshot".into(),
+        reference: "snapshot:b14:endgame-constraints".into(),
+    });
+    context.quality_inputs = serde_json::json!({
+        "source": "B14_ENDGAME_BOUNDED",
+        "requestedEnding": endgame_payload.get("requestedEnding"),
+        "hardResponsibilitySummary": endgame_payload.get("hardResponsibilities"),
+        "readerPromise": endgame_payload.get("readerPromise"),
+        "characterArcSummary": endgame_payload.get("characterArcSummary"),
+        "finalVolumeSummary": endgame_payload.get("finalVolumeSummary")
+    });
+    context.method_profile = serde_json::json!({
+        "profile": "ENDGAME_COMPLETION",
+        "version": "b14.r3",
+        "softOnly": true
+    });
+    let mut digest_input = serde_json::to_value(&context).map_err(|error| error.to_string())?;
+    digest_input
+        .as_object_mut()
+        .expect("SkillTaskContext serializes as object")
+        .remove("contextDigest");
+    context.context_digest = sha256_canonical(&digest_input).map_err(|error| error.to_string())?;
+    Ok(context)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCheckRequest {

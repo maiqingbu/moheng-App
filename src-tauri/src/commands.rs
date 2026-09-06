@@ -1642,20 +1642,32 @@ fn query_b14_skill_runtime(
         crate::creative_skills::build_method_guidance(&loaded_skills, &loaded_resources);
     let guidance_digest = sha256_canonical(&json!({"guidance":method_guidance}))
         .map_err(|error| error.to_string())?;
-    let skill_context = crate::creative_skills::build_skill_task_context(
+    let endgame_payload = json!({
+        "requestedEnding": read
+            .endgame_contract
+            .as_ref()
+            .and_then(|value| value.get("requestedEnding")),
+        "hardResponsibilities": crate::repositories::endgame::EndgameRepository::instance_responsibilities(&handle, project_id)
+            .map_err(|error| error.to_string())?,
+        "readerPromise": read
+            .endgame_contract
+            .as_ref()
+            .and_then(|value| value.get("readerPromise")),
+        "characterArcSummary": read
+            .endgame_contract
+            .as_ref()
+            .and_then(|value| value.get("characterArcSummary")),
+        "finalVolumeSummary": read
+            .endgame_contract
+            .as_ref()
+            .and_then(|value| value.get("finalVolumeSummary"))
+    });
+    let skill_context = crate::creative_skills::build_endgame_skill_task_context(
         project_id,
         &format!("task:b14:{skill_id}"),
         read.revision,
         "context:b14:endgame",
-        &json!({
-            "artifactId":"endgame-context",
-            "chapterGoal":read.endgame_contract.as_ref()
-                .and_then(|value| value.get("requestedEnding"))
-                .and_then(|value| value.get("summary"))
-                .and_then(Value::as_str)
-                .unwrap_or("完成全书终局检查"),
-            "activeTaskRefs":[]
-        }),
+        &endgame_payload,
     )?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1697,7 +1709,7 @@ fn query_b14_skill_runtime(
         "skillTaskContext":skill_context,
         "projectId":project_id,
         "projectRevision":read.revision,
-        "boundedContext":{"requestedEnding":read.endgame_contract.as_ref().and_then(|value| value.get("requestedEnding")),"hardSummary":{"blockers":crate::endgame::evaluate_completion(&read.input).blocker_count},"finalVolume":"bounded"},
+        "boundedContext":{"requestedEnding":endgame_payload.get("requestedEnding"),"hardSummary":{"blockers":crate::endgame::evaluate_completion(&read.input).blocker_count,"responsibilities":endgame_payload.get("hardResponsibilities")},"readerPromise":endgame_payload.get("readerPromise"),"finalVolume":"bounded"},
         "methodGuidance":method_guidance,
         "prompt":"仅输出软性创作建议 JSON；不得改变正式完结状态。"
     });

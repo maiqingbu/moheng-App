@@ -3,6 +3,7 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
 
@@ -84,6 +85,9 @@ fn seed(connection: &Connection) {
         connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
         connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'FinalChapter','CHAPTER',?2,?3,1,?4)", libsql_rusqlite::params![PROJECT_ID,scope,artifact_id,hash]).unwrap();
     }
+    connection.execute("INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:r2:scale',?1,'规模伏笔','PLANTED','B06',?2,?2)", libsql_rusqlite::params![PROJECT_ID,NOW]).unwrap();
+    connection.execute("INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES ('mystery:b14:r2:scale',?1,'规模谜团','OPEN',?2,?2)", libsql_rusqlite::params![PROJECT_ID,NOW]).unwrap();
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES ('evidence:b14:r2:scale',?1,'fact:b14:r2:scale',?2,?3,1,'CANON','规模证据',?4)", libsql_rusqlite::params![PROJECT_ID,"chapter:b14:r2:0001","final:b14:r2:0001",NOW]).unwrap();
     connection.execute_batch("COMMIT").unwrap();
 }
 
@@ -108,6 +112,17 @@ fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift
         .unwrap();
     assert_eq!(task_count, 501);
     assert_eq!(continuity_count, 501);
+    let continuity =
+        NarrativeRepository::continuity_threads_complete(&connection, PROJECT_ID).unwrap();
+    assert!(continuity
+        .iter()
+        .any(|thread| thread.thread_id == "thread:foreshadow:b14:r2:scale"));
+    assert!(continuity
+        .iter()
+        .any(|thread| thread.thread_id == "thread:mystery:b14:r2:scale"));
+    assert!(continuity
+        .iter()
+        .any(|thread| !thread.evidence_refs.is_empty()));
     let query_plans = [
         ("QP-01-obligation-aggregate", "SELECT COUNT(*) FROM narrative_obligations WHERE project_id='proj-b14-r2-scale'"),
         ("QP-02-continuity-projection", "SELECT obligation_id,authority_level,lifecycle FROM narrative_obligations WHERE project_id='proj-b14-r2-scale' ORDER BY obligation_id"),
@@ -134,7 +149,7 @@ fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift
         let start = std::time::Instant::now();
         let completion = query_completion_status_impl(&state, request.clone()).unwrap();
         let endgame = query_endgame_status_impl(&state, request).unwrap();
-        println!("B14_R2_SCALE|chapters={CHAPTERS}|characters={characters}|tasks={task_count}|continuity={continuity_count}|pageSize={page_size}|elapsedMs={}|status={}|blockers={}", start.elapsed().as_millis(), completion["status"], completion["blockerCount"]);
+        println!("B14_R2_SCALE|chapters={CHAPTERS}|characters={characters}|tasks={task_count}|continuity={continuity_count}|continuityThreads={}|pageSize={page_size}|elapsedMs={}|status={}|blockers={}", continuity.len(), start.elapsed().as_millis(), completion["status"], completion["blockerCount"]);
         assert_eq!(completion["status"], endgame["status"]);
         (completion["status"].clone(), completion["checks"].clone(), completion["blockerCount"].clone(), completion["relevantStateDigest"].clone())
     });

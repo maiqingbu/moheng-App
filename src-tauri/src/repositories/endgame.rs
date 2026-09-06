@@ -311,6 +311,16 @@ impl EndgameRepository {
             "foreshadow" => Ok(connection.query_row("SELECT status FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2", libsql_rusqlite::params![project_id,id], |row| row.get::<_,String>(0)).optional()?.is_some_and(|value| matches!(value.as_str(),"RECOVERED"|"RESOLVED"|"ABANDONED"))),
             "thread" => Ok(NarrativeRepository::continuity_threads_complete(connection, project_id)?.into_iter().find(|thread| thread.thread_id == reference).is_some_and(|thread| matches!(thread.logical_status.as_str(),"RESOLVED"|"ABANDONED"))),
             "task" => Ok(NarrativeRepository::task_states_by_ids_complete(connection, project_id, &[id])?.into_iter().find(|state| state.state_id == id).and_then(|state| state.value.get("status").and_then(Value::as_str).map(|value| matches!(value,"SATISFIED"|"INVALIDATED"))).unwrap_or(false)),
+            "reservation" => {
+                let current = Self::payload_for_head(connection, project_id, "BookPlan")?;
+                let still_open = current
+                    .and_then(|value| value.get("futureReservations").cloned())
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|item| item.get("reservationId").and_then(Value::as_str) == Some(id));
+                Ok(!still_open)
+            }
             _ => Ok(false),
         }
     }
@@ -418,20 +428,25 @@ impl EndgameRepository {
             .unwrap_or_default();
         let mut count = 0;
         for mapping in mappings {
+            let payoff_id = mapping.get("payoffId").and_then(Value::as_str);
+            let payoff_exists = if let Some(reference) = payoff_id {
+                let obligation_id = reference.strip_prefix("payoff:").unwrap_or(reference);
+                connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2 AND authority_level IN ('A','B') AND obligation_type='PAYOFF')",
+                    libsql_rusqlite::params![project_id, obligation_id],
+                    |row| row.get(0),
+                )?
+            } else {
+                false
+            };
             let fulfilled = mapping.get("fulfilled").and_then(Value::as_bool) == Some(true);
             let evidence_valid = Self::fulfillment_evidence_refs_valid(
                 connection,
                 project_id,
                 mapping.get("fulfillmentEvidenceRefs"),
-                &format!(
-                    "payoff:{}",
-                    mapping
-                        .get("payoffId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                ),
+                payoff_id.unwrap_or_default(),
             )?;
-            if !fulfilled || !evidence_valid {
+            if !payoff_exists || !fulfilled || !evidence_valid {
                 count += 1;
             }
         }
@@ -731,13 +746,16 @@ impl EndgameRepository {
         let mut knowledge = Vec::new();
         let mut statement = connection.prepare("SELECT knowledge_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id,until_chapter_id FROM canon_knowledge WHERE project_id=?1 ORDER BY knowledge_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"knowledgeId":row.get::<_,String>(0)?,"knowerId":row.get::<_,String>(1)?,"factId":row.get::<_,Option<String>>(2)?,"epistemicState":row.get::<_,String>(3)?,"visibilityScope":row.get::<_,Option<String>>(4)?,"fromChapterId":row.get::<_,Option<String>>(5)?,"untilChapterId":row.get::<_,Option<String>>(6)?})))? { knowledge.push(row?); }
-        let mut continuity = Vec::new();
-        let mut statement = connection.prepare("SELECT obligation_id,authority_level,lifecycle,obligation_type FROM narrative_obligations WHERE project_id=?1 ORDER BY obligation_id")?;
-        for row in statement.query_map([project_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"authority":row.get::<_,String>(1)?,"lifecycle":row.get::<_,String>(2)?,"type":row.get::<_,String>(3)?})))? { continuity.push(row?); }
+        let continuity = NarrativeRepository::continuity_threads_complete(connection, project_id)?
+            .into_iter()
+            .map(|thread| serde_json::to_value(thread))
+            .collect::<Result<Vec<_>, _>>()?;
         let reservation = Self::payload_for_head(connection, project_id, "BookPlan")?
             .and_then(|value| value.get("futureReservations").cloned())
             .unwrap_or_else(|| json!([]));
-        let obligations = continuity.clone();
+        let mut obligations = Vec::new();
+        let mut statement = connection.prepare("SELECT obligation_id,authority_level,lifecycle,obligation_type FROM narrative_obligations WHERE project_id=?1 ORDER BY obligation_id")?;
+        for row in statement.query_map([project_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"authority":row.get::<_,String>(1)?,"lifecycle":row.get::<_,String>(2)?,"type":row.get::<_,String>(3)?})))? { obligations.push(row?); }
         let mut tasks = Vec::new();
         let mut statement = connection.prepare("SELECT state_id,value_json FROM state_deltas s WHERE project_id=?1 AND state_type='volume.task.progress' AND NOT EXISTS (SELECT 1 FROM state_deltas newer WHERE newer.project_id=s.project_id AND newer.state_id=s.state_id AND newer.state_type=s.state_type AND (newer.updated_at > s.updated_at OR (newer.updated_at=s.updated_at AND newer.rowid>s.rowid))) ORDER BY state_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"value":serde_json::from_str::<Value>(&row.get::<_,String>(1)?).unwrap_or(Value::Null)})))? { tasks.push(row?); }
