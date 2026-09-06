@@ -4,10 +4,12 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::production::{ProductionModelGateway, ProductionModelResponse};
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const NOW: &str = "2026-09-06T00:00:00Z";
 
@@ -16,6 +18,34 @@ fn test_state() -> (KernelState, PathBuf) {
     let root = temp.path().to_path_buf();
     std::mem::forget(temp);
     let state = KernelState::new(AppPaths::new(root.clone()));
+    drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
+    (state, root)
+}
+
+struct EndgameSkillGateway;
+
+impl ProductionModelGateway for EndgameSkillGateway {
+    fn provider(&self) -> &str { "b14-test-provider" }
+    fn model(&self, _capability: &str) -> String { "b14-test-model".into() }
+    fn invoke(&self, capability: &str, _input: &serde_json::Value) -> Result<ProductionModelResponse, String> {
+        Ok(ProductionModelResponse::deterministic(json!({
+            "kind": if capability == "B14_S45_COMPLETION_QUALITY" { "QualityFinding" } else { "CreativeProposal" },
+            "status":"OK",
+            "summary":"测试 Skill Runtime 的软性建议。",
+            "suggestions":["仅供作者参考，不改变正式完结结论。"],
+            "runtimeCheckRequests":[]
+        })))
+    }
+}
+
+fn test_state_with_skill_gateway() -> (KernelState, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    std::mem::forget(temp);
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(root.clone()),
+        Arc::new(EndgameSkillGateway),
+    );
     drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
     (state, root)
 }
@@ -393,8 +423,8 @@ fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
 }
 
 #[test]
-fn b14_s44_s45_are_explicit_soft_only_actions_without_model_runs() {
-    let (state, _root) = test_state();
+fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
+    let (state, _root) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let before = state.manager.open("proj-b14", "", NOW).unwrap();
     let before_runs: i64 = before
@@ -422,7 +452,9 @@ fn b14_s44_s45_are_explicit_soft_only_actions_without_model_runs() {
         )
         .unwrap();
     drop(after);
-    assert_eq!(before_runs, after_runs);
+    assert_eq!(after_runs, before_runs + 2);
+    assert!(advice["provenance"]["modelRunId"].as_str().is_some());
+    assert!(quality["provenance"]["modelRunId"].as_str().is_some());
 }
 
 #[test]
