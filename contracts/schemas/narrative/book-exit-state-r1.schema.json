@@ -18,9 +18,11 @@
     "continuityDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "reservationDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "obligationDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "taskRealityDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "finalChapterInventoryDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "finalVolumeExitStateRef": { "$ref": "../artifact/artifact-ref.schema.json" },
     "completionReportRef": { "type": "string", "minLength": 1 }
   },
-  "required": ["payloadSchema", "closedAt", "projectRevision", "relevantStateDigest", "endgameContractRef", "finalChapterCount", "firstFinalChapterRef", "lastFinalChapterRef", "manuscriptInventoryDigest", "canonDigest", "knowledgeDigest", "continuityDigest", "reservationDigest", "obligationDigest", "finalVolumeExitStateRef", "completionReportRef"],
+  "required": ["payloadSchema", "closedAt", "projectRevision", "relevantStateDigest", "endgameContractRef", "finalChapterCount", "firstFinalChapterRef", "lastFinalChapterRef", "manuscriptInventoryDigest", "canonDigest", "knowledgeDigest", "continuityDigest", "reservationDigest", "obligationDigest", "taskRealityDigest", "finalChapterInventoryDigest", "finalVolumeExitStateRef", "completionReportRef"],
   "additionalProperties": false
 }

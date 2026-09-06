@@ -29,6 +29,7 @@ export const ACTIVE_USER_SURFACE = [
   'src/ui/pages/VolumeManager.vue',
   'src/ui/pages/VolumeWorkspace.vue',
   'src/ui/pages/LongFormHealth.vue',
+  'src/ui/pages/Completion.vue',
 ]
 
 const forbiddenVisiblePatterns = [
@@ -97,6 +98,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const router = sourceReader('src/app/router.ts')
   const healthPage = sourceReader('src/ui/pages/LongFormHealth.vue')
   const healthLanguage = sourceReader('src/ui/presentation/healthLanguage.ts')
+  const completionPage = sourceReader('src/ui/pages/Completion.vue')
   const healthRoute = router.split('\n').find(line => line.includes('/projects/:id/health')) ?? ''
   const dynamicTokenCoverage = /export function containsInternalProductToken/.test(language)
     && /containsInternalProductToken\(raw\)/.test(language)
@@ -143,6 +145,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     ai_trace_lint: aiLeaks.length === 0,
     b13_health_surface: /LongFormHealth\.vue/.test(router) && /factorLabel/.test(healthPage) && /statusLabel/.test(healthPage) && /factorLabel/.test(healthLanguage) && /issueKey/.test(healthLanguage),
     future_feature_boundary: /LongFormHealth/.test(healthRoute) && !/UnavailableFeature/.test(healthRoute) && Boolean(healthPage),
+    b14_completion_surface: /queryCompletionStatus/.test(completionPage) && /queryEndgameAdvice/.test(completionPage) && /checkName/.test(completionPage) && /userError/.test(completionPage),
   }
   const internalCodeOnly = activeFiles.flatMap(item => {
     const source = item.source
@@ -169,6 +172,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'], note: 'B13 formal health workspace is active.' },
     b13HealthSurface: { status: checks.b13_health_surface ? 'PASS' : 'FAIL', route: healthRoute },
+    b14CompletionSurface: { status: checks.b14_completion_surface ? 'PASS' : 'FAIL', verifiedBy: 'Completion.vue formal query and presentation mapper' },
     internalCodeOnly,
     allowedProviderTerms: ['OpenAI Compatible', 'API Endpoint', 'API Key'],
     checks: Object.fromEntries(Object.entries(checks).map(([name, passed]) => [name, passed ? 'PASS' : 'FAIL'])),

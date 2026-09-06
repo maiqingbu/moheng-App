@@ -18,6 +18,7 @@ const activePages = [
   'src/ui/pages/ProjectOverview.vue',
   'src/ui/pages/SettingsPage.vue',
   'src/ui/pages/VolumeWorkspace.vue',
+  'src/ui/pages/Completion.vue',
 ]
 const templateText = source => source.match(/<template>([\s\S]*?)<\/template>/)?.[1]
   .replace(/\{\{[\s\S]*?\}\}/g, ' ')

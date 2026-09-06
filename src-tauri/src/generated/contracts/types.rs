@@ -1156,6 +1156,14 @@ pub struct EndgameContractR1 {
     pub ending_boundary_digest: String,
     pub requested_ending: EndgameContractR1RequestedEnding,
     pub hard_responsibilities: Vec<EndgameContractR1HardResponsibilitiesItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mystery_mappings: Option<Vec<EndgameContractR1MysteryMappingsItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_payoff_mappings: Option<Vec<EndgameContractR1HardPayoffMappingsItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_mappings: Option<Vec<EndgameContractR1ReservationMappingsItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relevant_refs: Option<Vec<String>>,
     pub created_at: String,
 }
 
@@ -1175,6 +1183,30 @@ pub struct EndgameContractR1HardResponsibilitiesItem {
     pub source_refs: Vec<String>,
     pub authority_class: String,
     pub required_disposition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1MysteryMappingsItem {
+    pub source_mystery_id: String,
+    pub mapped_responsibility_refs: Vec<String>,
+    pub mapping_confirmation: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1HardPayoffMappingsItem {
+    pub payoff_id: String,
+    pub fulfillment_evidence_refs: Vec<String>,
+    pub fulfilled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EndgameContractR1ReservationMappingsItem {
+    pub reservation_id: String,
+    pub fulfillment_evidence_refs: Vec<String>,
+    pub mapping_confirmation: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1228,6 +1260,8 @@ pub struct BookExitStateR1 {
     pub continuity_digest: String,
     pub reservation_digest: String,
     pub obligation_digest: String,
+    pub task_reality_digest: String,
+    pub final_chapter_inventory_digest: String,
     pub final_volume_exit_state_ref: ArtifactRef,
     pub completion_report_ref: String,
 }

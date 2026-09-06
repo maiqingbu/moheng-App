@@ -8,6 +8,7 @@ pub enum CompletionStatus {
     Ready,
     Blocked,
     NeedsDecision,
+    NeedsRecheck,
     SourceUnavailable,
 }
 

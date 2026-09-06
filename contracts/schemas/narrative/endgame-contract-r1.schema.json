@@ -34,6 +34,46 @@
         "additionalProperties": false
       }
     },
+    "mysteryMappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceMysteryId": { "type": "string", "minLength": 1 },
+          "mappedResponsibilityRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "mappingConfirmation": { "const": "USER_CONFIRMED" }
+        },
+        "required": ["sourceMysteryId", "mappedResponsibilityRefs", "mappingConfirmation"],
+        "additionalProperties": false
+      }
+    },
+    "hardPayoffMappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "payoffId": { "type": "string", "minLength": 1 },
+          "fulfillmentEvidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "fulfilled": { "type": "boolean" }
+        },
+        "required": ["payoffId", "fulfillmentEvidenceRefs", "fulfilled"],
+        "additionalProperties": false
+      }
+    },
+    "reservationMappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reservationId": { "type": "string", "minLength": 1 },
+          "fulfillmentEvidenceRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "mappingConfirmation": { "const": "USER_CONFIRMED" }
+        },
+        "required": ["reservationId", "fulfillmentEvidenceRefs", "mappingConfirmation"],
+        "additionalProperties": false
+      }
+    },
+    "relevantRefs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "createdAt": { "type": "string", "format": "date-time", "pattern": "Z$" }
   },
   "required": ["payloadSchema", "compiledFromProjectRevision", "compiledFromRelevantStateDigest", "bookPlanRef", "endingBoundaryDigest", "requestedEnding", "hardResponsibilities", "createdAt"],

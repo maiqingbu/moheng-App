@@ -1513,11 +1513,16 @@ fn b14_completion_response(
     project_id: &str,
     revision: i64,
     input: &crate::endgame::CompletionInput,
-    completed: bool,
+    history: crate::repositories::endgame::CompletionHistory,
+    relevant_state_digest: &str,
 ) -> Result<Value, String> {
     let evaluation = crate::endgame::evaluate_completion(input);
-    let digest = crate::endgame::relevant_state_digest(input).map_err(|error| error.to_string())?;
-    let status = serde_json::to_value(evaluation.status).map_err(|error| error.to_string())?;
+    let status = if history.has_history && !history.currently_completed {
+        crate::endgame::CompletionStatus::NeedsRecheck
+    } else {
+        evaluation.status
+    };
+    let status = serde_json::to_value(status).map_err(|error| error.to_string())?;
     Ok(json!({
         "projectId": project_id,
         "projectRevision": revision,
@@ -1525,11 +1530,11 @@ fn b14_completion_response(
         "checks": evaluation.checks,
         "blockerCount": evaluation.blocker_count,
         "advisoryCount": evaluation.advisory_count,
-        "relevantStateDigest": digest,
+        "relevantStateDigest": relevant_state_digest,
         "sourceAvailable": input.source_available,
         "requestedEndingConfirmed": input.requested_ending_confirmed,
-        "completed": completed,
-        "owner": "B14::EndgameCompletionOwner"
+        "completed": history.currently_completed,
+        "hasHistoricalCompletion": history.has_history
     }))
 }
 
@@ -1538,24 +1543,94 @@ pub fn query_endgame_status_impl(state: &KernelState, request: Value) -> Result<
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let (input, revision, _) =
-                crate::repositories::endgame::EndgameRepository::read_completion_input(
-                    connection, project_id,
-                )
-                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
-            let completed =
-                crate::repositories::endgame::EndgameRepository::completion_already_committed(
-                    connection, project_id,
-                )
-                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
-            b14_completion_response(project_id, revision, &input, completed)
-                .map_err(ManagerError::ProjectCommand)
+            let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                connection, project_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let history = crate::repositories::endgame::EndgameRepository::completion_history(
+                connection,
+                project_id,
+                &read.relevant_state_digest,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            b14_completion_response(
+                project_id,
+                read.revision,
+                &read.input,
+                history,
+                &read.relevant_state_digest,
+            )
+            .map_err(ManagerError::ProjectCommand)
         })
         .map_err(|error| error.to_string())
 }
 
 pub fn query_completion_status_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     query_endgame_status_impl(state, request)
+}
+
+pub fn query_endgame_advice_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                connection, project_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let proposal = crate::creative_skills::normalize_skill_output(json!({
+                "kind":"CreativeProposal",
+                "status":"OK",
+                "summary":"这是创作建议，不会改变正式完结状态。",
+                "suggestions":["可以先明确结局边界，再安排最后一项关键回报。","建议让结局中的主动选择与前文主要责任形成可核对的呼应。"],
+                "runtimeCheckRequests":[],
+                "formalBlock":false,
+                "authorityWrite":false,
+                "controlDecision":false
+            }))
+            .map_err(ManagerError::ProjectCommand)?;
+            Ok(json!({
+                "softOnly":true,
+                "proposal":proposal,
+                "projectRevision":read.revision,
+                "sourceAvailable":read.input.source_available,
+                "runtimeCheckRequests":[],
+                "userAction":"S44_ENDGAME_ADVICE"
+            }))
+        })
+        .map_err(|error| error.to_string())
+}
+
+pub fn query_completion_quality_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                connection, project_id,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+            let review = crate::creative_skills::normalize_skill_output(json!({
+                "kind":"QualityFinding",
+                "status":"OK",
+                "summary":"回报质量检查只提供软性建议，不会改变正式完结结论。",
+                "suggestions":["可以复核最后阶段是否同时回应了读者期待与人物选择。"],
+                "runtimeCheckRequests":[],
+                "formalBlock":false,
+                "authorityWrite":false,
+                "controlDecision":false
+            }))
+            .map_err(ManagerError::ProjectCommand)?;
+            Ok(json!({
+                "softOnly":true,
+                "review":review,
+                "projectRevision":read.revision,
+                "sourceAvailable":read.input.source_available,
+                "runtimeCheckRequests":[],
+                "userAction":"S45_COMPLETION_QUALITY"
+            }))
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn b14_project_scope() -> Value {
@@ -1603,7 +1678,7 @@ fn b14_hard_responsibilities(input: &crate::endgame::CompletionInput) -> Value {
         "CONTINUITY",
         input.open_hard_continuity,
         "A",
-        "character_arc_states",
+        "continuity_threads",
     );
     add(
         "TASK",
@@ -1675,17 +1750,21 @@ pub fn create_endgame_contract_impl(
     {
         return Ok(replayed);
     }
-    let (input, revision, _) =
+    let read =
         crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
             .map_err(|error| error.to_string())?;
+    let input = read.input;
+    let revision = read.revision;
     if revision != expected_revision {
         return Err("REVISION_CONFLICT".into());
     }
-    if crate::repositories::endgame::EndgameRepository::completion_already_committed(
-        &handle, project_id,
+    let history = crate::repositories::endgame::EndgameRepository::completion_history(
+        &handle,
+        project_id,
+        &read.relevant_state_digest,
     )
-    .map_err(|error| error.to_string())?
-    {
+    .map_err(|error| error.to_string())?;
+    if history.currently_completed {
         return Err("B14_ALREADY_COMPLETED".into());
     }
     let book_plan_ref = crate::repositories::endgame::EndgameRepository::latest_project_head_ref(
@@ -1693,14 +1772,28 @@ pub fn create_endgame_contract_impl(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "B14_BOOK_PLAN_REQUIRED".to_string())?;
-    let digest =
-        crate::endgame::relevant_state_digest(&input).map_err(|error| error.to_string())?;
     let ending_boundary_digest =
         sha256_canonical(&json!({"summary":summary})).map_err(|error| error.to_string())?;
-    let contract_payload = json!({
+    let mystery_mappings = request
+        .pointer("/payload/mysteryMappings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let reservation_mappings = request
+        .pointer("/payload/reservationMappings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let hard_payoff_mappings = request
+        .pointer("/payload/hardPayoffMappings")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let relevant_refs = request
+        .pointer("/payload/relevantRefs")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let mut contract_payload = json!({
         "payloadSchema": "endgame-contract.r1",
         "compiledFromProjectRevision": revision + 1,
-        "compiledFromRelevantStateDigest": digest,
+        "compiledFromRelevantStateDigest": "",
         "bookPlanRef": book_plan_ref,
         "endingBoundaryDigest": ending_boundary_digest,
         "requestedEnding": {
@@ -1709,8 +1802,21 @@ pub fn create_endgame_contract_impl(
             "confirmedAt": confirmed_at
         },
         "hardResponsibilities": b14_hard_responsibilities(&input),
+        "mysteryMappings": mystery_mappings,
+        "reservationMappings": reservation_mappings,
+        "hardPayoffMappings": hard_payoff_mappings,
+        "relevantRefs": relevant_refs,
         "createdAt": requested_at
     });
+    let preview =
+        crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract(
+            &handle,
+            project_id,
+            Some(&contract_payload),
+        )
+        .map_err(|error| error.to_string())?;
+    let digest = preview.relevant_state_digest;
+    contract_payload["compiledFromRelevantStateDigest"] = json!(digest);
     let artifact_id = format!("endgame-contract:{project_id}");
     let version =
         crate::repositories::artifacts::ArtifactRepository::next_version(&handle, &artifact_id)
@@ -1768,17 +1874,21 @@ pub fn complete_book_impl(
     {
         return Ok(replayed);
     }
-    let (input, revision, _) =
+    let read =
         crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
             .map_err(|error| error.to_string())?;
+    let input = read.input;
+    let revision = read.revision;
     if revision != expected_revision {
         return Err("REVISION_CONFLICT".into());
     }
-    if crate::repositories::endgame::EndgameRepository::completion_already_committed(
-        &handle, project_id,
+    let history = crate::repositories::endgame::EndgameRepository::completion_history(
+        &handle,
+        project_id,
+        &read.relevant_state_digest,
     )
-    .map_err(|error| error.to_string())?
-    {
+    .map_err(|error| error.to_string())?;
+    if history.currently_completed {
         return Err("B14_ALREADY_COMPLETED".into());
     }
     let evaluation = crate::endgame::evaluate_completion(&input);
@@ -1787,8 +1897,7 @@ pub fn complete_book_impl(
             serde_json::to_string(&evaluation.status).map_err(|error| error.to_string())?;
         return Err(format!("B14_COMPLETION_NOT_READY:{status}"));
     }
-    let digest =
-        crate::endgame::relevant_state_digest(&input).map_err(|error| error.to_string())?;
+    let digest = read.relevant_state_digest;
     let endgame_contract_ref =
         crate::repositories::endgame::EndgameRepository::latest_project_head_ref(
             &handle,
@@ -1804,6 +1913,9 @@ pub fn complete_book_impl(
     let (final_chapter_count, first_final_chapter_ref, last_final_chapter_ref) =
         crate::repositories::endgame::EndgameRepository::final_chapter_summary(&handle, project_id)
             .map_err(|error| error.to_string())?;
+    let domain_digests =
+        crate::repositories::endgame::EndgameRepository::domain_digests(&handle, project_id)
+            .map_err(|error| error.to_string())?;
     let exit_artifact_id = format!("book-exit-state:{project_id}:{command_id}");
     let report_artifact_id = format!("book-completion-report:{project_id}:{command_id}");
     let completion_receipt_id = format!("completion-receipt:{command_id}");
@@ -1816,12 +1928,14 @@ pub fn complete_book_impl(
         "finalChapterCount": final_chapter_count,
         "firstFinalChapterRef": first_final_chapter_ref,
         "lastFinalChapterRef": last_final_chapter_ref,
-        "manuscriptInventoryDigest": sha256_canonical(&json!({"projectId":project_id,"finalChapterCount":final_chapter_count,"stateDigest":digest})).map_err(|error| error.to_string())?,
-        "canonDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"CANON","stateDigest":digest})).map_err(|error| error.to_string())?,
-        "knowledgeDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"KNOWLEDGE","stateDigest":digest})).map_err(|error| error.to_string())?,
-        "continuityDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"CONTINUITY","stateDigest":digest})).map_err(|error| error.to_string())?,
-        "reservationDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"RESERVATION","stateDigest":digest})).map_err(|error| error.to_string())?,
-        "obligationDigest": sha256_canonical(&json!({"projectId":project_id,"kind":"OBLIGATION","stateDigest":digest})).map_err(|error| error.to_string())?,
+        "manuscriptInventoryDigest": domain_digests["manuscriptInventoryDigest"],
+        "canonDigest": domain_digests["canonDigest"],
+        "knowledgeDigest": domain_digests["knowledgeDigest"],
+        "continuityDigest": domain_digests["continuityDigest"],
+        "reservationDigest": domain_digests["reservationDigest"],
+        "obligationDigest": domain_digests["obligationDigest"],
+        "taskRealityDigest": domain_digests["taskRealityDigest"],
+        "finalChapterInventoryDigest": domain_digests["finalChapterInventoryDigest"],
         "finalVolumeExitStateRef": final_volume_exit_state_ref,
         "completionReportRef": report_artifact_id
     });
@@ -1841,7 +1955,7 @@ pub fn complete_book_impl(
         "endgameContractRef": endgame_contract_ref,
         "completionGateResult": "READY",
         "checkSummaries": evaluation.checks,
-        "exportPreflightDigest": sha256_canonical(&json!({"projectId":project_id,"stateDigest":digest,"finalVolumeExitStateRef":final_volume_exit_state_ref})).map_err(|error| error.to_string())?,
+        "exportPreflightDigest": domain_digests["finalChapterInventoryDigest"],
         "bookExitStateRef": exit_ref,
         "completionReceiptRef": completion_receipt_id
     });
@@ -5113,6 +5227,22 @@ pub fn query_completion_status(
 }
 
 #[tauri::command]
+pub fn query_endgame_advice(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_endgame_advice_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_completion_quality(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_completion_quality_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     execute_command_impl(&state, request)
 }
@@ -5299,6 +5429,8 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,
+        query_endgame_advice,
+        query_completion_quality,
         execute_command,
         query_global_settings,
         query_project_settings,

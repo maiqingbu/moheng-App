@@ -801,6 +801,8 @@ export interface FrontendPort {
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection>
   queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
   queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
+  queryEndgameAdvice(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection>
+  queryCompletionQuality(request: ProjectQueryRequest): Promise<SoftCreativeAdviceProjection>
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection>
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
@@ -831,7 +833,7 @@ export type {
   HealthSourceRef,
 } from '../generated/contracts'
 
-export type CompletionGateStatus = 'READY' | 'BLOCKED' | 'NEEDS_DECISION' | 'SOURCE_UNAVAILABLE'
+export type CompletionGateStatus = 'READY' | 'BLOCKED' | 'NEEDS_DECISION' | 'NEEDS_RECHECK' | 'SOURCE_UNAVAILABLE'
 
 export interface CompletionCheckProjection {
   kind: string
@@ -853,5 +855,15 @@ export interface CompletionStatusProjection {
   sourceAvailable: boolean
   requestedEndingConfirmed: boolean
   completed: boolean
-  owner: string
+  hasHistoricalCompletion: boolean
+}
+
+export interface SoftCreativeAdviceProjection {
+  softOnly: true
+  proposal?: { summary?: string; suggestions?: string[] }
+  review?: { summary?: string; suggestions?: string[] }
+  projectRevision: number
+  sourceAvailable: boolean
+  runtimeCheckRequests: unknown[]
+  userAction: string
 }

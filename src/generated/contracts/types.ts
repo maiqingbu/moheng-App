@@ -592,6 +592,10 @@ export interface EndgameContractR1 {
   "endingBoundaryDigest": string
   "requestedEnding": { "summary": string; "confirmationSource": unknown; "confirmedAt": string }
   "hardResponsibilities": Array<{ "responsibilityId": string; "kind": "OBLIGATION" | "MYSTERY" | "PAYOFF" | "FUTURE_RESERVATION" | "CONTINUITY" | "TASK" | "ENDING_BOUNDARY"; "sourceRefs": Array<string>; "authorityClass": "A" | "B" | "C"; "requiredDisposition": string }>
+  "mysteryMappings"?: Array<{ "sourceMysteryId": string; "mappedResponsibilityRefs": Array<string>; "mappingConfirmation": unknown }>
+  "hardPayoffMappings"?: Array<{ "payoffId": string; "fulfillmentEvidenceRefs": Array<string>; "fulfilled": boolean }>
+  "reservationMappings"?: Array<{ "reservationId": string; "fulfillmentEvidenceRefs": Array<string>; "mappingConfirmation": unknown }>
+  "relevantRefs"?: Array<string>
   "createdAt": string
 }
 
@@ -638,6 +642,8 @@ export interface BookExitStateR1 {
   "continuityDigest": string
   "reservationDigest": string
   "obligationDigest": string
+  "taskRealityDigest": string
+  "finalChapterInventoryDigest": string
   "finalVolumeExitStateRef": ArtifactRef
   "completionReportRef": string
 }

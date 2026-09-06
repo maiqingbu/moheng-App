@@ -20,6 +20,7 @@ const requiredPatterns = {
   'src-tauri/src/repositories/endgame.rs': [/narrative_obligations/, /stale_queue/, /canonical_heads/, /artifact_payloads/],
   'src/ui/pages/Completion.vue': [/USER_CONFIRMED/, /complete_book/, /queryCompletionStatus/],
   'src/app/router.ts': [/\/projects\/:id\/completion/],
+  'src-tauri/src/commands.rs': [/query_endgame_advice/, /query_completion_quality/],
 }
 
 const failures = []
@@ -30,6 +31,19 @@ for (const [file, patterns] of Object.entries(requiredPatterns)) {
   const source = fs.readFileSync(target, 'utf8')
   for (const pattern of patterns) if (!pattern.test(source)) failures.push({ file, reason: `MISSING_PATTERN:${pattern}` })
 }
+const repositorySource = fs.readFileSync(path.join(root, 'src-tauri/src/repositories/endgame.rs'), 'utf8')
+const commandSource = fs.readFileSync(path.join(root, 'src-tauri/src/commands.rs'), 'utf8')
+const forbiddenPatterns = [
+  ['schema mappingRefs dependency', /mappingRefs/],
+  ['FutureReservation status dependency', /authorityLevel.*status|status.*authorityLevel/],
+  ['CharacterArc continuity authority', /character_arc_states/],
+  ['project revision freshness equality', /compiledFromProjectRevision[\s\S]{0,240}== Some\(revision/],
+  ['permanent completion lock', /completion_already_committed/],
+]
+for (const [reason, pattern] of forbiddenPatterns) {
+  if (pattern.test(repositorySource) || pattern.test(commandSource)) failures.push({ file: 'B14-R1 source boundary', reason })
+}
+if (!/completion_history/.test(repositorySource)) failures.push({ file: 'src-tauri/src/repositories/endgame.rs', reason: 'MISSING_DIGEST_BOUND_COMPLETION_HISTORY' })
 
 const result = {
   schema: 'b14-architecture-verification',
@@ -42,4 +56,3 @@ const result = {
 }
 console.log(JSON.stringify(result, null, 2))
 if (failures.length) process.exitCode = 1
-
