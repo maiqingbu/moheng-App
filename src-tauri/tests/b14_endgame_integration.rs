@@ -600,6 +600,12 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     assert!(quality["provenance"]["skillTaskContextDigest"]
         .as_str()
         .is_some());
+    assert!(advice["provenance"]["resourceDigests"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(quality["provenance"]["resourceDigests"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
 }
 
 #[test]
