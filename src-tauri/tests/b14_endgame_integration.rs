@@ -91,7 +91,7 @@ fn insert_committed_artifact(
     hash
 }
 
-fn seed_ready_project(state: &KernelState) {
+fn seed_ready_project_with_plan(state: &KernelState, book_plan: serde_json::Value) {
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     let project_scope = r#"{"level":"PROJECT"}"#;
     let book_id = "book:b14";
@@ -108,8 +108,6 @@ fn seed_ready_project(state: &KernelState) {
             libsql_rusqlite::params![volume_id, "proj-b14", book_id, NOW],
         )
         .unwrap();
-    let book_plan =
-        json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[]});
     insert_committed_artifact(
         &handle,
         "proj-b14",
@@ -130,6 +128,13 @@ fn seed_ready_project(state: &KernelState) {
         "VOLUME",
         &volume_scope,
         &volume_exit,
+    );
+}
+
+fn seed_ready_project(state: &KernelState) {
+    seed_ready_project_with_plan(
+        state,
+        json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[]}),
     );
 }
 
@@ -438,6 +443,40 @@ fn b14_continuity_projection_includes_foreshadow_mystery_and_evidence_sources() 
     assert!(threads
         .iter()
         .any(|thread| !thread.evidence_refs.is_empty()));
+}
+
+#[test]
+fn b14_mystery_mapping_requires_current_responsibility_disposition() {
+    let (state, _root) = test_state();
+    let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[{"id":"mystery:b14:closure","description":"身份谜团"}],"futureReservations":[]});
+    seed_ready_project_with_plan(&state, plan);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_obligation(&handle, "obligation:b14:mystery", "C", "PROGRESSING");
+    drop(handle);
+    execute_command_impl(&state, json!({"type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-mystery-active","idempotencyKey":"b14-mystery-active:key","expectedRevision":0,"requestedAt":NOW,"payload":{"requestedEnding":{"summary":"正式结局","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW},"mysteryMappings":[{"sourceMysteryId":"mystery:b14:closure","mappedResponsibilityRefs":["obligation:obligation:b14:mystery"],"mappingConfirmation":"USER_CONFIRMED"}]}})).unwrap();
+    let blocked = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let mystery = blocked["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "MYSTERY").unwrap();
+    assert_eq!(mystery["status"], "BLOCKED");
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle.execute("UPDATE narrative_obligations SET lifecycle='RESOLVED' WHERE project_id='proj-b14' AND obligation_id='obligation:b14:mystery'", []).unwrap();
+    drop(handle);
+    let resolved = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let mystery = resolved["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "MYSTERY").unwrap();
+    assert_eq!(mystery["status"], "READY");
+}
+
+#[test]
+fn b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff() {
+    let (state, _root) = test_state();
+    let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[{"reservationId":"reservation:b14:future","description":"未来承诺","authorityLevel":"A"}]});
+    seed_ready_project_with_plan(&state, plan);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_committed_artifact(&handle,"proj-b14","final:b14:unrelated","FinalChapter","CHAPTER",r#"{"level":"CHAPTER","chapterId":"chapter:b14:unrelated"}"#,&json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:b14:unrelated","body":"无关章节"}));
+    drop(handle);
+    execute_command_impl(&state, json!({"type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-unrelated-mapping","idempotencyKey":"b14-unrelated-mapping:key","expectedRevision":0,"requestedAt":NOW,"payload":{"requestedEnding":{"summary":"正式结局","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW},"reservationMappings":[{"reservationId":"reservation:b14:future","fulfillmentEvidenceRefs":["final-chapter:final:b14:unrelated"],"mappingConfirmation":"USER_CONFIRMED"}],"hardPayoffMappings":[{"payoffId":"payoff:b14:unrelated","fulfillmentEvidenceRefs":["final-chapter:final:b14:unrelated"],"fulfilled":true}]}})).unwrap();
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let payoff = result["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "PAYOFF").unwrap();
+    assert_eq!(payoff["status"], "BLOCKED");
 }
 
 #[test]

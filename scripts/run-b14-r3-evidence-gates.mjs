@@ -14,7 +14,7 @@ function run(name,command,args,env={}){const startedAt=new Date().toISOString(),
 const gate=(record,extra={})=>({status:record.status,blocking:true,source:record.rawLogPath,...extra})
 const architecture=run('architecture','node',['scripts/verify-b14-r3-architecture.mjs'],{B14_R3_SOURCE_COMMIT:sourceCommit})
 const integration=run('integration','cargo',['test','--manifest-path','src-tauri/Cargo.toml','--test','b14_endgame_integration'])
-const scale=run('scale','cargo',['test','--manifest-path','src-tauri/Cargo.toml','--test','b14_r3_scale','--','--nocapture'])
+const scale=run('scale','cargo',['test','--manifest-path','src-tauri/Cargo.toml','--test','b14_r2_scale','--','--nocapture'])
 const browser=run('browser','node',['scripts/capture-b14-r3-browser-evidence.mjs'],{B14_R3_EVIDENCE_DIR:evidenceDir,B14_R3_SOURCE_COMMIT:sourceCommit})
 const mutations=run('mutations','node',['scripts/run-b14-r3-mutations.mjs'],{B14_R3_EVIDENCE_DIR:evidenceDir})
 const ux=run('product_ux','npm',['run','verify:product-ux'])

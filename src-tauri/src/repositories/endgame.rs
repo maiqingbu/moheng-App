@@ -367,7 +367,7 @@ impl EndgameRepository {
         project_id: &str,
         book_plan: Option<&Value>,
         contract: Option<&Value>,
-    ) -> Result<i64, EndgameRepositoryError> {
+    ) -> Result<(i64, i64), EndgameRepositoryError> {
         let goals = book_plan
             .and_then(|value| value.get("majorMysteryGoals"))
             .and_then(Value::as_array)
@@ -378,7 +378,8 @@ impl EndgameRepository {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut count = 0;
+        let mut unmapped = 0;
+        let mut unresolved = 0;
         for goal in goals {
             let id = goal
                 .get("id")
@@ -389,18 +390,20 @@ impl EndgameRepository {
                     item.get("sourceMysteryId").and_then(Value::as_str) == Some(source)
                 })
             });
-            let valid = mapping.is_some_and(|item| {
+            let mapping_confirmed = mapping.is_some_and(|item| {
                 item.get("mappingConfirmation").and_then(Value::as_str) == Some("USER_CONFIRMED")
-            }) && Self::responsibility_refs_satisfied(
+            });
+            if !mapping_confirmed {
+                unmapped += 1;
+            } else if !Self::responsibility_refs_satisfied(
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("mappedResponsibilityRefs")),
-            )?;
-            if !valid {
-                count += 1;
+            )? {
+                unresolved += 1;
             }
         }
-        Ok(count)
+        Ok((unmapped, unresolved))
     }
 
     fn hard_payoff_count(
@@ -833,7 +836,7 @@ impl EndgameRepository {
             .and_then(Value::as_str)
             == Some("USER_CONFIRMED");
 
-        let unmapped_mysteries = Self::mystery_count(
+        let (unmapped_mysteries, unresolved_mapped_mysteries) = Self::mystery_count(
             connection,
             project_id,
             book_plan.as_ref(),
@@ -851,6 +854,7 @@ impl EndgameRepository {
             requested_ending_confirmed,
             endgame_contract_fresh: false,
             unmapped_mysteries,
+            unresolved_mapped_mysteries,
             unresolved_hard_obligations,
             unresolved_hard_payoffs,
             unfulfilled_hard_reservations,

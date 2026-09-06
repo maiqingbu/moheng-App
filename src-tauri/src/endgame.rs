@@ -48,6 +48,7 @@ pub struct CompletionInput {
     pub requested_ending_confirmed: bool,
     pub endgame_contract_fresh: bool,
     pub unmapped_mysteries: i64,
+    pub unresolved_mapped_mysteries: i64,
     pub unresolved_hard_obligations: i64,
     pub unresolved_hard_payoffs: i64,
     pub unfulfilled_hard_reservations: i64,
@@ -119,6 +120,7 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
 
     let unresolved_obligations = bounded(input.unresolved_hard_obligations);
     let unmapped_mysteries = bounded(input.unmapped_mysteries);
+    let unresolved_mapped_mysteries = bounded(input.unresolved_mapped_mysteries);
     let unresolved_payoffs = bounded(input.unresolved_hard_payoffs);
     let unfulfilled_reservations = bounded(input.unfulfilled_hard_reservations);
     let open_continuity = bounded(input.open_hard_continuity);
@@ -145,15 +147,19 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
         "MYSTERY",
         if unmapped_mysteries > 0 {
             CompletionStatus::NeedsDecision
+        } else if unresolved_mapped_mysteries > 0 {
+            CompletionStatus::Blocked
         } else {
             CompletionStatus::Ready
         },
         if unmapped_mysteries > 0 {
             "有重要谜团还没有明确对应到可检查的收束责任。"
+        } else if unresolved_mapped_mysteries > 0 {
+            "已选择的谜团收束责任尚未达到正式完成状态。"
         } else {
             "重要谜团的正式收束责任已完成检查。"
         },
-        0,
+        unresolved_mapped_mysteries,
         0,
     ));
 
@@ -264,6 +270,7 @@ pub fn relevant_state_digest(input: &CompletionInput) -> Result<String, serde_js
     let value = json!({
         "sourceAvailable": input.source_available,
         "unmappedMysteries": input.unmapped_mysteries,
+        "unresolvedMappedMysteries": input.unresolved_mapped_mysteries,
         "unresolvedHardObligations": input.unresolved_hard_obligations,
         "unresolvedHardPayoffs": input.unresolved_hard_payoffs,
         "unfulfilledHardReservations": input.unfulfilled_hard_reservations,
