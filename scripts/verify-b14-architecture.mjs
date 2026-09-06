@@ -34,6 +34,7 @@ for (const [file, patterns] of Object.entries(requiredPatterns)) {
 }
 const repositorySource = fs.readFileSync(path.join(root, 'src-tauri/src/repositories/endgame.rs'), 'utf8')
 const commandSource = fs.readFileSync(path.join(root, 'src-tauri/src/commands.rs'), 'utf8')
+const rustSource = fs.readdirSync(path.join(root, 'src-tauri/src')).filter(file => file.endsWith('.rs')).map(file => fs.readFileSync(path.join(root, 'src-tauri/src', file), 'utf8')).join('\n')
 const forbiddenPatterns = [
   ['schema mappingRefs dependency', /mappingRefs/],
   ['FutureReservation status dependency', /authorityLevel.*status|status.*authorityLevel/],
@@ -45,6 +46,7 @@ for (const [reason, pattern] of forbiddenPatterns) {
   if (pattern.test(repositorySource) || pattern.test(commandSource)) failures.push({ file: 'B14-R1 source boundary', reason })
 }
 if (!/completion_history/.test(repositorySource)) failures.push({ file: 'src-tauri/src/repositories/endgame.rs', reason: 'MISSING_DIGEST_BOUND_COMPLETION_HISTORY' })
+if (/\b(?:ExportRuntime|ReleaseOwner|ReleaseCertification)\b/.test(rustSource)) failures.push({ file: 'src-tauri/src', reason: 'B15_EXPORT_RUNTIME_SCOPE_LEAK' })
 
 const result = {
   schema: 'b14-architecture-verification',

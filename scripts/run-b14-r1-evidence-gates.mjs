@@ -31,6 +31,7 @@ function write(name, value) { const file = path.join(evidenceDir, name); fs.writ
 const targeted = run('b14_r1_targeted', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame', '--test', 'b14_endgame_integration', '--test', 'b14_r1_scale', '--', '--nocapture'])
 const historicalRestore = spawnSync('git', ['restore', '--source', R1_REPAIR_BASELINE, '--', 'evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json'], { cwd: root, encoding: 'utf8' })
 fs.writeFileSync(path.join(automaticDir, 'historical_restore.log'), `${historicalRestore.stdout || ''}${historicalRestore.stderr || ''}`)
+const mutations = run('mutations', process.execPath, ['scripts/run-b14-r1-mutations.mjs'])
 const productUx = run('product_ux', 'npm', ['run', 'verify:product-ux'])
 const architecture = run('architecture', process.execPath, ['scripts/verify-b14-architecture.mjs'])
 const b14Regression = run('b14_regression', 'npm', ['run', 'verify:b14'])
@@ -56,6 +57,7 @@ Object.assign(gates, {
   b14_r1_04_s44_s45_integration: gate(targeted.status, 'B14_R1/INTEGRATION/b14_r1_targeted.log'),
   b14_r1_05_product_ux: gate(productUx.status, 'B14_R1/AUTOMATIC/product_ux.log'),
   b14_r1_06_evidence_package: gate(architecture.status && dirtyBefore === false && dirtyAfter === false, 'B14_SOURCE_BINDING.json'),
+  mutation_gates: gate(mutations.status, 'B14_R1_MUTATION_GATES.json'),
   scale_10m: gate(targeted.status, 'B14_R1/AUTOMATIC/b14_r1_targeted.log'),
   query_plans: gate(targeted.status, 'B14_R1/AUTOMATIC/b14_r1_targeted.log'),
   b09_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
@@ -63,7 +65,7 @@ Object.assign(gates, {
   b12_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
   b13_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
   architecture: gate(architecture.status, 'B14_R1/AUTOMATIC/architecture.log'),
-  module_boundary: gate(basePass('b01_b13_architecture'), 'gate-results.json'),
+  module_boundary: gate(basePass('b14_architecture'), 'gate-results.json'),
   product_ux: gate(productUx.status, 'B14_R1/AUTOMATIC/product_ux.log'),
   rust_fmt: gate(basePass('b14_rust_quality'), 'gate-results.json'),
   rust_check: gate(basePass('b14_rust_quality'), 'gate-results.json'),
