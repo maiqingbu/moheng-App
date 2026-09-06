@@ -170,7 +170,7 @@ onMounted(() => { void load() })
 
       <section v-if="!status.completed" class="card pad section">
         <h2 class="card-title">第二步：提交全书完结</h2>
-        <p class="card-subtitle">只有六项检查全部 READY 时，系统才会在一个正式事务中写入 BookExitState、BookCompletionReport 与回执。</p>
+        <p class="card-subtitle">只有六项检查全部满足时，系统才会一次性保存完结状态与确认记录。</p>
         <label class="check-line"><input v-model="completionConfirmed" type="checkbox" />我确认现在提交全书完结。</label>
         <button class="btn primary" :disabled="submitting || !canComplete || !completionConfirmed" @click="completeBook">提交全书完结</button>
       </section>
