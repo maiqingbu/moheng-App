@@ -3,8 +3,10 @@ use ai_novel_production_system_core::commands::{
     query_endgame_advice_impl, KernelState,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
+use ai_novel_production_system_core::production::{
+    ProductionModelGateway, ProductionModelResponse,
+};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use ai_novel_production_system_core::production::{ProductionModelGateway, ProductionModelResponse};
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
@@ -25,9 +27,17 @@ fn test_state() -> (KernelState, PathBuf) {
 struct EndgameSkillGateway;
 
 impl ProductionModelGateway for EndgameSkillGateway {
-    fn provider(&self) -> &str { "b14-test-provider" }
-    fn model(&self, _capability: &str) -> String { "b14-test-model".into() }
-    fn invoke(&self, capability: &str, _input: &serde_json::Value) -> Result<ProductionModelResponse, String> {
+    fn provider(&self) -> &str {
+        "b14-test-provider"
+    }
+    fn model(&self, _capability: &str) -> String {
+        "b14-test-model".into()
+    }
+    fn invoke(
+        &self,
+        capability: &str,
+        _input: &serde_json::Value,
+    ) -> Result<ProductionModelResponse, String> {
         Ok(ProductionModelResponse::deterministic(json!({
             "kind": if capability == "B14_S45_COMPLETION_QUALITY" { "QualityFinding" } else { "CreativeProposal" },
             "status":"OK",
@@ -385,7 +395,8 @@ fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
     let handle = advisory_state.manager.open("proj-b14", "", NOW).unwrap();
     insert_obligation(&handle, "obligation:b14:c", "C", "PROGRESSING");
     drop(handle);
-    let advisory = query_completion_status_impl(&advisory_state, json!({"projectId":"proj-b14"})).unwrap();
+    let advisory =
+        query_completion_status_impl(&advisory_state, json!({"projectId":"proj-b14"})).unwrap();
     let payoff = advisory["checks"]
         .as_array()
         .unwrap()
@@ -438,7 +449,12 @@ fn b14_hard_payoff_rejects_non_final_artifact_as_fulfillment_evidence() {
     )
     .unwrap();
     let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
-    let payoff = result["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "PAYOFF").unwrap();
+    let payoff = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "PAYOFF")
+        .unwrap();
     assert_eq!(payoff["status"], "BLOCKED");
 }
 
@@ -453,7 +469,12 @@ fn b14_export_preflight_blocks_uncommitted_chapter_in_final_sequence() {
     ).unwrap();
     drop(handle);
     let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
-    let export = result["checks"].as_array().unwrap().iter().find(|check| check["kind"] == "EXPORT_INTEGRITY").unwrap();
+    let export = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "EXPORT_INTEGRITY")
+        .unwrap();
     assert_eq!(export["status"], "BLOCKED");
     assert_eq!(export["blockerCount"], 1);
 }

@@ -33,6 +33,19 @@ pub struct CompletionHistory {
 }
 
 impl EndgameRepository {
+    pub fn project_updated_at(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<String, EndgameRepositoryError> {
+        connection
+            .query_row(
+                "SELECT updated_at FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn mapping_workflow(
         connection: &Connection,
         project_id: &str,
@@ -49,11 +62,17 @@ impl EndgameRepository {
         }).collect::<Vec<_>>();
         let mut candidates = Vec::new();
         let mut statement = connection.prepare("SELECT a.artifact_id,COALESCE(c.title,'最终章节') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version LEFT JOIN chapters c ON c.project_id=a.project_id AND c.final_artifact_id=a.artifact_id AND c.final_version=a.version WHERE h.project_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' ORDER BY a.artifact_id")?;
-        for row in statement.query_map([project_id], |row| Ok(json!({"ref":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { candidates.push(row?); }
+        for row in statement.query_map([project_id], |row| {
+            Ok(json!({"ref":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?}))
+        })? {
+            candidates.push(row?);
+        }
         let mut hard_payoffs = Vec::new();
         let mut statement = connection.prepare("SELECT obligation_id,description FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND obligation_type='PAYOFF' AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"key":format!("payoff:{}", row.get::<_,String>(0)?),"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { hard_payoffs.push(row?); }
-        Ok(json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"fulfillmentCandidates":candidates}))
+        Ok(
+            json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"fulfillmentCandidates":candidates}),
+        )
     }
     pub fn latest_head_ref(
         connection: &Connection,
@@ -238,7 +257,9 @@ impl EndgameRepository {
             return Ok(false);
         }
         for reference in refs.iter().filter_map(Value::as_str) {
-            let artifact_id = reference.strip_prefix("final-chapter:").unwrap_or(reference);
+            let artifact_id = reference
+                .strip_prefix("final-chapter:")
+                .unwrap_or(reference);
             let current_final: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED')",
                 libsql_rusqlite::params![project_id, artifact_id],
@@ -390,11 +411,8 @@ impl EndgameRepository {
             }
         }
         let task_ids = classes.keys().map(String::as_str).collect::<Vec<_>>();
-        let states = NarrativeRepository::task_states_by_ids_complete(
-            connection,
-            project_id,
-            &task_ids,
-        )?;
+        let states =
+            NarrativeRepository::task_states_by_ids_complete(connection, project_id, &task_ids)?;
         let statuses = states
             .into_iter()
             .filter_map(|state| {
@@ -410,7 +428,10 @@ impl EndgameRepository {
             .filter(|(task_id, class)| {
                 matches!(class.as_str(), "REQUIRED" | "CLIMAX" | "RESERVED")
                     && matches!(
-                        statuses.get(task_id).map(String::as_str).unwrap_or("NOT_STARTED"),
+                        statuses
+                            .get(task_id)
+                            .map(String::as_str)
+                            .unwrap_or("NOT_STARTED"),
                         "NOT_STARTED" | "ACTIVE" | "BLOCKED"
                     )
             })
@@ -445,15 +466,34 @@ impl EndgameRepository {
                     .map(ToOwned::to_owned),
             );
             for (mapping_key, ref_keys) in [
-                ("mysteryMappings", ["sourceMysteryId", "mappedResponsibilityRefs"].as_slice()),
-                ("reservationMappings", ["reservationId", "fulfillmentEvidenceRefs"].as_slice()),
-                ("hardPayoffMappings", ["payoffId", "fulfillmentEvidenceRefs"].as_slice()),
+                (
+                    "mysteryMappings",
+                    ["sourceMysteryId", "mappedResponsibilityRefs"].as_slice(),
+                ),
+                (
+                    "reservationMappings",
+                    ["reservationId", "fulfillmentEvidenceRefs"].as_slice(),
+                ),
+                (
+                    "hardPayoffMappings",
+                    ["payoffId", "fulfillmentEvidenceRefs"].as_slice(),
+                ),
             ] {
-                for mapping in value.get(mapping_key).and_then(Value::as_array).into_iter().flatten() {
+                for mapping in value
+                    .get(mapping_key)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
                     for key in ref_keys {
                         match mapping.get(*key) {
                             Some(Value::String(reference)) => refs.push(reference.clone()),
-                            Some(Value::Array(items)) => refs.extend(items.iter().filter_map(Value::as_str).map(ToOwned::to_owned)),
+                            Some(Value::Array(items)) => refs.extend(
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(ToOwned::to_owned),
+                            ),
                             _ => {}
                         }
                     }
@@ -468,8 +508,12 @@ impl EndgameRepository {
     fn value_contains_ref(value: &Value, refs: &[String]) -> bool {
         match value {
             Value::String(item) => refs.iter().any(|reference| reference == item),
-            Value::Array(items) => items.iter().any(|item| Self::value_contains_ref(item, refs)),
-            Value::Object(items) => items.values().any(|item| Self::value_contains_ref(item, refs)),
+            Value::Array(items) => items
+                .iter()
+                .any(|item| Self::value_contains_ref(item, refs)),
+            Value::Object(items) => items
+                .values()
+                .any(|item| Self::value_contains_ref(item, refs)),
             _ => false,
         }
     }
@@ -501,7 +545,9 @@ impl EndgameRepository {
             let (target, downstream) = row?;
             let target = serde_json::from_str::<Value>(&target).unwrap_or(Value::Null);
             let downstream = serde_json::from_str::<Value>(&downstream).unwrap_or(Value::Null);
-            if Self::value_contains_ref(&target, refs) || Self::value_contains_ref(&downstream, refs) {
+            if Self::value_contains_ref(&target, refs)
+                || Self::value_contains_ref(&downstream, refs)
+            {
                 relevant_change = true;
             }
         }
@@ -639,12 +685,10 @@ impl EndgameRepository {
             [project_id],
             |row| row.get(0),
         )?;
-        let unresolved_hard_payoffs = Self::hard_payoff_count(
-            connection,
-            project_id,
-            endgame_contract.as_ref(),
-        )?;
-        let continuity_threads = NarrativeRepository::continuity_threads_complete(connection, project_id)?;
+        let unresolved_hard_payoffs =
+            Self::hard_payoff_count(connection, project_id, endgame_contract.as_ref())?;
+        let continuity_threads =
+            NarrativeRepository::continuity_threads_complete(connection, project_id)?;
         let open_hard_continuity = continuity_threads
             .iter()
             .filter(|thread| {

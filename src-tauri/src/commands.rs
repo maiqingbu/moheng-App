@@ -1570,12 +1570,20 @@ pub fn query_completion_status_impl(state: &KernelState, request: Value) -> Resu
     query_endgame_status_impl(state, request)
 }
 
-pub fn query_endgame_mapping_options_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+pub fn query_endgame_mapping_options_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
-    state.manager.with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-        crate::repositories::endgame::EndgameRepository::mapping_workflow(connection, project_id)
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::endgame::EndgameRepository::mapping_workflow(
+                connection, project_id,
+            )
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
-    }).map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string())
 }
 
 pub fn query_endgame_advice_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -1583,7 +1591,13 @@ pub fn query_endgame_advice_impl(state: &KernelState, request: Value) -> Result<
 }
 
 pub fn query_completion_quality_impl(state: &KernelState, request: Value) -> Result<Value, String> {
-    query_b14_skill_runtime(state, request, "S45", "B14_S45_COMPLETION_QUALITY", "review")
+    query_b14_skill_runtime(
+        state,
+        request,
+        "S45",
+        "B14_S45_COMPLETION_QUALITY",
+        "review",
+    )
 }
 
 fn query_b14_skill_runtime(
@@ -1594,25 +1608,71 @@ fn query_b14_skill_runtime(
     output_key: &str,
 ) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
-    let handle = state.manager.open(project_id, "", "2026-09-06T00:00:00Z").map_err(|error| error.to_string())?;
-    let read = crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id).map_err(|error| error.to_string())?;
-    let selection = crate::creative_skills::select_creative_skills(crate::creative_skills::SkillSelectionRequest {
-        primary: skill_id.into(), support: Vec::new(), budget_reason: None, context_tokens: 1200, model_calls: 1,
-    })?;
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_nanos();
-    let model_run_id = StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("b14:{skill_id}:{project_id}:{nonce}"))?;
-    let now: String = handle.query_row("SELECT updated_at FROM project_meta WHERE project_id=?1", [project_id], |row| row.get(0)).map_err(|error| error.to_string())?;
+    let handle = state
+        .manager
+        .open(project_id, "", "2026-09-06T00:00:00Z")
+        .map_err(|error| error.to_string())?;
+    let read =
+        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
+            .map_err(|error| error.to_string())?;
+    let selection = crate::creative_skills::select_creative_skills(
+        crate::creative_skills::SkillSelectionRequest {
+            primary: skill_id.into(),
+            support: Vec::new(),
+            budget_reason: None,
+            context_tokens: 1200,
+            model_calls: 1,
+        },
+    )?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let model_run_id = StableIdentityFactory::from_command(
+        StableIdKind::ModelRun,
+        &format!("b14:{skill_id}:{project_id}:{nonce}"),
+    )?;
+    let now =
+        crate::repositories::endgame::EndgameRepository::project_updated_at(&handle, project_id)
+            .map_err(|error| error.to_string())?;
     let spec = crate::repositories::runtime::ModelRunSpec {
-        model_run_id: model_run_id.clone(), job_id: None, step_id: None,
-        provider: state.production_gateway.provider().into(), model: state.production_gateway.model(capability),
-        idempotency_key: format!("b14:{skill_id}:{nonce}"), capability: capability.into(), prompt_ref: None,
-        context_manifest_ref: None, budget_id: None, predicted_cost_cents: state.production_gateway.predicted_cost_cents(capability).max(0), attempt_no: 1, repair_round: 0,
+        model_run_id: model_run_id.clone(),
+        job_id: None,
+        step_id: None,
+        provider: state.production_gateway.provider().into(),
+        model: state.production_gateway.model(capability),
+        idempotency_key: format!("b14:{skill_id}:{nonce}"),
+        capability: capability.into(),
+        prompt_ref: None,
+        context_manifest_ref: None,
+        budget_id: None,
+        predicted_cost_cents: state
+            .production_gateway
+            .predicted_cost_cents(capability)
+            .max(0),
+        attempt_no: 1,
+        repair_round: 0,
     };
     let input = json!({"skillId":selection.primary.id,"skillVersion":selection.primary.version,"projectId":project_id,"projectRevision":read.revision,"boundedContext":{"requestedEnding":read.endgame_contract.as_ref().and_then(|value| value.get("requestedEnding")),"hardSummary":{"blockers":crate::endgame::evaluate_completion(&read.input).blocker_count},"finalVolume":"bounded"},"prompt":"仅输出软性创作建议 JSON；不得改变正式完结状态。"});
-    let outcome = crate::production::execute_production_model(&handle, state.production_gateway.as_ref(), &spec, capability, input, &now)?;
-    let output = crate::creative_skills::normalize_skill_output(outcome.parsed.ok_or_else(|| "B14_SKILL_OUTPUT_MISSING".to_string())?)?;
-    let output_digest = sha256_canonical(&serde_json::to_value(&output).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
-    Ok(json!({"softOnly":true,output_key:output,"projectRevision":read.revision,"sourceAvailable":read.input.source_available,"runtimeCheckRequests":[],"userAction":format!("{skill_id}_EXPLICIT_ACTION"),"provenance":{"skillId":skill_id,"skillVersion":selection.primary.version,"modelRunId":model_run_id,"provider":spec.provider,"model":spec.model,"contextDigest":sha256_canonical(&json!({"projectId":project_id,"revision":read.revision})).map_err(|error| error.to_string())?,"outputDigest":output_digest,"explicitUserAction":true}}))
+    let outcome = crate::production::execute_production_model(
+        &handle,
+        state.production_gateway.as_ref(),
+        &spec,
+        capability,
+        input,
+        &now,
+    )?;
+    let output = crate::creative_skills::normalize_skill_output(
+        outcome
+            .parsed
+            .ok_or_else(|| "B14_SKILL_OUTPUT_MISSING".to_string())?,
+    )?;
+    let output_digest =
+        sha256_canonical(&serde_json::to_value(&output).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    Ok(
+        json!({"softOnly":true,output_key:output,"projectRevision":read.revision,"sourceAvailable":read.input.source_available,"runtimeCheckRequests":[],"userAction":format!("{skill_id}_EXPLICIT_ACTION"),"provenance":{"skillId":skill_id,"skillVersion":selection.primary.version,"modelRunId":model_run_id,"provider":spec.provider,"model":spec.model,"contextDigest":sha256_canonical(&json!({"projectId":project_id,"revision":read.revision})).map_err(|error| error.to_string())?,"outputDigest":output_digest,"explicitUserAction":true}}),
+    )
 }
 
 fn b14_project_scope() -> Value {
@@ -5209,7 +5269,10 @@ pub fn query_completion_status(
 }
 
 #[tauri::command]
-pub fn query_endgame_mapping_options(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+pub fn query_endgame_mapping_options(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
     query_endgame_mapping_options_impl(&state, request)
 }
 
