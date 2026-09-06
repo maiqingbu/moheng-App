@@ -37,6 +37,8 @@
     "verify:b13-r4": "export B13_R4_EVIDENCE_DIR=\"${B13_R4_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b13-r4-evidence.XXXXXX)}\" && node scripts/run-b13-r4-evidence-gates.mjs",
     "verify:b14": "export B14_EVIDENCE_DIR=\"${B14_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b14-evidence.XXXXXX)}\" && node scripts/run-b14-evidence-gates.mjs",
     "package:b14": "node scripts/assemble-b14-package.mjs",
+    "verify:b14-r1": "export B14_R1_EVIDENCE_DIR=\"${B14_R1_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-b14-r1-evidence.XXXXXX)}\" && node scripts/run-b14-r1-evidence-gates.mjs",
+    "package:b14-r1": "node scripts/assemble-b14-r1-package.mjs",
     "package:b13-r4": "node scripts/assemble-b13-r4-package.mjs",
     "verify:package-consistency": "node scripts/verify-package-consistency.mjs",
     "verify:b12": "node scripts/run-b12-evidence-gates.mjs && node scripts/generate-b12-acceptance.mjs",
