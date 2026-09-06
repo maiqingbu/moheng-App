@@ -8,6 +8,7 @@ const requiredFiles = [
   'src-tauri/src/repositories/endgame.rs',
   'src-tauri/tests/b14_endgame.rs',
   'src-tauri/tests/b14_endgame_integration.rs',
+  'src-tauri/tests/b14_r1_scale.rs',
   'contracts/schemas/narrative/endgame-contract-r1.schema.json',
   'contracts/schemas/narrative/book-exit-state-r1.schema.json',
   'contracts/schemas/narrative/book-completion-report-r1.schema.json',

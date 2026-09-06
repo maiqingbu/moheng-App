@@ -299,3 +299,60 @@ fn b14_s44_s45_are_explicit_soft_only_actions_without_model_runs() {
     drop(after);
     assert_eq!(before_runs, after_runs);
 }
+
+#[test]
+fn b14_status_and_soft_queries_do_not_mutate_authority() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let count = |connection: &libsql_rusqlite::Connection, table: &str| -> i64 {
+        connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project_id='proj-b14'"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let before = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let values = [
+            "canon_entities",
+            "canon_facts",
+            "canon_knowledge",
+            "narrative_obligations",
+            "foreshadows",
+            "state_deltas",
+            "dependency_edges",
+            "artifacts",
+            "commit_receipts",
+        ]
+        .into_iter()
+        .map(|table| (table, count(&handle, table)))
+        .collect::<Vec<_>>();
+        drop(handle);
+        values
+    };
+    query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let after = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let values = [
+            "canon_entities",
+            "canon_facts",
+            "canon_knowledge",
+            "narrative_obligations",
+            "foreshadows",
+            "state_deltas",
+            "dependency_edges",
+            "artifacts",
+            "commit_receipts",
+        ]
+        .into_iter()
+        .map(|table| (table, count(&handle, table)))
+        .collect::<Vec<_>>();
+        drop(handle);
+        values
+    };
+    assert_eq!(before, after);
+}

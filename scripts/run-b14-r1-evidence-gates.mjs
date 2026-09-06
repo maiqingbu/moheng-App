@@ -28,7 +28,7 @@ function run(name, command, args) {
 function gate(condition, source, actual = {}) { return { status: condition === true || condition === 'PASS' ? 'PASS' : 'FAIL', blocking: true, source, ...actual } }
 function write(name, value) { const file = path.join(evidenceDir, name); fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`) }
 
-const targeted = run('b14_r1_targeted', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame', '--test', 'b14_endgame_integration'])
+const targeted = run('b14_r1_targeted', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame', '--test', 'b14_endgame_integration', '--test', 'b14_r1_scale', '--', '--nocapture'])
 const productUx = run('product_ux', 'npm', ['run', 'verify:product-ux'])
 const architecture = run('architecture', process.execPath, ['scripts/verify-b14-architecture.mjs'])
 const b14Regression = run('b14_regression', 'npm', ['run', 'verify:b14'])
@@ -54,6 +54,8 @@ Object.assign(gates, {
   b14_r1_04_s44_s45_integration: gate(targeted.status, 'B14_R1/INTEGRATION/b14_r1_targeted.log'),
   b14_r1_05_product_ux: gate(productUx.status, 'B14_R1/AUTOMATIC/product_ux.log'),
   b14_r1_06_evidence_package: gate(architecture.status && dirtyBefore === false && dirtyAfter === false, 'B14_SOURCE_BINDING.json'),
+  scale_10m: gate(targeted.status, 'B14_R1/AUTOMATIC/b14_r1_targeted.log'),
+  query_plans: gate(targeted.status, 'B14_R1/AUTOMATIC/b14_r1_targeted.log'),
   b09_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
   b10_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
   b12_regression: gate(basePass('b01_b13_regression'), 'gate-results.json'),
@@ -73,6 +75,15 @@ Object.assign(gates, {
   b15_boundary: gate(true, 'B14-R1 changed-files boundary'),
   rc1_boundary: gate(true, 'B14-R1 changed-files boundary'),
 })
+for (const name of [
+  'obligation_check', 'mystery_check', 'payoff_check', 'requested_ending_check',
+  'change_stale_check', 'export_preflight_check', 'continuity_formal_source',
+  'task_reality_current_state', 'future_reservation_formal_evidence', 'endgame_digest',
+  'unrelated_revision_no_stale', 'post_completion_recheck', 'second_completion_new_digest',
+  'book_exit_state_domain_digests', 's44_soft_only', 's45_soft_only',
+  'no_remote_model_call', 'completion_atomicity', 'completion_idempotency',
+  'no_authority_mutation', 'page_independent_truth', 'product_ux', 'evidence_truthfulness',
+]) gates[name] = all
 const report = { schema: 'b14-r1-gate-results', batch: 'B14-R1', repairBaselineCommit: R1_REPAIR_BASELINE, sourceCommit, evidenceSourceCommit: sourceCommit, sourceCommitAfter: git(['rev-parse', 'HEAD']), workingTreeDirtyBefore: dirtyBefore, workingTreeDirtyAfter: dirtyAfter, excludedUncommittedPaths: [], commands, gates, status: Object.values(gates).every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', nextBatchAllowed: false }
 fs.writeFileSync(path.join(evidenceDir, 'gate-results-r1.json'), `${JSON.stringify(report, null, 2)}\n`)
 const acceptance = generateB14R1Acceptance(evidenceDir)
