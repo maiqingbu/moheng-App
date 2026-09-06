@@ -50,7 +50,10 @@ impl EndgameRepository {
         let mut candidates = Vec::new();
         let mut statement = connection.prepare("SELECT a.artifact_id,COALESCE(c.title,'最终章节') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version LEFT JOIN chapters c ON c.project_id=a.project_id AND c.final_artifact_id=a.artifact_id AND c.final_version=a.version WHERE h.project_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' ORDER BY a.artifact_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"ref":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { candidates.push(row?); }
-        Ok(json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":[],"fulfillmentCandidates":candidates}))
+        let mut hard_payoffs = Vec::new();
+        let mut statement = connection.prepare("SELECT obligation_id,description FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND obligation_type='PAYOFF' AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
+        for row in statement.query_map([project_id], |row| Ok(json!({"key":format!("payoff:{}", row.get::<_,String>(0)?),"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { hard_payoffs.push(row?); }
+        Ok(json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"fulfillmentCandidates":candidates}))
     }
     pub fn latest_head_ref(
         connection: &Connection,

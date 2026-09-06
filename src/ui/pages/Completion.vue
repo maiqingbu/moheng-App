@@ -103,6 +103,7 @@ async function createContract() {
     },
     mysteryMappings: (workflow?.mysteries ?? []).flatMap(item => mappingSelections.value[item.key] ? [{ sourceMysteryId: item.id, mappedResponsibilityRefs: [mappingSelections.value[item.key]], mappingConfirmation: 'USER_CONFIRMED' }] : []),
     reservationMappings: (workflow?.reservations ?? []).flatMap(item => mappingSelections.value[item.key] ? [{ reservationId: item.id, fulfillmentEvidenceRefs: [mappingSelections.value[item.key]], mappingConfirmation: 'USER_CONFIRMED' }] : []),
+    hardPayoffMappings: (workflow?.hardPayoffs ?? []).flatMap(item => mappingSelections.value[item.key] ? [{ payoffId: item.id, fulfillmentEvidenceRefs: [mappingSelections.value[item.key]], fulfilled: true }] : [{ payoffId: item.id, fulfillmentEvidenceRefs: [], fulfilled: false }]),
   }, '终局目标与收束安排已保存，正在重新检查作品状态。')
 }
 
@@ -173,7 +174,8 @@ onMounted(() => { void load() })
         <template v-if="mappingWorkflow">
           <label v-for="item in mappingWorkflow.mysteries" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
           <label v-for="item in mappingWorkflow.reservations" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
-          <p v-if="!mappingWorkflow.mysteries.length && !mappingWorkflow.reservations.length" class="muted" style="margin-top:12px">当前没有需要确认的谜团或未来约束。</p>
+          <label v-for="item in mappingWorkflow.hardPayoffs" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">尚未兑现</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+          <p v-if="!mappingWorkflow.mysteries.length && !mappingWorkflow.reservations.length && !mappingWorkflow.hardPayoffs.length" class="muted" style="margin-top:12px">当前没有需要确认的谜团、未来约束或关键回报。</p>
         </template>
       </section>
 
