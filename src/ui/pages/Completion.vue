@@ -97,12 +97,12 @@ async function createContract() {
       confirmationSource: 'USER_CONFIRMED',
       confirmedAt: new Date().toISOString(),
     },
-  }, '终局目标已提交，正在重新检查正式状态。')
+  }, '终局目标与收束安排已保存，正在重新检查作品状态。')
 }
 
 async function completeBook() {
   if (!completionConfirmed.value || !canComplete.value) return
-  await submit('complete_book', {}, '完结提交已完成，ExitState 与 CompletionReport 已写入。')
+  await submit('complete_book', {}, '当前版本的完结状态与确认报告已经保存。')
 }
 
 async function requestEndgameAdvice() {
@@ -144,10 +144,10 @@ onMounted(() => { void load() })
 
       <section v-if="!status.completed" class="card pad section">
         <h2 class="card-title">第一步：确认用户要求的结局</h2>
-        <p class="card-subtitle">终局合同必须由用户明确确认；未确认时不能进入完结提交。</p>
+        <p class="card-subtitle">终局约束需要由你明确确认；未确认时不能进入完结提交。</p>
         <label class="field-label" style="margin-top:14px">你希望本书如何结束？<textarea v-model="summary" rows="4" placeholder="用一句或几句明确描述结局边界。" /></label>
         <label class="check-line"><input v-model="endingConfirmed" type="checkbox" />我确认以上内容是本次正式完结目标。</label>
-        <button class="btn primary" :disabled="submitting || !endingConfirmed || !summary.trim()" @click="createContract">确认终局目标并创建合同</button>
+        <button class="btn primary" :disabled="submitting || !endingConfirmed || !summary.trim()" @click="createContract">确认终局目标并保存约束</button>
       </section>
 
       <section class="card pad section">
