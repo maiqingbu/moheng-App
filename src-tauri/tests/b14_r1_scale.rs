@@ -18,7 +18,7 @@ fn seed_scale_database(connection: &Connection, project_id: &str) {
         libsql_rusqlite::params![project_id, CHAPTERS, NOW],
     ).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let body: String = std::iter::repeat('长').take(CHARS_PER_CHAPTER).collect();
+    let body = "长".repeat(CHARS_PER_CHAPTER);
     for chapter_no in 1..=CHAPTERS {
         let chapter_id = format!("chapter:r1:scale:{chapter_no:04}");
         let artifact_id = format!("final:r1:scale:{chapter_no:04}");
