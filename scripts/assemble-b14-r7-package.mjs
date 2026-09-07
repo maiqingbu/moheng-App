@@ -106,7 +106,7 @@ copyEvidence()
 
 const checksumName = 'PACKAGE_MANIFEST/FILES_SHA256SUMS.txt'
 const inventoryFiles = allFiles(stageRoot).filter(file => file !== checksumName)
-writeManifest('PACKAGE_INVENTORY.json', { countingRule: 'totalFilesIncludingChecksum and totalFilesExcludingChecksum', totalFilesExcludingChecksum: inventoryFiles.length + 1, totalFilesIncludingChecksum: inventoryFiles.length + 1, status: 'PASS' })
+writeManifest('PACKAGE_INVENTORY.json', { countingRule: 'totalFilesIncludingChecksum and totalFilesExcludingChecksum', totalFilesExcludingChecksum: inventoryFiles.length + 1, totalFilesIncludingChecksum: inventoryFiles.length + 2, status: 'PASS' })
 const checksumEntries = allFiles(stageRoot).filter(file => file !== checksumName)
 fs.writeFileSync(path.join(manifestRoot, 'FILES_SHA256SUMS.txt'), `${checksumEntries.map(file => `${sha(path.join(stageRoot, file))}  ${file}`).join('\n')}\n`)
 fs.mkdirSync(delivery, { recursive: true })
