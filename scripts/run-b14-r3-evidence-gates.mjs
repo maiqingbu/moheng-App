@@ -32,7 +32,8 @@ const gate = (record, extra = {}) => ({ status: record.status, blocking: true, s
 const writeJson = (name, value) => fs.writeFileSync(path.join(evidenceDir, name), `${JSON.stringify(value, null, 2)}\n`)
 const evidence = {}
 function evidenceFile(name, status, details = {}) {
-  const value = { schema: `b14-r3-${name.replaceAll(/[^a-zA-Z0-9]+/g, '-').toLowerCase()}`, sourceCommit, baselineCommit: R3_REPAIR_BASELINE, status, ...details }
+  const normalizedStatus = status === true ? 'PASS' : status === false ? 'FAIL' : status
+  const value = { schema: `b14-r3-${name.replaceAll(/[^a-zA-Z0-9]+/g, '-').toLowerCase()}`, sourceCommit, baselineCommit: R3_REPAIR_BASELINE, status: normalizedStatus, ...details }
   writeJson(name, value)
   evidence[name] = value
 }
