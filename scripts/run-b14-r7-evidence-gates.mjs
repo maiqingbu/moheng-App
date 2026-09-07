@@ -60,6 +60,9 @@ const rustFmt = run('rust_fmt', 'cargo', ['fmt', '--manifest-path', 'src-tauri/C
 const rustCheck = run('rust_check', 'cargo', ['check', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
 const rustClippy = run('rust_clippy', 'cargo', ['clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings'])
 const rustAllTargets = run('rust_all_targets', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
+if (!dirtyBefore) {
+  spawnSync('git', ['restore', '--', 'evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json'], { cwd: root, encoding: 'utf8' })
+}
 
 const paged = marker(targeted.output, 'B14_R7_CONTINUITY_PAGED_SOURCE')
 const hard = marker(targeted.output, 'B14_R7_HARD_CONTINUITY')
