@@ -29,6 +29,32 @@ struct EndgameSkillGateway {
     inputs: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
+struct ExplicitRuntimeGateway {
+    requests: serde_json::Value,
+}
+
+impl ProductionModelGateway for ExplicitRuntimeGateway {
+    fn provider(&self) -> &str {
+        "b14-r5-test-provider"
+    }
+    fn model(&self, _capability: &str) -> String {
+        "b14-r5-test-model".into()
+    }
+    fn invoke(
+        &self,
+        _capability: &str,
+        _input: &serde_json::Value,
+    ) -> Result<ProductionModelResponse, String> {
+        Ok(ProductionModelResponse::deterministic(json!({
+            "kind":"QualityFinding",
+            "status":"OK",
+            "summary":"R5 explicit runtime check",
+            "suggestions":[],
+            "runtimeCheckRequests":self.requests
+        })))
+    }
+}
+
 impl ProductionModelGateway for EndgameSkillGateway {
     fn provider(&self) -> &str {
         "b14-test-provider"
@@ -841,11 +867,15 @@ fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
     insert_obligation(&handle, "obligation:b14:r5:thread", "A", "PROGRESSING");
     drop(handle);
 
-    let blocked_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let blocked_task =
+        query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     let task_result = &blocked_task["runtimeCheckResults"][0]["result"];
     assert_eq!(task_result["status"], "ISSUE_FOUND");
     assert!(task_result["findingCount"].as_i64().unwrap_or(0) >= 1);
-    assert_eq!(task_result["resolvedScope"], "current_endgame_hard_task_reality");
+    assert_eq!(
+        task_result["resolvedScope"],
+        "current_endgame_hard_task_reality"
+    );
 
     let open_thread = query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     let thread_result = &open_thread["runtimeCheckResults"][0]["result"];
@@ -858,11 +888,222 @@ fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
     handle.execute("UPDATE narrative_obligations SET lifecycle='RESOLVED' WHERE project_id='proj-b14' AND obligation_id='obligation:b14:r5:thread'", []).unwrap();
     drop(handle);
 
-    let satisfied_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
-    assert_eq!(satisfied_task["runtimeCheckResults"][0]["result"]["status"], "NO_ISSUE");
-    let resolved_thread = query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
-    assert_eq!(resolved_thread["runtimeCheckResults"][0]["result"]["status"], "NO_ISSUE");
+    let satisfied_task =
+        query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(
+        satisfied_task["runtimeCheckResults"][0]["result"]["status"],
+        "NO_ISSUE"
+    );
+    let resolved_thread =
+        query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(
+        resolved_thread["runtimeCheckResults"][0]["result"]["status"],
+        "NO_ISSUE"
+    );
     println!("B14_R5_RUNTIME_EMPTY_SCOPE|taskPositive=PASS|taskNegative=PASS|threadPositive=PASS|threadNegative=PASS");
+}
+
+#[test]
+fn b14_r5_continuity_101_and_501_are_real_hard_blockers() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    for index in 1..=100 {
+        insert_obligation(
+            &handle,
+            &format!("obligation:r5:{index:03}"),
+            "C",
+            "RESOLVED",
+        );
+    }
+    insert_obligation(&handle, "obligation:r5:101", "A", "PROGRESSING");
+    drop(handle);
+
+    let first_threads = NarrativeRepository::continuity_threads_complete(
+        &state.manager.open("proj-b14", "", NOW).unwrap(),
+        "proj-b14",
+    )
+    .unwrap();
+    let first_hard = first_threads
+        .iter()
+        .filter(|thread| {
+            matches!(thread.authority_level.as_str(), "A" | "B")
+                && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+        })
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(first_hard, vec!["thread:obligation:r5:101"]);
+
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    for index in 102..=500 {
+        insert_obligation(
+            &handle,
+            &format!("obligation:r5:{index:03}"),
+            "C",
+            "RESOLVED",
+        );
+    }
+    insert_obligation(&handle, "obligation:r5:501", "A", "PROGRESSING");
+    drop(handle);
+
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let final_threads =
+        NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+    let final_hard = final_threads
+        .iter()
+        .filter(|thread| {
+            matches!(thread.authority_level.as_str(), "A" | "B")
+                && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+        })
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    assert!(final_hard
+        .iter()
+        .any(|thread| thread == "thread:obligation:r5:101"));
+    assert!(final_hard
+        .iter()
+        .any(|thread| thread == "thread:obligation:r5:501"));
+    assert_eq!(final_threads.len(), 501);
+    println!("B14_R5_CONTINUITY_REAL|sourceIndex101=thread:obligation:r5:101|sourceIndex501=thread:obligation:r5:501|hardBlocker101=true|hardBlocker501=true|completeRows={}", final_threads.len());
+}
+
+#[test]
+fn b14_r5_no_authority_mutation_uses_non_empty_domain_fixtures() {
+    let (state, _root, _inputs) = test_state_with_skill_gateway();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r5','proj-b14','R5人物','PERSON',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r5','proj-b14','entity:r5','状态','{}','book-plan:b14',1,'A',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,created_at,updated_at) VALUES ('knowledge:r5','proj-b14','entity:r5','fact:r5','KNOWS','CHAPTER',?1,?1)", [NOW]).unwrap();
+    insert_obligation(&handle, "obligation:r5:authority", "C", "RESOLVED");
+    handle.execute("INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:r5','proj-b14','R5伏笔','PLANTED','B06',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO reader_desires(desire_id,project_id,desire_type,status,payload_json,created_at,updated_at) VALUES ('desire:r5','proj-b14','谜底','OPEN','{}',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:r5:authority','proj-b14','volume.task.progress',?1,'{}',?2,?2)", libsql_rusqlite::params![json!({"taskId":"task:r5:authority","status":"SATISFIED"}).to_string(), NOW]).unwrap();
+    handle.execute("INSERT INTO change_requests(change_request_id,project_id,change_type,scope,summary,status,impact_seed_json,created_at,updated_at) VALUES ('change:r5','proj-b14','REWRITE','CHAPTER','R5变更','DRAFT','{}',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO retcon_plans(retcon_plan_id,project_id,target_fact_json,reason,fix_type,downstream_impact_json,estimated_cost_cents,status,created_at,updated_at) VALUES ('retcon:r5','proj-b14','{}','R5修订','SUPPLEMENT','{}',0,'DRAFT',?1,?1)", [NOW]).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "volume-plan:r5",
+        "VolumePlan",
+        "VOLUME",
+        r#"{"level":"VOLUME","volumeId":"volume:b14"}"#,
+        &json!({"payloadSchema":"volume-plan.r1","tasks":[]}),
+    );
+    let final_hash = insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "final:r5",
+        "FinalChapter",
+        "CHAPTER",
+        r#"{"level":"CHAPTER","chapterId":"chapter:r5"}"#,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:r5","body":"R5正文"}),
+    );
+    handle.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES ('chapter:r5','proj-b14','volume:b14',1,'R5章','COMMITTED',3,'final:r5',1,?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:r5','proj-b14','fact:r5','chapter:r5','final:r5',1,'CANON',?1)", [NOW]).unwrap();
+
+    let snapshot = |connection: &Connection| {
+        let rows = [
+            ("Canon", "canon_facts", "SELECT fact_id,subject_id,predicate,object_json FROM canon_facts WHERE project_id='proj-b14' ORDER BY fact_id"),
+            ("Knowledge", "canon_knowledge", "SELECT knowledge_id,knower_id,fact_id,epistemic_state FROM canon_knowledge WHERE project_id='proj-b14' ORDER BY knowledge_id"),
+            ("Narrative Obligation", "narrative_obligations", "SELECT obligation_id,authority_level,lifecycle FROM narrative_obligations WHERE project_id='proj-b14' ORDER BY obligation_id"),
+            ("Foreshadow", "foreshadows", "SELECT foreshadow_id,status FROM foreshadows WHERE project_id='proj-b14' ORDER BY foreshadow_id"),
+            ("ReaderDesire", "reader_desires", "SELECT desire_id,status FROM reader_desires WHERE project_id='proj-b14' ORDER BY desire_id"),
+            ("Planning", "volume_plan", "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='proj-b14' AND artifact_type='VolumePlan' ORDER BY artifact_id"),
+            ("Task Reality", "state_deltas", "SELECT state_id,value_json FROM state_deltas WHERE project_id='proj-b14' AND state_type='volume.task.progress' ORDER BY state_id"),
+            ("ChangeRequest", "change_requests", "SELECT change_request_id,status,summary FROM change_requests WHERE project_id='proj-b14' ORDER BY change_request_id"),
+            ("RetconPlan", "retcon_plans", "SELECT retcon_plan_id,status,reason FROM retcon_plans WHERE project_id='proj-b14' ORDER BY retcon_plan_id"),
+            ("FinalChapter", "chapters", "SELECT chapter_id,final_artifact_id,final_version FROM chapters WHERE project_id='proj-b14' AND status='COMMITTED' ORDER BY chapter_no,chapter_id"),
+        ];
+        rows.into_iter().map(|(name, source, sql)| {
+            let mut statement = connection.prepare(sql).unwrap();
+            let values = statement.query_map([], |row| {
+                let mut value = Vec::new();
+                for index in 0..row.as_ref().column_count() { value.push(row.get::<_, String>(index).unwrap_or_default()); }
+                Ok(value)
+            }).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            json!({"name":name,"source":source,"beforeCount":values.len(),"digest":sha256_canonical(&json!(values)).unwrap()})
+        }).collect::<Vec<_>>()
+    };
+    let before = snapshot(&handle);
+    assert!(before
+        .iter()
+        .all(|domain| domain["beforeCount"].as_i64().unwrap_or(0) > 0));
+    let before_digests = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+    drop(handle);
+    query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let after = snapshot(&handle);
+    let after_digests = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap();
+    for (before_domain, after_domain) in before.iter().zip(after.iter()) {
+        assert_eq!(before_domain["beforeCount"], after_domain["beforeCount"]);
+        assert_eq!(before_domain["digest"], after_domain["digest"]);
+    }
+    assert_eq!(before_digests, after_digests);
+    let domains = before.into_iter().zip(after).map(|(before, after)| json!({"name":before["name"],"source":before["source"],"beforeCount":before["beforeCount"],"beforeDigest":before["digest"],"afterCount":after["beforeCount"],"afterDigest":after["digest"],"unchanged":true})).collect::<Vec<_>>();
+    println!(
+        "B14_R5_NO_AUTHORITY_REAL|domains={}",
+        serde_json::to_string(&domains).unwrap()
+    );
+    assert!(!final_hash.is_empty());
+}
+
+#[test]
+fn b14_r5_explicit_runtime_refs_are_scoped_and_cross_project_refs_are_unsupported() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(ExplicitRuntimeGateway {
+            requests: json!([{"kind":"TASK_REALITY","refs":["task:r5:only"]}]),
+        }),
+    );
+    drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "volume-plan:r5:explicit",
+        "VolumePlan",
+        "VOLUME",
+        r#"{"level":"VOLUME","volumeId":"volume:b14"}"#,
+        &json!({"payloadSchema":"volume-plan.r1","tasks":[{"taskId":"task:r5:only","class":"REQUIRED"},{"taskId":"task:r5:other","class":"REQUIRED"}]}),
+    );
+    handle.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:r5:only','proj-b14','volume.task.progress',?1,'{}',?2,?2),('task:r5:other','proj-b14','volume.task.progress',?3,'{}',?2,?2)", libsql_rusqlite::params![json!({"taskId":"task:r5:only","status":"BLOCKED"}).to_string(), NOW, json!({"taskId":"task:r5:other","status":"BLOCKED"}).to_string()]).unwrap();
+    drop(handle);
+    let scoped = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(
+        scoped["runtimeCheckResults"][0]["result"]["status"],
+        "ISSUE_FOUND"
+    );
+    assert_eq!(
+        scoped["runtimeCheckResults"][0]["result"]["sourceRefs"],
+        json!(["task:r5:only"])
+    );
+
+    let invalid_state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().join("invalid")),
+        Arc::new(ExplicitRuntimeGateway {
+            requests: json!([{"kind":"TASK_REALITY","refs":["task:other-project:blocked"]}]),
+        }),
+    );
+    drop(
+        invalid_state
+            .manager
+            .create("proj-b14", "B14", NOW)
+            .unwrap(),
+    );
+    seed_ready_project(&invalid_state);
+    let invalid =
+        query_completion_quality_impl(&invalid_state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(
+        invalid["runtimeCheckResults"][0]["result"]["status"],
+        "UNSUPPORTED"
+    );
+    println!("B14_R5_RUNTIME_EXPLICIT|scopedTask=PASS|otherTaskExcluded=true|crossProjectUnsupported=PASS");
 }
 
 #[test]

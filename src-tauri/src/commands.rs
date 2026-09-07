@@ -1618,19 +1618,16 @@ fn run_b14_runtime_rechecks(
                 || reference.starts_with("final-chapter:")
         });
         if !supported || !refs_valid {
-            results.push(json!({
+            let result = json!({
                 "requestType": request.kind,
                 "requestedRefs": request.refs,
                 "resolvedScope": "unsupported",
                 "status": "UNSUPPORTED",
                 "findingCount": 0,
-                "sourceRefs": [],
-                "kind": request.kind,
-                "status": "UNSUPPORTED",
                 "summary": "其中一项建议暂时无法自动核对。",
-                "source": "B14::DeterministicRuntime",
-                "readOnly": true
-            }));
+                "sourceRefs": []
+            });
+            results.push(json!({"kind":request.kind,"result":result,"source":"B14::DeterministicRuntime","readOnly":true}));
             continue;
         }
         let result = match request.kind.as_str() {
@@ -1653,18 +1650,21 @@ fn run_b14_runtime_rechecks(
                 } else {
                     let mut selected = Vec::new();
                     for reference in &request.refs {
-                        let Some(thread) = threads.iter().find(|thread| thread.thread_id == *reference) else {
-                            return Ok(Value::Array(vec![json!({
+                        let Some(thread) =
+                            threads.iter().find(|thread| thread.thread_id == *reference)
+                        else {
+                            let result = json!({
                                 "requestType": request.kind,
                                 "requestedRefs": request.refs,
                                 "resolvedScope": "unsupported",
                                 "status": "UNSUPPORTED",
                                 "findingCount": 0,
                                 "summary": "指定的连续性记录当前不属于本作品。",
-                                "sourceRefs": [],
-                                "source": "B14::DeterministicRuntime",
-                                "readOnly": true
-                            })]));
+                                "sourceRefs": []
+                            });
+                            return Ok(Value::Array(vec![
+                                json!({"kind":request.kind,"result":result,"source":"B14::DeterministicRuntime","readOnly":true}),
+                            ]));
                         };
                         selected.push(thread);
                     }
@@ -1692,8 +1692,10 @@ fn run_b14_runtime_rechecks(
             }
             "TASK_REALITY" => {
                 let ids = if request.refs.is_empty() {
-                    crate::repositories::endgame::EndgameRepository::current_hard_task_ids(connection, project_id)
-                        .map_err(|error| error.to_string())?
+                    crate::repositories::endgame::EndgameRepository::current_hard_task_ids(
+                        connection, project_id,
+                    )
+                    .map_err(|error| error.to_string())?
                 } else {
                     request.refs.clone()
                 };
@@ -1701,17 +1703,18 @@ fn run_b14_runtime_rechecks(
                 let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(connection, project_id, &ids_ref)
                     .map_err(|error| error.to_string())?;
                 if !request.refs.is_empty() && states.len() != request.refs.len() {
-                    return Ok(Value::Array(vec![json!({
+                    let result = json!({
                         "requestType": request.kind,
                         "requestedRefs": request.refs,
                         "resolvedScope": "unsupported",
                         "status": "UNSUPPORTED",
                         "findingCount": 0,
                         "summary": "指定的正式任务当前不属于本作品。",
-                        "sourceRefs": [],
-                        "source": "B14::DeterministicRuntime",
-                        "readOnly": true
-                    })]));
+                        "sourceRefs": []
+                    });
+                    return Ok(Value::Array(vec![
+                        json!({"kind":request.kind,"result":result,"source":"B14::DeterministicRuntime","readOnly":true}),
+                    ]));
                 }
                 let blocked = states
                     .iter()

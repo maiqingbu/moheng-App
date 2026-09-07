@@ -140,15 +140,33 @@ fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift
         ("QP-MAP-01-reservation-related-evidence", "SELECT a.artifact_id FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='proj-b14-r2-scale' AND a.artifact_type='FinalChapter' AND json_extract(p.payload_json,'$.reservationId')='reservation:b14:r2:scale'"),
         ("QP-MAP-02-payoff-related-evidence", "SELECT a.artifact_id FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='proj-b14-r2-scale' AND a.artifact_type='FinalChapter' AND json_extract(p.payload_json,'$.payoffId')='payoff:b14:r2:scale'"),
     ];
+    let mut has_multi_row_plan = false;
     for (name, sql) in query_plans {
-        let plan: String = connection
-            .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get(3))
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap();
+        let rows = statement
+            .query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "parent": row.get::<_, i64>(1)?,
+                    "notUsed": row.get::<_, i64>(2)?,
+                    "detail": row.get::<_, String>(3)?
+                }))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(!rows.is_empty());
+        let plan = rows[0]["detail"].as_str().unwrap_or_default().to_string();
+        has_multi_row_plan |= rows.len() > 1;
         let sql_digest = sha256_canonical(&json!({"sql":sql})).unwrap();
-        let plan_digest = sha256_canonical(&json!({"plan":plan})).unwrap();
-        println!("B14_R3_QUERY_PLAN|name={name}|sqlDigest={sql_digest}|planDigest={plan_digest}|plan={plan}");
+        let plan_digest = sha256_canonical(&json!({"rows":rows.clone()})).unwrap();
+        println!("B14_R3_QUERY_PLAN|name={name}|sqlDigest={sql_digest}|planDigest={plan_digest}|plan={plan}|rowCount={}|rows={}", rows.len(), serde_json::to_string(&rows).unwrap());
         assert!(!plan.trim().is_empty());
     }
+    assert!(has_multi_row_plan);
+    println!("B14_R5_QUERY_PLANS|allRows=true|hasMultiRowPlan=true|queryCount=15");
     let snapshots = [1, 30, 50].map(|page_size| {
         let request = json!({"projectId":PROJECT_ID,"scope":"completion","pageSize":page_size});
         let start = std::time::Instant::now();
