@@ -9,11 +9,12 @@ const narrative = read('src-tauri/src/repositories/narrative.rs')
 const commands = read('src-tauri/src/commands.rs')
 const skills = read('src-tauri/src/creative_skills.rs')
 const completion = read('src/ui/pages/Completion.vue')
+const hardResponsibilitiesOwner = commands.match(/fn b14_hard_responsibilities[\s\S]*?\n}\n/)?.[0] ?? ''
 const failures = []
 const require = (value, reason) => { if (!value) failures.push(reason) }
 require(/responsibility_satisfied/.test(repository) && /fulfillment_evidence_refs_valid/.test(repository), 'RESPONSIBILITY_DISPOSITION_RELATION_MISSING')
 require(/continuity_threads_complete/.test(narrative) && /active_foreshadows/.test(narrative) && /open_mysteries/.test(narrative) && /recent_evidence/.test(narrative), 'FULL_CONTINUITY_SOURCE_MISSING')
-require(/instance_responsibilities/.test(repository) && /instance_responsibilities/.test(commands) && !/"narrative_obligations"/.test(commands), 'GENERIC_RESPONSIBILITY_REF_REMAINS')
+require(/instance_responsibilities/.test(repository) && /instance_responsibilities/.test(hardResponsibilitiesOwner) && !/"narrative_obligations"/.test(commands), 'GENERIC_RESPONSIBILITY_REF_REMAINS')
 require(/SkillBundleLoader::tracked_package|SkillBundleLoader::tracked_package/.test(commands) || /tracked_package/.test(skills), 'SKILL_BUNDLE_LOADER_MISSING')
 require(/load_selected/.test(commands) && /build_method_guidance/.test(commands) && /build_endgame_skill_task_context/.test(commands) && /ENDGAME_COMPLETION/.test(skills), 'SKILL_GUIDANCE_CONTEXT_MISSING')
 require(/loadedSkillRefs/.test(commands) && /resourceDigests/.test(commands) && /guidanceDigest/.test(commands), 'SKILL_PROVENANCE_MISSING')
