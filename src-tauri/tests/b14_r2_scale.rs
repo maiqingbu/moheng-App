@@ -134,6 +134,11 @@ fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift
         ("QP-08-final-chapter-inventory", "SELECT chapter_id,chapter_no,final_artifact_id,final_version FROM chapters WHERE project_id='proj-b14-r2-scale' ORDER BY chapter_no,chapter_id"),
         ("QP-09-structured-receipt", "SELECT a.artifact_id,r.receipt_id FROM artifacts a JOIN commit_receipts r ON r.project_id=a.project_id AND r.command_id=json_extract(a.provenance_json,'$.commandId') WHERE a.project_id='proj-b14-r2-scale'"),
         ("QP-10-latest-completion", "SELECT artifact_id,version FROM canonical_heads WHERE project_id='proj-b14-r2-scale' AND artifact_type='BookCompletionReport' ORDER BY version DESC LIMIT 1"),
+        ("QP-CONT-02-foreshadows-complete", "SELECT foreshadow_id,intent,status FROM foreshadows WHERE project_id='proj-b14-r2-scale' AND status IN ('PLANTED','REINFORCED','STALE') ORDER BY updated_at DESC,foreshadow_id LIMIT 100 OFFSET 100"),
+        ("QP-CONT-03-mysteries-complete", "SELECT mystery_id,mystery_type,status FROM mystery_states WHERE project_id='proj-b14-r2-scale' AND status IN ('OPEN','PROGRESSING') ORDER BY updated_at DESC,mystery_id LIMIT 100 OFFSET 100"),
+        ("QP-CONT-04-evidence-complete", "SELECT evidence_id,fact_id,final_chapter_id FROM canon_evidence WHERE project_id='proj-b14-r2-scale' ORDER BY created_at DESC,evidence_id LIMIT 100 OFFSET 100"),
+        ("QP-MAP-01-reservation-related-evidence", "SELECT a.artifact_id FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='proj-b14-r2-scale' AND a.artifact_type='FinalChapter' AND json_extract(p.payload_json,'$.reservationId')='reservation:b14:r2:scale'"),
+        ("QP-MAP-02-payoff-related-evidence", "SELECT a.artifact_id FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='proj-b14-r2-scale' AND a.artifact_type='FinalChapter' AND json_extract(p.payload_json,'$.payoffId')='payoff:b14:r2:scale'"),
     ];
     for (name, sql) in query_plans {
         let plan: String = connection
