@@ -121,11 +121,24 @@ impl EndgameRepository {
             matches!(item.get("authorityLevel").and_then(Value::as_str), Some("A" | "B")).then(|| json!({"key":format!("reservation:{id}"),"id":id,"label":item.get("description").and_then(Value::as_str).unwrap_or("未来约束")}))
         }).collect::<Vec<_>>();
         let mut fulfillment_candidates = Vec::new();
-        let mut statement = connection.prepare("SELECT a.artifact_id,COALESCE(c.title,'最终章节') FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version LEFT JOIN chapters c ON c.project_id=a.project_id AND c.final_artifact_id=a.artifact_id AND c.final_version=a.version WHERE h.project_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' ORDER BY a.artifact_id")?;
-        for row in statement.query_map([project_id], |row| {
-            Ok(json!({"ref":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?}))
-        })? {
-            fulfillment_candidates.push(row?);
+        let mut reservation_candidates = Vec::new();
+        for reservation in &reservations {
+            let id = reservation
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let responsibility_ref = if id.starts_with("reservation:") {
+                id.to_owned()
+            } else {
+                format!("reservation:{id}")
+            };
+            let candidates =
+                Self::related_fulfillment_candidates(connection, project_id, &responsibility_ref)?;
+            fulfillment_candidates.extend(candidates.clone());
+            reservation_candidates.push(json!({
+                "responsibilityRef": responsibility_ref,
+                "candidates": candidates
+            }));
         }
         let mut responsibility_candidates = Vec::new();
         let mut statement = connection.prepare(
@@ -153,11 +166,57 @@ impl EndgameRepository {
             responsibility_candidates.push(row?);
         }
         let mut hard_payoffs = Vec::new();
+        let mut hard_payoff_candidates = Vec::new();
         let mut statement = connection.prepare("SELECT obligation_id,description FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND obligation_type='PAYOFF' AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
-        for row in statement.query_map([project_id], |row| Ok(json!({"key":format!("payoff:{}", row.get::<_,String>(0)?),"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? { hard_payoffs.push(row?); }
+        for row in statement.query_map([project_id], |row| Ok(json!({"key":format!("payoff:{}", row.get::<_,String>(0)?),"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? {
+            let payoff = row?;
+            let responsibility_ref = format!(
+                "payoff:{}",
+                payoff.get("id").and_then(Value::as_str).unwrap_or_default()
+            );
+            let candidates = Self::related_fulfillment_candidates(
+                connection,
+                project_id,
+                &responsibility_ref,
+            )?;
+            fulfillment_candidates.extend(candidates.clone());
+            hard_payoff_candidates.push(json!({
+                "responsibilityRef": responsibility_ref,
+                "candidates": candidates
+            }));
+            hard_payoffs.push(payoff);
+        }
+        fulfillment_candidates
+            .sort_by(|left, right| left["ref"].as_str().cmp(&right["ref"].as_str()));
+        fulfillment_candidates.dedup_by(|left, right| left["ref"] == right["ref"]);
         Ok(
-            json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"responsibilityCandidates":responsibility_candidates,"fulfillmentCandidates":fulfillment_candidates}),
+            json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"responsibilityCandidates":responsibility_candidates,"fulfillmentCandidates":fulfillment_candidates,"reservationCandidates":reservation_candidates,"hardPayoffCandidates":hard_payoff_candidates}),
         )
+    }
+
+    fn related_fulfillment_candidates(
+        connection: &Connection,
+        project_id: &str,
+        responsibility_ref: &str,
+    ) -> Result<Vec<Value>, EndgameRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT a.artifact_id, COALESCE(c.title, '最终章节'), COALESCE(v.title, ''), c.chapter_no, COALESCE(json_extract(p.payload_json, '$.evidenceSummary'), json_extract(p.payload_json, '$.summary'), c.title, '正式章节证据') FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version LEFT JOIN chapters c ON c.project_id=a.project_id AND c.final_artifact_id=a.artifact_id AND c.final_version=a.version LEFT JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE a.project_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND (json_extract(p.payload_json, '$.responsibilityRef')=?2 OR json_extract(p.payload_json, '$.payoffId')=?2 OR json_extract(p.payload_json, '$.reservationId')=?2 OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=a.project_id AND ((d.source_ref=?2 AND d.target_ref=a.artifact_id) OR (d.target_ref=?2 AND d.source_ref=a.artifact_id)))) ORDER BY a.artifact_id",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, responsibility_ref],
+            |row| {
+                let chapter_no: Option<i64> = row.get(3)?;
+                Ok(json!({
+                    "ref": row.get::<_, String>(0)?,
+                    "label": row.get::<_, String>(1)?,
+                    "volume": row.get::<_, String>(2)?,
+                    "chapterNo": chapter_no,
+                    "evidenceSummary": row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "正式章节证据".into()),
+                    "relationValidated": true
+                }))
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
     pub fn latest_head_ref(
         connection: &Connection,
@@ -357,19 +416,34 @@ impl EndgameRepository {
             return Ok(false);
         }
         for reference in refs.iter().filter_map(Value::as_str) {
-            let artifact_id = reference
-                .strip_prefix("final-chapter:")
-                .unwrap_or(reference);
-            let current_final: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND (json_extract(p.payload_json,'$.responsibilityRef')=?3 OR json_extract(p.payload_json,'$.payoffId')=?4 OR json_extract(p.payload_json,'$.reservationId')=?5 OR EXISTS(SELECT 1 FROM dependency_edges d WHERE d.project_id=a.project_id AND ((d.source_ref=?3 AND d.target_ref=a.artifact_id) OR (d.target_ref=?3 AND d.source_ref=a.artifact_id)))))",
-                libsql_rusqlite::params![project_id, artifact_id, responsibility_ref, responsibility_ref, responsibility_ref],
-                |row| row.get(0),
-            )?;
-            if !current_final {
+            if !Self::related_fulfillment_evidence_exists(
+                connection,
+                project_id,
+                reference,
+                responsibility_ref,
+            )? {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    fn related_fulfillment_evidence_exists(
+        connection: &Connection,
+        project_id: &str,
+        evidence_ref: &str,
+        responsibility_ref: &str,
+    ) -> Result<bool, EndgameRepositoryError> {
+        let artifact_id = evidence_ref
+            .strip_prefix("final-chapter:")
+            .unwrap_or(evidence_ref);
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM artifacts a JOIN canonical_heads h ON h.project_id=a.project_id AND h.artifact_id=a.artifact_id AND h.version=a.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' AND (json_extract(p.payload_json,'$.responsibilityRef')=?3 OR json_extract(p.payload_json,'$.payoffId')=?3 OR json_extract(p.payload_json,'$.reservationId')=?3 OR EXISTS(SELECT 1 FROM dependency_edges d WHERE d.project_id=a.project_id AND ((d.source_ref=?3 AND d.target_ref=a.artifact_id) OR (d.target_ref=?3 AND d.source_ref=a.artifact_id)))))",
+                libsql_rusqlite::params![project_id, artifact_id, responsibility_ref],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     fn mystery_count(
@@ -483,13 +557,22 @@ impl EndgameRepository {
                     .iter()
                     .find(|item| item.get("reservationId").and_then(Value::as_str) == Some(source))
             });
+            let responsibility_ref = id
+                .map(|value| {
+                    if value.starts_with("reservation:") {
+                        value.to_owned()
+                    } else {
+                        format!("reservation:{value}")
+                    }
+                })
+                .unwrap_or_else(|| "reservation:".into());
             let valid = mapping.is_some_and(|item| {
                 item.get("mappingConfirmation").and_then(Value::as_str) == Some("USER_CONFIRMED")
             }) && Self::fulfillment_evidence_refs_valid(
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("fulfillmentEvidenceRefs")),
-                &format!("reservation:{}", id.unwrap_or_default()),
+                &responsibility_ref,
             )?;
             if !valid {
                 count += 1;

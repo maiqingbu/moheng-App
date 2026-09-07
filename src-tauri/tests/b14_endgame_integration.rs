@@ -47,7 +47,7 @@ impl ProductionModelGateway for EndgameSkillGateway {
             "status":"OK",
             "summary":"测试 Skill Runtime 的软性建议。",
             "suggestions":["仅供作者参考，不改变正式完结结论。"],
-            "runtimeCheckRequests":[]
+            "runtimeCheckRequests":[{"kind":if capability == "B14_S45_COMPLETION_QUALITY" {"TASK_REALITY"} else {"THREAD_STATE"},"refs":[]}]
         })))
     }
 }
@@ -606,6 +606,50 @@ fn b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff() {
 }
 
 #[test]
+fn b14_r4_mapping_candidates_are_relation_scoped_before_ui() {
+    let (state, _root) = test_state();
+    seed_ready_project_with_plan(
+        &state,
+        json!({
+            "payloadSchema":"book-plan.r1",
+            "majorMysteryGoals":[],
+            "futureReservations":[{"reservationId":"reservation:b14:r4","description":"R4未来约束","authorityLevel":"A"}]
+        }),
+    );
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "final:b14:r4:related",
+        "FinalChapter",
+        "CHAPTER",
+        r#"{"level":"CHAPTER","chapterId":"chapter:b14:r4:related"}"#,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:b14:r4:related","reservationId":"reservation:b14:r4","evidenceSummary":"关联正式依据"}),
+    );
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "final:b14:r4:unrelated",
+        "FinalChapter",
+        "CHAPTER",
+        r#"{"level":"CHAPTER","chapterId":"chapter:b14:r4:unrelated"}"#,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:b14:r4:unrelated","evidenceSummary":"无关章节"}),
+    );
+    handle.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES ('chapter:b14:r4:related','proj-b14','volume:b14',1,'关联章','COMMITTED',3,'final:b14:r4:related',1,?1,?1),('chapter:b14:r4:unrelated','proj-b14','volume:b14',2,'无关章','COMMITTED',3,'final:b14:r4:unrelated',1,?1,?1)", [NOW]).unwrap();
+    let workflow = EndgameRepository::mapping_workflow(&handle, "proj-b14").unwrap();
+    let candidates = workflow["reservationCandidates"][0]["candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["ref"], "final:b14:r4:related");
+    assert!(!workflow["fulfillmentCandidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["ref"] == "final:b14:r4:unrelated"));
+}
+
+#[test]
 fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
     let (state, _root) = test_state();
     seed_ready_project(&state);
@@ -695,8 +739,18 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
     let quality = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     assert_eq!(advice["softOnly"], true);
     assert_eq!(quality["softOnly"], true);
-    assert_eq!(advice["runtimeCheckRequests"], json!([]));
-    assert_eq!(quality["runtimeCheckRequests"], json!([]));
+    assert_eq!(advice["runtimeCheckRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(quality["runtimeCheckRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(advice["runtimeCheckResults"].as_array().unwrap().len(), 1);
+    assert_eq!(quality["runtimeCheckResults"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        advice["runtimeCheckResults"][0]["source"],
+        "B14::DeterministicRuntime"
+    );
+    assert_eq!(
+        quality["runtimeCheckResults"][0]["source"],
+        "B14::DeterministicRuntime"
+    );
 
     let after = state.manager.open("proj-b14", "", NOW).unwrap();
     let after_runs: i64 = after

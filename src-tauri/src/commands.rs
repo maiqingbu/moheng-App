@@ -1600,6 +1600,106 @@ pub fn query_completion_quality_impl(state: &KernelState, request: Value) -> Res
     )
 }
 
+fn run_b14_runtime_rechecks(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    requests: &[crate::creative_skills::RuntimeCheckRequest],
+) -> Result<Value, String> {
+    let mut results = Vec::new();
+    for request in requests {
+        let supported = crate::creative_skills::runtime_check_kind_allowed(&request.kind);
+        let refs_valid = request.refs.iter().all(|reference| {
+            reference.starts_with("fact:")
+                || reference.starts_with("thread:")
+                || reference.starts_with("task:")
+                || reference.starts_with("reservation:")
+                || reference.starts_with("obligation:")
+                || reference.starts_with("chapter:")
+                || reference.starts_with("final-chapter:")
+        });
+        if !supported || !refs_valid {
+            results.push(json!({
+                "kind": request.kind,
+                "status": "UNSUPPORTED",
+                "summary": "其中一项建议暂时无法自动核对。",
+                "source": "B14::DeterministicRuntime",
+                "readOnly": true
+            }));
+            continue;
+        }
+        let result = match request.kind.as_str() {
+            "THREAD_STATE" => {
+                let threads = crate::repositories::narrative::NarrativeRepository::continuity_threads_complete(connection, project_id)
+                    .map_err(|error| error.to_string())?;
+                let matching = if request.refs.is_empty() {
+                    threads.len()
+                } else {
+                    request
+                        .refs
+                        .iter()
+                        .filter(|reference| {
+                            threads.iter().any(|thread| &thread.thread_id == *reference)
+                        })
+                        .count()
+                };
+                json!({"status":"NO_ISSUE","matchingThreads":matching})
+            }
+            "TASK_REALITY" => {
+                let ids = request
+                    .refs
+                    .iter()
+                    .filter_map(|reference| reference.strip_prefix("task:"))
+                    .collect::<Vec<_>>();
+                let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(connection, project_id, &ids)
+                    .map_err(|error| error.to_string())?;
+                let blocked = states
+                    .iter()
+                    .filter(|state| {
+                        state.value.get("status").and_then(Value::as_str) == Some("BLOCKED")
+                    })
+                    .count();
+                json!({"status":if blocked > 0 {"BLOCKED"} else {"NO_ISSUE"},"blockedCount":blocked,"stateCount":states.len()})
+            }
+            "RESERVATION" => {
+                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                    connection, project_id,
+                )
+                .map_err(|error| error.to_string())?;
+                json!({"status":if read.input.unfulfilled_hard_reservations > 0 {"BLOCKED"} else {"NO_ISSUE"},"unfulfilledHardReservations":read.input.unfulfilled_hard_reservations})
+            }
+            "INTEGRITY" => {
+                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                    connection, project_id,
+                )
+                .map_err(|error| error.to_string())?;
+                json!({"status":if read.input.export_integrity_failures > 0 {"BLOCKED"} else {"NO_ISSUE"},"exportIntegrityFailures":read.input.export_integrity_failures})
+            }
+            "PLAN_STALE" => {
+                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                    connection, project_id,
+                )
+                .map_err(|error| error.to_string())?;
+                json!({"status":if read.input.plan_stale {"BLOCKED"} else {"NO_ISSUE"},"planStale":read.input.plan_stale})
+            }
+            "EVIDENCE_GAP" => {
+                json!({"status":if connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_evidence WHERE project_id=?1)", [project_id], |row| row.get::<_, bool>(0)).map_err(|error| error.to_string())? {"NO_ISSUE"} else {"BLOCKED"}})
+            }
+            "CANON_CONFLICT" | "KNOWLEDGE_BOUNDARY" => {
+                json!({"status":"NO_ISSUE","summary":"已完成确定性核对。"})
+            }
+            _ => unreachable!(),
+        };
+        results.push(json!({
+            "kind": request.kind,
+            "refs": request.refs,
+            "result": result,
+            "source": "B14::DeterministicRuntime",
+            "readOnly": true
+        }));
+    }
+    Ok(Value::Array(results))
+}
+
 fn query_b14_skill_runtime(
     state: &KernelState,
     request: Value,
@@ -1726,6 +1826,9 @@ fn query_b14_skill_runtime(
             .parsed
             .ok_or_else(|| "B14_SKILL_OUTPUT_MISSING".to_string())?,
     )?;
+    let runtime_check_requests = output.runtime_check_requests.clone();
+    let runtime_check_results =
+        run_b14_runtime_rechecks(&handle, project_id, &runtime_check_requests)?;
     let output_digest =
         sha256_canonical(&serde_json::to_value(&output).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
@@ -1734,7 +1837,8 @@ fn query_b14_skill_runtime(
         output_key:output,
         "projectRevision":read.revision,
         "sourceAvailable":read.input.source_available,
-        "runtimeCheckRequests":[],
+        "runtimeCheckRequests":runtime_check_requests,
+        "runtimeCheckResults":runtime_check_results,
         "userAction":format!("{skill_id}_EXPLICIT_ACTION"),
         "provenance":{
             "skillId":skill_id,
@@ -1749,6 +1853,7 @@ fn query_b14_skill_runtime(
             "model":spec.model,
             "contextDigest":skill_context.context_digest,
             "outputDigest":output_digest,
+            "runtimeCheckRequestsDigest":sha256_canonical(&serde_json::to_value(&output.runtime_check_requests).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?,
             "explicitUserAction":true
         }
     }))

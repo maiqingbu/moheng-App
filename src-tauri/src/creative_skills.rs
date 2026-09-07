@@ -59,6 +59,10 @@ const RUNTIME_CHECK_KINDS: &[&str] = &[
     "EVIDENCE_GAP",
 ];
 
+pub fn runtime_check_kind_allowed(kind: &str) -> bool {
+    RUNTIME_CHECK_KINDS.contains(&kind)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillMetadata {
@@ -682,9 +686,6 @@ pub fn normalize_skill_output(raw: Value) -> Result<NormalizedSkillOutput, Strin
                 .get("kind")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "SKILL_RUNTIME_CHECK_KIND_INVALID".to_string())?;
-            if !RUNTIME_CHECK_KINDS.contains(&item_kind) {
-                return Err("SKILL_RUNTIME_CHECK_KIND_INVALID".into());
-            }
             Ok(RuntimeCheckRequest {
                 kind: item_kind.into(),
                 detail: item
