@@ -1682,7 +1682,9 @@ fn run_b14_runtime_rechecks(
                 json!({"status":if read.input.plan_stale {"BLOCKED"} else {"NO_ISSUE"},"planStale":read.input.plan_stale})
             }
             "EVIDENCE_GAP" => {
-                json!({"status":if connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_evidence WHERE project_id=?1)", [project_id], |row| row.get::<_, bool>(0)).map_err(|error| error.to_string())? {"NO_ISSUE"} else {"BLOCKED"}})
+                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(connection, project_id)
+                    .map_err(|error| error.to_string())?;
+                json!({"status":if read.input.source_available {"NO_ISSUE"} else {"BLOCKED"},"sourceAvailable":read.input.source_available})
             }
             "CANON_CONFLICT" | "KNOWLEDGE_BOUNDARY" => {
                 json!({"status":"NO_ISSUE","summary":"已完成确定性核对。"})
