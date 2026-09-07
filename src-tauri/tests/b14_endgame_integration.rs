@@ -1107,6 +1107,102 @@ fn b14_r5_explicit_runtime_refs_are_scoped_and_cross_project_refs_are_unsupporte
 }
 
 #[test]
+fn b14_r6_paged_foreshadow_and_mystery_sources_create_real_hard_blockers() {
+    let run_case = |source_class: &str, ordinal: usize| -> serde_json::Value {
+        let (state, _root) = test_state();
+        seed_ready_project(&state);
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        if source_class == "Foreshadow" {
+            for index in 1..=ordinal {
+                handle.execute(
+                    "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES (?1,'proj-b14',?2,'PLANTED','B06',?3,?3)",
+                    libsql_rusqlite::params![format!("foreshadow:r6:{index:03}"), format!("R6伏笔 {index}"), NOW],
+                ).unwrap();
+            }
+        } else {
+            for index in 1..=ordinal {
+                handle.execute(
+                    "INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES (?1,'proj-b14','R6谜团','OPEN',?2,?2)",
+                    libsql_rusqlite::params![format!("mystery:r6:{index:03}"), NOW],
+                ).unwrap();
+            }
+        }
+        let source_ref = format!("{}:r6:{ordinal:03}", source_class.to_lowercase());
+        handle.execute(
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_event_id,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','R6_PAGED_SOURCE','A',?2,'book-plan:b14',1,'分页来源产生的硬连续性责任',?3,'PROGRESSING',?4,?4)",
+            libsql_rusqlite::params![format!("obligation:r6:{source_class}:{ordinal:03}"), source_ref, json!({"kind":"AFTER_CHAPTER","value":0}).to_string(), NOW],
+        ).unwrap();
+        drop(handle);
+        execute_command_impl(&state, json!({
+            "type":"endgame_contract_create","projectId":"proj-b14","commandId":format!("r6-contract-{source_class}-{ordinal}"),"idempotencyKey":format!("r6-contract-{source_class}-{ordinal}:key"),"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"requestedEnding":{"summary":"R6 分页来源验证","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+        })).unwrap();
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let threads = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+        let thread = threads.iter().find(|thread| thread.thread_id == format!("thread:obligation:r6:{source_class}:{ordinal:03}")).unwrap();
+        let read_count = if source_class == "Foreshadow" {
+            NarrativeRepository::active_foreshadows_complete(&handle, "proj-b14").unwrap().len()
+        } else {
+            NarrativeRepository::open_mysteries_complete(&handle, "proj-b14").unwrap().len()
+        };
+        let page_size_results = [1, 30, 50].into_iter().map(|page_size| {
+            let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14","pageSize":page_size})).unwrap();
+            let payoff = result["checks"].as_array().unwrap().iter().find(|item| item["kind"] == "PAYOFF").unwrap();
+            json!({"pageSize":page_size,"status":result["status"],"continuityBlockerCount":payoff["blockerCount"]})
+        }).collect::<Vec<_>>();
+        assert!(page_size_results.iter().all(|item| item["status"] == "BLOCKED"));
+        assert!(page_size_results.iter().all(|item| item["continuityBlockerCount"].as_i64().unwrap_or(0) >= 1));
+        assert_eq!(read_count, ordinal);
+        assert_eq!(thread.authority_level, "A");
+        assert!(matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED"));
+        json!({"sourceClass":format!("{source_class}-derived"),"sourceOrdinal":ordinal,"sourceRef":thread.source_event_ref,"threadRef":thread.thread_id,"authorityLevel":thread.authority_level,"logicalStatus":thread.logical_status,"blockerDetected":true,"readCount":read_count,"blockerCount":page_size_results[0]["continuityBlockerCount"],"completionStatus":page_size_results[0]["status"],"pageSizeResults":page_size_results})
+    };
+    let case101 = run_case("Foreshadow", 101);
+    let case501 = run_case("Mystery", 501);
+    assert_eq!(case101["sourceOrdinal"], 101);
+    assert_eq!(case501["sourceOrdinal"], 501);
+    println!("B14_R6_CONTINUITY_PAGED_BOUNDARY|{}", serde_json::to_string(&json!({"case101":case101,"case501":case501})).unwrap());
+}
+
+#[test]
+fn b14_r6_continuity_domain_is_non_empty_and_unchanged_after_read_and_completion() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    const R6_CONTINUITY_DOMAIN_SEED: bool = true;
+    if R6_CONTINUITY_DOMAIN_SEED {
+        insert_obligation(&handle, "obligation:r6:continuity-domain", "C", "RESOLVED");
+    }
+    drop(handle);
+    execute_command_impl(&state, json!({
+        "type":"endgame_contract_create","projectId":"proj-b14","commandId":"r6-continuity-domain-contract","idempotencyKey":"r6-continuity-domain-contract:key","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"requestedEnding":{"summary":"R6 Continuity domain","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+    })).unwrap();
+    let before = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let rows = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+        let digest = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap()["continuityDigest"].clone();
+        json!({"name":"Continuity","source":"NarrativeRepository::continuity_threads_complete","beforeCount":rows.len(),"beforeDigest":digest})
+    };
+    assert!(before["beforeCount"].as_i64().unwrap_or(0) > 0, "REQUIRED_AUTHORITY_DOMAIN_EMPTY");
+    query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let completion = execute_command_impl(&state, json!({
+        "type":"complete_book","projectId":"proj-b14","commandId":"r6-continuity-domain-complete","idempotencyKey":"r6-continuity-domain-complete:key","expectedRevision":1,"requestedAt":NOW,"payload":{}
+    })).unwrap();
+    assert_eq!(completion["finalStatus"], "committed");
+    let after = {
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let rows = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+        let digest = EndgameRepository::domain_digests(&handle, "proj-b14").unwrap()["continuityDigest"].clone();
+        json!({"afterCount":rows.len(),"afterDigest":digest})
+    };
+    assert_eq!(before["beforeCount"], after["afterCount"]);
+    assert_eq!(before["beforeDigest"], after["afterDigest"]);
+    println!("B14_R6_CONTINUITY_DOMAIN|{}", serde_json::to_string(&json!({"before":before,"after":after,"unchanged":true})).unwrap());
+}
+
+#[test]
 fn b14_status_and_soft_queries_do_not_mutate_authority() {
     let (state, _root, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
