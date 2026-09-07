@@ -124,6 +124,47 @@ fn insert_committed_artifact(
     hash
 }
 
+fn insert_committed_artifact_with_command(
+    connection: &Connection,
+    project_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    scope_level: &str,
+    scope_key: &str,
+    payload: &serde_json::Value,
+    command_id: &str,
+) -> String {
+    let hash = sha256_canonical(payload).unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','C',?6,?7,?8,?8)",
+            libsql_rusqlite::params![
+                artifact_id,
+                project_id,
+                artifact_type,
+                scope_level,
+                scope_key,
+                hash,
+                json!({"commandId":command_id}).to_string(),
+                NOW
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![artifact_id, payload.to_string(), hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
+            libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key, artifact_id, hash],
+        )
+        .unwrap();
+    hash
+}
+
 fn seed_ready_project_with_plan(state: &KernelState, book_plan: serde_json::Value) {
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     let project_scope = r#"{"level":"PROJECT"}"#;
@@ -189,6 +230,117 @@ fn insert_obligation(
             ],
         )
         .unwrap();
+}
+
+fn r7_domain_snapshot(connection: &Connection) -> Vec<serde_json::Value> {
+    let rows = [
+        (
+            "Canon",
+            "canon_facts",
+            "SELECT fact_id,subject_id,predicate,object_json FROM canon_facts WHERE project_id='proj-b14' ORDER BY fact_id",
+        ),
+        (
+            "Knowledge",
+            "canon_knowledge",
+            "SELECT knowledge_id,knower_id,fact_id,epistemic_state FROM canon_knowledge WHERE project_id='proj-b14' ORDER BY knowledge_id",
+        ),
+        (
+            "Narrative Obligation",
+            "narrative_obligations",
+            "SELECT obligation_id,authority_level,lifecycle FROM narrative_obligations WHERE project_id='proj-b14' ORDER BY obligation_id",
+        ),
+        (
+            "Foreshadow",
+            "foreshadows",
+            "SELECT foreshadow_id,status FROM foreshadows WHERE project_id='proj-b14' ORDER BY foreshadow_id",
+        ),
+        (
+            "ReaderDesire",
+            "reader_desires",
+            "SELECT desire_id,status FROM reader_desires WHERE project_id='proj-b14' ORDER BY desire_id",
+        ),
+        (
+            "Planning",
+            "volume_plan",
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='proj-b14' AND artifact_type='VolumePlan' ORDER BY artifact_id",
+        ),
+        (
+            "Task Reality",
+            "state_deltas",
+            "SELECT state_id,value_json FROM state_deltas WHERE project_id='proj-b14' AND state_type='volume.task.progress' ORDER BY state_id",
+        ),
+        (
+            "ChangeRequest",
+            "change_requests",
+            "SELECT change_request_id,status,summary FROM change_requests WHERE project_id='proj-b14' ORDER BY change_request_id",
+        ),
+        (
+            "RetconPlan",
+            "retcon_plans",
+            "SELECT retcon_plan_id,status,reason FROM retcon_plans WHERE project_id='proj-b14' ORDER BY retcon_plan_id",
+        ),
+        (
+            "FinalChapter",
+            "chapters",
+            "SELECT chapter_id,final_artifact_id,final_version FROM chapters WHERE project_id='proj-b14' AND status='COMMITTED' ORDER BY chapter_no,chapter_id",
+        ),
+    ];
+    let mut domains = rows
+        .into_iter()
+        .map(|(name, source, sql)| {
+            let mut statement = connection.prepare(sql).unwrap();
+            let values = statement
+                .query_map([], |row| {
+                    let mut value = Vec::new();
+                    for index in 0..row.as_ref().column_count() {
+                        value.push(row.get::<_, String>(index).unwrap_or_default());
+                    }
+                    Ok(value)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            json!({
+                "name": name,
+                "source": source,
+                "count": values.len(),
+                "digest": sha256_canonical(&json!(values)).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let continuity =
+        NarrativeRepository::continuity_threads_complete(connection, "proj-b14").unwrap();
+    domains.insert(
+        5,
+        json!({
+            "name": "Continuity",
+            "source": "NarrativeRepository::continuity_threads_complete",
+            "count": continuity.len(),
+            "digest": sha256_canonical(&serde_json::to_value(&continuity).unwrap()).unwrap()
+        }),
+    );
+    domains
+}
+
+fn assert_r7_domains_unchanged(
+    before: &[serde_json::Value],
+    after: &[serde_json::Value],
+    phase: &str,
+) {
+    assert_eq!(before.len(), 11, "R7 expected 11 domains before {phase}");
+    assert_eq!(after.len(), 11, "R7 expected 11 domains after {phase}");
+    for (before_domain, after_domain) in before.iter().zip(after) {
+        assert_eq!(
+            before_domain["count"], after_domain["count"],
+            "R7 {phase} count changed for {}",
+            before_domain["name"]
+        );
+        assert_eq!(
+            before_domain["digest"], after_domain["digest"],
+            "R7 {phase} digest changed for {}",
+            before_domain["name"]
+        );
+    }
 }
 
 #[test]
@@ -1391,4 +1543,281 @@ fn b14_domain_digests_use_independent_authoritative_sources() {
     };
     assert_ne!(before["continuityDigest"], after["continuityDigest"]);
     assert_eq!(before["obligationDigest"], after["obligationDigest"]);
+}
+
+#[test]
+fn b14_r7_paged_sources_enter_continuity_and_change_digest() {
+    let run_case = |source_class: &str, ordinal: usize| -> serde_json::Value {
+        let (state, _root) = test_state();
+        seed_ready_project(&state);
+        let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+        let source_id = format!("{}:r7:{ordinal:03}", source_class.to_lowercase());
+        if source_class == "Foreshadow" {
+            for index in 1..=ordinal {
+                handle
+                    .execute(
+                        "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES (?1,'proj-b14',?2,'PLANTED','B06',?3,?3)",
+                        libsql_rusqlite::params![
+                            format!("foreshadow:r7:{index:03}"),
+                            format!("R7伏笔 {index}"),
+                            NOW
+                        ],
+                    )
+                    .unwrap();
+            }
+        } else {
+            for index in 1..=ordinal {
+                handle
+                    .execute(
+                        "INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES (?1,'proj-b14','R7谜团','OPEN',?2,?2)",
+                        libsql_rusqlite::params![format!("mystery:r7:{index:03}"), NOW],
+                    )
+                    .unwrap();
+            }
+        }
+        drop(handle);
+
+        let before = state.manager.open("proj-b14", "", NOW).unwrap();
+        let complete_read_count = if source_class == "Foreshadow" {
+            NarrativeRepository::active_foreshadows_complete(&before, "proj-b14")
+                .unwrap()
+                .len()
+        } else {
+            NarrativeRepository::open_mysteries_complete(&before, "proj-b14")
+                .unwrap()
+                .len()
+        };
+        let before_threads =
+            NarrativeRepository::continuity_threads_complete(&before, "proj-b14").unwrap();
+        let before_thread = before_threads
+            .iter()
+            .find(|thread| thread.thread_id == format!("thread:{source_id}"))
+            .unwrap();
+        let source_ref = before_thread
+            .source_refs
+            .first()
+            .map(|source| source.ref_.clone())
+            .unwrap();
+        let continuity_digest_with_source = EndgameRepository::domain_digests(&before, "proj-b14")
+            .unwrap()["continuityDigest"]
+            .clone();
+        assert_eq!(complete_read_count, ordinal);
+        assert_eq!(source_ref, source_id);
+        assert_eq!(before_thread.authority_level, "C");
+        assert_eq!(before_thread.logical_status, "OPEN");
+        assert!(
+            before_threads
+                .iter()
+                .any(|thread| thread.thread_id == format!("thread:{source_id}")),
+            "PAGED_SOURCE_{ordinal}_MISSING_FROM_CONTINUITY"
+        );
+        drop(before);
+
+        let after = state.manager.open("proj-b14", "", NOW).unwrap();
+        if source_class == "Foreshadow" {
+            after
+                .execute(
+                    "UPDATE foreshadows SET status='RECOVERED' WHERE project_id='proj-b14' AND foreshadow_id=?1",
+                    [source_id.as_str()],
+                )
+                .unwrap();
+        } else {
+            after
+                .execute(
+                    "UPDATE mystery_states SET status='RESOLVED' WHERE project_id='proj-b14' AND mystery_id=?1",
+                    [source_id.as_str()],
+                )
+                .unwrap();
+        }
+        let after_threads =
+            NarrativeRepository::continuity_threads_complete(&after, "proj-b14").unwrap();
+        let continuity_digest_without_source =
+            EndgameRepository::domain_digests(&after, "proj-b14").unwrap()["continuityDigest"]
+                .clone();
+        let present_after_removal = after_threads
+            .iter()
+            .any(|thread| thread.thread_id == format!("thread:{source_id}"));
+        assert!(!present_after_removal);
+        assert_ne!(
+            continuity_digest_with_source, continuity_digest_without_source,
+            "PAGED_SOURCE_{ordinal}_DID_NOT_CHANGE_CONTINUITY_DIGEST"
+        );
+        json!({
+            "sourceClass": source_class,
+            "sourceOrdinal": ordinal,
+            "sourceRef": source_ref,
+            "threadRef": before_thread.thread_id,
+            "threadAuthority": before_thread.authority_level,
+            "threadStatus": before_thread.logical_status,
+            "completeReadCount": complete_read_count,
+            "projectionThreadCount": before_threads.len(),
+            "presentInProjection": true,
+            "continuityDigestWithSource": continuity_digest_with_source,
+            "continuityDigestWithoutSource": continuity_digest_without_source,
+            "digestChanges": true,
+            "presentAfterSourceRemoval": present_after_removal,
+            "status": "PASS"
+        })
+    };
+
+    let case101 = run_case("Foreshadow", 101);
+    let case501 = run_case("Mystery", 501);
+    assert_eq!(case101["sourceOrdinal"], 101);
+    assert_eq!(case501["sourceOrdinal"], 501);
+    println!(
+        "B14_R7_CONTINUITY_PAGED_SOURCE|{}",
+        serde_json::to_string(&json!({"case101":case101,"case501":case501})).unwrap()
+    );
+}
+
+#[test]
+fn b14_r7_hard_continuity_responsibility_blocks_completion_independently() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_obligation(&handle, "obligation:r7:hard", "A", "PROGRESSING");
+    drop(handle);
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create",
+            "projectId":"proj-b14",
+            "commandId":"r7-hard-contract",
+            "idempotencyKey":"r7-hard-contract:key",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"requestedEnding":{"summary":"R7 HARD responsibility","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+        }),
+    )
+    .unwrap();
+    let status = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let thread = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14")
+        .unwrap()
+        .into_iter()
+        .find(|thread| thread.thread_id == "thread:obligation:r7:hard")
+        .unwrap();
+    assert_eq!(status["status"], "BLOCKED");
+    assert_eq!(thread.authority_level, "A");
+    assert!(matches!(
+        thread.logical_status.as_str(),
+        "OPEN" | "SUSPENDED"
+    ));
+    println!(
+        "B14_R7_HARD_CONTINUITY|{}",
+        serde_json::to_string(&json!({
+            "hardResponsibilityRef":"obligation:r7:hard",
+            "threadRef":thread.thread_id,
+            "authority":thread.authority_level,
+            "status":thread.logical_status,
+            "completionBlocked":status["status"] == "BLOCKED"
+        }))
+        .unwrap()
+    );
+}
+
+#[test]
+fn b14_r7_one_fixture_keeps_all_11_domains_unchanged_across_queries_and_completion() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r7','proj-b14','R7人物','PERSON',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,authority_level,created_at,updated_at) VALUES ('fact:r7','proj-b14','entity:r7','状态','{}','book-plan:b14',1,'A',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,created_at,updated_at) VALUES ('knowledge:r7','proj-b14','entity:r7','fact:r7','KNOWS','CHAPTER',?1,?1)", [NOW]).unwrap();
+    insert_obligation(&handle, "obligation:r7:resolved", "C", "RESOLVED");
+    handle.execute("INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:r7:resolved','proj-b14','R7伏笔','RECOVERED','B06',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO reader_desires(desire_id,project_id,desire_type,status,payload_json,created_at,updated_at) VALUES ('desire:r7','proj-b14','谜底','PAID','{}',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:r7','proj-b14','volume.task.progress',?1,'{}',?2,?2)", libsql_rusqlite::params![json!({"taskId":"task:r7","status":"SATISFIED"}).to_string(), NOW]).unwrap();
+    handle.execute("INSERT INTO change_requests(change_request_id,project_id,change_type,scope,summary,status,impact_seed_json,created_at,updated_at) VALUES ('change:r7','proj-b14','REWRITE','CHAPTER','R7变更','APPLIED','{}',?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO retcon_plans(retcon_plan_id,project_id,target_fact_json,reason,fix_type,downstream_impact_json,estimated_cost_cents,status,created_at,updated_at) VALUES ('retcon:r7','proj-b14','{}','R7修订','SUPPLEMENT','{}',0,'APPLIED',?1,?1)", [NOW]).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "volume-plan:r7",
+        "VolumePlan",
+        "VOLUME",
+        r#"{"level":"VOLUME","volumeId":"volume:b14"}"#,
+        &json!({"payloadSchema":"volume-plan.r1","tasks":[]}),
+    );
+    insert_committed_artifact_with_command(
+        &handle,
+        "proj-b14",
+        "final:r7",
+        "FinalChapter",
+        "CHAPTER",
+        r#"{"level":"CHAPTER","chapterId":"chapter:r7"}"#,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:r7","body":"R7正文"}),
+        "r7-final-command",
+    );
+    handle.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES ('chapter:r7','proj-b14','volume:b14',1,'R7章','COMMITTED',3,'final:r7',1,?1,?1)", [NOW]).unwrap();
+    handle.execute("INSERT INTO commands(project_id,command_id,idempotency_key,request_digest,status,created_at) VALUES ('proj-b14','r7-final-command','r7-final-command:key',?1,'COMMITTED',?2)", libsql_rusqlite::params!["a".repeat(64), NOW]).unwrap();
+    handle.execute("INSERT INTO commit_receipts(receipt_id,project_id,commit_id,command_id,idempotency_key,before_revision,after_revision,bundle_digest,receipt_json,receipt_digest,committed_at) VALUES ('receipt:r7:final','proj-b14','commit:r7:final','r7-final-command','r7-final-command:key',0,1,?1,'{}',?2,?3)", libsql_rusqlite::params!["a".repeat(64), "b".repeat(64), NOW]).unwrap();
+    handle.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,created_at) VALUES ('evidence:r7','proj-b14','fact:r7','chapter:r7','final:r7',1,'CANON',?1)", [NOW]).unwrap();
+    drop(handle);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create",
+            "projectId":"proj-b14",
+            "commandId":"r7-no-authority-contract",
+            "idempotencyKey":"r7-no-authority-contract:key",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"requestedEnding":{"summary":"R7 no-authority fixture","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+        }),
+    )
+    .unwrap();
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let before = r7_domain_snapshot(&handle);
+    assert_eq!(before.len(), 11);
+    for domain in &before {
+        assert!(
+            domain["count"].as_u64().unwrap_or(0) > 0,
+            "R7 empty authority domain: {domain}"
+        );
+    }
+    drop(handle);
+
+    query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let after_endgame_query = r7_domain_snapshot(&state.manager.open("proj-b14", "", NOW).unwrap());
+    assert_r7_domains_unchanged(&before, &after_endgame_query, "endgame query");
+
+    query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let after_completion_query =
+        r7_domain_snapshot(&state.manager.open("proj-b14", "", NOW).unwrap());
+    assert_r7_domains_unchanged(&before, &after_completion_query, "completion query");
+    let completion = execute_command_impl(
+        &state,
+        json!({
+            "type":"complete_book",
+            "projectId":"proj-b14",
+            "commandId":"r7-no-authority-complete",
+            "idempotencyKey":"r7-no-authority-complete:key",
+            "expectedRevision":1,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap();
+    assert_eq!(completion["finalStatus"], "committed");
+    let after_complete_book = r7_domain_snapshot(&state.manager.open("proj-b14", "", NOW).unwrap());
+    assert_r7_domains_unchanged(&before, &after_complete_book, "complete book");
+    println!(
+        "B14_R7_NO_AUTHORITY_11_DOMAIN|{}",
+        serde_json::to_string(&json!({
+            "fixtureProject":"proj-b14",
+            "domainCount":11,
+            "oneFixture":true,
+            "before":before,
+            "afterEndgameQuery":after_endgame_query,
+            "afterCompletionQuery":after_completion_query,
+            "afterCompleteBook":after_complete_book,
+            "completeBookSucceeded":true,
+            "allowedMutationDomains":["B14 control artifacts","Endgame/Completion control state","BookExitState","BookCompletionReport","completion receipt / current completion refs"],
+            "forbiddenMutationDomains":["Canon","Knowledge","Narrative Obligation","Foreshadow","ReaderDesire","Continuity","Planning","Task Reality","ChangeRequest","RetconPlan","FinalChapter"],
+            "status":"PASS"
+        }))
+        .unwrap()
+    );
 }
