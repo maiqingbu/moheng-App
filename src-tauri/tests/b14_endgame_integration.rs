@@ -820,6 +820,55 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
 }
 
 #[test]
+fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
+    let (state, _root, _inputs) = test_state_with_skill_gateway();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    let volume_scope = r#"{"level":"VOLUME","volumeId":"volume:b14"}"#;
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "volume-plan:b14:r5",
+        "VolumePlan",
+        "VOLUME",
+        volume_scope,
+        &json!({"payloadSchema":"volume-plan.r1","tasks":[{"taskId":"task:b14:r5:blocked","class":"REQUIRED"}]}),
+    );
+    handle.execute(
+        "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b14:r5:blocked','proj-b14','volume.task.progress',?1,'{}',?2,?2)",
+        libsql_rusqlite::params![json!({"taskId":"task:b14:r5:blocked","status":"BLOCKED"}).to_string(), NOW],
+    ).unwrap();
+    handle.execute(
+        "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:r5','proj-b14','R5 连续性责任','PLANTED','B06',?1,?1)",
+        [NOW],
+    ).unwrap();
+    drop(handle);
+
+    let blocked_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let task_result = &blocked_task["runtimeCheckResults"][0]["result"];
+    assert_eq!(task_result["status"], "ISSUE_FOUND");
+    assert!(task_result["findingCount"].as_i64().unwrap_or(0) >= 1);
+    assert_eq!(task_result["resolvedScope"], "current_endgame_hard_task_reality");
+
+    let open_thread = query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let thread_result = &open_thread["runtimeCheckResults"][0]["result"];
+    assert_eq!(thread_result["status"], "ISSUE_FOUND");
+    assert!(thread_result["findingCount"].as_i64().unwrap_or(0) >= 1);
+    assert_eq!(thread_result["resolvedScope"], "current_endgame_continuity");
+
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    handle.execute("UPDATE state_deltas SET value_json=?1 WHERE project_id='proj-b14' AND state_id='task:b14:r5:blocked'", [json!({"taskId":"task:b14:r5:blocked","status":"SATISFIED"}).to_string()]).unwrap();
+    handle.execute("UPDATE foreshadows SET status='RESOLVED' WHERE project_id='proj-b14' AND foreshadow_id='foreshadow:b14:r5'", []).unwrap();
+    drop(handle);
+
+    let satisfied_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(satisfied_task["runtimeCheckResults"][0]["result"]["status"], "NO_ISSUE");
+    let resolved_thread = query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(resolved_thread["runtimeCheckResults"][0]["result"]["status"], "NO_ISSUE");
+    println!("B14_R5_RUNTIME_EMPTY_SCOPE|taskPositive=PASS|taskNegative=PASS|threadPositive=PASS|threadNegative=PASS");
+}
+
+#[test]
 fn b14_status_and_soft_queries_do_not_mutate_authority() {
     let (state, _root, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
