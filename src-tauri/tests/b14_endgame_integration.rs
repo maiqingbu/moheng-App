@@ -497,6 +497,7 @@ fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
         .iter()
         .any(|thread| thread.thread_id == "thread:obligation:b14:r4:hard"
             && thread.logical_status == "OPEN"));
+    println!("B14_R4_CONTINUITY|foreshadows=501|mysteries=501|evidence=501|hardBlocker=PASS|digestSource=complete");
     drop(handle);
     execute_command_impl(
         &state,
@@ -647,6 +648,7 @@ fn b14_r4_mapping_candidates_are_relation_scoped_before_ui() {
         .unwrap()
         .iter()
         .any(|item| item["ref"] == "final:b14:r4:unrelated"));
+    println!("B14_R4_MAPPING|relatedCandidates=1|unrelatedOmitted=true|bounded=true");
 }
 
 #[test]
@@ -811,6 +813,7 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
         }))
         .unwrap()
     );
+    println!("B14_R4_RUNTIME_CHECK_HANDOFF|S44=PASS|S45=PASS|deterministic=true|modelRunsDelta=2|authorityWrite=false");
 }
 
 #[test]
