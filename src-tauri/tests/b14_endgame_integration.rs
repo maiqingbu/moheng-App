@@ -1591,8 +1591,12 @@ fn b14_r7_paged_sources_enter_continuity_and_change_digest() {
             NarrativeRepository::continuity_threads_complete(&before, "proj-b14").unwrap();
         let before_thread = before_threads
             .iter()
-            .find(|thread| thread.thread_id == format!("thread:{source_id}"))
-            .unwrap();
+            .find(|thread| thread.thread_id == format!("thread:{source_id}"));
+        assert!(
+            before_thread.is_some(),
+            "PAGED_SOURCE_{ordinal}_MISSING_FROM_CONTINUITY"
+        );
+        let before_thread = before_thread.unwrap();
         let source_ref = before_thread
             .source_refs
             .first()
