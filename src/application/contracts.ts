@@ -870,9 +870,20 @@ export interface SoftCreativeAdviceProjection {
 }
 
 export interface EndgameMappingWorkflowProjection {
+  reservationCandidates: Record<string, EndgameMappingCandidate[]>
+  hardPayoffCandidates: Record<string, EndgameMappingCandidate[]>
   mysteries: Array<{ key: string; id: string; label: string }>
   reservations: Array<{ key: string; id: string; label: string }>
   hardPayoffs: Array<{ key: string; id: string; label: string }>
   responsibilityCandidates: Array<{ ref: string; label: string }>
   fulfillmentCandidates: Array<{ ref: string; label: string }>
+}
+
+export interface EndgameMappingCandidate {
+  ref: string
+  label: string
+  volume?: string
+  chapterNo?: number | null
+  evidenceSummary?: string
+  relationValidated?: boolean
 }

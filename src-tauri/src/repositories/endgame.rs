@@ -4,7 +4,7 @@ use crate::hash::sha256_canonical;
 use crate::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndgameRepositoryError {
@@ -121,7 +121,7 @@ impl EndgameRepository {
             matches!(item.get("authorityLevel").and_then(Value::as_str), Some("A" | "B")).then(|| json!({"key":format!("reservation:{id}"),"id":id,"label":item.get("description").and_then(Value::as_str).unwrap_or("未来约束")}))
         }).collect::<Vec<_>>();
         let mut fulfillment_candidates = Vec::new();
-        let mut reservation_candidates = Vec::new();
+        let mut reservation_candidates = serde_json::Map::new();
         for reservation in &reservations {
             let id = reservation
                 .get("id")
@@ -135,10 +135,7 @@ impl EndgameRepository {
             let candidates =
                 Self::related_fulfillment_candidates(connection, project_id, &responsibility_ref)?;
             fulfillment_candidates.extend(candidates.clone());
-            reservation_candidates.push(json!({
-                "responsibilityRef": responsibility_ref,
-                "candidates": candidates
-            }));
+            reservation_candidates.insert(responsibility_ref, json!(candidates));
         }
         let mut responsibility_candidates = Vec::new();
         let mut statement = connection.prepare(
@@ -166,7 +163,7 @@ impl EndgameRepository {
             responsibility_candidates.push(row?);
         }
         let mut hard_payoffs = Vec::new();
-        let mut hard_payoff_candidates = Vec::new();
+        let mut hard_payoff_candidates = serde_json::Map::new();
         let mut statement = connection.prepare("SELECT obligation_id,description FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND obligation_type='PAYOFF' AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"key":format!("payoff:{}", row.get::<_,String>(0)?),"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?})))? {
             let payoff = row?;
@@ -180,17 +177,14 @@ impl EndgameRepository {
                 &responsibility_ref,
             )?;
             fulfillment_candidates.extend(candidates.clone());
-            hard_payoff_candidates.push(json!({
-                "responsibilityRef": responsibility_ref,
-                "candidates": candidates
-            }));
+            hard_payoff_candidates.insert(responsibility_ref, json!(candidates));
             hard_payoffs.push(payoff);
         }
         fulfillment_candidates
             .sort_by(|left, right| left["ref"].as_str().cmp(&right["ref"].as_str()));
         fulfillment_candidates.dedup_by(|left, right| left["ref"] == right["ref"]);
         Ok(
-            json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"responsibilityCandidates":responsibility_candidates,"fulfillmentCandidates":fulfillment_candidates,"reservationCandidates":reservation_candidates,"hardPayoffCandidates":hard_payoff_candidates}),
+            json!({"mysteries":mysteries,"reservations":reservations,"hardPayoffs":hard_payoffs,"responsibilityCandidates":responsibility_candidates,"fulfillmentCandidates":fulfillment_candidates,"reservationCandidates":Value::Object(reservation_candidates),"hardPayoffCandidates":Value::Object(hard_payoff_candidates)}),
         )
     }
 
@@ -635,6 +629,40 @@ impl EndgameRepository {
                     )
             })
             .count() as i64)
+    }
+
+    /// Returns the current hard-task scope declared by authoritative
+    /// VolumePlan artifacts.  Runtime rechecks use this when a Skill request
+    /// intentionally omits refs; an empty ref list must still resolve to a
+    /// formal endgame scope instead of an empty query.
+    pub fn current_hard_task_ids(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<String>, EndgameRepositoryError> {
+        let mut ids = BTreeSet::new();
+        let mut statement = connection.prepare(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND h.scope_level='VOLUME' ORDER BY h.scope_key,h.artifact_id",
+        )?;
+        for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let payload = serde_json::from_str::<Value>(&row?)?;
+            for task in payload
+                .get("tasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (Some(task_id), Some(class)) = (
+                    task.get("taskId").and_then(Value::as_str),
+                    task.get("class").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                if matches!(class, "REQUIRED" | "CLIMAX" | "RESERVED") {
+                    ids.insert(task_id.to_string());
+                }
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 
     fn relevant_refs(contract: Option<&Value>) -> Vec<String> {

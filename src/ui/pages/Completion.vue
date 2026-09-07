@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 import type { CommandStatus, CompletionStatusProjection, EndgameMappingWorkflowProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
+import { scopedMappingCandidates } from '../../application/endgameMapping'
 
 const route = useRoute()
 const frontendPort = getFrontendPort()
@@ -43,6 +44,8 @@ function checkStatus(status: string) {
   return ({ READY: '已满足', BLOCKED: '还有必须解决的问题', NEEDS_DECISION: '需要先确认', NEEDS_RECHECK: '需要重新检查', SOURCE_UNAVAILABLE: '暂时无法完成检查' } as Record<string, string>)[status] ?? '需要重新检查'
 }
 function checkClass(status: string) { return status === 'READY' ? 'success' : status === 'NEEDS_DECISION' || status === 'NEEDS_RECHECK' ? 'warning' : 'danger' }
+function reservationCandidates(id: string) { return mappingWorkflow.value ? scopedMappingCandidates(mappingWorkflow.value, 'reservation', id) : [] }
+function hardPayoffCandidates(id: string) { return mappingWorkflow.value ? scopedMappingCandidates(mappingWorkflow.value, 'payoff', id) : [] }
 function userError(value: string) {
   if (value.includes('B14_ALREADY_COMPLETED')) return '当前版本已经完成完结确认。'
   if (value.includes('B14_COMPLETION_NOT_READY')) return '当前还有必须解决的问题，暂时不能提交完结。'
@@ -173,8 +176,14 @@ onMounted(() => { void load() })
         <div class="card-head"><div><h2 class="card-title">需要确认的终局责任</h2><p class="card-subtitle">仅可选择当前作品已保存的责任与完成依据；不会自动建立对应关系。</p></div><button class="btn small" :disabled="mappingLoading || submitting" @click="loadMappingWorkflow">{{ mappingLoading ? '正在读取' : '查看可确认内容' }}</button></div>
         <template v-if="mappingWorkflow">
           <label v-for="item in mappingWorkflow.mysteries" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.responsibilityCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
-          <label v-for="item in mappingWorkflow.reservations" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
-          <label v-for="item in mappingWorkflow.hardPayoffs" :key="item.key" class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">尚未兑现</option><option v-for="choice in mappingWorkflow.fulfillmentCandidates" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+          <template v-for="item in mappingWorkflow.reservations" :key="item.key">
+            <label class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">暂不确认</option><option v-for="choice in reservationCandidates(item.id)" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+            <p v-if="reservationCandidates(item.id).length === 0" class="muted" style="margin-top:6px">当前还没有可作为完成依据的正式记录。</p>
+          </template>
+          <template v-for="item in mappingWorkflow.hardPayoffs" :key="item.key">
+            <label class="field-label" style="margin-top:12px">{{ item.label }}<select v-model="mappingSelections[item.key]"><option value="">尚未兑现</option><option v-for="choice in hardPayoffCandidates(item.id)" :key="choice.ref" :value="choice.ref">{{ choice.label }}</option></select></label>
+            <p v-if="hardPayoffCandidates(item.id).length === 0" class="muted" style="margin-top:6px">当前还没有可作为完成依据的正式记录。</p>
+          </template>
           <p v-if="!mappingWorkflow.mysteries.length && !mappingWorkflow.reservations.length && !mappingWorkflow.hardPayoffs.length" class="muted" style="margin-top:12px">当前没有需要确认的谜团、未来约束或关键回报。</p>
         </template>
       </section>

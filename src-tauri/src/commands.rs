@@ -1619,6 +1619,12 @@ fn run_b14_runtime_rechecks(
         });
         if !supported || !refs_valid {
             results.push(json!({
+                "requestType": request.kind,
+                "requestedRefs": request.refs,
+                "resolvedScope": "unsupported",
+                "status": "UNSUPPORTED",
+                "findingCount": 0,
+                "sourceRefs": [],
                 "kind": request.kind,
                 "status": "UNSUPPORTED",
                 "summary": "其中一项建议暂时无法自动核对。",
@@ -1631,65 +1637,135 @@ fn run_b14_runtime_rechecks(
             "THREAD_STATE" => {
                 let threads = crate::repositories::narrative::NarrativeRepository::continuity_threads_complete(connection, project_id)
                     .map_err(|error| error.to_string())?;
-                let matching = if request.refs.is_empty() {
-                    threads.len()
+                let resolved_scope = if request.refs.is_empty() {
+                    "current_endgame_continuity"
                 } else {
-                    request
-                        .refs
-                        .iter()
-                        .filter(|reference| {
-                            threads.iter().any(|thread| &thread.thread_id == *reference)
-                        })
-                        .count()
+                    "explicit_continuity_refs"
                 };
-                json!({"status":"NO_ISSUE","matchingThreads":matching})
+                let selected = if request.refs.is_empty() {
+                    threads
+                        .iter()
+                        .filter(|thread| {
+                            matches!(thread.authority_level.as_str(), "A" | "B")
+                                && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    let mut selected = Vec::new();
+                    for reference in &request.refs {
+                        let Some(thread) = threads.iter().find(|thread| thread.thread_id == *reference) else {
+                            return Ok(Value::Array(vec![json!({
+                                "requestType": request.kind,
+                                "requestedRefs": request.refs,
+                                "resolvedScope": "unsupported",
+                                "status": "UNSUPPORTED",
+                                "findingCount": 0,
+                                "summary": "指定的连续性记录当前不属于本作品。",
+                                "sourceRefs": [],
+                                "source": "B14::DeterministicRuntime",
+                                "readOnly": true
+                            })]));
+                        };
+                        selected.push(thread);
+                    }
+                    selected
+                };
+                let findings = selected
+                    .into_iter()
+                    .filter(|thread| {
+                        matches!(thread.authority_level.as_str(), "A" | "B")
+                            && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
+                    })
+                    .map(|thread| thread.thread_id.clone())
+                    .collect::<Vec<_>>();
+                json!({
+                    "requestType": request.kind,
+                    "requestedRefs": request.refs,
+                    "resolvedScope": resolved_scope,
+                    "status": if findings.is_empty() { "NO_ISSUE" } else { "ISSUE_FOUND" },
+                    "findingCount": findings.len(),
+                    "summary": if findings.is_empty() { "当前连续性记录未发现需要处理的正式问题。" } else { "系统重新核对后，确认还有一项关键连续性记录没有完成。" },
+                    "sourceRefs": findings,
+                    "source": "B14::DeterministicRuntime",
+                    "readOnly": true
+                })
             }
             "TASK_REALITY" => {
-                let ids = request
-                    .refs
-                    .iter()
-                    .filter_map(|reference| reference.strip_prefix("task:"))
-                    .collect::<Vec<_>>();
-                let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(connection, project_id, &ids)
+                let ids = if request.refs.is_empty() {
+                    crate::repositories::endgame::EndgameRepository::current_hard_task_ids(connection, project_id)
+                        .map_err(|error| error.to_string())?
+                } else {
+                    request.refs.clone()
+                };
+                let ids_ref = ids.iter().map(String::as_str).collect::<Vec<_>>();
+                let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(connection, project_id, &ids_ref)
                     .map_err(|error| error.to_string())?;
+                if !request.refs.is_empty() && states.len() != request.refs.len() {
+                    return Ok(Value::Array(vec![json!({
+                        "requestType": request.kind,
+                        "requestedRefs": request.refs,
+                        "resolvedScope": "unsupported",
+                        "status": "UNSUPPORTED",
+                        "findingCount": 0,
+                        "summary": "指定的正式任务当前不属于本作品。",
+                        "sourceRefs": [],
+                        "source": "B14::DeterministicRuntime",
+                        "readOnly": true
+                    })]));
+                }
                 let blocked = states
                     .iter()
                     .filter(|state| {
-                        state.value.get("status").and_then(Value::as_str) == Some("BLOCKED")
+                        matches!(
+                            state.value.get("status").and_then(Value::as_str),
+                            Some("NOT_STARTED" | "ACTIVE" | "BLOCKED")
+                        )
                     })
-                    .count();
-                json!({"status":if blocked > 0 {"BLOCKED"} else {"NO_ISSUE"},"blockedCount":blocked,"stateCount":states.len()})
+                    .map(|state| state.state_id.clone())
+                    .collect::<Vec<_>>();
+                json!({
+                    "requestType": request.kind,
+                    "requestedRefs": request.refs,
+                    "resolvedScope": if request.refs.is_empty() { "current_endgame_hard_task_reality" } else { "explicit_task_refs" },
+                    "status": if blocked.is_empty() { "NO_ISSUE" } else { "ISSUE_FOUND" },
+                    "findingCount": blocked.len(),
+                    "summary": if blocked.is_empty() { "当前正式任务未发现需要处理的问题。" } else { "系统重新核对后，确认还有一项关键任务没有完成。" },
+                    "sourceRefs": blocked,
+                    "stateCount": states.len(),
+                    "source": "B14::DeterministicRuntime",
+                    "readOnly": true
+                })
             }
             "RESERVATION" => {
                 let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
                     connection, project_id,
                 )
                 .map_err(|error| error.to_string())?;
-                json!({"status":if read.input.unfulfilled_hard_reservations > 0 {"BLOCKED"} else {"NO_ISSUE"},"unfulfilledHardReservations":read.input.unfulfilled_hard_reservations})
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_reservations","status":if read.input.unfulfilled_hard_reservations > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":read.input.unfulfilled_hard_reservations,"summary":if read.input.unfulfilled_hard_reservations > 0 {"系统重新核对后，确认还有一项未来约束没有完成。"} else {"当前未来约束未发现需要处理的问题。"},"sourceRefs":["completion:reservations"],"unfulfilledHardReservations":read.input.unfulfilled_hard_reservations})
             }
             "INTEGRITY" => {
                 let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
                     connection, project_id,
                 )
                 .map_err(|error| error.to_string())?;
-                json!({"status":if read.input.export_integrity_failures > 0 {"BLOCKED"} else {"NO_ISSUE"},"exportIntegrityFailures":read.input.export_integrity_failures})
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_integrity","status":if read.input.export_integrity_failures > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":read.input.export_integrity_failures,"summary":if read.input.export_integrity_failures > 0 {"系统重新核对后，确认成品完整性仍有问题。"} else {"当前成品完整性未发现需要处理的问题。"},"sourceRefs":["completion:integrity"],"exportIntegrityFailures":read.input.export_integrity_failures})
             }
             "PLAN_STALE" => {
                 let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
                     connection, project_id,
                 )
                 .map_err(|error| error.to_string())?;
-                json!({"status":if read.input.plan_stale {"BLOCKED"} else {"NO_ISSUE"},"planStale":read.input.plan_stale})
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_plan","status":if read.input.plan_stale {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":i64::from(read.input.plan_stale),"summary":if read.input.plan_stale {"系统重新核对后，确认当前规划需要重新确认。"} else {"当前规划未发现需要处理的问题。"},"sourceRefs":["completion:plan"],"planStale":read.input.plan_stale})
             }
             "EVIDENCE_GAP" => {
                 let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
                     connection, project_id,
                 )
                 .map_err(|error| error.to_string())?;
-                json!({"status":if read.input.source_available {"NO_ISSUE"} else {"BLOCKED"},"sourceAvailable":read.input.source_available})
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_evidence","status":if read.input.source_available {"NO_ISSUE"} else {"ISSUE_FOUND"},"findingCount":i64::from(!read.input.source_available),"summary":if read.input.source_available {"当前正式依据可读取。"} else {"系统重新核对后，确认正式依据暂时不可读取。"},"sourceRefs":["completion:evidence"],"sourceAvailable":read.input.source_available})
             }
             "CANON_CONFLICT" | "KNOWLEDGE_BOUNDARY" => {
-                json!({"status":"NO_ISSUE","summary":"已完成确定性核对。"})
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_scope","status":"NO_ISSUE","findingCount":0,"summary":"已完成确定性核对。","sourceRefs":["completion:current-scope"]})
             }
             _ => unreachable!(),
         };

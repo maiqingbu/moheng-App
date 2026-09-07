@@ -641,7 +641,7 @@ fn b14_r4_mapping_candidates_are_relation_scoped_before_ui() {
     );
     handle.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES ('chapter:b14:r4:related','proj-b14','volume:b14',1,'关联章','COMMITTED',3,'final:b14:r4:related',1,?1,?1),('chapter:b14:r4:unrelated','proj-b14','volume:b14',2,'无关章','COMMITTED',3,'final:b14:r4:unrelated',1,?1,?1)", [NOW]).unwrap();
     let workflow = EndgameRepository::mapping_workflow(&handle, "proj-b14").unwrap();
-    let candidates = workflow["reservationCandidates"][0]["candidates"]
+    let candidates = workflow["reservationCandidates"]["reservation:b14:r4"]
         .as_array()
         .unwrap();
     assert_eq!(candidates.len(), 1);
@@ -838,10 +838,7 @@ fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
         "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b14:r5:blocked','proj-b14','volume.task.progress',?1,'{}',?2,?2)",
         libsql_rusqlite::params![json!({"taskId":"task:b14:r5:blocked","status":"BLOCKED"}).to_string(), NOW],
     ).unwrap();
-    handle.execute(
-        "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:r5','proj-b14','R5 连续性责任','PLANTED','B06',?1,?1)",
-        [NOW],
-    ).unwrap();
+    insert_obligation(&handle, "obligation:b14:r5:thread", "A", "PROGRESSING");
     drop(handle);
 
     let blocked_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
@@ -858,7 +855,7 @@ fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
 
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     handle.execute("UPDATE state_deltas SET value_json=?1 WHERE project_id='proj-b14' AND state_id='task:b14:r5:blocked'", [json!({"taskId":"task:b14:r5:blocked","status":"SATISFIED"}).to_string()]).unwrap();
-    handle.execute("UPDATE foreshadows SET status='RESOLVED' WHERE project_id='proj-b14' AND foreshadow_id='foreshadow:b14:r5'", []).unwrap();
+    handle.execute("UPDATE narrative_obligations SET lifecycle='RESOLVED' WHERE project_id='proj-b14' AND obligation_id='obligation:b14:r5:thread'", []).unwrap();
     drop(handle);
 
     let satisfied_task = query_completion_quality_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
