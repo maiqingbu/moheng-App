@@ -453,6 +453,39 @@ fn b14_continuity_projection_includes_foreshadow_mystery_and_evidence_sources() 
 }
 
 #[test]
+fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
+    let (state, _root) = test_state();
+    seed_ready_project(&state);
+    let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    for index in 1..=501 {
+        handle.execute(
+            "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES (?1,'proj-b14',?2,'PLANTED','B06',?3,?3)",
+            libsql_rusqlite::params![format!("foreshadow:b14:r4:{index:03}"), format!("伏笔 {index}"), NOW],
+        ).unwrap();
+        handle.execute(
+            "INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES (?1,'proj-b14','R4谜团','OPEN',?2,?2)",
+            libsql_rusqlite::params![format!("mystery:b14:r4:{index:03}"), NOW],
+        ).unwrap();
+        handle.execute(
+            "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES (?1,'proj-b14',?2,?3,'final:b14:r4',1,'CANON',?4,?5)",
+            libsql_rusqlite::params![format!("evidence:b14:r4:{index:03}"), format!("fact:b14:r4:{index:03}"), "chapter:b14:r4", format!("证据 {index}"), NOW],
+        ).unwrap();
+    }
+    insert_obligation(&handle, "obligation:b14:r4:hard", "A", "PROGRESSING");
+    let foreshadows = NarrativeRepository::active_foreshadows_complete(&handle, "proj-b14").unwrap();
+    let mysteries = NarrativeRepository::open_mysteries_complete(&handle, "proj-b14").unwrap();
+    let evidence = NarrativeRepository::recent_evidence_complete(&handle, "proj-b14").unwrap();
+    assert_eq!(foreshadows.len(), 501);
+    assert_eq!(mysteries.len(), 501);
+    assert_eq!(evidence.len(), 501);
+    let threads = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
+    assert!(threads.iter().any(|thread| thread.thread_id == "thread:obligation:b14:r4:hard" && thread.logical_status == "OPEN"));
+    drop(handle);
+    let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    assert_eq!(result["status"], "BLOCKED");
+}
+
+#[test]
 fn b14_mystery_mapping_requires_current_responsibility_disposition() {
     let (state, _root) = test_state();
     let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[{"id":"mystery:b14:closure","description":"身份谜团"}],"futureReservations":[]});
