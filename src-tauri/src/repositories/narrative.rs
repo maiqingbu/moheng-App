@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const TASK_STATE_CHUNK_SIZE: usize = 100;
+pub const CONTINUITY_SOURCE_CHUNK_SIZE: i64 = 100;
 pub const TASK_STATES_BY_IDS_SQL: &str = "SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3";
 pub const ARTIFACT_PAYLOAD_BY_REF_SQL: &str = "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4";
 
@@ -195,9 +196,9 @@ impl NarrativeRepository {
         })? {
             obligations.push(row?);
         }
-        let foreshadows = Self::active_foreshadows(connection, project_id, &[], &[], 100)?;
-        let mysteries = Self::open_mysteries(connection, project_id, &[], 100)?;
-        let evidence = Self::recent_evidence(connection, project_id, &[], &[], 100)?;
+        let foreshadows = Self::active_foreshadows_complete(connection, project_id)?;
+        let mysteries = Self::open_mysteries_complete(connection, project_id)?;
+        let evidence = Self::recent_evidence_complete(connection, project_id)?;
         build_continuity_threads(
             &obligations,
             &foreshadows,
@@ -675,6 +676,44 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Reads the formal Continuity foreshadow source completely without
+    /// widening the shared bounded reader. Each page is indexed, project
+    /// scoped, and capped at the existing 100-row contract.
+    pub fn active_foreshadows_complete(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<ForeshadowRecord>, NarrativeRepositoryError> {
+        let mut result = Vec::new();
+        let mut offset = 0_i64;
+        loop {
+            let mut statement = connection.prepare(
+                "SELECT foreshadow_id, intent, status, plant_chapter_id, recover_window_end_chapter, secret_payload_ref FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE') ORDER BY updated_at DESC, foreshadow_id LIMIT ?2 OFFSET ?3",
+            )?;
+            let page = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, CONTINUITY_SOURCE_CHUNK_SIZE, offset],
+                    |row| {
+                        Ok(ForeshadowRecord {
+                            foreshadow_id: row.get(0)?,
+                            intent: row.get(1)?,
+                            status: row.get(2)?,
+                            plant_chapter_id: row.get(3)?,
+                            recover_window_end_chapter: row.get(4)?,
+                            secret_payload_ref: row.get(5)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let page_len = page.len() as i64;
+            result.extend(page);
+            if page_len < CONTINUITY_SOURCE_CHUNK_SIZE {
+                break;
+            }
+            offset += CONTINUITY_SOURCE_CHUNK_SIZE;
+        }
+        Ok(result)
+    }
+
     pub fn has_more_foreshadows(
         connection: &Connection,
         project_id: &str,
@@ -707,6 +746,40 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Complete, stable, chunked read for the formal mystery source.
+    pub fn open_mysteries_complete(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<MysteryRecord>, NarrativeRepositoryError> {
+        let mut result = Vec::new();
+        let mut offset = 0_i64;
+        loop {
+            let mut statement = connection.prepare(
+                "SELECT mystery_id, mystery_type, status, core_fact_id FROM mystery_states WHERE project_id=?1 AND status IN ('OPEN','PROGRESSING') ORDER BY updated_at DESC, mystery_id LIMIT ?2 OFFSET ?3",
+            )?;
+            let page = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, CONTINUITY_SOURCE_CHUNK_SIZE, offset],
+                    |row| {
+                        Ok(MysteryRecord {
+                            mystery_id: row.get(0)?,
+                            mystery_type: row.get(1)?,
+                            status: row.get(2)?,
+                            core_fact_id: row.get(3)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let page_len = page.len() as i64;
+            result.extend(page);
+            if page_len < CONTINUITY_SOURCE_CHUNK_SIZE {
+                break;
+            }
+            offset += CONTINUITY_SOURCE_CHUNK_SIZE;
+        }
+        Ok(result)
     }
 
     pub fn has_more_mysteries(
@@ -792,6 +865,49 @@ impl NarrativeRepository {
             Self::recent_evidence_bounded(connection, project_id, chapter_ids, source_refs, limit)?
                 .0,
         )
+    }
+
+    /// Complete read of the same current evidence scope consumed by the B06
+    /// Continuity producer. History remains bounded by the formal source
+    /// predicate; only the page limit is traversed completely.
+    pub fn recent_evidence_complete(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<EvidenceRecord>, NarrativeRepositoryError> {
+        let mut result = Vec::new();
+        let mut offset = 0_i64;
+        loop {
+            let mut statement = connection.prepare(
+                "SELECT evidence_id, fact_id, relation_id, event_id, final_chapter_id, source_artifact_id, source_version, evidence_type, quote, range_start, range_end FROM canon_evidence WHERE project_id=?1 ORDER BY created_at DESC, evidence_id LIMIT ?2 OFFSET ?3",
+            )?;
+            let page = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, CONTINUITY_SOURCE_CHUNK_SIZE, offset],
+                    |row| {
+                        Ok(EvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            fact_id: row.get(1)?,
+                            relation_id: row.get(2)?,
+                            event_id: row.get(3)?,
+                            final_chapter_id: row.get(4)?,
+                            source_artifact_id: row.get(5)?,
+                            version: row.get(6)?,
+                            evidence_type: row.get(7)?,
+                            quote: row.get(8)?,
+                            range_start: row.get(9)?,
+                            range_end: row.get(10)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let page_len = page.len() as i64;
+            result.extend(page);
+            if page_len < CONTINUITY_SOURCE_CHUNK_SIZE {
+                break;
+            }
+            offset += CONTINUITY_SOURCE_CHUNK_SIZE;
+        }
+        Ok(result)
     }
 
     pub fn recent_evidence_bounded(

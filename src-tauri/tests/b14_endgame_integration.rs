@@ -457,6 +457,19 @@ fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
     let (state, _root) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
+    insert_committed_artifact(
+        &handle,
+        "proj-b14",
+        "final:b14:r4",
+        "FinalChapter",
+        "CHAPTER",
+        r#"{"level":"CHAPTER","chapterId":"chapter:b14:r4"}"#,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":"chapter:b14:r4","body":"R4 continuity source"}),
+    );
+    handle.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,status,word_count,final_artifact_id,final_version,created_at,updated_at) VALUES ('chapter:b14:r4','proj-b14','volume:b14',1,'R4 continuity source','COMMITTED',3,'final:b14:r4',1,?1,?1)",
+        [NOW],
+    ).unwrap();
     for index in 1..=501 {
         handle.execute(
             "INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES (?1,'proj-b14',?2,'PLANTED','B06',?3,?3)",
@@ -472,15 +485,26 @@ fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
         ).unwrap();
     }
     insert_obligation(&handle, "obligation:b14:r4:hard", "A", "PROGRESSING");
-    let foreshadows = NarrativeRepository::active_foreshadows_complete(&handle, "proj-b14").unwrap();
+    let foreshadows =
+        NarrativeRepository::active_foreshadows_complete(&handle, "proj-b14").unwrap();
     let mysteries = NarrativeRepository::open_mysteries_complete(&handle, "proj-b14").unwrap();
     let evidence = NarrativeRepository::recent_evidence_complete(&handle, "proj-b14").unwrap();
     assert_eq!(foreshadows.len(), 501);
     assert_eq!(mysteries.len(), 501);
     assert_eq!(evidence.len(), 501);
     let threads = NarrativeRepository::continuity_threads_complete(&handle, "proj-b14").unwrap();
-    assert!(threads.iter().any(|thread| thread.thread_id == "thread:obligation:b14:r4:hard" && thread.logical_status == "OPEN"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread.thread_id == "thread:obligation:b14:r4:hard"
+            && thread.logical_status == "OPEN"));
     drop(handle);
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"endgame_contract_create","projectId":"proj-b14","commandId":"b14-r4-continuity-contract","idempotencyKey":"b14-r4-continuity-contract:key","expectedRevision":0,"requestedAt":NOW,
+            "payload":{"requestedEnding":{"summary":"R4 连续性测试结局","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}
+        }),
+    ).unwrap();
     let result = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     assert_eq!(result["status"], "BLOCKED");
 }
