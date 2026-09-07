@@ -124,6 +124,7 @@ fn insert_committed_artifact(
     hash
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_committed_artifact_with_command(
     connection: &Connection,
     project_id: &str,
