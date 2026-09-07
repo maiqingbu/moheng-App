@@ -748,7 +748,7 @@ impl EndgameRepository {
         for row in statement.query_map([project_id], |row| Ok(json!({"knowledgeId":row.get::<_,String>(0)?,"knowerId":row.get::<_,String>(1)?,"factId":row.get::<_,Option<String>>(2)?,"epistemicState":row.get::<_,String>(3)?,"visibilityScope":row.get::<_,Option<String>>(4)?,"fromChapterId":row.get::<_,Option<String>>(5)?,"untilChapterId":row.get::<_,Option<String>>(6)?})))? { knowledge.push(row?); }
         let continuity = NarrativeRepository::continuity_threads_complete(connection, project_id)?
             .into_iter()
-            .map(|thread| serde_json::to_value(thread))
+            .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
         let reservation = Self::payload_for_head(connection, project_id, "BookPlan")?
             .and_then(|value| value.get("futureReservations").cloned())

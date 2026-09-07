@@ -15,7 +15,7 @@ require(/responsibility_satisfied/.test(repository) && /fulfillment_evidence_ref
 require(/continuity_threads_complete/.test(narrative) && /active_foreshadows/.test(narrative) && /open_mysteries/.test(narrative) && /recent_evidence/.test(narrative), 'FULL_CONTINUITY_SOURCE_MISSING')
 require(/instance_responsibilities/.test(repository) && /instance_responsibilities/.test(commands) && !/"narrative_obligations"/.test(commands), 'GENERIC_RESPONSIBILITY_REF_REMAINS')
 require(/SkillBundleLoader::tracked_package|SkillBundleLoader::tracked_package/.test(commands) || /tracked_package/.test(skills), 'SKILL_BUNDLE_LOADER_MISSING')
-require(/load_selected/.test(commands) && /build_method_guidance/.test(commands) && /build_skill_task_context/.test(commands), 'SKILL_GUIDANCE_CONTEXT_MISSING')
+require(/load_selected/.test(commands) && /build_method_guidance/.test(commands) && /build_endgame_skill_task_context/.test(commands) && /ENDGAME_COMPLETION/.test(skills), 'SKILL_GUIDANCE_CONTEXT_MISSING')
 require(/loadedSkillRefs/.test(commands) && /resourceDigests/.test(commands) && /guidanceDigest/.test(commands), 'SKILL_PROVENANCE_MISSING')
 require(!/(EndgameContract|BookExitState|BookCompletionReport|ExitState|CompletionReport)/.test(completion.match(/<template>[\s\S]*?<\/template>/)?.[0] ?? ''), 'PRODUCT_INTERNAL_TERMS_VISIBLE')
 require(!/ExportRuntime|ReleaseOwner|ReleaseCertification/.test(`${repository}\n${narrative}\n${commands}`), 'B15_SCOPE_LEAK')
