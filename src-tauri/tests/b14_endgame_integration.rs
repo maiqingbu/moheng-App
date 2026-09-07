@@ -497,6 +497,9 @@ fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
         .iter()
         .any(|thread| thread.thread_id == "thread:obligation:b14:r4:hard"
             && thread.logical_status == "OPEN"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread.thread_id == "thread:foreshadow:b14:r4:501"));
     println!("B14_R4_CONTINUITY|foreshadows=501|mysteries=501|evidence=501|hardBlocker=PASS|digestSource=complete");
     drop(handle);
     execute_command_impl(
