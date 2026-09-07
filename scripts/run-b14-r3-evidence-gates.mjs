@@ -41,7 +41,7 @@ function evidenceFile(name, status, details = {}) {
 const architecture = run('architecture', 'node', ['scripts/verify-b14-r3-architecture.mjs'], { B14_R3_SOURCE_COMMIT: sourceCommit })
 const integration = run('integration', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_endgame_integration', '--', '--nocapture'])
 const scale = run('scale', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b14_r2_scale', '--', '--nocapture'])
-const browser = run('browser', 'node', ['scripts/capture-b14-r3-browser-evidence.mjs'], { B14_R3_EVIDENCE_DIR: evidenceDir, B14_R3_SOURCE_COMMIT: sourceCommit })
+const browser = run('browser', 'node', ['scripts/capture-b14-r3-browser-evidence.mjs'], { B14_R3_EVIDENCE_DIR: evidenceDir, B14_R3_SOURCE_COMMIT: sourceCommit, B14_R3_BROWSER_PORT: process.env.B14_R3_BROWSER_PORT ?? '1474' })
 const mutations = run('mutations', 'node', ['scripts/run-b14-r3-mutations.mjs'], { B14_R3_EVIDENCE_DIR: evidenceDir })
 const ux = run('product_ux', 'npm', ['run', 'verify:product-ux'])
 const moduleBoundary = run('module_boundary', 'node', ['scripts/verify-module-boundaries.mjs'])
@@ -90,7 +90,7 @@ const scalePass = scale.status === 'PASS' && /B14_R2_SCALE\|chapters=4000\|chara
 const skillPass = integrationPass && skillMarkers.length === 1 && skillMarkers[0].guidanceConsumed === true && skillMarkers[0].boundedRuntimeStage === 'ENDGAME_COMPLETION' && skillMarkers[0].S44?.loadedSkillRefs?.length === 1 && skillMarkers[0].S45?.loadedSkillRefs?.length === 1
 const refsPass = integrationPass && instanceMarker.length >= 1 && !JSON.stringify(instanceMarker).includes('narrative_obligations') && !JSON.stringify(instanceMarker).includes('continuity_threads')
 const browserPass = browserJson?.status === 'PASS' && browserJson.items?.length === 17
-const mutationPass = mutationJson?.status === 'PASS' && mutationJson.mutations?.length === 8 && mutationJson.mutations.every(item => item.introduced?.status === 'PASS' && item.reverted?.status === 'PASS')
+const mutationPass = mutationJson?.status === 'PASS' && mutationJson.mutations?.length === 8 && mutationJson.mutations.every(item => item.status === 'PASS' && item.introducedExitCode !== 0 && item.revertedExitCode === 0)
 
 evidenceFile('B14_R3_MYSTERY_DISPOSITION.json', integrationPass, { rawLogPath: commands.integration.rawLogPath, testNames: ['b14_mystery_mapping_requires_current_responsibility_disposition', 'b14_hard_responsibilities_are_instance_level_and_change_matchable'], cases: ['no mapping -> NEEDS_DECISION', 'active mapped responsibility -> BLOCKED', 'resolved mapped responsibility -> READY'] })
 evidenceFile('B14_R3_RESERVATION_RELATION.json', integrationPass, { rawLogPath: commands.integration.rawLogPath, testNames: ['b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff'], relationRule: 'current FinalChapter plus exact responsibility relation' })

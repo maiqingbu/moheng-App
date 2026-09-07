@@ -127,6 +127,8 @@ write('PACKAGE_INVENTORY.json', { countingRule: 'totalFilesIncludingChecksum and
 const withoutChecksum = allFiles(stageRoot).filter(file => file !== 'PACKAGE_MANIFEST/FILES_SHA256SUMS.txt')
 write('PACKAGE_INVENTORY.json', { countingRule: 'totalFilesIncludingChecksum and totalFilesExcludingChecksum', totalFilesExcludingChecksum: withoutChecksum.length, totalFilesIncludingChecksum: withoutChecksum.length + 1, status: 'PASS' })
 const entries = allFiles(stageRoot).filter(file => file !== 'PACKAGE_MANIFEST/FILES_SHA256SUMS.txt')
+packageResult.inventory = entries.length + 1
+for (const target of [path.join(evidenceDir, 'B14_R3_PACKAGE_RESULT.json'), path.join(evidenceRoot, 'B14_R3_PACKAGE_RESULT.json')]) fs.writeFileSync(target, `${JSON.stringify(packageResult, null, 2)}\n`)
 fs.writeFileSync(path.join(manifest, 'FILES_SHA256SUMS.txt'), `${entries.map(name => `${sha(path.join(stageRoot, name))}  ${name}`).join('\n')}\n`)
 const zipPath = path.join(delivery, `${packageName}.zip`)
 fs.mkdirSync(delivery, { recursive: true })
