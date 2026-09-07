@@ -1682,8 +1682,10 @@ fn run_b14_runtime_rechecks(
                 json!({"status":if read.input.plan_stale {"BLOCKED"} else {"NO_ISSUE"},"planStale":read.input.plan_stale})
             }
             "EVIDENCE_GAP" => {
-                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(connection, project_id)
-                    .map_err(|error| error.to_string())?;
+                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
+                    connection, project_id,
+                )
+                .map_err(|error| error.to_string())?;
                 json!({"status":if read.input.source_available {"NO_ISSUE"} else {"BLOCKED"},"sourceAvailable":read.input.source_available})
             }
             "CANON_CONFLICT" | "KNOWLEDGE_BOUNDARY" => {
