@@ -13,7 +13,7 @@
   --prototype-shadow: 0 10px 35px rgb(32 54 39 / 8%);
 }
 
-.prototype-window { height: 100vh; min-height: 720px; overflow: hidden; display: grid; grid-template-rows: 34px 58px minmax(0, 1fr); background: var(--prototype-bg); color: var(--prototype-text); font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+.prototype-window { height: 100%; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 34px 58px minmax(0, 1fr); background: var(--prototype-bg); color: var(--prototype-text); font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
 .prototype-titlebar { position: relative; display: flex; align-items: center; justify-content: center; background: #343735; color: #d8ddd8; font-size: 12px; letter-spacing: .04em; }
 .prototype-dots { position: absolute; left: 18px; display: flex; gap: 8px; }
 .prototype-dot { width: 12px; height: 12px; border-radius: 50%; }
@@ -71,16 +71,15 @@
 .prototype-badge.warn { background: #fff2dc; color: #8d5a15; }
 .prototype-badge.danger { background: #fae8e6; color: #963a33; }
 .prototype-badge.brand { background: var(--prototype-brand-soft); color: var(--prototype-brand-strong); }
-.prototype-assistant { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: 64px minmax(0, 1fr) auto; overflow: hidden; border-left: 1px solid var(--prototype-border); background: #fbfcfa; }
-.prototype-assistant.collapsed { grid-template-rows: 64px minmax(0, 1fr); }
-.prototype-assistanthead { display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--prototype-border); white-space: nowrap; }
+.prototype-assistant { min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--prototype-border); background: #fbfcfa; }
+.prototype-assistanthead { flex: 0 0 64px; display: flex; align-items: center; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--prototype-border); white-space: nowrap; }
 .prototype-atitle { min-width: 0; }
 .prototype-atitle strong { font-size: 14px; }
 .prototype-atitle small { display: block; margin-top: 2px; overflow: hidden; color: var(--prototype-muted); font-size: 11px; text-overflow: ellipsis; }
 .prototype-assistanttools { margin-left: auto; display: flex; gap: 8px; }
 .prototype-assistant.collapsed .prototype-atitle, .prototype-assistant.collapsed .prototype-assistanttools, .prototype-assistant.collapsed .prototype-messages, .prototype-assistant.collapsed .prototype-composer { display: none; }
 .prototype-assistant.collapsed .prototype-assistanthead { justify-content: center; padding: 0; }
-.prototype-messages { display: flex; min-height: 0; flex-direction: column; gap: 14px; overflow: auto; padding: 18px; }
+.prototype-messages { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; gap: 14px; overflow: auto; padding: 18px; }
 .prototype-msg { max-width: 92%; font-size: 13px; line-height: 1.65; }
 .prototype-msg.user { align-self: flex-end; padding: 10px 12px; border-radius: 14px 14px 4px 14px; background: #e4f1e8; }
 .prototype-msg.assistantmsg { align-self: flex-start; }
@@ -92,13 +91,29 @@
 .prototype-proposal { margin-top: 10px; padding: 10px; border: 1px solid #f0dfbd; border-radius: 11px; background: #fffaf0; }
 .prototype-proposal strong { font-size: 12px; }
 .prototype-proposal p { margin: 5px 0; color: #655239; font-size: 12px; }
-.prototype-composer { padding: 12px; border-top: 1px solid var(--prototype-border); background: #fff; }
+.prototype-composer { flex: 0 0 auto; padding: 12px; border-top: 1px solid var(--prototype-border); background: #fff; }
 .prototype-inputbox { padding: 10px; border: 1px solid #cfd9cf; border-radius: 14px; background: #fbfcfb; }
 .prototype-inputbox textarea { width: 100%; height: 58px; border: 0; outline: 0; resize: none; background: transparent; color: var(--prototype-text); }
 .prototype-composerbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .prototype-hint { color: #899289; font-size: 11px; }
 .prototype-empty-assistant { margin: auto 0; color: var(--prototype-muted); font-size: 13px; line-height: 1.65; }
 .prototype-empty-assistant strong { display: block; margin-bottom: 5px; color: var(--prototype-text); }
+
+/* 作品库没有独立的参考页：沿用参考稿的留白、边框和信息密度，避免旧双列大卡片把归档区推到首屏外。 */
+.prototype-workspace .project-library-page { max-width: 1180px; }
+.prototype-workspace .project-library-page .page-head { margin-bottom: 18px; }
+.prototype-workspace .project-library-page .library-metrics { margin-bottom: 14px; }
+.prototype-workspace .project-library-page .library-toolbar { margin-top: 0; }
+.prototype-workspace .project-library-page .project-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.prototype-workspace .project-library-page .project-card-main { grid-template-columns: 72px minmax(0, 1fr); gap: 14px; padding: 14px 16px; }
+.prototype-workspace .project-library-page .project-cover { width: 72px; height: 96px; padding: 10px 8px; }
+.prototype-workspace .project-library-page .project-cover span { font-size: 23px; }
+.prototype-workspace .project-library-page .project-card-copy > p { min-height: 0; margin: 4px 0 7px; }
+.prototype-workspace .project-library-page .project-progress-row { margin-top: 10px; }
+.prototype-workspace .project-library-page .project-stats { margin-top: 7px; }
+.prototype-workspace .project-library-page .project-next { margin-top: 6px; }
+.prototype-workspace .project-library-page .project-card-actions { padding: 9px 16px; }
+.prototype-workspace .project-library-page .archived-section { margin-top: 16px; }
 
 @media (max-width: 1180px) {
   .prototype-topbar { grid-template-columns: 64px minmax(0, 1fr) auto; }
@@ -113,7 +128,7 @@
 }
 
 @media (max-width: 820px) {
-  .prototype-window { min-height: 100vh; }
+  .prototype-window { min-height: 100%; }
   .prototype-topactions .prototype-btn.ghost, .prototype-projectbar-meta, .prototype-pill { display: none; }
   .prototype-topactions { padding-right: 10px; }
   .prototype-workspace { padding: 22px 16px 86px; }
