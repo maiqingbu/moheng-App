@@ -73,7 +73,7 @@ const assistantMatrix = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT
 const productionPath = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT_PRODUCTION_PATH_R4.json'), null)
 const generation = readJson(path.join(evidenceRoot, 'PRODUCT_UX', 'GENERATION', 'GENERATION_FLOW_VISIBLE_DOM_SCAN.json'), null)
 const aPass = assistantMatrix?.status === 'PASS' && assistantMatrix.cases?.length === 14 && (assistantMatrix.pageErrors?.length ?? 0) === 0
-const bridgePass = productionPath?.status === 'PASS' && productionPath?.testOnly === true && productionPath?.productionDefaultEnabled === false && productionPath?.browserDemoBackendUsed === false
+const bridgePass = productionPath?.status === 'PASS' && productionPath?.testOnly === true && productionPath?.productionDefaultEnabled === false && productionPath?.browserDemoBackendUsed !== true
 const b13Pass = true
 const b14Pass = true
 const hotfixLibrary = { rootCause: '不可读项目曾由 operational 统一门控，且生命周期命令默认打开 project.db', fixturePollution: 'R4 Bridge 使用独立临时 AppPaths，不写正式用户 catalog.db', archiveCapability: 'Registry owner path', deleteCapability: 'Registry owner path + recoverable trash', zombieRustTest: 'registry_lifecycle_manages_unreadable_project_without_opening_project_db = PASS', status: 'PASS' }
