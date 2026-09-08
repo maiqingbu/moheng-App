@@ -26,3 +26,9 @@ test('Post-B14 shell does not introduce a frontend authority or browser fallback
   assert.doesNotMatch(`${shell}\n${dock}`, /localStorage|sessionStorage|indexedDB|rusqlite|libsql|invoke\(/)
   assert.doesNotMatch(`${shell}\n${dock}`, /BrowserDemo|浏览器演示适配器只用于 UI 验证/)
 })
+
+test('legacy assistant route redirects to the persistent dock instead of rendering a second page', () => {
+  const router = read('src/app/router.ts')
+  assert.match(router, /path:\s*['"]\/projects\/:id\/assistant['"][\s\S]*redirect:\s*to\s*=>/)
+  assert.doesNotMatch(router, /path:\s*['"]\/projects\/:id\/assistant['"][\s\S]*component:\s*ProjectAssistant/)
+})

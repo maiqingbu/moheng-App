@@ -434,11 +434,13 @@ export class BrowserDemoPort implements FrontendPort {
   async queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan> {
     await wait(30)
     const revision = this.record(request.projectId).bundle.project.revision
+    const executable = /修复|重新整理|重建/.test(request.question)
     return {
+      action: executable ? 'EXECUTABLE' : 'PROPOSAL_ONLY',
       repairPlanId: `demo-repair-${revision}`,
       projectId: request.projectId,
       basedOnProjectRevision: revision,
-      diagnosis: { summary: '项目展示需要重新核对' },
+      diagnosis: { claim: executable ? '当前作品展示需要重新整理。' : '这项请求会改变已经确认的作品事实，需要先建立正式提案。', supportStatus: 'SUPPORTED' },
       findingRefs: [],
       targetAuthorityOwner: 'B04::ProjectionOwner',
       proposedOperations: [{ operation: 'rebuild_projection', target: '项目展示', params: {}, postconditions: {} }],
@@ -732,6 +734,9 @@ export class BrowserDemoPort implements FrontendPort {
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break
           case 'integrity_check_run': message='完整性检查已完成，未发现权威数据断链。'; break
           case 'settings_save': if(request.payload?.settings) bundle.settings=clone(request.payload.settings as unknown as SettingsProjection); message='项目设置已保存。'; break
+          case 'repair_plan_create': message='修改方案已保存，等待你的明确授权。'; break
+          case 'repair_authorize': message='授权已记录，等待责任方执行并回传结果。'; break
+          case 'repair_execute': message='修改已执行，并已重新核对结果。'; break
           case 'signing_retry': bundle.signing.status='IN_REVIEW';bundle.project.signingStatus='IN_REVIEW';bundle.signing.verdict='正在重新执行完整开篇评估。';bundle.project.runState='ACTIVE';bundle.project.blockReason=null;message='开篇评估已重新启动。';break
           case 'signing_demo_pass':
             bundle.signing={status:'PASS',score:87,verdict:'开篇评估通过：平台匹配、连续升级和原创差异均达到当前门槛，后续生产已解锁。',dimensions:demoBundle.signing.dimensions.map((d,i)=>({...d,score:82+(i%7)*2,note:'演示评估已通过。'})),receipt:{id:'SIGN-RCP-0001',signedAt:nowLabel(),platformPolicyVersion:'FQ-2026.08',pitchVersion:'pitch-b@v1',constitutionVersion:'constitution@v3',namingVersion:'naming@v2',openingContractVersion:'opening@v2',chapterHashes:['sha256:ch1…','sha256:ch2…','sha256:ch3…'],reviewReportId:'SIGN-REPORT-001',receiptHash:'sha256:sign…a71'}}
@@ -740,7 +745,7 @@ export class BrowserDemoPort implements FrontendPort {
           case 'signing_demo_reject': bundle.signing.status='REJECTED';bundle.signing.score=51;bundle.signing.verdict='未通过：核心故事承诺与目标平台不匹配。';bundle.project.signingStatus='REJECTED';bundle.project.runState='BLOCKED';bundle.project.blockReason='SIGNING_REQUIRED';message='评估未通过，需要重新调整故事方向。';break
           default: message='演示命令已处理。'
         }
-        if(finalStatus==='committed'){bundle.project.revision+=1;bundle.project.latestReceiptId=receiptId;bundle.project.updatedAt=nowLabel()}
+        if(finalStatus==='committed' && !['repair_plan_create', 'repair_authorize'].includes(request.type)){bundle.project.revision+=1;bundle.project.latestReceiptId=receiptId;bundle.project.updatedAt=nowLabel()}
       }
     }
 
