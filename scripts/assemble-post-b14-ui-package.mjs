@@ -186,7 +186,7 @@ write(path.join(stageRoot, 'README_ACCEPTANCE.md'), `# 墨衡 V2.1 Post-B14 / Pr
 
 const checksumPath = path.join(manifestRoot, 'FILES_SHA256SUMS.txt')
 const ordinary = allFiles(stageRoot).filter(file => file !== path.relative(stageRoot, checksumPath))
-write(path.join(manifestRoot, 'PACKAGE_INVENTORY.json'), { totalFilesExcludingChecksum: ordinary.length, totalFilesIncludingChecksum: ordinary.length + 1, status: 'PASS' })
+write(path.join(manifestRoot, 'PACKAGE_INVENTORY.json'), { totalFilesExcludingChecksum: ordinary.length + 1, totalFilesIncludingChecksum: ordinary.length + 2, status: 'PASS' })
 const checksumFiles = allFiles(stageRoot).filter(file => file !== path.relative(stageRoot, checksumPath))
 write(checksumPath, `${checksumFiles.map(file => `${sha(path.join(stageRoot, file))}  ${file}`).join('\n')}\n`)
 const archive = path.join(delivery, `${packageName}.zip`)
