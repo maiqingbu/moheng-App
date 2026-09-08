@@ -24,7 +24,7 @@ async function build() {
 
 <template>
   <div class="page">
-    <PageHeader title="卷管理" subtitle="全书规划只保存整体战略；详细卷计划按当前卷逐步建立，不会一次生成整本书的章节规划。">
+    <PageHeader title="当前卷" subtitle="区分规划、实际进展、系统推算与暂定安排，不把计划当成已经发生的事实。">
       <button class="btn primary" :disabled="!signingPassed" @click="build">建立当前卷规划</button>
     </PageHeader>
     <CommandFeedback :state="state" />

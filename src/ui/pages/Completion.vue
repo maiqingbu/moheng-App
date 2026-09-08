@@ -142,7 +142,7 @@ onMounted(() => { void load() })
 
 <template>
   <div class="page">
-    <PageHeader title="终局与完结" subtitle="只依据项目正式记录检查全书是否具备完结条件；建议不替代硬性阻断。">
+    <PageHeader title="完结准备" subtitle="依据项目正式记录检查终局目标、必须解决的问题与成品完整性；建议不替代正式阻断。">
       <button class="btn" :disabled="loading || submitting" @click="load">重新检查</button>
     </PageHeader>
 

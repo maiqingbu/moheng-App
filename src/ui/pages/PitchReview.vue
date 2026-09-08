@@ -32,7 +32,7 @@ async function confirm(){
 
 <template>
   <div class="page">
-    <PageHeader title="故事方向选择" subtitle="系统已经生成三份实质不同的立项方案。请明确选择一个方向，或组合两个方向后继续。">
+    <PageHeader title="规划 · 故事方向" subtitle="先明确作品方向与故事承诺，再进入故事核心和当前卷规划。">
       <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" @click="regenerate">重新推荐</button>
     </PageHeader>
 

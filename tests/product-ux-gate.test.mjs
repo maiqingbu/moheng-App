@@ -20,7 +20,7 @@ test('Product UX gate fails closed when BookPlan and VolumePlan return to visibl
   const source = read('src/ui/pages/VolumeManager.vue')
   const result = evaluateProductUx({
     sourceReader: relative => relative === 'src/ui/pages/VolumeManager.vue'
-      ? source.replace('全书规划只保存整体战略；详细卷计划按当前卷逐步建立，不会一次生成整本书的章节规划。', 'BookPlan 只保存全书战略；详细 VolumePlan 按当前卷创建。')
+      ? source.replace('区分规划、实际进展、系统推算与暂定安排，不把计划当成已经发生的事实。', 'BookPlan 只保存全书战略；详细 VolumePlan 按当前卷创建。')
       : read(relative),
   })
   assert.equal(result.status, 'FAIL')

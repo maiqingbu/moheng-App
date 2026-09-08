@@ -46,7 +46,7 @@ async function saveAndContinue() {
 
 <template>
   <div class="page">
-    <PageHeader title="故事核心" subtitle="先确认主角、欲望、核心机制与读者承诺，再决定是否进入开篇准备。">
+    <PageHeader title="规划 · 故事核心" subtitle="确认主角、欲望、核心机制与读者承诺，再决定是否进入开篇准备。">
       <button class="btn" @click="router.push(`/projects/${store.currentProjectId ?? ''}/directions`)">返回故事方向</button>
     </PageHeader>
 

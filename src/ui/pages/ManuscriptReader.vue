@@ -64,7 +64,7 @@ onMounted(async () => {
 
 <template>
   <div class="page">
-    <PageHeader title="成品阅读" subtitle="按卷打开目录，正文只读取当前章节；整书导出会在后台完成。">
+    <PageHeader title="资料 · 成品阅读" subtitle="按卷打开正式章节，也可以从人物、事件、线索与设定角度查看作品记录。">
       <div class="actions"><input v-model="query" class="input" style="width:220px" placeholder="搜索正文 / 人名 / 地点" @keyup.enter="search"><button class="btn" @click="search">搜索</button></div>
     </PageHeader>
 

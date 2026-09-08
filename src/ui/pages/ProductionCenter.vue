@@ -98,7 +98,7 @@ async function executeRepair() {
 
 <template>
   <div v-if="project && production" class="page">
-    <PageHeader title="创作中心" subtitle="章节生产与授权修复均从当前作品记录重新查询。">
+    <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。">
       <button v-if="project.runState !== 'ACTIVE' && production.nextChapter" class="btn primary" @click="startProduction">开始第 {{ production.nextChapter.number }} 章</button>
       <button v-if="project.runState === 'ACTIVE'" class="btn" @click="controlProduction('production_pause')">暂停</button>
       <button v-if="project.runState === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>

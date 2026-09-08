@@ -40,7 +40,7 @@ watch(filter, load)
 
 <template>
   <div class="page">
-    <PageHeader title="决策收件箱" subtitle="立项、卷方向、预算、变更与完结冲突统一在这里处理。" />
+    <PageHeader title="待处理" subtitle="把需要确认、修改、重新检查或授权的事情集中在这里处理。" />
 
     <div class="segmented" style="width:max-content;margin-bottom:14px">
       <button v-for="item in filters" :key="item.value" :class="{ active: filter === item.value }" @click="setFilter(item.value)">{{ item.label }}</button>

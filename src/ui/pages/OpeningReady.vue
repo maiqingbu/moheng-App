@@ -27,7 +27,7 @@ async function startCreating() {
 
 <template>
   <div class="page">
-    <PageHeader title="开篇准备" subtitle="确认前三章的承诺、边界与第一章目标，然后进入已有的正式创作中心。">
+    <PageHeader title="规划 · 开篇准备" subtitle="确认前三章的承诺、边界与第一章目标，然后进入正式创作。">
       <button class="btn" @click="router.push(`/projects/${store.currentProjectId ?? ''}/setup`)">返回故事核心</button>
     </PageHeader>
     <div v-if="!opening" class="skeleton" style="height:180px" />
