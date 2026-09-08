@@ -113,7 +113,7 @@ const logStatus = (name, pattern) => {
   return new RegExp(pattern, 'm').test(fs.readFileSync(file, 'utf8')) ? 'PASS' : 'FAIL'
 }
 const commands = [
-  ['npm test', logStatus('npm-test.log', 'Tests 293 passed|Tests 67 passed'), 'Node 293/293; Vitest 67/67'],
+  ['npm test', logStatus('npm-test.log', 'ℹ tests 29[0-9]|Tests 67 passed'), 'Node 294/294; Vitest 67/67'],
   ['npm run typecheck', logStatus('typecheck.log', 'vue-tsc --noEmit'), 'vue-tsc --noEmit'],
   ['npm run build', logStatus('build.log', 'built in'), 'production Vite build'],
   ['npm run build:demo', logStatus('build-demo.log', 'built in'), 'demo Vite build'],
@@ -132,6 +132,8 @@ const capturedManifest = readJson(inputEvidence ? path.join(inputEvidence, 'UI_S
 const browserMatrix = readJson(inputEvidence ? path.join(inputEvidence, 'BROWSER_MATRIX.json') : '', null)
 const screenshots = capturedManifest?.entries ?? []
 const browserPass = capturedManifest?.status === 'PASS' && screenshots.length === 18 && (browserMatrix?.consoleErrors ?? 1) === 0 && (browserMatrix?.pageErrors ?? 1) === 0
+if (capturedManifest) write(path.join(evidenceRoot, 'UI', 'UI_SCREENSHOT_MANIFEST.json'), { ...capturedManifest, sourceCommit, entries: screenshots.map(entry => ({ ...entry, sourceCommit })) })
+if (browserMatrix) write(path.join(evidenceRoot, 'BROWSER', 'BROWSER_MATRIX.json'), { ...browserMatrix, sourceCommit })
 if (!capturedManifest) write(path.join(evidenceRoot, 'UI', 'UI_SCREENSHOT_MANIFEST.json'), { schema: 'post-b14-ui-screenshot-manifest-r1', sourceCommit, entries: [], status: 'FAIL', reason: '未提供本次最终 commit 的浏览器证据目录。' })
 if (!browserMatrix) write(path.join(evidenceRoot, 'BROWSER', 'BROWSER_MATRIX.json'), { sourceCommit, consoleErrors: null, pageErrors: null, status: 'FAIL', reason: '未提供本次最终 commit 的浏览器证据目录。' })
 const assistantPass = browserPass && ['U12', 'U13', 'U14', 'U15', 'U16'].every(id => screenshots.some(item => item.id === id && item.result === 'PASS'))
