@@ -64,8 +64,9 @@ const server = http.createServer(async (request, response) => {
     return
   }
   if (request.method !== 'POST' || request.url !== '/invoke' || request.headers['x-r4-bridge-token'] !== token) { response.writeHead(404); response.end(); return }
+  let input = null
   try {
-    const input = await body(request)
+    input = await body(request)
     const result = await invoke(input.command, input.payload)
     response.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     response.end(JSON.stringify(result))
