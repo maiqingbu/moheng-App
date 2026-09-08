@@ -9,6 +9,7 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::ops::SearchService;
 use serde_json::{json, Value};
 use std::env;
 use std::io::{self, BufRead, Write};
@@ -37,10 +38,40 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
     let revision_digest = sha256_canonical(&json!({"revision": revision}))
         .map_err(|error| error.to_string())?;
     let canon_digest = sha256_canonical(&canon).map_err(|error| error.to_string())?;
+    let projection_current = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            SearchService::projection_health(connection, project_id)
+                .map_err(|error| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())?;
+    let projection_digest = sha256_canonical(&json!({"projectionCurrent": projection_current}))
+        .map_err(|error| error.to_string())?;
+    let fts_settings = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let mut statement = connection.prepare(
+                "SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key LIKE 'fts.%' ORDER BY setting_key",
+            )?;
+            let rows = statement
+                .query_map([project_id], |row| {
+                    Ok(json!({
+                        "key": row.get::<_, String>(0)?,
+                        "value": row.get::<_, String>(1)?
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(rows)
+        })
+        .map_err(|error| error.to_string())?;
+    let fts_settings_digest = sha256_canonical(&json!({"settings": fts_settings}))
+        .map_err(|error| error.to_string())?;
     Ok(json!({
         "domains": [
             {"name":"ProjectRevision","count":1,"digest":revision_digest},
-            {"name":"Canon","count":canon_count,"digest":canon_digest}
+            {"name":"Canon","count":canon_count,"digest":canon_digest},
+            {"name":"Projection","count":1,"digest":projection_digest},
+            {"name":"FTSProjectionSettings","count":fts_settings.len(),"digest":fts_settings_digest}
         ],
         "revision": revision,
         "source": "formal authority read owners"
@@ -181,12 +212,38 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
     }
 }
 
+fn serve(state: &KernelState, ready: Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string(&ready)?);
+    io::stdout().flush()?;
+    for line in io::stdin().lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let envelope: Value = serde_json::from_str(&line)?;
+        let command = envelope["command"].as_str().unwrap_or_default();
+        let body = envelope.get("payload").cloned().unwrap_or(Value::Null);
+        let response = match dispatch(state, command, body) {
+            Ok(value) => json!({"ok":true,"value":value}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+        println!("{}", serde_json::to_string(&response)?);
+        io::stdout().flush()?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = env::var_os("MOHENG_R4_FIXTURE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir().join(format!("moheng-r4-{}", std::process::id())));
     std::fs::create_dir_all(&root)?;
     let state = KernelState::new(AppPaths::new(&root));
+    let manifest_path = root.join("r5-fixture-ids.json");
+    if manifest_path.is_file() {
+        let ready: Value = serde_json::from_slice(&std::fs::read(manifest_path)?)?;
+        return serve(&state, ready);
+    }
     let seed = execute_command_impl(
         &state,
         json!({
@@ -252,6 +309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
     let failed_id = failed["projectId"].as_str().unwrap_or_default().to_owned();
+    let ready = json!({"event":"ready","projectId":project_id,"degradedProjectId":degraded_id,"degradedDeleteProjectId":degraded_delete_id,"failureProjectId":failed_id});
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&ready)?)?;
     execute_command_impl(
         &state,
         json!({
@@ -260,25 +319,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "payload":{"storyCore":{"protagonist":"被逐出宗门的炼丹师","desire":"证明废丹的价值","mechanism":"废丹让妖兽进化并留下代价","conflict":"宗门封锁秘密","readerPromise":"每次升级都伴随选择与代价","forbiddenReveals":[]}}
         }),
     )?;
-    println!(
-        "{}",
-        serde_json::to_string(&json!({"event":"ready","projectId":project_id,"degradedProjectId":degraded_id,"degradedDeleteProjectId":degraded_delete_id,"failureProjectId":failed_id}))?
-    );
-    io::stdout().flush()?;
-    for line in io::stdin().lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let envelope: Value = serde_json::from_str(&line)?;
-        let command = envelope["command"].as_str().unwrap_or_default();
-        let body = envelope.get("payload").cloned().unwrap_or(Value::Null);
-        let response = match dispatch(&state, command, body) {
-            Ok(value) => json!({"ok":true,"value":value}),
-            Err(error) => json!({"ok":false,"error":error}),
-        };
-        println!("{}", serde_json::to_string(&response)?);
-        io::stdout().flush()?;
-    }
-    Ok(())
+    serve(&state, ready)
 }

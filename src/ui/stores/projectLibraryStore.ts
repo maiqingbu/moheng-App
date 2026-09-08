@@ -84,10 +84,18 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     }
     const projectScoped = envelope.projectId != null && !['project_create_from_idea', 'project_create_from_market', 'global_settings_save'].includes(envelope.type)
     commandStates.value[key] = { status: 'submitting', message: '正在提交…', commandId }
-    const receipt = await frontendPort.executeCommand(envelope, (status, message) => {
-      if (commandStates.value[key]?.commandId !== commandId) return
-      commandStates.value[key] = { ...commandStates.value[key], commandId, status, message }
-    })
+    let receipt: Awaited<ReturnType<typeof frontendPort.executeCommand>>
+    try {
+      receipt = await frontendPort.executeCommand(envelope, (status, message) => {
+        if (commandStates.value[key]?.commandId !== commandId) return
+        commandStates.value[key] = { ...commandStates.value[key], commandId, status, message }
+      })
+    } catch (error) {
+      if (commandStates.value[key]?.commandId === commandId) {
+        commandStates.value[key] = { status: 'failed', message: error instanceof Error ? error.message : '操作未完成。', commandId }
+      }
+      throw error
+    }
     if (receipt.commandId !== commandId || (projectScoped && receipt.projectId !== envelope.projectId)) {
       const error = new Error('PROTOCOL / PROJECT_BINDING_ERROR')
       if (commandStates.value[key]?.commandId === commandId) {

@@ -83,11 +83,12 @@ async function authorizeProposal() {
     }
     assistantPhase.value = 'EXECUTED'
     proposalMessage.value = '修改已执行，正在重新核对结果。'
-    await new Promise(resolve => setTimeout(resolve, 180))
+    await new Promise(resolve => setTimeout(resolve, 800))
     assistantPhase.value = 'POST_VERIFYING'
     await store.refresh()
     const afterRevision = store.project?.revision ?? null
-    if (executionBeforeRevision.value == null || afterRevision == null || afterRevision <= executionBeforeRevision.value) {
+    const formalReceiptVerified = receipt.receipt?.status === 'REPAIR_VERIFIED'
+    if (afterRevision == null || !formalReceiptVerified) {
       assistantPhase.value = 'FAILED'
       proposalMessage.value = '修改已经执行，但重新检查未完成，请稍后重试。'
       return
