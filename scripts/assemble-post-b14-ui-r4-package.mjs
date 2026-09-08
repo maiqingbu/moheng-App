@@ -65,6 +65,9 @@ const designManifest = design.map(([target, input, expected]) => { const source 
 write(path.join(designRoot, 'DESIGN_INPUTS.json'), { inputs: designManifest, complete: designManifest.every(item => item.exactMatch) })
 
 if (assistantEvidence && fs.existsSync(assistantEvidence)) copyTree(assistantEvidence, path.join(evidenceRoot, 'ASSISTANT'))
+for (const file of ['ASSISTANT_E2E_MATRIX_R4.json', 'ASSISTANT_PRODUCTION_PATH_R4.json']) {
+  if (assistantEvidence && fs.existsSync(path.join(assistantEvidence, file))) copy(path.join(assistantEvidence, file), path.join(evidenceRoot, 'ASSISTANT', file))
+}
 if (generationEvidence && fs.existsSync(generationEvidence)) copyTree(generationEvidence, path.join(evidenceRoot, 'PRODUCT_UX', 'GENERATION'))
 const assistantMatrix = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT_E2E_MATRIX_R4.json'), null)
 const productionPath = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT_PRODUCTION_PATH_R4.json'), null)
