@@ -158,6 +158,7 @@ fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn registry_lifecycle_command(
     state: &KernelState,
     project_id: &str,

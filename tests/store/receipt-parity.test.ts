@@ -138,11 +138,13 @@ describe('B01 Receipt source/result parity', () => {
     expect(page).not.toContain('const projectId = receipt.projectId')
   })
 
-  it('LIBRARY-REV-03: degraded Library items disable every revision-backed destructive action', () => {
+  it('LIBRARY-REV-03: degraded Library items keep archive/delete management actions available', () => {
     const page = readFileSync(new URL('../../src/ui/pages/ProjectLibrary.vue', import.meta.url), 'utf8')
     expect(page).toContain(`:disabled="!item.operational" @click="askAction(item,'duplicate')"`)
-    expect(page).toContain(`:disabled="!item.operational" @click="askAction(item,'archive')"`)
-    expect(page).toContain(`:disabled="!item.operational" @click="askAction(item,'delete')"`)
+    expect(page).toContain(`@click="askAction(item,'archive')"`)
+    expect(page).toContain(`@click="askAction(item,'delete')"`)
+    expect(page).not.toContain(`:disabled="!item.operational" @click="askAction(item,'archive')"`)
+    expect(page).not.toContain(`:disabled="!item.operational" @click="askAction(item,'delete')"`)
     expect(page).toContain(':disabled="!item.operational" @click="restoreProject(item)"')
     expect(page).not.toContain('revision ?? 0')
   })

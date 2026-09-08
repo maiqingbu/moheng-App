@@ -168,6 +168,7 @@ impl CatalogRepository {
             .map_err(DatabaseError::Sqlite)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_registry_command_receipt(
         connection: &Connection,
         idempotency_key: &str,
