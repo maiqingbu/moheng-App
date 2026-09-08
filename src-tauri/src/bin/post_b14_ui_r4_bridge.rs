@@ -2,10 +2,9 @@
 
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_assistant_repair_plan_impl, query_book_health_impl,
+    query_canon_impl, query_decisions_impl, query_opening_ready_impl, query_production_center_impl,
     query_project_library_impl, query_project_overview_impl, query_story_directions_impl,
-    query_story_setup_impl, query_opening_ready_impl, query_production_center_impl,
-    query_decisions_impl, query_canon_impl, query_volume_list_impl, support_session_impl,
-    KernelState,
+    query_story_setup_impl, query_volume_list_impl, support_session_impl, KernelState,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -35,14 +34,17 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
         .get("facts")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let revision_digest = sha256_canonical(&json!({"revision": revision}))
-        .map_err(|error| error.to_string())?;
+    let revision_digest =
+        sha256_canonical(&json!({"revision": revision})).map_err(|error| error.to_string())?;
     let canon_digest = sha256_canonical(&canon).map_err(|error| error.to_string())?;
     let projection_current = state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            SearchService::projection_health(connection, project_id)
-                .map_err(|error| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(error.to_string()))
+            SearchService::projection_health(connection, project_id).map_err(|error| {
+                ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(
+                    error.to_string(),
+                )
+            })
         })
         .map_err(|error| error.to_string())?;
     let projection_digest = sha256_canonical(&json!({"projectionCurrent": projection_current}))
@@ -50,22 +52,15 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
     let fts_settings = state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let mut statement = connection.prepare(
-                "SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key LIKE 'fts.%' ORDER BY setting_key",
-            )?;
-            let rows = statement
-                .query_map([project_id], |row| {
-                    Ok(json!({
-                        "key": row.get::<_, String>(0)?,
-                        "value": row.get::<_, String>(1)?
-                    }))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(rows)
+            SearchService::fts_projection_settings(connection, project_id).map_err(|error| {
+                ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(
+                    error.to_string(),
+                )
+            })
         })
         .map_err(|error| error.to_string())?;
-    let fts_settings_digest = sha256_canonical(&json!({"settings": fts_settings}))
-        .map_err(|error| error.to_string())?;
+    let fts_settings_digest =
+        sha256_canonical(&json!({"settings": fts_settings})).map_err(|error| error.to_string())?;
     Ok(json!({
         "domains": [
             {"name":"ProjectRevision","count":1,"digest":revision_digest},
@@ -95,8 +90,8 @@ fn catalog_snapshot(root: PathBuf) -> Result<Value, String> {
             }))
         })
         .collect::<Vec<_>>();
-    let digest = sha256_canonical(&json!({"projects": redacted}))
-        .map_err(|error| error.to_string())?;
+    let digest =
+        sha256_canonical(&json!({"projects": redacted})).map_err(|error| error.to_string())?;
     Ok(json!({"count": projects.len(), "catalogDigest": digest}))
 }
 
@@ -278,7 +273,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "payload":{"title":"R5 无法打开的归档作品","idea":"用于作品库归档生命周期隔离验收"}
         }),
     )?;
-    let degraded_id = degraded["projectId"].as_str().unwrap_or_default().to_owned();
+    let degraded_id = degraded["projectId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let degraded_db = root.join("projects").join(&degraded_id).join("project.db");
     if degraded_db.exists() {
         std::fs::remove_file(degraded_db)?;
@@ -293,8 +291,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "payload":{"title":"R5 无法打开的删除作品","idea":"用于作品库删除与刷新隔离验收"}
         }),
     )?;
-    let degraded_delete_id = degraded_delete["projectId"].as_str().unwrap_or_default().to_owned();
-    let degraded_delete_db = root.join("projects").join(&degraded_delete_id).join("project.db");
+    let degraded_delete_id = degraded_delete["projectId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let degraded_delete_db = root
+        .join("projects")
+        .join(&degraded_delete_id)
+        .join("project.db");
     if degraded_delete_db.exists() {
         std::fs::remove_file(degraded_delete_db)?;
     }

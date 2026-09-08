@@ -117,6 +117,19 @@ impl SearchService {
                 || indexed_source_count.is_some_and(|count| count > 0 && projection_exists)))
     }
 
+    pub fn fts_projection_settings(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<(String, String)>, OpsError> {
+        let mut statement = connection.prepare(
+            "SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key LIKE 'fts.%' ORDER BY setting_key",
+        )?;
+        statement
+            .query_map([project_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(OpsError::from)
+    }
+
     pub fn ensure_projection(
         connection: &Connection,
         project_id: &str,
