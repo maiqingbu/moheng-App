@@ -83,6 +83,7 @@ async function authorizeProposal() {
     }
     assistantPhase.value = 'EXECUTED'
     proposalMessage.value = '修改已执行，正在重新核对结果。'
+    await new Promise(resolve => setTimeout(resolve, 180))
     assistantPhase.value = 'POST_VERIFYING'
     await store.refresh()
     const afterRevision = store.project?.revision ?? null

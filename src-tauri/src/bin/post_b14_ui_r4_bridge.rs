@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| env::temp_dir().join(format!("moheng-r4-{}", std::process::id())));
     std::fs::create_dir_all(&root)?;
-    let state = KernelState::new(AppPaths::new(root));
+    let state = KernelState::new(AppPaths::new(&root));
     let seed = execute_command_impl(
         &state,
         json!({

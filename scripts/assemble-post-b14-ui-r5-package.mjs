@@ -71,7 +71,7 @@ write(path.join(designRoot, 'DESIGN_INPUTS.json'), { inputs: designManifest, com
 
 const blockingFiles = [
   'ASSISTANT_STATE_MACHINE_R5.json', 'ASSISTANT_E2E_MATRIX_R5.json', 'A08_FORMAL_AUTHORITY_DIGEST.json', 'A09_AUTHORIZATION_TRACE.json', 'A10_FORMAL_RECEIPT_TRACE.json', 'A11_POST_STATE_TRACE.json', 'PROJECT_LIBRARY_E2E_MATRIX_R5.json', 'R5_DATA_ISOLATION.json', 'B13_UI_R5_REGRESSION.json', 'B14_UI_R5_REGRESSION.json', 'ACCESSIBILITY_R5.json', 'VISIBLE_DOM_R5.json', 'GENERATION_FLOW_R5.json', 'ROUTE_INVENTORY_R5.json',
-  ...Array.from({ length: 14 }, (_, index) => `A${String(index + 1).padStart(2, '0')}.json'), ...Array.from({ length: 7 }, (_, index) => `LIB-0${index + 1}.json`),
+  ...Array.from({ length: 14 }, (_, index) => `A${String(index + 1).padStart(2, '0')}.json`), ...Array.from({ length: 7 }, (_, index) => `LIB-0${index + 1}.json`),
 ]
 const evidenceFiles = allFiles(evidenceDir)
 const json = relative => readJson(path.join(evidenceDir, relative))
