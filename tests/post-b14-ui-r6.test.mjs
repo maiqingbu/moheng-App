@@ -30,8 +30,10 @@ test('R6 no-op repair is rejected by the typed owner verification', () => {
 
 test('R6 expected command failures use a typed receipt instead of an HTTP error', () => {
   const bridge = read('scripts/post-b14-ui-r4-bridge.mjs')
+  const rustBridge = read('src-tauri/src/bin/post_b14_ui_r4_bridge.rs')
   assert.match(bridge, /failedCommandReceipt\([\s\S]*?finalStatus: 'failed'/)
   assert.match(bridge, /input\?\.command === 'execute_command'[\s\S]*?response\.writeHead\(200/)
+  assert.match(rustBridge, /testOnlyFailureInjection[\s\S]*?"finalStatus": "failed"/)
 })
 
 test('R6 scans the complete product surface and uses the real production profile', () => {

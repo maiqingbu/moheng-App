@@ -303,6 +303,32 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         "query_assistant_repair_plan" => query_assistant_repair_plan_impl(state, request),
         "execute_command" => {
             let result = execute_command_impl(state, request.clone());
+            if let Err(error) = &result {
+                if request
+                    .pointer("/payload/testOnlyFailureInjection")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    let command_id = request
+                        .get("commandId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("R5_TEST_FAILURE")
+                        .to_owned();
+                    let project_id = request
+                        .get("projectId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                    return Ok(json!({
+                        "commandId": command_id,
+                        "projectId": project_id.clone(),
+                        "resultProjectId": project_id,
+                        "finalStatus": "failed",
+                        "message": error,
+                        "receiptId": format!("failed:{command_id}"),
+                        "testOnlyFailureReceipt": true
+                    }));
+                }
+            }
             if request.get("type").and_then(Value::as_str) == Some("repair_authorize") {
                 let outcome = if result.is_ok() { "accepted" } else { "failed" };
                 r6_trace_event(
