@@ -124,10 +124,11 @@ impl SearchService {
         let mut statement = connection.prepare(
             "SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key LIKE 'fts.%' ORDER BY setting_key",
         )?;
-        statement
+        let result = statement
             .query_map([project_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(OpsError::from)
+            .map_err(OpsError::from);
+        result
     }
 
     pub fn ensure_projection(
