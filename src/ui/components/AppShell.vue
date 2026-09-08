@@ -39,6 +39,7 @@ const isActive = (item: NavItem) => item.matches.includes(String(route.name))
 
 <template>
   <div class="app-shell" :class="{ 'has-assistant': inWorkspace, 'assistant-is-collapsed': assistantCollapsed }">
+    <div class="desktop-titlebar"><div class="titlebar-dots"><span class="titlebar-dot red" /><span class="titlebar-dot amber" /><span class="titlebar-dot green" /></div>墨衡 · AI 小说创作系统</div>
     <aside class="sidebar">
       <button class="brand" type="button" @click="router.push('/projects')">
         <span class="brand-mark">墨</span>

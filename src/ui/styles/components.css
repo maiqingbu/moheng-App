@@ -130,6 +130,16 @@ tr:last-child td { border-bottom:0; }
 /* Post-B14 product shell: the assistant is a dock, not a destination. */
 .app-shell.has-assistant { grid-template-columns: var(--sidebar) minmax(0, 1fr) 400px; }
 .app-shell.has-assistant.assistant-is-collapsed { grid-template-columns: var(--sidebar) minmax(0, 1fr) 52px; }
+.app-shell { grid-template-rows: 34px 58px minmax(0, 1fr); }
+.desktop-titlebar { grid-column: 1 / -1; grid-row: 1; position: relative; display: flex; align-items: center; justify-content: center; background: #343735; color: #d8ddd8; font-size: 12px; letter-spacing: .04em; }
+.titlebar-dots { position: absolute; left: 18px; display: flex; gap: 8px; }
+.titlebar-dot { width: 12px; height: 12px; border-radius: 50%; }
+.titlebar-dot.red { background: #ff625a; }
+.titlebar-dot.amber { background: #ffbf38; }
+.titlebar-dot.green { background: #2cc94e; }
+.sidebar { grid-column: 1; grid-row: 2 / 4; position: sticky; top: 34px; height: calc(100vh - 34px); }
+.main-shell { grid-column: 2; grid-row: 2 / 4; min-height: 0; }
+.assistant-dock { grid-column: 3; grid-row: 2 / 4; height: calc(100vh - 34px); top: 34px; }
 .nav-group-bottom { margin-top: auto; }
 .topbar-stage { min-height: 26px; padding: 3px 9px; border-radius: 999px; background: var(--pine-50); color: var(--pine-700); font-size: 11px; font-weight: 700; white-space: nowrap; }
 .topbar-meta { font-size: 11px; white-space: nowrap; }
@@ -188,6 +198,6 @@ tr:last-child td { border-bottom:0; }
   .app-shell.has-assistant .brand { padding-left: 4px; padding-right: 4px; }
   .app-shell.has-assistant .brand-copy, .app-shell.has-assistant .nav-label, .app-shell.has-assistant .nav-item span:not(.nav-icon), .app-shell.has-assistant .nav-count, .app-shell.has-assistant .sidebar-foot { display: none; }
   .app-shell.has-assistant .nav-item { justify-content: center; padding-left: 8px; padding-right: 8px; }
-  .assistant-dock { position: fixed; top: 60px; right: 0; bottom: 0; width: min(390px, 92vw); height: auto; box-shadow: var(--shadow-2); }
+  .assistant-dock { position: fixed; top: 92px; right: 0; bottom: 0; width: min(390px, 92vw); height: auto; box-shadow: var(--shadow-2); }
   .assistant-dock.collapsed { width: 52px; }
 }
