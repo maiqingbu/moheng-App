@@ -2,30 +2,30 @@
   color-scheme: light;
 
   /* Surfaces — cleaner, higher contrast whites with a whisper of green */
-  --bg: #eef4ee;
-  --bg-elevated: #f6faf5;
+  --bg: #f6f7f3;
+  --bg-elevated: #f0f3ee;
   --surface: #ffffff;
-  --surface-soft: #e4eee5;
-  --surface-strong: #d4e3d6;
+  --surface-soft: #f0f3ee;
+  --surface-strong: #e2e8e1;
 
   /* Ink — near-black, crisp, WCAG-friendly reading contrast */
-  --ink: #0e1611;
-  --ink-2: #22302a;
-  --ink-3: #47564c;
-  --ink-4: #74837a;
+  --ink: #182019;
+  --ink-2: #263229;
+  --ink-3: #566158;
+  --ink-4: #748078;
 
   /* Lines — clearly visible dividers */
-  --line: #cfdfd1;
-  --line-strong: #b3c9b7;
+  --line: #dce3da;
+  --line-strong: #c0cbc0;
 
   /* Pine brand green — vivid, saturated emerald */
-  --pine-50: #e2f4e9;
-  --pine-100: #c6ebd4;
+  --pine-50: #e7f2ea;
+  --pine-100: #d2e8d7;
   --pine-200: #99d9b2;
   --pine-300: #66bd8a;
   --pine-400: #3f9c64;
-  --pine-500: #2b8152;
-  --pine-600: #226c43;
+  --pine-500: #25734b;
+  --pine-600: #1d5d3c;
   --pine-700: #1c5636;
   --pine-800: #154029;
   --pine-900: #0e2c1c;
@@ -51,7 +51,7 @@
   --radius-md: 14px;
   --radius-lg: 20px;
   --radius-xl: 28px;
-  --sidebar: 244px;
+  --sidebar: 216px;
   --content-max: 1480px;
 
   /* Typography — refined stacks tuned for mixed Chinese/Latin UI */

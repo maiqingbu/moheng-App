@@ -38,6 +38,12 @@
   .composer-foot .actions { justify-content:space-between; }
 }
 
+@media (max-width: 820px) {
+  .assistant-dock { position: fixed; top: 60px; right: 0; bottom: 0; width: min(390px, 94vw); height: auto; z-index: 55; box-shadow: var(--shadow-2); }
+  .assistant-dock.collapsed { width: 52px; }
+  .assistant-dock.collapsed .assistant-rail-button { min-height: calc(100vh - 60px); }
+}
+
 @media (max-width: 1180px) {
   .project-grid { grid-template-columns:1fr; }
   .library-toolbar { grid-template-columns:minmax(220px,1fr) auto; }

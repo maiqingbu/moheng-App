@@ -146,7 +146,10 @@ for (const query of ['queryProjectOverview', 'queryChapterList', 'queryChapterFi
 }
 
 const appShell = read('ui/components/AppShell.vue')
-for (const label of ['总览', '市场与平台策略', '故事方向', '创作中心', '卷管理', '决策收件箱', '成品阅读', '作品图谱', '长篇健康', '版本与变更记录', '项目设置']) {
+// Post-B14 / Pre-B15 productization collapses the frozen legacy workspaces into
+// task-oriented IA labels. The underlying routes remain frozen above; only the
+// user-facing navigation grouping changes.
+for (const label of ['总览', '创作', '规划', '当前卷', '待处理', '资料', '长篇健康', '完结准备', '作品设置']) {
   if (!appShell.includes(label)) errors.push(`侧栏缺少工作区：${label}`)
 }
 
