@@ -91,14 +91,22 @@ async function startApp(bridge) {
 }
 
 async function bridgeInvoke(bridge, command, payload = {}) {
-  const response = await fetch(bridge.url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-r4-bridge-token': bridge.token },
-    body: JSON.stringify({ command, payload }),
-  })
-  const body = await response.json()
-  if (!response.ok) throw new Error(body.error ?? `R5_BRIDGE_${response.status}`)
-  return body
+  if (bridge.child.exitCode !== null) throw new Error(`R5_BRIDGE_EXITED:${bridge.child.exitCode}`)
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10_000)
+  try {
+    const response = await fetch(bridge.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-r4-bridge-token': bridge.token },
+      body: JSON.stringify({ command, payload }),
+      signal: controller.signal,
+    })
+    const body = await response.json()
+    if (!response.ok) throw new Error(body.error ?? `R5_BRIDGE_${response.status}`)
+    return body
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`R5_BRIDGE_TIMEOUT:${command}`)
+    throw error
+  } finally { clearTimeout(timeout) }
 }
 
 async function main() {
@@ -111,6 +119,7 @@ async function main() {
   const { chromium } = playwright()
   const browser = await chromium.launch({ headless: true })
   const page = await browser.newPage({ viewport: { width: 1440, height: 840 } })
+  page.setDefaultTimeout(15_000); page.setDefaultNavigationTimeout(15_000)
   const consoleErrors = []; const pageErrors = []
   page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
   page.on('pageerror', error => pageErrors.push(String(error)))
