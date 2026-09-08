@@ -100,14 +100,14 @@ const binding = { schema: 'post-b14-ui-r5-evidence-source-binding', finalSourceC
 write(path.join(evidenceDir, 'R5_EVIDENCE_SOURCE_BINDING.json'), binding)
 const gate = (passed, evidence) => ({ status: result(Boolean(passed)), evidence })
 const gates = {
-  assistantStateMachine: gate(evidenceStatus('ASSISTANT_STATE_MACHINE_R5.json'), 'ASSISTANT_STATE_MACHINE_R5.json'),
+  assistantStateMachine: gate(evidenceStatus('ASSISTANT/ASSISTANT_STATE_MACHINE_R5.json'), 'ASSISTANT/ASSISTANT_STATE_MACHINE_R5.json'),
   A01_A14: gate(matrix?.status === 'PASS', 'ASSISTANT_E2E_MATRIX_R5.json'),
   A08FormalAuthorityDigest: gate(evidenceStatus('A08_FORMAL_AUTHORITY_DIGEST.json') && a08.beforeFormalDigest && a08.afterFormalDigest, 'A08_FORMAL_AUTHORITY_DIGEST.json'),
   A09ExplicitAuthorizationTrace: gate(evidenceStatus('A09_AUTHORIZATION_TRACE.json') && a09.explicitUserAction === true && a09.trace?.length > 0, 'A09_AUTHORIZATION_TRACE.json'),
   A10FormalReceiptTrace: gate(evidenceStatus('A10_FORMAL_RECEIPT_TRACE.json') && a10.receiptExists === true, 'A10_FORMAL_RECEIPT_TRACE.json'),
   A11RealStateChange: gate(evidenceStatus('A11_POST_STATE_TRACE.json') && a11.formalStateChanged === true && a11.expectedStateReached === true, 'A11_POST_STATE_TRACE.json'),
   A11FormalPostVerify: gate(evidenceStatus('A11_POST_STATE_TRACE.json') && a11.postVerify?.succeeded === true, 'A11_POST_STATE_TRACE.json'),
-  LIB01_LIB07: gate(library?.status === 'PASS' && Array.from({ length: 7 }, (_, index) => evidenceStatus(`LIB-0${index + 1}.json`)).every(Boolean), 'PROJECT_LIBRARY_E2E_MATRIX_R5.json'),
+  LIB01_LIB07: gate(library?.status === 'PASS' && Array.from({ length: 7 }, (_, index) => evidenceStatus(`LIBRARY/LIB-0${index + 1}/LIB-0${index + 1}.json`)).every(Boolean), 'PROJECT_LIBRARY_E2E_MATRIX_R5.json'),
   normalProjectRegression: gate(library?.normalRegression?.status === 'PASS', 'LIBRARY/NORMAL_PROJECT_REGRESSION.json'),
   dataIsolation: gate(isolation?.status === 'PASS' && isolation.productionCountBefore != null && isolation.productionCountAfter != null, 'R5_DATA_ISOLATION.json'),
   allBlockingEvidenceFinalSourceBound: gate(binding.status === 'PASS', 'R5_EVIDENCE_SOURCE_BINDING.json'),
