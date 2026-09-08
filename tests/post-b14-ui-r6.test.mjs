@@ -26,6 +26,7 @@ test('R6 library delete failure is consumed by the UI event handler', () => {
 test('R6 scans the complete product surface and uses the real production profile', () => {
   const capture = read('scripts/capture-post-b14-ui-r5.mjs')
   assert.match(capture, /FULL_PRODUCT_VISIBLE_DOM_SCAN_R6\.json/)
+  for (const surface of ['P13_ASSISTANT_QUERY', 'P14_ASSISTANT_PROPOSAL', 'P15_ASSISTANT_RESULT']) assert.match(capture, new RegExp(surface))
   assert.match(capture, /Library\/Application Support\/com\.moheng\.ai-novel-production-system|TAURI_APP_DATA_DIR/)
   assert.doesNotMatch(capture, /const productionRoot = fs\.mkdtempSync/)
 })

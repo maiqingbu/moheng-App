@@ -4061,7 +4061,10 @@ fn execute_repair_command(
                 connection: &handle,
                 project_id,
                 now: requested_at,
-                no_op: request.pointer("/payload/testOnlyNoop").and_then(Value::as_bool) == Some(true),
+                no_op: request
+                    .pointer("/payload/testOnlyNoop")
+                    .and_then(Value::as_bool)
+                    == Some(true),
             };
             let receipt = crate::repair::execute(
                 &handle,

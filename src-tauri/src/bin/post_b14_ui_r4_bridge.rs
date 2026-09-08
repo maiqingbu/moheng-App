@@ -23,7 +23,14 @@ static R5_LAST_RECEIPT: Mutex<Option<Value>> = Mutex::new(None);
 static R6_TRACE: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static R6_FAIL_NEXT_NOOP: AtomicBool = AtomicBool::new(false);
 
-fn r6_trace_event(event: &str, layer: &str, command: &str, capability: &str, owner: &str, result: &str) {
+fn r6_trace_event(
+    event: &str,
+    layer: &str,
+    command: &str,
+    capability: &str,
+    owner: &str,
+    result: &str,
+) {
     if let Ok(mut trace) = R6_TRACE.lock() {
         let seq = trace.len() + 1;
         trace.push(json!({
@@ -94,33 +101,60 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
 fn catalog_snapshot(root: PathBuf) -> Result<Value, String> {
     let catalog_path = root.join("catalog.db");
     if !catalog_path.is_file() {
-        let digest = sha256_canonical(&json!({"projects": []})).map_err(|error| error.to_string())?;
-        return Ok(json!({"count": 0, "catalogDigest": digest, "profileExists": false, "readOnly": true}));
+        let digest =
+            sha256_canonical(&json!({"projects": []})).map_err(|error| error.to_string())?;
+        return Ok(
+            json!({"count": 0, "catalogDigest": digest, "profileExists": false, "readOnly": true}),
+        );
     }
-    let connection = ai_novel_production_system_core::project_db::connection::open_connection(&catalog_path, true)
-        .map_err(|error| error.to_string())?;
-    let projects = ai_novel_production_system_core::catalog::CatalogRepository::list_projects(&connection)
-        .map_err(|error| error.to_string())?;
-    let redacted = projects.iter().map(|project| json!({
-        "projectIdDigest": sha256_canonical(&json!(project.project_id)).unwrap_or_default(),
-        "lifecycle": project.lifecycle,
-        "createdAt": project.created_at,
-        "updatedAt": project.updated_at
-    })).collect::<Vec<_>>();
+    let connection = ai_novel_production_system_core::project_db::connection::open_connection(
+        &catalog_path,
+        true,
+    )
+    .map_err(|error| error.to_string())?;
+    let projects =
+        ai_novel_production_system_core::catalog::CatalogRepository::list_projects(&connection)
+            .map_err(|error| error.to_string())?;
+    let redacted = projects
+        .iter()
+        .map(|project| {
+            json!({
+                "projectIdDigest": sha256_canonical(&json!(project.project_id)).unwrap_or_default(),
+                "lifecycle": project.lifecycle,
+                "createdAt": project.created_at,
+                "updatedAt": project.updated_at
+            })
+        })
+        .collect::<Vec<_>>();
     let digest =
         sha256_canonical(&json!({"projects": redacted})).map_err(|error| error.to_string())?;
-    Ok(json!({"count": projects.len(), "catalogDigest": digest, "profileExists": true, "readOnly": true}))
+    Ok(
+        json!({"count": projects.len(), "catalogDigest": digest, "profileExists": true, "readOnly": true}),
+    )
 }
 
 fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, String> {
     let request = body.get("request").cloned().unwrap_or(body.clone());
     if command == "r6_reset_trace" {
-        R6_TRACE.lock().map_err(|_| "R6_TRACE_LOCK_POISONED".to_string())?.clear();
+        R6_TRACE
+            .lock()
+            .map_err(|_| "R6_TRACE_LOCK_POISONED".to_string())?
+            .clear();
         return Ok(json!({"reset": true, "testOnly": true}));
     }
     if command == "r6_record_ui_event" {
-        let event = request.get("event").and_then(Value::as_str).unwrap_or("UI_EVENT");
-        r6_trace_event(event, "ui-test-observer", "ui", "assistant.repair", "ProjectAssistantDock", "observed");
+        let event = request
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or("UI_EVENT");
+        r6_trace_event(
+            event,
+            "ui-test-observer",
+            "ui",
+            "assistant.repair",
+            "ProjectAssistantDock",
+            "observed",
+        );
         return Ok(json!({"recorded": true, "testOnly": true}));
     }
     if command == "r6_query_trace" {
@@ -191,11 +225,39 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         )
     {
         if request.get("type").and_then(Value::as_str) == Some("repair_authorize") {
-            r6_trace_event("STORE_AUTHORIZE", "store-observer", "repair_authorize", "assistant.repair.authorize", "ProjectStore", "observed");
-            r6_trace_event("IPC_REPAIR_AUTHORIZE", "ipc", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "received");
-            r6_trace_event("AUTHORIZATION_CAPABILITY_RESOLVED", "capability", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "resolved");
+            r6_trace_event(
+                "STORE_AUTHORIZE",
+                "store-observer",
+                "repair_authorize",
+                "assistant.repair.authorize",
+                "ProjectStore",
+                "observed",
+            );
+            r6_trace_event(
+                "IPC_REPAIR_AUTHORIZE",
+                "ipc",
+                "repair_authorize",
+                "assistant.repair.authorize",
+                "H03::RepairAuthorizationOwner",
+                "received",
+            );
+            r6_trace_event(
+                "AUTHORIZATION_CAPABILITY_RESOLVED",
+                "capability",
+                "repair_authorize",
+                "assistant.repair.authorize",
+                "H03::RepairAuthorizationOwner",
+                "resolved",
+            );
         } else {
-            r6_trace_event("IPC_REPAIR_EXECUTE", "ipc", "repair_execute", "assistant.repair.execute", "H03::RepairOwner", "received");
+            r6_trace_event(
+                "IPC_REPAIR_EXECUTE",
+                "ipc",
+                "repair_execute",
+                "assistant.repair.execute",
+                "H03::RepairOwner",
+                "received",
+            );
         }
         if let Some(delay) = env::var("MOHENG_R5_EXECUTION_DELAY_MS")
             .ok()
@@ -243,10 +305,37 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
             let result = execute_command_impl(state, request.clone());
             if request.get("type").and_then(Value::as_str) == Some("repair_authorize") {
                 let outcome = if result.is_ok() { "accepted" } else { "failed" };
-                r6_trace_event("AUTHORIZATION_OWNER_CALLED", "owner", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", outcome);
-                if result.is_ok() { r6_trace_event("AUTHORIZATION_ACCEPTED", "owner", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "committed"); }
+                r6_trace_event(
+                    "AUTHORIZATION_OWNER_CALLED",
+                    "owner",
+                    "repair_authorize",
+                    "assistant.repair.authorize",
+                    "H03::RepairAuthorizationOwner",
+                    outcome,
+                );
+                if result.is_ok() {
+                    r6_trace_event(
+                        "AUTHORIZATION_ACCEPTED",
+                        "owner",
+                        "repair_authorize",
+                        "assistant.repair.authorize",
+                        "H03::RepairAuthorizationOwner",
+                        "committed",
+                    );
+                }
             } else if request.get("type").and_then(Value::as_str) == Some("repair_execute") {
-                r6_trace_event("REPAIR_OWNER_CALLED", "owner", "repair_execute", "assistant.repair.execute", "H03::RepairOwner", if result.is_ok() { "committed" } else { "failed" });
+                r6_trace_event(
+                    "REPAIR_OWNER_CALLED",
+                    "owner",
+                    "repair_execute",
+                    "assistant.repair.execute",
+                    "H03::RepairOwner",
+                    if result.is_ok() {
+                        "committed"
+                    } else {
+                        "failed"
+                    },
+                );
             }
             if let Ok(value) = &result {
                 if matches!(
