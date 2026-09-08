@@ -28,6 +28,12 @@ test('R6 no-op repair is rejected by the typed owner verification', () => {
   assert.match(commands, /fn verify\([\s\S]*?if self\.no_op[\s\S]*?"status": "FAIL"/)
 })
 
+test('R6 expected command failures use a typed receipt instead of an HTTP error', () => {
+  const bridge = read('scripts/post-b14-ui-r4-bridge.mjs')
+  assert.match(bridge, /failedCommandReceipt\([\s\S]*?finalStatus: 'failed'/)
+  assert.match(bridge, /input\?\.command === 'execute_command'[\s\S]*?response\.writeHead\(200/)
+})
+
 test('R6 scans the complete product surface and uses the real production profile', () => {
   const capture = read('scripts/capture-post-b14-ui-r5.mjs')
   assert.match(capture, /FULL_PRODUCT_VISIBLE_DOM_SCAN_R6\.json/)

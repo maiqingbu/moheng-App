@@ -43,6 +43,19 @@ function invoke(command, payload) {
   }))
 }
 function body(request) { return new Promise((resolve, reject) => { let value = ''; request.on('data', chunk => { value += chunk }); request.on('end', () => { try { resolve(value ? JSON.parse(value) : {}) } catch (error) { reject(error) } }); request.on('error', reject) }) }
+function failedCommandReceipt(input, error) {
+  const request = input?.payload?.request ?? input?.payload ?? {}
+  const commandId = typeof request.commandId === 'string' ? request.commandId : `R4_FAILED_${Date.now()}`
+  const projectId = typeof request.projectId === 'string' ? request.projectId : undefined
+  return {
+    commandId,
+    ...(projectId ? { projectId, resultProjectId: projectId } : {}),
+    acceptedAt: new Date().toISOString(),
+    finalStatus: 'failed',
+    message: error instanceof Error ? error.message : String(error),
+    receiptId: `failed:${commandId}`,
+  }
+}
 const server = http.createServer(async (request, response) => {
   if (request.method === 'OPTIONS' && request.url === '/invoke') {
     response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type, x-r4-bridge-token' })
@@ -56,6 +69,11 @@ const server = http.createServer(async (request, response) => {
     response.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     response.end(JSON.stringify(result))
   } catch (error) {
+    if (input?.command === 'execute_command' && (input?.payload?.request?.type || input?.payload?.type)) {
+      response.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
+      response.end(JSON.stringify(failedCommandReceipt(input, error)))
+      return
+    }
     response.writeHead(500, { 'content-type': 'application/json', 'access-control-allow-origin': '*' })
     response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
   }
