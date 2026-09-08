@@ -20,6 +20,24 @@ use std::time::Duration;
 static R5_FAIL_NEXT_DELETE: AtomicBool = AtomicBool::new(false);
 static R5_FAIL_NEXT_ASSISTANT_EXECUTE: AtomicBool = AtomicBool::new(false);
 static R5_LAST_RECEIPT: Mutex<Option<Value>> = Mutex::new(None);
+static R6_TRACE: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+static R6_FAIL_NEXT_NOOP: AtomicBool = AtomicBool::new(false);
+
+fn r6_trace_event(event: &str, layer: &str, command: &str, capability: &str, owner: &str, result: &str) {
+    if let Ok(mut trace) = R6_TRACE.lock() {
+        let seq = trace.len() + 1;
+        trace.push(json!({
+            "seq": seq,
+            "layer": layer,
+            "event": event,
+            "command": command,
+            "capability": capability,
+            "owner": owner,
+            "result": result,
+            "timestampOrMonotonicOrder": seq
+        }));
+    }
+}
 
 fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, String> {
     let revision = state
@@ -74,29 +92,48 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
 }
 
 fn catalog_snapshot(root: PathBuf) -> Result<Value, String> {
-    let catalog_state = KernelState::new(AppPaths::new(root));
-    let library = query_project_library_impl(&catalog_state)?;
-    let projects = library
-        .get("projects")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let redacted = projects
-        .iter()
-        .filter_map(|project| {
-            Some(json!({
-                "lifecycle": project.get("lifecycle")?,
-                "operational": project.get("operational")?
-            }))
-        })
-        .collect::<Vec<_>>();
+    let catalog_path = root.join("catalog.db");
+    if !catalog_path.is_file() {
+        let digest = sha256_canonical(&json!({"projects": []})).map_err(|error| error.to_string())?;
+        return Ok(json!({"count": 0, "catalogDigest": digest, "profileExists": false, "readOnly": true}));
+    }
+    let connection = ai_novel_production_system_core::project_db::connection::open_connection(&catalog_path, true)
+        .map_err(|error| error.to_string())?;
+    let projects = ai_novel_production_system_core::catalog::CatalogRepository::list_projects(&connection)
+        .map_err(|error| error.to_string())?;
+    let redacted = projects.iter().map(|project| json!({
+        "projectIdDigest": sha256_canonical(&json!(project.project_id)).unwrap_or_default(),
+        "lifecycle": project.lifecycle,
+        "createdAt": project.created_at,
+        "updatedAt": project.updated_at
+    })).collect::<Vec<_>>();
     let digest =
         sha256_canonical(&json!({"projects": redacted})).map_err(|error| error.to_string())?;
-    Ok(json!({"count": projects.len(), "catalogDigest": digest}))
+    Ok(json!({"count": projects.len(), "catalogDigest": digest, "profileExists": true, "readOnly": true}))
 }
 
 fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, String> {
     let request = body.get("request").cloned().unwrap_or(body.clone());
+    if command == "r6_reset_trace" {
+        R6_TRACE.lock().map_err(|_| "R6_TRACE_LOCK_POISONED".to_string())?.clear();
+        return Ok(json!({"reset": true, "testOnly": true}));
+    }
+    if command == "r6_record_ui_event" {
+        let event = request.get("event").and_then(Value::as_str).unwrap_or("UI_EVENT");
+        r6_trace_event(event, "ui-test-observer", "ui", "assistant.repair", "ProjectAssistantDock", "observed");
+        return Ok(json!({"recorded": true, "testOnly": true}));
+    }
+    if command == "r6_query_trace" {
+        return Ok(json!({
+            "traceSource": "BRIDGE_RUNTIME_RECORDER",
+            "sequence": R6_TRACE.lock().map_err(|_| "R6_TRACE_LOCK_POISONED".to_string())?.clone(),
+            "testOnly": true
+        }));
+    }
+    if command == "r6_arm_noop" {
+        R6_FAIL_NEXT_NOOP.store(true, Ordering::SeqCst);
+        return Ok(json!({"armed": true, "testOnly": true}));
+    }
     if command == "r5_arm_library_failure" {
         R5_FAIL_NEXT_DELETE.store(true, Ordering::SeqCst);
         return Ok(json!({"armed": true, "testOnly": true}));
@@ -142,11 +179,24 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         request["payload"]["testOnlyFailureInjection"] = json!(true);
     }
     if command == "execute_command"
+        && request.get("type").and_then(Value::as_str) == Some("repair_execute")
+        && R6_FAIL_NEXT_NOOP.swap(false, Ordering::SeqCst)
+    {
+        request["payload"]["testOnlyNoop"] = json!(true);
+    }
+    if command == "execute_command"
         && matches!(
             request.get("type").and_then(Value::as_str),
             Some("repair_authorize" | "repair_execute")
         )
     {
+        if request.get("type").and_then(Value::as_str) == Some("repair_authorize") {
+            r6_trace_event("STORE_AUTHORIZE", "store-observer", "repair_authorize", "assistant.repair.authorize", "ProjectStore", "observed");
+            r6_trace_event("IPC_REPAIR_AUTHORIZE", "ipc", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "received");
+            r6_trace_event("AUTHORIZATION_CAPABILITY_RESOLVED", "capability", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "resolved");
+        } else {
+            r6_trace_event("IPC_REPAIR_EXECUTE", "ipc", "repair_execute", "assistant.repair.execute", "H03::RepairOwner", "received");
+        }
         if let Some(delay) = env::var("MOHENG_R5_EXECUTION_DELAY_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -191,6 +241,13 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         "query_assistant_repair_plan" => query_assistant_repair_plan_impl(state, request),
         "execute_command" => {
             let result = execute_command_impl(state, request.clone());
+            if request.get("type").and_then(Value::as_str) == Some("repair_authorize") {
+                let outcome = if result.is_ok() { "accepted" } else { "failed" };
+                r6_trace_event("AUTHORIZATION_OWNER_CALLED", "owner", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", outcome);
+                if result.is_ok() { r6_trace_event("AUTHORIZATION_ACCEPTED", "owner", "repair_authorize", "assistant.repair.authorize", "H03::RepairAuthorizationOwner", "committed"); }
+            } else if request.get("type").and_then(Value::as_str) == Some("repair_execute") {
+                r6_trace_event("REPAIR_OWNER_CALLED", "owner", "repair_execute", "assistant.repair.execute", "H03::RepairOwner", if result.is_ok() { "committed" } else { "failed" });
+            }
             if let Ok(value) = &result {
                 if matches!(
                     request.get("type").and_then(Value::as_str),

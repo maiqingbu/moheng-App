@@ -99,8 +99,13 @@ async function deleteProject() {
   if (!target || deleteConfirm.value !== target.title) return
   const request: { type: 'project_delete'; projectId: string; expectedRevision?: number } = { type:'project_delete', projectId:target.id }
   if (target.revision != null) request.expectedRevision = target.revision
-  await store.runCommand(`delete-${target.id}`, request)
-  if (store.commandState(`delete-${target.id}`).status === 'committed') closeAction()
+  try {
+    await store.runCommand(`delete-${target.id}`, request)
+    if (store.commandState(`delete-${target.id}`).status === 'committed') closeAction()
+  } catch {
+    // The store owns the failed state; consume the event error so a failed
+    // destructive action never escapes into the browser event loop.
+  }
 }
 </script>
 
@@ -117,7 +122,7 @@ async function deleteProject() {
         <MetricCard label="活跃作品" :value="store.projection.totals.active" note="不含已归档作品" />
         <MetricCard label="正在生产" :value="store.projection.totals.producing" note="当前有后台生产任务" />
         <MetricCard label="等待决定" :value="store.projection.totals.waitingDecision" note="需要你处理后才能继续" />
-        <MetricCard label="累计成本" :value="`¥${store.projection.totals.totalCost.toFixed(2)}`" note="全部作品演示数据合计" />
+        <MetricCard label="累计成本" :value="`¥${store.projection.totals.totalCost.toFixed(2)}`" note="全部作品合计" />
       </div>
 
       <section class="library-toolbar card">

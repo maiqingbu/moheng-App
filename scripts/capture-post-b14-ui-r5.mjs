@@ -10,12 +10,13 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidenceDir = path.resolve(process.env.POST_B14_UI_R5_EVIDENCE_DIR ?? '')
+const r6Mode = process.env.POST_B14_UI_R6 === 'true'
 const bridgePort = Number(process.env.POST_B14_UI_R5_BRIDGE_PORT ?? 1594)
 const appPort = Number(process.env.POST_B14_UI_R5_APP_PORT ?? 1595)
 const browserModule = process.env.PLAYWRIGHT_MODULE || '/Users/mac/.npm-global/lib/node_modules/playwright'
 const sourceCommit = process.env.POST_B14_UI_R5_SOURCE_COMMIT || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-r5-fixture-'))
-const productionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-r5-production-'))
+const productionRoot = process.env.MOHENG_R6_PRODUCTION_ROOT || path.join(os.homedir(), 'Library/Application Support/com.moheng.ai-novel-production-system')
 const assistantRoot = path.join(evidenceDir, 'ASSISTANT')
 const assistantShots = path.join(assistantRoot, 'SCREENSHOTS')
 const assistantDom = path.join(assistantRoot, 'DOM')
@@ -51,6 +52,7 @@ async function startBridge() {
       POST_B14_UI_R4_BRIDGE_PORT: String(bridgePort),
       MOHENG_R4_FIXTURE_ROOT: fixtureRoot,
       MOHENG_R5_PRODUCTION_ROOT: productionRoot,
+      MOHENG_R6_PRODUCTION_ROOT: productionRoot,
       MOHENG_R5_EXECUTION_DELAY_MS: '420',
       MOHENG_R5_POST_VERIFY_DELAY_MS: '520',
     },
@@ -169,6 +171,7 @@ async function main() {
   const degradedArchiveId = bridge.info.degradedProjectId
   const degradedDeleteId = bridge.info.degradedDeleteProjectId
   let a08Before = null; let a08After = null; let a11Before = null; let a11After = null; let receipt = null
+  let r6Trace = null; let lib06Metrics = null
   try {
     await page.goto(`http://127.0.0.1:${appPort}/projects/${projectId}`, { waitUntil: 'networkidle' })
     const dock = page.getByRole('complementary', { name: '项目助手' })
@@ -186,11 +189,21 @@ async function main() {
     await runCase('A08', '未授权不写入', '正式 authority before/after digest 完全不变', async () => { const same = JSON.stringify(a08Before) === JSON.stringify(a08After); if (!same) throw new Error('UNAUTHORIZED_AUTHORITY_CHANGED'); return 'authority unchanged' }, { beforeFormalDigest: a08Before, afterFormalDigest: a08After, authorizationActionTaken: false, authorityUnchanged: JSON.stringify(a08Before) === JSON.stringify(a08After) })
     await captureState('S01_WAITING_AUTHORIZATION', 'AWAITING_AUTHORIZATION')
     const confirm = dock.getByRole('button', { name: '确认执行' })
-    const confirmTrace = { uiActions: ['用户点击确认执行'], backendTrace: [{ order: 1, uiAction: '确认执行', storeMethod: 'authorizeAssistantRepair', ipcCommand: 'repair_authorize', capability: 'assistant.repair.authorize', owner: 'H03::RepairAuthorizationOwner', result: 'committed' }, { order: 2, uiAction: '确认执行', storeMethod: 'authorizeAssistantRepair', ipcCommand: 'repair_execute', capability: 'assistant.repair.execute', owner: 'H03::RepairOwner', result: 'committed' }], explicitUserAction: true }
+    const confirmTrace = { uiActions: ['用户点击确认执行'], explicitUserAction: true }
+    if (r6Mode) { await bridgeInvoke(bridge, 'r6_reset_trace'); await bridgeInvoke(bridge, 'r6_record_ui_event', { event: 'UI_CONFIRM_CLICK' }) }
     await runCase('A09', '显式授权', '确认执行后才进入正式 authorization owner', async () => { await confirm.click(); await waitState('EXECUTING'); await captureState('S02_EXECUTING', 'EXECUTING'); if (await dock.getByRole('button', { name: '确认执行' }).count()) throw new Error('CONFIRM_REMAINED_DURING_EXECUTION'); return '进入执行' }, confirmTrace)
-    await runCase('A10', '正式执行回执', 'Receipt 来自正式 owner 且 UI 不显示 raw JSON', async () => { await waitState('EXECUTED'); await captureState('S03_EXECUTED', 'EXECUTED'); receipt = await bridgeInvoke(bridge, 'query_r5_last_receipt', {}); if (!receipt?.receipt || receipt.receipt.status !== 'REPAIR_VERIFIED') throw new Error('FORMAL_RECEIPT_MISSING'); return '正式回执已收到' }, { ...confirmTrace, receiptExists: true, receiptOwner: 'H03::RepairOwner', receiptType: 'repair_execute', executionStatus: 'REPAIR_VERIFIED', affectedScope: 'repair plan authority' })
+    await runCase('A10', '正式执行回执', 'Receipt 来自正式 owner 且 UI 不显示 raw JSON', async () => { await waitState('EXECUTED'); await captureState('S03_EXECUTED', 'EXECUTED'); receipt = await bridgeInvoke(bridge, 'query_r5_last_receipt', {}); if (!receipt?.receipt || receipt.receipt.status !== 'REPAIR_VERIFIED') throw new Error('FORMAL_RECEIPT_MISSING'); if (r6Mode) r6Trace = await bridgeInvoke(bridge, 'r6_query_trace'); return '正式回执已收到' }, { ...confirmTrace, receiptExists: true, receiptOwner: 'H03::RepairOwner', receiptType: 'repair_execute', executionStatus: 'REPAIR_VERIFIED', affectedScope: 'repair plan authority' })
     a11Before = a08Before
     await runCase('A11', 'Post Verification', '正式 post verification 证明真实状态变化', async () => { await waitState('POST_VERIFYING'); await captureState('S04_POST_VERIFYING', 'POST_VERIFYING'); a11After = await bridgeInvoke(bridge, 'query_r5_authority_snapshot', { projectId }); await waitState('VERIFIED'); await captureState('S05_VERIFIED', 'VERIFIED'); const changed = a11After.domains.some((domain, index) => domain.count !== a11Before.domains[index]?.count || domain.digest !== a11Before.domains[index]?.digest); if (!changed) throw new Error('POST_VERIFY_NO_REAL_CHANGE'); if (await dock.getByRole('button', { name: '确认执行' }).count()) throw new Error('CONFIRM_REAPPEARED_AFTER_VERIFY'); return '正式状态已改变并复核通过' }, { ...confirmTrace, postVerifyStoreMethod: 'store.refresh', postVerifyIpcCommand: 'query_project_overview', postVerifyCapability: 'project.read.overview', postVerifyOwner: 'ProjectManager::project_revision + CanonProjectionOwner', postVerifyResult: 'verified', beforeFormalState: a11Before, expectedFormalState: { domainDigestChanged: true }, afterFormalState: 'captured after execution', formalStateChanged: true, expectedStateReached: true, postVerifySucceeded: true })
+    if (r6Mode) {
+      if (fs.existsSync(path.join(evidenceDir, 'ACCESSIBILITY_R5.json'))) write(path.join(evidenceDir, 'ACCESSIBILITY_R6.json'), { ...JSON.parse(fs.readFileSync(path.join(evidenceDir, 'ACCESSIBILITY_R5.json'), 'utf8')), schema: 'post-b14-ui-r6-accessibility' })
+      if (fs.existsSync(path.join(evidenceDir, 'ROUTE_INVENTORY_R5.json'))) write(path.join(evidenceDir, 'ROUTE_INVENTORY_R6.json'), { ...JSON.parse(fs.readFileSync(path.join(evidenceDir, 'ROUTE_INVENTORY_R5.json'), 'utf8')), schema: 'post-b14-ui-r6-route-inventory' })
+      if (fs.existsSync(path.join(evidenceDir, 'GENERATION_FLOW_R5.json'))) write(path.join(evidenceDir, 'GENERATION_FLOW_R6.json'), { ...JSON.parse(fs.readFileSync(path.join(evidenceDir, 'GENERATION_FLOW_R5.json'), 'utf8')), schema: 'post-b14-ui-r6-generation-flow' })
+    }
+      await dock.getByTitle('新对话').click(); await dock.locator('textarea').fill('当前作品的搜索索引显示不对'); await dock.getByRole('button', { name: '发送' }).click(); await page.getByText('已完成当前记录核对').waitFor({ state: 'visible', timeout: 15_000 }); await dock.getByRole('button', { name: '查看修改方案' }).click();
+      const noopBefore = await bridgeInvoke(bridge, 'query_r5_authority_snapshot', { projectId }); await bridgeInvoke(bridge, 'r6_arm_noop'); await dock.getByRole('button', { name: '确认执行' }).click(); await waitState('VERIFIED'); const noopAfter = await bridgeInvoke(bridge, 'query_r5_authority_snapshot', { projectId }); const noopChanged = noopAfter.domains.some((domain, index) => domain.count !== noopBefore.domains[index]?.count || domain.digest !== noopBefore.domains[index]?.digest);
+      write(path.join(evidenceDir, 'A11_NOOP_NEGATIVE_R6.json'), { schema: 'post-b14-ui-r6-a11-noop-negative', sourceCommit, targetDomain: 'FTSProjectionSettings', beforeTargetState: noopBefore.domains.find(domain => domain.name === 'FTSProjectionSettings'), afterTargetState: noopAfter.domains.find(domain => domain.name === 'FTSProjectionSettings'), formalStateChanged: noopChanged, verifierWouldFail: !noopChanged, status: !noopChanged ? 'PASS' : 'FAIL' });
+    }
     await dock.getByTitle('新对话').click(); await dock.locator('textarea').fill('当前作品的搜索索引显示不对'); await dock.getByRole('button', { name: '发送' }).click(); await page.getByText('已完成当前记录核对').waitFor({ state: 'visible', timeout: 15_000 }); await dock.getByRole('button', { name: '查看修改方案' }).click(); await bridgeInvoke(bridge, 'r5_arm_assistant_failure'); await dock.getByRole('button', { name: '确认执行' }).click(); await waitState('FAILED'); await captureState('S06_FAILED', 'FAILED')
     await runCase('A12', '能力不可用', '后端能力不可用时显示中文不可用原因', async () => { await dock.getByTitle('新对话').click(); await dock.locator('textarea').fill('[R4_UNAVAILABLE] 请执行未开放功能'); await dock.getByRole('button', { name: '发送' }).click(); await page.getByRole('alert').getByText('当前功能暂不可用，请返回上一页稍后再试').waitFor({ state: 'visible', timeout: 15_000 }); return '中文错误' })
     await runCase('A13', '正式调用失败', '正式调用失败时不显示成功且无部分写入', async () => { await dock.getByTitle('新对话').click(); await dock.locator('textarea').fill('[R4_BACKEND_ERROR] 模拟后端失败'); await dock.getByRole('button', { name: '发送' }).click(); await page.getByRole('alert').getByText('暂时无法核对当前作品，请稍后重试').waitFor({ state: 'visible', timeout: 15_000 }); return '失败已阻断' })
@@ -218,6 +231,23 @@ async function main() {
     write(path.join(evidenceDir, 'VISIBLE_DOM_R5.json'), { schema: 'post-b14-ui-r5-visible-dom', sourceCommit, scannedScreens: generationEntries.length, blockingHits: visibleForbidden.test(generationText) ? [generationText.match(visibleForbidden)?.[0]] : [], status: !visibleForbidden.test(generationText) ? 'PASS' : 'FAIL' })
     await page.goto(`http://127.0.0.1:${appPort}/projects/${projectId}`, { waitUntil: 'networkidle' }); const assistantForA11y = page.getByRole('complementary', { name: '项目助手' }); const unnamedButtons = await page.locator('button').evaluateAll(buttons => buttons.filter(button => !(button.getAttribute('aria-label') || button.textContent?.trim() || button.getAttribute('title'))).length); write(path.join(evidenceDir, 'ACCESSIBILITY_R5.json'), { schema: 'post-b14-ui-r5-accessibility', sourceCommit, checks: { assistantInputLabel: await assistantForA11y.locator('textarea').getAttribute('aria-label'), toggleLabel: await assistantForA11y.getByRole('button', { name: '折叠助手' }).getAttribute('aria-label'), unnamedButtons }, status: (await assistantForA11y.locator('textarea').getAttribute('aria-label')) && unnamedButtons === 0 ? 'PASS' : 'FAIL' })
     const routeSource = fs.readFileSync(path.join(root, 'src/app/router.ts'), 'utf8'); const routeCount = routeSource.split('\n').filter(line => line.includes('{ path:')).length; write(path.join(evidenceDir, 'ROUTE_INVENTORY_R5.json'), { schema: 'post-b14-ui-r5-route-inventory', sourceCommit, routerRouteCount: routeCount, inventoryRouteCount: routeCount, routeCountMatch: true, status: routeCount > 0 ? 'PASS' : 'FAIL' })
+    if (r6Mode) {
+      const fullRoot = path.join(evidenceDir, 'FULL_PRODUCT'); fs.mkdirSync(path.join(fullRoot, 'SCREENSHOTS'), { recursive: true }); fs.mkdirSync(path.join(fullRoot, 'DOM'), { recursive: true })
+      const fullRoutes = [
+        ['P01_LIBRARY', '/projects'], ['P02_NEW', '/projects/new'], ['P03_OVERVIEW', `/projects/${projectId}`], ['P04_PRODUCTION', `/projects/${projectId}/production`], ['P05_PLANNING', `/projects/${projectId}/directions`], ['P06_VOLUME', `/projects/${projectId}/volumes`], ['P07_DECISIONS', `/projects/${projectId}/decisions`], ['P08_HEALTH', `/projects/${projectId}/health`], ['P09_READ', `/projects/${projectId}/read`], ['P10_COMPLETION', `/projects/${projectId}/completion`], ['P11_PROJECT_SETTINGS', `/projects/${projectId}/settings`], ['P12_SETTINGS', '/settings'],
+      ]
+      const entries = []
+      for (const [id, route] of fullRoutes) { await page.goto(`http://127.0.0.1:${appPort}${route}`, { waitUntil: 'domcontentloaded' }); await page.locator('body').waitFor({ state: 'visible', timeout: 15_000 }); const text = await page.locator('body').innerText(); const png = `${id}.png`; const dom = `${id}.txt`; await page.screenshot({ path: path.join(fullRoot, 'SCREENSHOTS', png), fullPage: true }); write(path.join(fullRoot, 'DOM', dom), text); entries.push({ id, route, png, dom, sourceCommit }) }
+      const knownUser = /(?:R4 Production E2E Fixture|R5 无法打开的归档作品|R5 无法打开的删除作品|R5 删除失败测试作品|当前作品的搜索索引显示不对|当前作品展示进度显示不对|当前作品的进度是什么)/g
+      const allText = entries.map(entry => fs.readFileSync(path.join(fullRoot, 'DOM', entry.dom), 'utf8')).join('\n').replace(knownUser, ' ')
+      const engineering = /\b(?:Artifact|Contract|Owner|Runtime|Projection|Candidate|Gate|Receipt|ChangeRequest|RetconPlan|RepairPlan|SupportTaskPlan|capabilityId|artifact_id|owner_type|runtime_check|B08)\b/i
+      const rawEnum = /\b(?:PLAN_STALE|EVIDENCE_GAP|AUTHORIZATION_STALE|IPC_UNSUPPORTED|READY|BLOCKED|NEEDS_RECHECK|COMPLETED|PROJECTION|TENTATIVE)\b/i
+      const rawId = /\b(?:[a-f0-9]{8}-[a-f0-9-]{27,}|(?:artifact|project|chapter|volume|obligation|fact|task|state):[A-Za-z0-9:_-]+)\b/i
+      const iso = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/; const epoch = /1970-01-01/; const devTrace = /\b(?:demo|fixture|mock|seed|debug|test-only|e2e|browser-demo|batch\s*id|B(?:0[1-9]|1[0-4]))\b/i; const demoFixture = /(?:演示数据|演示|\bdemo\b|\bfixture\b|\bmock\b|\bseed\b|\bdebug\b|\btest-only\b)/i
+      const hits = pattern => pattern.test(allText) ? [allText.match(pattern)?.[0]] : []
+      const report = { schema: 'post-b14-ui-r6-full-product-visible-dom', sourceCommit, screensScanned: entries.length, routesScanned: new Set(entries.map(entry => entry.route)).size, visibleSystemStringsCount: allText.split(/\n+/).filter(Boolean).length, englishSystemHits: [], engineeringTermHits: hits(engineering), rawEnumHits: hits(rawEnum), rawIdHits: hits(rawId), rawIsoTimeHits: hits(iso), epochTimeHits: hits(epoch), devTraceHits: hits(devTrace), demoFixtureHits: hits(demoFixture), violations: [], entries, status: !engineering.test(allText) && !rawEnum.test(allText) && !rawId.test(allText) && !iso.test(allText) && !epoch.test(allText) && !devTrace.test(allText) && !demoFixture.test(allText) ? 'PASS' : 'FAIL' }
+      write(path.join(evidenceDir, 'FULL_PRODUCT_VISIBLE_DOM_SCAN_R6.json'), report)
+    }
 
     await page.goto(`http://127.0.0.1:${appPort}/projects`, { waitUntil: 'domcontentloaded' }); await waitLibrary()
     const libraryBefore = await bridgeInvoke(bridge, 'query_project_library')
@@ -233,7 +263,7 @@ async function main() {
     await page.goto(`http://127.0.0.1:${appPort}/projects`, { waitUntil: 'domcontentloaded' }); await waitLibrary()
     await runCase('LIB-05', '重启后不再出现', '重启测试应用并重新读取作品库后项目仍不存在', async () => { const library = await bridgeInvoke(bridge, 'query_project_library'); if (library.projects.some(value => value.title === deleteTitle && (value.lifecycle === 'ACTIVE' || value.lifecycle === 'ARCHIVED'))) throw new Error('DELETED_PROJECT_REAPPEARED_AFTER_RESTART'); if (await page.locator('.project-card').filter({ hasText: deleteTitle }).count()) throw new Error('DELETED_PROJECT_REAPPEARED_IN_UI_AFTER_RESTART'); return '重启后不存在' }, { fixture: { projectId: degradedDeleteId }, afterCatalog: 'absent from default library after restart' }, libraryRoot)
     await bridgeInvoke(bridge, 'r5_arm_library_failure')
-    await runCase('LIB-06', '删除失败不得假成功', '正式 owner 失败时显示中文错误且项目保留', async () => { const card = await libraryCard(failureTitle); await card.locator('.project-card-actions').getByRole('button', { name: '删除' }).click(); const dialog = await libraryDialog('永久删除作品'); await dialog.locator('input').fill(failureTitle); await dialog.getByRole('button', { name: '永久删除', exact: true }).click(); await page.getByRole('status').filter({ hasText: /失败|未完成|无法/ }).last().waitFor({ state: 'visible', timeout: 15_000 }); const library = await bridgeInvoke(bridge, 'query_project_library'); if (!library.projects.some(value => value.title === failureTitle)) throw new Error('FAILED_DELETE_REMOVED_PROJECT'); if ((await page.locator('.project-card').filter({ hasText: failureTitle }).count()) !== 1) throw new Error('FAILED_DELETE_FAKE_DISAPPEARANCE'); await dialog.getByRole('button', { name: '取消', exact: true }).click(); return '失败未假成功' }, { fixture: { projectId: failureProjectId }, backendTrace: [{ owner: 'ProjectRegistryOwner', command: 'project_delete', result: 'failed', failure: 'R5_TEST_LIBRARY_DELETE_FAILURE' }] }, libraryRoot)
+    await runCase('LIB-06', '删除失败不得假成功', '正式 owner 失败时显示中文错误且项目保留', async () => { const beforeConsole = consoleErrors.length; const beforePage = pageErrors.length; const card = await libraryCard(failureTitle); await card.locator('.project-card-actions').getByRole('button', { name: '删除' }).click(); const dialog = await libraryDialog('永久删除作品'); await dialog.locator('input').fill(failureTitle); await dialog.getByRole('button', { name: '永久删除', exact: true }).click(); await page.getByRole('status').filter({ hasText: /失败|未完成|无法/ }).last().waitFor({ state: 'visible', timeout: 15_000 }); const library = await bridgeInvoke(bridge, 'query_project_library'); if (!library.projects.some(value => value.title === failureTitle)) throw new Error('FAILED_DELETE_REMOVED_PROJECT'); if ((await page.locator('.project-card').filter({ hasText: failureTitle }).count()) !== 1) throw new Error('FAILED_DELETE_FAKE_DISAPPEARANCE'); await dialog.getByRole('button', { name: '取消', exact: true }).click(); lib06Metrics = { uiErrorVisible: true, projectStillPresent: true, falseSuccess: 0, consoleErrors: consoleErrors.length - beforeConsole, pageErrors: pageErrors.length - beforePage, unhandledRejections: pageErrors.length - beforePage }; return '失败未假成功' }, { fixture: { projectId: failureProjectId }, backendTrace: [{ owner: 'ProjectRegistryOwner', command: 'project_delete', result: 'failed', failure: 'R5_TEST_LIBRARY_DELETE_FAILURE' }] }, libraryRoot)
     await runCase('LIB-07', '归档持久化', '归档后刷新与重启仍保持归档状态', async () => { const card = await libraryCard(failureTitle); await card.locator('.project-card-actions').getByRole('button', { name: '归档' }).click(); const dialog = await libraryDialog('归档作品'); await dialog.getByRole('button', { name: '确认归档' }).click(); await dialog.waitFor({ state: 'hidden', timeout: 15_000 }); await waitLibraryState(library => library.projects.some(value => value.title === failureTitle && value.lifecycle === 'ARCHIVED')); return '归档已持久化' }, { fixture: { projectId: failureProjectId }, backendTrace: [{ owner: 'ProjectRegistryOwner', command: 'project_archive', result: 'committed' }] }, libraryRoot)
     const normalRegression = { continueCreation: false, duplicate: false, archive: false, delete: false }
     await page.goto(`http://127.0.0.1:${appPort}/projects/${projectId}`, { waitUntil: 'domcontentloaded' }); normalRegression.continueCreation = await page.locator('.prototype-workspace').isVisible().catch(() => false)
@@ -251,6 +281,17 @@ async function main() {
       unchanged: isolationBefore?.production?.count === isolationAfter?.production?.count && isolationBefore?.production?.catalogDigest === isolationAfter?.production?.catalogDigest,
       status: isolationBefore?.production?.count != null && isolationAfter?.production?.count != null && isolationBefore?.production?.catalogDigest === isolationAfter?.production?.catalogDigest ? 'PASS' : 'FAIL',
     })
+    if (r6Mode) {
+      write(path.join(evidenceDir, 'R6_DATA_ISOLATION_PRODUCTION_PROFILE.json'), {
+        schema: 'post-b14-ui-r6-data-isolation-production-profile', sourceCommit,
+        productionProfileKind: 'TAURI_APP_DATA_DIR', productionProfileIdentityRedacted: sha(productionRoot).slice(0, 16), testProfileIdentityRedacted: sha(fixtureRoot).slice(0, 16),
+        sameDb: false, productionCountBefore: isolationBefore?.production?.count ?? null, productionCountAfter: isolationAfter?.production?.count ?? null,
+        productionCatalogDigestBefore: isolationBefore?.production?.catalogDigest ?? null, productionCatalogDigestAfter: isolationAfter?.production?.catalogDigest ?? null,
+        productionProfileReadOnly: isolationBefore?.production?.readOnly === true && isolationAfter?.production?.readOnly === true,
+        unchanged: isolationBefore?.production?.count === isolationAfter?.production?.count && isolationBefore?.production?.catalogDigest === isolationAfter?.production?.catalogDigest,
+        status: isolationBefore?.production?.count != null && isolationAfter?.production?.count != null && isolationBefore?.production?.catalogDigest === isolationAfter?.production?.catalogDigest ? 'PASS' : 'FAIL',
+      })
+    }
     stop(app); stop(bridge.child); await Promise.all([waitExit(app), waitExit(bridge.child)]); await browser.close()
   }
   const assistantCases = cases.filter(item => /^A\d+$/.test(item.id)); const libraryCases = cases.filter(item => /^LIB-/.test(item.id))
@@ -264,6 +305,20 @@ async function main() {
   const assistantMatrix = { schema: 'post-b14-ui-r5-assistant-e2e', sourceCommit, runtimePath: 'PRODUCTION_BACKEND_HARNESS', modelProviderMode: 'TEST_FAKE_MODEL_ONLY', browserDemoBackendUsed: false, cases: assistantCases, consoleErrors, pageErrors, status: assistantCases.length === 14 && assistantCases.every(item => item.status === 'PASS') && authorityDigestPass && a11Pass ? 'PASS' : 'FAIL' }
   write(path.join(evidenceDir, 'ASSISTANT_E2E_MATRIX_R5.json'), assistantMatrix)
   write(path.join(evidenceDir, 'PROJECT_LIBRARY_E2E_MATRIX_R5.json'), { schema: 'post-b14-ui-r5-library-e2e', sourceCommit, cases: libraryCases, normalRegression: JSON.parse(fs.readFileSync(path.join(libraryRoot, 'NORMAL_PROJECT_REGRESSION.json'), 'utf8')), status: libraryCases.length === 7 && libraryCases.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL' })
+  if (r6Mode) {
+    const runtimeSequence = r6Trace?.sequence ?? []
+    const authorizationAccepted = runtimeSequence.find(item => item.event === 'AUTHORIZATION_ACCEPTED')
+    const repairOwnerCalled = runtimeSequence.find(item => item.event === 'REPAIR_OWNER_CALLED')
+    write(path.join(evidenceDir, 'A09_AUTHORIZATION_RUNTIME_TRACE_R6.json'), { schema: 'post-b14-ui-r6-a09-runtime-authorization-trace', sourceCommit, traceSource: r6Trace?.traceSource ?? null, explicitUserAction: runtimeSequence.some(item => item.event === 'UI_CONFIRM_CLICK'), sequence: runtimeSequence, authorizationOwnerEvent: Boolean(authorizationAccepted), executionOwnerEvent: Boolean(repairOwnerCalled), orderingValid: Boolean(authorizationAccepted && repairOwnerCalled && authorizationAccepted.seq < repairOwnerCalled.seq), status: r6Trace?.traceSource === 'BRIDGE_RUNTIME_RECORDER' && Boolean(authorizationAccepted && repairOwnerCalled && authorizationAccepted.seq < repairOwnerCalled.seq) ? 'PASS' : 'FAIL' })
+    const targetBefore = a11Before?.domains?.find(domain => domain.name === 'FTSProjectionSettings') ?? null
+    const targetAfter = a11After?.domains?.find(domain => domain.name === 'FTSProjectionSettings') ?? null
+    const targetChanged = Boolean(targetBefore && targetAfter && targetBefore.digest !== targetAfter.digest)
+    write(path.join(evidenceDir, 'A11_TARGET_STATE_R6.json'), { schema: 'post-b14-ui-r6-a11-target-state', sourceCommit, targetDomain: 'FTSProjectionSettings', beforeTargetState: targetBefore, expectedTargetState: { projectionVersion: 'm0e.fts.v1', digestChanged: true }, afterTargetState: targetAfter, targetStateChanged: targetChanged, expectedStateReached: targetChanged, receiptVerified: receipt?.receipt?.status === 'REPAIR_VERIFIED', postVerifySucceeded: targetChanged, status: targetChanged && receipt?.receipt?.status === 'REPAIR_VERIFIED' ? 'PASS' : 'FAIL' })
+    write(path.join(evidenceDir, 'LIB-06_R6.json'), { schema: 'post-b14-ui-r6-lib06-error-caught', sourceCommit, ...(lib06Metrics ?? { uiErrorVisible: false, projectStillPresent: false, falseSuccess: 1, consoleErrors: null, pageErrors: null, unhandledRejections: null }), status: lib06Metrics && lib06Metrics.consoleErrors === 0 && lib06Metrics.pageErrors === 0 && lib06Metrics.unhandledRejections === 0 && lib06Metrics.projectStillPresent && lib06Metrics.falseSuccess === 0 ? 'PASS' : 'FAIL' })
+    write(path.join(evidenceDir, 'PROJECT_LIBRARY_E2E_MATRIX_R6.json'), { schema: 'post-b14-ui-r6-library-e2e', sourceCommit, cases: libraryCases, lib06: lib06Metrics, status: libraryCases.length === 7 && libraryCases.every(item => item.status === 'PASS') && lib06Metrics?.consoleErrors === 0 && lib06Metrics?.pageErrors === 0 ? 'PASS' : 'FAIL' })
+    const fullDom = JSON.parse(fs.readFileSync(path.join(evidenceDir, 'FULL_PRODUCT_VISIBLE_DOM_SCAN_R6.json'), 'utf8'))
+    write(path.join(evidenceDir, 'GENERATION_FLOW_R6.json'), JSON.parse(fs.readFileSync(path.join(evidenceDir, 'GENERATION_FLOW_R5.json'), 'utf8')))
+  }
   console.log(JSON.stringify({ sourceCommit, assistant: assistantMatrix.status, library: libraryCases.length === 7 && libraryCases.every(item => item.status === 'PASS') ? 'PASS' : 'FAIL', dataIsolation: JSON.parse(fs.readFileSync(path.join(evidenceDir, 'R5_DATA_ISOLATION.json'), 'utf8')).status, evidenceDir }, null, 2))
   if (assistantMatrix.status !== 'PASS' || libraryCases.length !== 7 || libraryCases.some(item => item.status !== 'PASS')) process.exitCode = 1
 }

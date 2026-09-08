@@ -3482,6 +3482,7 @@ struct KernelRepairOwner<'a> {
     connection: &'a libsql_rusqlite::Connection,
     project_id: &'a str,
     now: &'a str,
+    no_op: bool,
 }
 
 impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
@@ -3489,6 +3490,12 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
         &self,
         operation: &crate::repair::RepairOperation,
     ) -> Result<crate::repair::OwnerExecution, String> {
+        if self.no_op {
+            return Ok(crate::repair::OwnerExecution {
+                owner: "B04::ProjectionOwner(TEST_ONLY_NOOP)".into(),
+                owner_receipt_ref: None,
+            });
+        }
         match operation.operation.as_str() {
             "refresh_runtime_projection" => {
                 SearchService::refresh_runtime_projection(
@@ -4054,6 +4061,7 @@ fn execute_repair_command(
                 connection: &handle,
                 project_id,
                 now: requested_at,
+                no_op: request.pointer("/payload/testOnlyNoop").and_then(Value::as_bool) == Some(true),
             };
             let receipt = crate::repair::execute(
                 &handle,
