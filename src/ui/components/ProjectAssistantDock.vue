@@ -87,7 +87,7 @@ function startConversation() {
       <div class="prototype-logo" style="width:30px;height:30px;border-radius:9px">墨</div>
       <div class="prototype-atitle"><strong>项目助手</strong><small>当前作品：{{ projectTitle }} · 正在查看：{{ context }}</small></div>
       <div class="prototype-assistanttools"><button class="prototype-iconbtn" type="button" title="新对话" @click="startConversation">＋</button></div>
-      <button class="prototype-iconbtn" type="button" :title="collapsed ? '展开助手' : '折叠助手'" @click="emit('toggle')">{{ collapsed ? '‹' : '›' }}</button>
+      <button class="prototype-iconbtn" type="button" :title="collapsed ? '展开助手' : '折叠助手'" :aria-label="collapsed ? '展开助手' : '折叠助手'" @click="emit('toggle')">{{ collapsed ? '‹' : '›' }}</button>
     </div>
 
     <div class="prototype-messages">
@@ -109,6 +109,6 @@ function startConversation() {
       <p v-else class="prototype-plan-message">{{ proposalMessage }}</p>
     </div>
 
-    <div class="prototype-composer"><div class="prototype-inputbox"><textarea v-model="question" :placeholder="placeholder" :disabled="sending" @keydown.enter.exact.prevent="send" /><div class="prototype-composerbar"><span class="prototype-hint">Shift + Enter 换行</span><button class="prototype-btn primary" type="button" :disabled="!question.trim() || sending" @click="send">{{ sending ? '核对中…' : '发送' }}</button></div></div></div>
+    <div class="prototype-composer"><div class="prototype-inputbox"><textarea v-model="question" aria-label="向项目助手提问" :placeholder="placeholder" :disabled="sending" @keydown.enter.exact.prevent="send" /><div class="prototype-composerbar"><span class="prototype-hint">Shift + Enter 换行</span><button class="prototype-btn primary" type="button" :disabled="!question.trim() || sending" @click="send">{{ sending ? '核对中…' : '发送' }}</button></div></div></div>
   </aside>
 </template>
