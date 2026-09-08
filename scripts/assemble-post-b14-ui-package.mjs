@@ -131,7 +131,9 @@ write(path.join(evidenceRoot, 'RAW_LOGS', 'COMMAND_SUMMARY.txt'), `${commands.ma
 const capturedManifest = readJson(inputEvidence ? path.join(inputEvidence, 'UI_SCREENSHOT_MANIFEST.json') : '', null)
 const browserMatrix = readJson(inputEvidence ? path.join(inputEvidence, 'BROWSER_MATRIX.json') : '', null)
 const screenshots = capturedManifest?.entries ?? []
-const browserPass = capturedManifest?.status === 'PASS' && screenshots.length === 18 && (browserMatrix?.consoleErrors ?? 1) === 0 && (browserMatrix?.pageErrors ?? 1) === 0
+const browserConsoleErrors = Array.isArray(browserMatrix?.consoleErrors) ? browserMatrix.consoleErrors.length : (browserMatrix?.consoleErrors ?? 1)
+const browserPageErrors = Array.isArray(browserMatrix?.pageErrors) ? browserMatrix.pageErrors.length : (browserMatrix?.pageErrors ?? 1)
+const browserPass = capturedManifest?.status === 'PASS' && screenshots.length === 18 && browserConsoleErrors === 0 && browserPageErrors === 0
 if (capturedManifest) write(path.join(evidenceRoot, 'UI', 'UI_SCREENSHOT_MANIFEST.json'), { ...capturedManifest, sourceCommit, entries: screenshots.map(entry => ({ ...entry, sourceCommit })) })
 if (browserMatrix) write(path.join(evidenceRoot, 'BROWSER', 'BROWSER_MATRIX.json'), { ...browserMatrix, sourceCommit })
 if (!capturedManifest) write(path.join(evidenceRoot, 'UI', 'UI_SCREENSHOT_MANIFEST.json'), { schema: 'post-b14-ui-screenshot-manifest-r1', sourceCommit, entries: [], status: 'FAIL', reason: '未提供本次最终 commit 的浏览器证据目录。' })
