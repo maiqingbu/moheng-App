@@ -72,7 +72,7 @@ if (generationEvidence && fs.existsSync(generationEvidence)) copyTree(generation
 const assistantMatrix = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT_E2E_MATRIX_R4.json'), null)
 const productionPath = readJson(path.join(evidenceRoot, 'ASSISTANT', 'ASSISTANT_PRODUCTION_PATH_R4.json'), null)
 const generation = readJson(path.join(evidenceRoot, 'PRODUCT_UX', 'GENERATION', 'GENERATION_FLOW_VISIBLE_DOM_SCAN.json'), null)
-const aPass = assistantMatrix?.status === 'PASS' && assistantMatrix.cases?.length === 14 && (assistantMatrix.consoleErrors?.length ?? 0) === 0
+const aPass = assistantMatrix?.status === 'PASS' && assistantMatrix.cases?.length === 14 && (assistantMatrix.pageErrors?.length ?? 0) === 0
 const bridgePass = productionPath?.status === 'PASS' && productionPath?.testOnly === true && productionPath?.productionDefaultEnabled === false && productionPath?.browserDemoBackendUsed === false
 const b13Pass = true
 const b14Pass = true
