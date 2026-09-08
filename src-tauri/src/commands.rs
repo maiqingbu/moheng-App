@@ -4845,6 +4845,20 @@ fn execute_b11_command(
 
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
+    #[cfg(feature = "e2e-test")]
+    if matches!(command_type, "project_delete" | "repair_execute")
+        && request
+            .pointer("/payload/testOnlyFailureInjection")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(if command_type == "project_delete" {
+            "R5_TEST_LIBRARY_DELETE_FAILURE"
+        } else {
+            "R5_TEST_ASSISTANT_EXECUTE_FAILURE"
+        }
+        .into());
+    }
     let command_id = required_string(&request, "commandId")?;
     let idempotency_key = required_string(&request, "idempotencyKey")?;
     let requested_at = required_string(&request, "requestedAt")?;

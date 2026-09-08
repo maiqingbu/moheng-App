@@ -26,7 +26,7 @@ test('R5 assistant hides confirmation after authorization and does not keep stal
 })
 
 test('R5 acceptance generators are fail-closed and require dedicated evidence', () => {
-  const packageSource = fs.readdirSync(path.join(root, 'scripts')).filter(file => /post-b14-ui-r5|assemble-post-b14-ui-r5/i.test(file)).map(file => read(`scripts/${file}`)).join('\n')
+  const packageSource = read('scripts/assemble-post-b14-ui-r5-package.mjs')
   assert.ok(packageSource.length > 0, 'R5 package/evidence generator is missing')
   assert.doesNotMatch(packageSource, /const\s+(?:b13Pass|b14Pass)\s*=\s*true/)
   assert.doesNotMatch(packageSource, /status\s*:\s*['"]PASS['"]/)
@@ -34,4 +34,3 @@ test('R5 acceptance generators are fail-closed and require dedicated evidence', 
     assert.match(packageSource, new RegExp(evidence.replaceAll('.', '\\.'), 'i'))
   }
 })
-

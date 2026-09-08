@@ -7,14 +7,135 @@ use ai_novel_production_system_core::commands::{
     query_decisions_impl, query_canon_impl, query_volume_list_impl, support_session_impl,
     KernelState,
 };
+use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::{json, Value};
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+
+static R5_FAIL_NEXT_DELETE: AtomicBool = AtomicBool::new(false);
+static R5_FAIL_NEXT_ASSISTANT_EXECUTE: AtomicBool = AtomicBool::new(false);
+static R5_LAST_RECEIPT: Mutex<Option<Value>> = Mutex::new(None);
+
+fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, String> {
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|error| error.to_string())?;
+    let canon = query_canon_impl(
+        state,
+        json!({"projectId": project_id, "scope": "canon", "pageSize": 100}),
+    )?;
+    let canon_count = canon
+        .get("facts")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let revision_digest = sha256_canonical(&json!({"revision": revision}))
+        .map_err(|error| error.to_string())?;
+    let canon_digest = sha256_canonical(&canon).map_err(|error| error.to_string())?;
+    Ok(json!({
+        "domains": [
+            {"name":"ProjectRevision","count":1,"digest":revision_digest},
+            {"name":"Canon","count":canon_count,"digest":canon_digest}
+        ],
+        "revision": revision,
+        "source": "formal authority read owners"
+    }))
+}
+
+fn catalog_snapshot(root: PathBuf) -> Result<Value, String> {
+    let catalog_state = KernelState::new(AppPaths::new(root));
+    let library = query_project_library_impl(&catalog_state)?;
+    let projects = library
+        .get("projects")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let redacted = projects
+        .iter()
+        .filter_map(|project| {
+            Some(json!({
+                "lifecycle": project.get("lifecycle")?,
+                "operational": project.get("operational")?
+            }))
+        })
+        .collect::<Vec<_>>();
+    let digest = sha256_canonical(&json!({"projects": redacted}))
+        .map_err(|error| error.to_string())?;
+    Ok(json!({"count": projects.len(), "catalogDigest": digest}))
+}
 
 fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, String> {
     let request = body.get("request").cloned().unwrap_or(body.clone());
+    if command == "r5_arm_library_failure" {
+        R5_FAIL_NEXT_DELETE.store(true, Ordering::SeqCst);
+        return Ok(json!({"armed": true, "testOnly": true}));
+    }
+    if command == "r5_arm_assistant_failure" {
+        R5_FAIL_NEXT_ASSISTANT_EXECUTE.store(true, Ordering::SeqCst);
+        return Ok(json!({"armed": true, "testOnly": true}));
+    }
+    if command == "query_r5_last_receipt" {
+        return R5_LAST_RECEIPT
+            .lock()
+            .map_err(|_| "R5_RECEIPT_LOCK_POISONED".to_string())?
+            .clone()
+            .ok_or_else(|| "R5_RECEIPT_NOT_FOUND".to_string());
+    }
+    if command == "query_r5_authority_snapshot" {
+        let project_id = request
+            .get("projectId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "R5_PROJECT_REQUIRED".to_string())?;
+        return authority_snapshot(state, project_id);
+    }
+    if command == "query_r5_data_isolation" {
+        let production_root = env::var_os("MOHENG_R5_PRODUCTION_ROOT")
+            .map(PathBuf::from)
+            .ok_or_else(|| "R5_PRODUCTION_ROOT_REQUIRED".to_string())?;
+        return Ok(json!({
+            "test": query_project_library_impl(state)?,
+            "production": catalog_snapshot(production_root)?
+        }));
+    }
+    let mut request = request;
+    if command == "execute_command"
+        && request.get("type").and_then(Value::as_str) == Some("project_delete")
+        && R5_FAIL_NEXT_DELETE.swap(false, Ordering::SeqCst)
+    {
+        request["payload"]["testOnlyFailureInjection"] = json!(true);
+    }
+    if command == "execute_command"
+        && request.get("type").and_then(Value::as_str) == Some("repair_execute")
+        && R5_FAIL_NEXT_ASSISTANT_EXECUTE.swap(false, Ordering::SeqCst)
+    {
+        request["payload"]["testOnlyFailureInjection"] = json!(true);
+    }
+    if command == "execute_command"
+        && matches!(
+            request.get("type").and_then(Value::as_str),
+            Some("repair_authorize" | "repair_execute")
+        )
+    {
+        if let Some(delay) = env::var("MOHENG_R5_EXECUTION_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+    }
+    if command == "query_project_overview" {
+        if let Some(delay) = env::var("MOHENG_R5_POST_VERIFY_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+    }
     if matches!(command, "support_session" | "query_assistant_repair_plan") {
         let question = request
             .get("question")
@@ -42,7 +163,20 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         "query_market_opportunities" => Ok(json!([])),
         "support_session" => support_session_impl(state, request),
         "query_assistant_repair_plan" => query_assistant_repair_plan_impl(state, request),
-        "execute_command" => execute_command_impl(state, request),
+        "execute_command" => {
+            let result = execute_command_impl(state, request.clone());
+            if let Ok(value) = &result {
+                if matches!(
+                    request.get("type").and_then(Value::as_str),
+                    Some("repair_authorize" | "repair_execute")
+                ) {
+                    if let Ok(mut receipt) = R5_LAST_RECEIPT.lock() {
+                        *receipt = Some(value.clone());
+                    }
+                }
+            }
+            result
+        }
         other => Err(format!("IPC_UNSUPPORTED:{other}")),
     }
 }
@@ -77,6 +211,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "payload":{"pitchIds":[pitch_id],"mode":"single"}
         }),
     )?;
+    let degraded = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_create_from_idea",
+            "commandId":"r5-seed-degraded-project",
+            "idempotencyKey":"r5-seed-degraded-project-key",
+            "requestedAt":"2026-09-08T00:00:03Z",
+            "payload":{"title":"R5 无法打开的归档作品","idea":"用于作品库归档生命周期隔离验收"}
+        }),
+    )?;
+    let degraded_id = degraded["projectId"].as_str().unwrap_or_default().to_owned();
+    let degraded_db = root.join("projects").join(&degraded_id).join("project.db");
+    if degraded_db.exists() {
+        std::fs::remove_file(degraded_db)?;
+    }
+    let degraded_delete = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_create_from_idea",
+            "commandId":"r5-seed-degraded-delete-project",
+            "idempotencyKey":"r5-seed-degraded-delete-project-key",
+            "requestedAt":"2026-09-08T00:00:03Z",
+            "payload":{"title":"R5 无法打开的删除作品","idea":"用于作品库删除与刷新隔离验收"}
+        }),
+    )?;
+    let degraded_delete_id = degraded_delete["projectId"].as_str().unwrap_or_default().to_owned();
+    let degraded_delete_db = root.join("projects").join(&degraded_delete_id).join("project.db");
+    if degraded_delete_db.exists() {
+        std::fs::remove_file(degraded_delete_db)?;
+    }
+    let failed = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_create_from_idea",
+            "commandId":"r5-seed-failure-project",
+            "idempotencyKey":"r5-seed-failure-project-key",
+            "requestedAt":"2026-09-08T00:00:04Z",
+            "payload":{"title":"R5 删除失败测试作品","idea":"用于验证失败不假成功"}
+        }),
+    )?;
+    let failed_id = failed["projectId"].as_str().unwrap_or_default().to_owned();
     execute_command_impl(
         &state,
         json!({
@@ -87,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!(
         "{}",
-        serde_json::to_string(&json!({"event":"ready","projectId":project_id}))?
+        serde_json::to_string(&json!({"event":"ready","projectId":project_id,"degradedProjectId":degraded_id,"degradedDeleteProjectId":degraded_delete_id,"failureProjectId":failed_id}))?
     );
     io::stdout().flush()?;
     for line in io::stdin().lock().lines() {

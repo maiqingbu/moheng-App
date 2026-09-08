@@ -7,6 +7,8 @@ import { productErrorMessage, sanitizeProductText } from '../presentation/produc
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import type { AssistantRepairPlan } from '../../application/contracts'
 
+type AssistantPhase = 'PROPOSAL_READY' | 'AWAITING_AUTHORIZATION' | 'EXECUTING' | 'EXECUTED' | 'POST_VERIFYING' | 'VERIFIED' | 'FAILED'
+
 defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{ toggle: [] }>()
 const route = useRoute()
@@ -21,6 +23,8 @@ const proposal = ref<AssistantRepairPlan | null>(null)
 const proposalOpen = ref(false)
 const proposalMessage = ref('')
 const assistantError = ref('')
+const assistantPhase = ref<AssistantPhase>('PROPOSAL_READY')
+const executionBeforeRevision = ref<number | null>(null)
 const context = computed(() => ({ 'project-overview': '总览', production: '创作', directions: '规划', volumes: '当前卷', 'volume-workspace': '当前卷', decisions: '待处理', health: '长篇健康', read: '资料', graph: '资料', completion: '完结准备' }[String(route.name)] ?? '当前作品'))
 const projectTitle = computed(() => store.project?.title?.trim() || '当前作品')
 const placeholder = computed(() => context.value === '当前卷' ? '问问这一卷还缺什么、为什么卡住……' : context.value === '创作' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……')
@@ -55,26 +59,55 @@ async function prepareProposal() {
   assistantError.value = ''
   try {
     proposal.value = await store.prepareAssistantRepair(text)
+    assistantPhase.value = proposal.value.action === 'EXECUTABLE' ? 'AWAITING_AUTHORIZATION' : 'PROPOSAL_READY'
     proposalOpen.value = true
   } catch (error) {
     proposal.value = null
     proposalOpen.value = true
+    assistantPhase.value = 'FAILED'
     proposalMessage.value = productErrorMessage(error, '暂时无法核对修改范围，请刷新当前作品后重试。')
   }
 }
 
 async function authorizeProposal() {
-  if (!proposal.value || proposal.value.action !== 'EXECUTABLE' || authorizationState.value.status === 'submitting') return
+  if (assistantPhase.value !== 'AWAITING_AUTHORIZATION' || !proposal.value || proposal.value.action !== 'EXECUTABLE' || authorizationState.value.status === 'submitting') return
+  executionBeforeRevision.value = store.project?.revision ?? null
+  assistantPhase.value = 'EXECUTING'
+  proposalMessage.value = '正在执行修改。'
   try {
     const receipt = await store.authorizeAssistantRepair(proposal.value)
-    proposalMessage.value = receipt.finalStatus === 'committed'
-      ? '修改已执行，并已重新核对结果。'
-      : '修改没有完成，请先刷新当前作品后再试。'
-    if (receipt.finalStatus === 'committed') await store.refresh()
+    if (receipt.finalStatus !== 'committed') {
+      assistantPhase.value = 'FAILED'
+      proposalMessage.value = '修改没有完成，请先刷新当前作品后再试。'
+      return
+    }
+    assistantPhase.value = 'EXECUTED'
+    proposalMessage.value = '修改已执行，正在重新核对结果。'
+    assistantPhase.value = 'POST_VERIFYING'
+    await store.refresh()
+    const afterRevision = store.project?.revision ?? null
+    if (executionBeforeRevision.value == null || afterRevision == null || afterRevision <= executionBeforeRevision.value) {
+      assistantPhase.value = 'FAILED'
+      proposalMessage.value = '修改已经执行，但重新检查未完成，请稍后重试。'
+      return
+    }
+    assistantPhase.value = 'VERIFIED'
+    proposalMessage.value = '修改已完成，并已重新核对结果。'
   } catch (error) {
+    assistantPhase.value = 'FAILED'
     proposalMessage.value = productErrorMessage(error, '修改没有完成，请先刷新当前作品后再试。')
   }
 }
+
+const assistantPhaseLabel = computed(() => ({
+  PROPOSAL_READY: '修改方案已生成',
+  AWAITING_AUTHORIZATION: '等待你的确认',
+  EXECUTING: '正在执行修改',
+  EXECUTED: '修改已执行',
+  POST_VERIFYING: '正在重新核对',
+  VERIFIED: '修改已完成并核对通过',
+  FAILED: '修改未完成',
+}[assistantPhase.value]))
 
 function startConversation() {
   presentation.value = null
@@ -82,13 +115,15 @@ function startConversation() {
   proposalOpen.value = false
   proposalMessage.value = ''
   assistantError.value = ''
+  assistantPhase.value = 'PROPOSAL_READY'
+  executionBeforeRevision.value = null
   evidenceOpen.value = false
   lastQuestion.value = ''
 }
 </script>
 
 <template>
-  <aside class="prototype-assistant" :class="{ collapsed }" aria-label="项目助手">
+  <aside class="prototype-assistant" :class="{ collapsed }" aria-label="项目助手" :data-assistant-state="assistantPhase">
     <div class="prototype-assistanthead">
       <div class="prototype-logo" style="width:30px;height:30px;border-radius:9px">墨</div>
       <div class="prototype-atitle"><strong>项目助手</strong><small>当前作品：{{ projectTitle }} · 正在查看：{{ context }}</small></div>
@@ -107,11 +142,11 @@ function startConversation() {
 
     <div v-if="proposalOpen" class="prototype-assistant-plan">
       <div v-if="proposal" class="prototype-answercard">
-        <div class="prototype-plan-title"><strong>修改方案</strong><span class="prototype-badge" :class="proposal.action === 'EXECUTABLE' ? 'brand' : 'warn'">{{ proposal.action === 'EXECUTABLE' ? '等待授权' : '需要先建立提案' }}</span></div>
+        <div class="prototype-plan-title"><strong>修改方案</strong><span class="prototype-badge" :class="assistantPhase === 'VERIFIED' ? 'brand' : assistantPhase === 'FAILED' ? 'warn' : 'brand'">{{ assistantPhaseLabel }}</span></div>
         <p>{{ sanitizeProductText(proposal.diagnosis?.claim, '已完成当前作品记录核对。') }}</p>
         <div class="prototype-plan-grid"><span>影响范围</span><strong>{{ displayScopes(proposal.affectedScopes) }}</strong><span>风险</span><strong>{{ sanitizeProductText(proposal.riskLevel, '按当前记录评估') }}</strong><span>执行前备份</span><strong>{{ proposal.requiresBackup ? '需要' : '不需要' }}</strong></div>
         <p v-if="proposalMessage" class="prototype-plan-message">{{ proposalMessage }}</p>
-        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || authorizationState.status === 'submitting' || executionState.status === 'submitting'" @click="authorizeProposal">{{ executionState.status === 'submitting' ? '执行中…' : '确认执行' }}</button><button v-else class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
+        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || authorizationState.status === 'submitting' || executionState.status === 'submitting'" @click="authorizeProposal">确认执行</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
       </div>
       <p v-else class="prototype-plan-message">{{ proposalMessage }}</p>
     </div>
