@@ -18,6 +18,17 @@ impl CatalogRepository {
     pub fn open(paths: &AppPaths, now: &str) -> Result<Connection, DatabaseError> {
         let connection = open_connection(&paths.catalog_db(), false)?;
         migrate_catalog(&connection, now)?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS project_registry_command_receipts (
+                idempotency_key TEXT PRIMARY KEY NOT NULL,
+                project_id TEXT NOT NULL,
+                command_id TEXT NOT NULL,
+                command_type TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                committed_at TEXT NOT NULL
+            );",
+        )?;
         Ok(connection)
     }
 
@@ -139,6 +150,37 @@ impl CatalogRepository {
         connection.execute(
             "UPDATE projects SET project_path = ?1, updated_at = ?2 WHERE project_id = ?3",
             libsql_rusqlite::params![project_path, now, project_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn registry_command_receipt(
+        connection: &Connection,
+        idempotency_key: &str,
+    ) -> Result<Option<(String, String)>, DatabaseError> {
+        connection
+            .query_row(
+                "SELECT request_digest, response_json FROM project_registry_command_receipts WHERE idempotency_key = ?1",
+                [idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn insert_registry_command_receipt(
+        connection: &Connection,
+        idempotency_key: &str,
+        project_id: &str,
+        command_id: &str,
+        command_type: &str,
+        request_digest: &str,
+        response_json: &str,
+        committed_at: &str,
+    ) -> Result<(), DatabaseError> {
+        connection.execute(
+            "INSERT INTO project_registry_command_receipts(idempotency_key, project_id, command_id, command_type, request_digest, response_json, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            libsql_rusqlite::params![idempotency_key, project_id, command_id, command_type, request_digest, response_json, committed_at],
         )?;
         Ok(())
     }

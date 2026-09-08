@@ -993,6 +993,51 @@ impl ProjectManager {
         Ok(())
     }
 
+    /// Registry-owned lifecycle cleanup used when a project database cannot be
+    /// opened. The project remains governed by catalog metadata and is moved to
+    /// the recoverable trash location when its directory still exists.
+    pub fn delete_registered_to_trash(
+        &self,
+        project_id: &str,
+        now: &str,
+    ) -> Result<(), ManagerError> {
+        let catalog = CatalogRepository::open(&self.paths, now)?;
+        let lifecycle = CatalogRepository::lifecycle(&catalog, project_id)?;
+        if !matches!(
+            lifecycle.as_deref(),
+            Some("ACTIVE") | Some("ARCHIVED") | Some("DELETING")
+        ) {
+            return Err(ManagerError::ProjectNotFound);
+        }
+        if self
+            .writers
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?
+            .contains(project_id)
+        {
+            return Err(ManagerError::AlreadyOpen);
+        }
+        if lifecycle.as_deref() == Some("DELETING") {
+            return Ok(());
+        }
+        CatalogRepository::set_lifecycle(&catalog, project_id, "DELETING", now)?;
+        let source = CatalogRepository::project_path(&catalog, project_id)?
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                self.paths
+                    .project_dir(project_id)
+                    .unwrap_or_else(|_| self.paths.projects_dir().join(project_id))
+            });
+        let trash = self.paths.trash_dir();
+        std::fs::create_dir_all(&trash)?;
+        let target = trash.join(project_id);
+        if source.exists() && !target.exists() {
+            std::fs::rename(&source, &target)?;
+        }
+        CatalogRepository::set_project_path(&catalog, project_id, &target.to_string_lossy(), now)?;
+        Ok(())
+    }
+
     /// Reconciles the catalog against the on-disk project/trash directories after
     /// an interrupted duplicate/delete, restoring path consistency.
     pub fn reconcile(&self, now: &str) -> Result<Vec<String>, ManagerError> {

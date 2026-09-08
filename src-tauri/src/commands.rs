@@ -158,6 +158,90 @@ fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
     })
 }
 
+fn registry_lifecycle_command(
+    state: &KernelState,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    command_type: &str,
+    request_digest: &str,
+    expected_revision: Option<i64>,
+    requested_at: &str,
+    delete: bool,
+) -> Result<Value, String> {
+    let catalog =
+        CatalogRepository::open(&state.paths, requested_at).map_err(|error| error.to_string())?;
+    if let Some((stored_digest, response_json)) =
+        CatalogRepository::registry_command_receipt(&catalog, idempotency_key)
+            .map_err(|error| error.to_string())?
+    {
+        if stored_digest != request_digest {
+            return Err("IDEMPOTENCY_CONFLICT".into());
+        }
+        return serde_json::from_str(&response_json).map_err(|error| error.to_string());
+    }
+    let lifecycle =
+        CatalogRepository::lifecycle(&catalog, project_id).map_err(|error| error.to_string())?;
+    if !matches!(
+        lifecycle.as_deref(),
+        Some("ACTIVE") | Some("ARCHIVED") | Some("DELETING")
+    ) {
+        return Err("PROJECT_NOT_FOUND".into());
+    }
+    let before_revision = expected_revision.unwrap_or(0);
+    if delete {
+        state
+            .manager
+            .delete_registered_to_trash(project_id, requested_at)
+            .map_err(|error| error.to_string())?;
+    } else {
+        state
+            .manager
+            .set_lifecycle(project_id, "ARCHIVED", requested_at)
+            .map_err(|error| error.to_string())?;
+    }
+    let receipt_id = format!("registry-receipt:{command_id}");
+    let receipt_digest = sha256_canonical(&json!({
+        "receiptId": receipt_id,
+        "projectId": project_id,
+        "commandId": command_id,
+        "idempotencyKey": idempotency_key,
+        "commandType": command_type,
+        "requestDigest": request_digest,
+        "beforeRevision": before_revision,
+        "afterRevision": before_revision,
+        "committedAt": requested_at,
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt = ProjectCommandReceipt {
+        receipt_id,
+        project_id: project_id.to_owned(),
+        result_project_id: project_id.to_owned(),
+        command_id: command_id.to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        command_type: command_type.to_owned(),
+        before_revision,
+        after_revision: before_revision,
+        request_digest: request_digest.to_owned(),
+        committed_at: requested_at.to_owned(),
+        receipt_digest,
+    };
+    let response = project_command_response(&receipt);
+    let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+    CatalogRepository::insert_registry_command_receipt(
+        &catalog,
+        idempotency_key,
+        project_id,
+        command_id,
+        command_type,
+        request_digest,
+        &response_json,
+        requested_at,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(response)
+}
+
 fn outcome_receipt<T>(outcome: ProjectCommandOutcome<T>) -> ProjectCommandReceipt {
     match outcome {
         ProjectCommandOutcome::Replayed(receipt)
@@ -5033,6 +5117,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         }
         "project_archive" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if state.manager.library_projection(id).is_err() {
+                return registry_lifecycle_command(
+                    state,
+                    id,
+                    command_id,
+                    idempotency_key,
+                    command_type,
+                    &digest,
+                    expected_revision,
+                    requested_at,
+                    false,
+                );
+            }
             let outcome = state
                 .manager
                 .commit_project_command(
@@ -5136,6 +5233,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         }
         "project_delete" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if state.manager.library_projection(id).is_err() {
+                return registry_lifecycle_command(
+                    state,
+                    id,
+                    command_id,
+                    idempotency_key,
+                    command_type,
+                    &digest,
+                    expected_revision,
+                    requested_at,
+                    true,
+                );
+            }
             if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
                 state
                     .manager

@@ -177,6 +177,33 @@ fn delete_to_trash_refuses_active_writer_and_delete_does_not_remove_rows() {
 }
 
 #[test]
+fn registry_lifecycle_manages_unreadable_project_without_opening_project_db() {
+    let temp = tempdir().unwrap();
+    let manager = new_manager(&temp);
+    drop(manager.create("proj-zombie", "损坏项目", NOW).unwrap());
+    fs::remove_file(temp.path().join("projects/proj-zombie/project.db")).unwrap();
+
+    assert!(manager.library_projection("proj-zombie").is_err());
+    manager
+        .set_lifecycle("proj-zombie", "ARCHIVED", NOW)
+        .unwrap();
+    manager
+        .delete_registered_to_trash("proj-zombie", "2026-09-08T01:00:00Z")
+        .unwrap();
+
+    let catalog = CatalogRepository::open(&AppPaths::new(temp.path()), NOW).unwrap();
+    let (lifecycle, path): (String, String) = catalog
+        .query_row(
+            "SELECT lifecycle, project_path FROM projects WHERE project_id = 'proj-zombie'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "DELETING");
+    assert!(path.contains("/trash/proj-zombie"));
+}
+
+#[test]
 fn writer_lock_releases_on_close() {
     let temp = tempdir().unwrap();
     let manager = new_manager(&temp);

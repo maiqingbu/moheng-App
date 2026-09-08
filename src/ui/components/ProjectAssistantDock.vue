@@ -20,6 +20,7 @@ const presentation = ref<AssistantPresentation | null>(null)
 const proposal = ref<AssistantRepairPlan | null>(null)
 const proposalOpen = ref(false)
 const proposalMessage = ref('')
+const assistantError = ref('')
 const context = computed(() => ({ 'project-overview': '总览', production: '创作', directions: '规划', volumes: '当前卷', 'volume-workspace': '当前卷', decisions: '待处理', health: '长篇健康', read: '资料', graph: '资料', completion: '完结准备' }[String(route.name)] ?? '当前作品'))
 const projectTitle = computed(() => store.project?.title?.trim() || '当前作品')
 const placeholder = computed(() => context.value === '当前卷' ? '问问这一卷还缺什么、为什么卡住……' : context.value === '创作' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……')
@@ -39,6 +40,9 @@ async function send() {
     const session = await store.supportSession(text, 'DIAGNOSE')
     if (session) presentation.value = presentAssistantSession(session)
     question.value = ''
+    assistantError.value = ''
+  } catch (error) {
+    assistantError.value = productErrorMessage(error, '暂时无法核对当前作品，请稍后重试。')
   } finally {
     sending.value = false
   }
@@ -48,6 +52,7 @@ async function prepareProposal() {
   const text = lastQuestion.value || question.value.trim()
   if (!text || proposalState.value.status === 'submitting') return
   proposalMessage.value = ''
+  assistantError.value = ''
   try {
     proposal.value = await store.prepareAssistantRepair(text)
     proposalOpen.value = true
@@ -76,6 +81,7 @@ function startConversation() {
   proposal.value = null
   proposalOpen.value = false
   proposalMessage.value = ''
+  assistantError.value = ''
   evidenceOpen.value = false
   lastQuestion.value = ''
 }
@@ -96,6 +102,7 @@ function startConversation() {
         <div class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>{{ presentation.status === 'supported' ? '已完成当前记录核对' : '还需要继续核对' }}</h4><p>{{ presentation.answer }}</p><div v-if="presentation.evidence.length" class="prototype-evidence"><span>依据来自当前作品记录</span><button class="prototype-link" type="button" @click="evidenceOpen = !evidenceOpen">{{ evidenceOpen ? '收起依据' : '查看依据' }}</button></div><div v-if="evidenceOpen" class="prototype-proposal"><strong>已核对的依据</strong><p v-for="item in presentation.evidence" :key="`${item.label}-${item.source ?? ''}`">{{ item.label }} · {{ item.detail }}</p></div><div class="prototype-proposal"><strong>需要修改时</strong><p>我可以整理一份修改方案，但不会直接改动已经确认的故事事实。</p><button class="prototype-btn" type="button" @click="prepareProposal">查看修改方案</button></div></div></div>
       </template>
       <div v-else class="prototype-msg assistantmsg"><div class="prototype-answercard"><h4>从一件具体的事开始</h4><p>我会先核对当前作品记录，再告诉你能够确认到什么。涉及正式修改时，会先给出方案并等待你的确认。</p><div class="prototype-evidence"><span>当前上下文：{{ context }}</span><span>等待提问</span></div></div></div>
+      <div v-if="assistantError" class="prototype-msg assistantmsg" role="alert"><div class="prototype-answercard"><h4>暂时无法完成查询</h4><p>{{ assistantError }}</p><button class="prototype-btn" type="button" @click="assistantError = ''">知道了</button></div></div>
     </div>
 
     <div v-if="proposalOpen" class="prototype-assistant-plan">

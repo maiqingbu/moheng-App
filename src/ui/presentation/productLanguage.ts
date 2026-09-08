@@ -144,6 +144,21 @@ export function productErrorMessage(value: unknown, fallback = '操作未完成�
   return raw
 }
 
+export function productTimeLabel(value: unknown): string {
+  const raw = textOf(value).trim()
+  if (!raw) return '暂无记录'
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime()) || date.getTime() <= 86_400_000) return '尚未打开'
+  const now = new Date()
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  const isYesterday = date.getFullYear() === yesterday.getFullYear() && date.getMonth() === yesterday.getMonth() && date.getDate() === yesterday.getDate()
+  const time = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+  if (sameDay) return `今天 ${time}`
+  if (isYesterday) return `昨天 ${time}`
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+}
+
 export function sanitizeProductText(value: unknown, fallback = ''): string {
   const raw = textOf(value).trim()
   if (!raw) return fallback

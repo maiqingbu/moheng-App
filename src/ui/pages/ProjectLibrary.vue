@@ -7,7 +7,7 @@ import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import { blockReasonLabels, phaseLabel, runStateLabel, signingLabels } from '../presentation/projectLabels'
-import { productErrorMessage } from '../presentation/productLanguage'
+import { productErrorMessage, productTimeLabel } from '../presentation/productLanguage'
 import type { ProjectLibraryItem } from '../../application/contracts'
 
 const router = useRouter()
@@ -57,7 +57,7 @@ function openProject(item: ProjectLibraryItem) {
 }
 
 function askAction(item: ProjectLibraryItem, mode: 'archive'|'delete'|'duplicate') {
-  if (!item.operational) return
+  if (!item.operational && mode === 'duplicate') return
   actionTarget.value = item
   actionMode.value = mode
   deleteConfirm.value = ''
@@ -82,8 +82,10 @@ async function duplicateProject() {
 
 async function archiveProject() {
   const target = actionTarget.value
-  if (!target || !target.operational) return
-  await store.runCommand(`archive-${target.id}`, { type:'project_archive', projectId:target.id, expectedRevision:target.revision })
+  if (!target) return
+  const request: { type: 'project_archive'; projectId: string; expectedRevision?: number } = { type:'project_archive', projectId:target.id }
+  if (target.revision != null) request.expectedRevision = target.revision
+  await store.runCommand(`archive-${target.id}`, request)
   if (store.commandState(`archive-${target.id}`).status === 'committed') closeAction()
 }
 
@@ -94,8 +96,10 @@ async function restoreProject(item: ProjectLibraryItem) {
 
 async function deleteProject() {
   const target = actionTarget.value
-  if (!target || !target.operational || deleteConfirm.value !== target.title) return
-  await store.runCommand(`delete-${target.id}`, { type:'project_delete', projectId:target.id, expectedRevision:target.revision })
+  if (!target || deleteConfirm.value !== target.title) return
+  const request: { type: 'project_delete'; projectId: string; expectedRevision?: number } = { type:'project_delete', projectId:target.id }
+  if (target.revision != null) request.expectedRevision = target.revision
+  await store.runCommand(`delete-${target.id}`, request)
   if (store.commandState(`delete-${target.id}`).status === 'committed') closeAction()
 }
 </script>
@@ -146,14 +150,14 @@ async function deleteProject() {
                 <div class="project-progress-row"><div class="progress"><span :style="{width:`${item.progress}%`}" /></div><b>{{ item.progress }}%</b></div>
                 <div class="project-stats"><span><b>{{ item.committedChapters }}</b> 正式章节</span><span><b>{{ item.totalWords.toLocaleString() }}</b> 字</span><span><b>¥{{ item.totalCost.toFixed(2) }}</b></span><span>{{ phaseLabel(item.phase) }}</span></div>
                 <div v-if="!item.operational" class="project-next warning-text">暂时无法打开：{{ readErrorLabel(item.readError) }}</div><div v-else-if="item.blockReason" class="project-next warning-text">当前原因：{{ blockLabel(item.blockReason) }}</div>
-                <div v-else class="project-next">开篇评估：{{ signingLabels[item.signingStatus] }} · 最近打开 {{ item.lastOpenedAt }}</div>
+                <div v-else class="project-next">开篇评估：{{ signingLabels[item.signingStatus] }} · 最近打开 {{ productTimeLabel(item.lastOpenedAt) }}</div>
               </div>
             </button>
             <div class="project-card-actions">
               <button class="btn small primary" @click="openProject(item)">{{ item.pendingDecisions ? '处理并继续' : item.phase==='COMPLETED' ? '打开作品' : '继续创作' }}</button>
               <button class="btn small soft" :disabled="!item.operational" @click="askAction(item,'duplicate')">复制</button>
-              <button class="btn small soft" :disabled="!item.operational" @click="askAction(item,'archive')">归档</button>
-              <button class="btn small ghost danger-text" :disabled="!item.operational" @click="askAction(item,'delete')">删除</button>
+              <button class="btn small soft" @click="askAction(item,'archive')">归档</button>
+              <button class="btn small ghost danger-text" @click="askAction(item,'delete')">删除</button>
             </div>
             <CommandFeedback :state="store.commandState(`archive-${item.id}`)" />
           </article>
@@ -165,8 +169,8 @@ async function deleteProject() {
         <button class="archived-toggle" @click="showArchived=!showArchived"><span><strong>已归档作品</strong><small>{{ store.archivedProjects.length }} 部 · 归档不会删除正文或版本</small></span><span>{{ showArchived ? '收起' : '展开' }}⌄</span></button>
         <div v-if="showArchived" class="archived-list card">
           <div v-for="item in store.archivedProjects" :key="item.id" class="archived-row">
-            <div><strong>{{ item.title }}</strong><div class="muted" style="font-size:11px">{{ item.genre }} · 最后更新 {{ item.updatedAt }}</div></div>
-            <div class="actions"><button class="btn small" :disabled="!item.operational" @click="restoreProject(item)">恢复到作品库</button><button class="btn small ghost danger-text" :disabled="!item.operational" @click="askAction(item,'delete')">删除</button></div>
+            <div><strong>{{ item.title }}</strong><div class="muted" style="font-size:11px">{{ item.genre }} · 最后更新 {{ productTimeLabel(item.updatedAt) }}</div></div>
+            <div class="actions"><button class="btn small" :disabled="!item.operational" @click="restoreProject(item)">恢复到作品库</button><button class="btn small ghost danger-text" @click="askAction(item,'delete')">删除</button></div>
           </div>
           <div v-if="!store.archivedProjects.length" class="empty">暂无归档作品</div>
         </div>
