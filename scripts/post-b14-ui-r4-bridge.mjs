@@ -14,6 +14,7 @@ const binary = path.join(root, 'src-tauri', 'target', 'debug', 'post-b14-ui-r4-b
 if (!fs.existsSync(binary)) throw new Error(`R4_BRIDGE_BINARY_MISSING:${binary}`)
 
 const child = spawn(binary, [], { cwd: root, env: { ...process.env, MOHENG_R4_FIXTURE_ROOT: fixtureRoot }, stdio: ['pipe', 'pipe', 'pipe'] })
+child.on('exit', code => { if (!server.listening) return; server.close(() => process.exit(code ?? 1)) })
 let buffer = ''
 let ready = null
 const pending = []

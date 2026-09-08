@@ -268,6 +268,12 @@ async function main() {
       write(path.join(evidenceDir, 'FULL_PRODUCT_VISIBLE_DOM_SCAN_R6.json'), report)
     }
 
+    if (bridge.child.exitCode !== null || app.exitCode !== null) {
+      const previousBridge = bridge.child; const previousApp = app; const bridgeExited = previousBridge.exitCode !== null; const appExited = previousApp.exitCode !== null
+      stop(previousApp); stop(previousBridge)
+      await Promise.all([bridgeExited ? Promise.resolve() : waitExit(previousBridge), appExited ? Promise.resolve() : waitExit(previousApp)])
+      bridge = await startBridge(); app = await startApp(bridge)
+    }
     await page.goto(`http://127.0.0.1:${appPort}/projects`, { waitUntil: 'domcontentloaded' }); await waitLibrary()
     const libraryBefore = await bridgeInvoke(bridge, 'query_project_library')
     const archiveTitle = 'R5 无法打开的归档作品'; const deleteTitle = 'R5 无法打开的删除作品'; const failureTitle = 'R5 删除失败测试作品'; const normalTitle = 'R4 Production E2E Fixture'
