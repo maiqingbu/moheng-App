@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
@@ -35,11 +35,12 @@ const routeTitle = computed(() => {
 })
 const isActive = (item: NavItem) => item.matches.includes(String(route.name))
 // 冻结兼容：长篇健康继续使用 /health；版本与变更记录保留 match: 'history'，但统一归入待处理工作区。
+watch(inWorkspace, value => { if (value) assistantCollapsed.value = false }, { immediate: true })
 </script>
 
 <template>
   <div class="app-shell" :class="{ 'has-assistant': inWorkspace, 'assistant-is-collapsed': assistantCollapsed }">
-    <div class="desktop-titlebar"><div class="titlebar-dots"><span class="titlebar-dot red" /><span class="titlebar-dot amber" /><span class="titlebar-dot green" /></div>墨衡 · AI 小说创作系统</div>
+    <div class="desktop-titlebar" data-tauri-drag-region><div class="titlebar-dots" data-tauri-drag-region><span class="titlebar-dot red" /><span class="titlebar-dot amber" /><span class="titlebar-dot green" /></div>墨衡 · AI 小说创作系统</div>
     <aside class="sidebar">
       <button class="brand" type="button" @click="router.push('/projects')">
         <span class="brand-mark">墨</span>
