@@ -70,8 +70,8 @@ const designManifest = design.map(([target, input, expectedSha256]) => { const s
 write(path.join(designRoot, 'DESIGN_INPUTS.json'), { inputs: designManifest, complete: designManifest.every(item => item.exactMatch) })
 
 const blockingFiles = [
-  'ASSISTANT_STATE_MACHINE_R5.json', 'ASSISTANT_E2E_MATRIX_R5.json', 'A08_FORMAL_AUTHORITY_DIGEST.json', 'A09_AUTHORIZATION_TRACE.json', 'A10_FORMAL_RECEIPT_TRACE.json', 'A11_POST_STATE_TRACE.json', 'PROJECT_LIBRARY_E2E_MATRIX_R5.json', 'R5_DATA_ISOLATION.json', 'B13_UI_R5_REGRESSION.json', 'B14_UI_R5_REGRESSION.json', 'ACCESSIBILITY_R5.json', 'VISIBLE_DOM_R5.json', 'GENERATION_FLOW_R5.json', 'ROUTE_INVENTORY_R5.json',
-  ...Array.from({ length: 14 }, (_, index) => `A${String(index + 1).padStart(2, '0')}.json`), ...Array.from({ length: 7 }, (_, index) => `LIB-0${index + 1}.json`),
+  'ASSISTANT/ASSISTANT_STATE_MACHINE_R5.json', 'ASSISTANT_E2E_MATRIX_R5.json', 'A08_FORMAL_AUTHORITY_DIGEST.json', 'A09_AUTHORIZATION_TRACE.json', 'A10_FORMAL_RECEIPT_TRACE.json', 'A11_POST_STATE_TRACE.json', 'PROJECT_LIBRARY_E2E_MATRIX_R5.json', 'R5_DATA_ISOLATION.json', 'B13_UI_R5_REGRESSION.json', 'B14_UI_R5_REGRESSION.json', 'ACCESSIBILITY_R5.json', 'VISIBLE_DOM_R5.json', 'GENERATION_FLOW_R5.json', 'ROUTE_INVENTORY_R5.json',
+  ...Array.from({ length: 14 }, (_, index) => `ASSISTANT/A${String(index + 1).padStart(2, '0')}/A${String(index + 1).padStart(2, '0')}.json`), ...Array.from({ length: 7 }, (_, index) => `LIBRARY/LIB-0${index + 1}/LIB-0${index + 1}.json`),
 ]
 const evidenceFiles = allFiles(evidenceDir)
 const json = relative => readJson(path.join(evidenceDir, relative))
@@ -108,7 +108,7 @@ const gates = {
   A11RealStateChange: gate(evidenceStatus('A11_POST_STATE_TRACE.json') && a11.formalStateChanged === true && a11.expectedStateReached === true, 'A11_POST_STATE_TRACE.json'),
   A11FormalPostVerify: gate(evidenceStatus('A11_POST_STATE_TRACE.json') && a11.postVerify?.succeeded === true, 'A11_POST_STATE_TRACE.json'),
   LIB01_LIB07: gate(library?.status === 'PASS' && Array.from({ length: 7 }, (_, index) => evidenceStatus(`LIB-0${index + 1}.json`)).every(Boolean), 'PROJECT_LIBRARY_E2E_MATRIX_R5.json'),
-  normalProjectRegression: gate(library?.normalRegression?.status === 'PASS', 'NORMAL_PROJECT_REGRESSION.json'),
+  normalProjectRegression: gate(library?.normalRegression?.status === 'PASS', 'LIBRARY/NORMAL_PROJECT_REGRESSION.json'),
   dataIsolation: gate(isolation?.status === 'PASS' && isolation.productionCountBefore != null && isolation.productionCountAfter != null, 'R5_DATA_ISOLATION.json'),
   allBlockingEvidenceFinalSourceBound: gate(binding.status === 'PASS', 'R5_EVIDENCE_SOURCE_BINDING.json'),
   b13Regression: gate(b13?.status === 'PASS', 'B13_UI_R5_REGRESSION.json'),
