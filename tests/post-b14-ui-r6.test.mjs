@@ -23,6 +23,11 @@ test('R6 library delete failure is consumed by the UI event handler', () => {
   assert.match(library, /async function deleteProject\(\)[\s\S]*try\s*\{[\s\S]*catch/)
 })
 
+test('R6 no-op repair is rejected by the typed owner verification', () => {
+  const commands = read('src-tauri/src/commands.rs')
+  assert.match(commands, /fn verify\([\s\S]*?if self\.no_op[\s\S]*?"status": "FAIL"/)
+})
+
 test('R6 scans the complete product surface and uses the real production profile', () => {
   const capture = read('scripts/capture-post-b14-ui-r5.mjs')
   assert.match(capture, /FULL_PRODUCT_VISIBLE_DOM_SCAN_R6\.json/)

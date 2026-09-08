@@ -3770,6 +3770,16 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
     }
 
     fn verify(&self, operation: &crate::repair::RepairOperation) -> Result<Value, String> {
+        if self.no_op {
+            return Ok(json!({
+                "operation": operation.operation,
+                "kind": "projection_current",
+                "status": "FAIL",
+                "observed": false,
+                "testOnlyNoop": true,
+                "userMessage": "测试用 no-op 未产生目标状态变化"
+            }));
+        }
         match operation.operation.as_str() {
             "execute_change_request" => {
                 let change_request_id = operation
