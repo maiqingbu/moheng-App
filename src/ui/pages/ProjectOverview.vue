@@ -1,6 +1,57 @@
 <script setup lang="ts">
-import { computed } from 'vue'; import { useRouter } from 'vue-router'; import PageHeader from '../components/PageHeader.vue'; import MetricCard from '../components/MetricCard.vue'; import RuntimeBanner from '../components/RuntimeBanner.vue'; import { useProjectStore } from '../stores/projectStore'; import { phaseLabel } from '../presentation/projectLabels'
-const store=useProjectStore(), router=useRouter(); const project=computed(()=>store.project); const id=computed(()=>store.currentProjectId??''); const nextAction=computed(()=>store.pendingDecisionCount?{label:`处理 ${store.pendingDecisionCount} 个待处理事项`,to:`/projects/${id.value}/decisions`}:project.value?.phase==='PITCHING'?{label:'进入规划',to:`/projects/${id.value}/directions`}:project.value?.phase==='STORY_BLUEPRINT'?{label:'进入规划',to:`/projects/${id.value}/setup`}:{label:'进入创作',to:`/projects/${id.value}/production`})
-const workspaces=[['创作','production','从章节准备到正文候选、检查与正式确认'],['规划','directions','故事方向、全书规划与当前卷路线'],['当前卷','volumes','区分规划、实际进展、系统推算与暂定安排'],['待处理','decisions','集中处理需要确认、修改或重新检查的事项'],['长篇健康','health','查看长期推进中的风险、趋势与建议'],['资料','read','阅读正式成品与查看作品资料'],['完结准备','completion','确认终局目标、正式阻断与完结状态']]
+import { computed } from 'vue'
+import { useRouter } from 'vue-router'
+import { useProjectStore } from '../stores/projectStore'
+import { phaseLabel } from '../presentation/projectLabels'
+
+const store = useProjectStore()
+const router = useRouter()
+const project = computed(() => store.project)
+const overview = computed(() => store.overview)
+const id = computed(() => store.currentProjectId ?? '')
+const currentVolume = computed(() => overview.value?.currentVolume)
+const recentChapters = computed(() => overview.value?.recentChapters ?? [])
+const nextAction = computed(() => store.pendingDecisionCount
+  ? { label: `处理 ${store.pendingDecisionCount} 项待处理`, to: `/projects/${id.value}/decisions` }
+  : project.value?.phase === 'PITCHING' || project.value?.phase === 'STORY_BLUEPRINT'
+    ? { label: '进入规划', to: `/projects/${id.value}/directions` }
+    : { label: '进入创作', to: `/projects/${id.value}/production` })
+const healthClass = computed(() => overview.value?.healthSummary.level === 'risk' ? 'danger' : overview.value?.healthSummary.level === 'attention' ? 'warn' : 'brand')
+const healthTitle = computed(() => overview.value?.healthSummary.label ?? '正在积累作品记录')
+const healthNote = computed(() => overview.value?.healthSummary.note ?? '正式章节与项目记录积累后，会显示长期状态。')
+const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第 ${recentChapters.value[0].number + 1} 章创作` : '开始第一章创作')
 </script>
-<template><div v-if="project && store.overview" class="page"><PageHeader :title="project.title" :subtitle="project.subtitle"><button class="btn" @click="router.push('/projects')">返回作品库</button><button class="btn primary" @click="router.push(nextAction.to)">{{ nextAction.label }}</button></PageHeader><RuntimeBanner :state="project.runState" :reason="project.blockReason"/><div class="metric-grid section"><MetricCard label="整体进度" :value="`${project.progress}%`" :note="phaseLabel(project.phase)"/><MetricCard label="正式章节" :value="project.committedChapters" note="这里只统计已经确认的正文"/><MetricCard label="累计成本" :value="`¥${project.totalCost.toFixed(2)}`" :note="`总耗时 ${project.totalElapsed}`"/><MetricCard label="待处理决定" :value="store.pendingDecisionCount" :note="store.overview.healthSummary.label"/></div><section class="section"><div class="section-head"><div><h2>项目工作区</h2><div class="muted" style="font-size:12px">每个工作区只显示当前需要的信息。</div></div></div><div class="workspace-cards"><button v-for="w in workspaces" :key="w[1]" @click="router.push(`/projects/${id}/${w[1]}`)"><span>◇</span><strong>{{ w[0] }}</strong><small>{{ w[2] }}</small></button></div></section><section class="section overview-recent-grid"><div class="card pad"><div class="card-head"><div><h2 class="card-title">最近正式章节</h2><p class="card-subtitle">这里只是轻量目录摘要。</p></div></div><div v-if="store.overview.recentChapters.length" class="overview-chapters"><div v-for="c in store.overview.recentChapters" :key="c.id"><span>第 {{ c.number }} 章</span><strong>{{ c.title }}</strong><small>{{ c.wordCount.toLocaleString() }} 字 · {{ c.version }}</small></div></div><div v-else class="empty">尚未生成正式章节</div></div><div class="card pad"><div class="card-head"><div><h2 class="card-title">最近产物</h2><p class="card-subtitle">只展示最近摘要，不加载全部历史。</p></div></div><div class="artifact-list"><div v-for="a in store.overview.recentArtifacts" :key="a.id" class="artifact-row"><div><strong>{{ a.title }}</strong><div class="muted" style="font-size:11px">{{ a.version }}</div></div><span class="badge" :class="a.status==='official'?'success':'warning'">{{ a.status==='official'?'正式':'制作中' }}</span></div></div></div></section></div></template>
+
+<template>
+  <div v-if="project && overview" class="prototype-overview">
+    <div class="prototype-pagehead"><div><h2>总览</h2><p>继续写作、掌握当前卷状态，并优先处理真正会影响后续创作的问题。</p></div><button class="prototype-btn" type="button" @click="router.push(`/projects/${id}/assistant`)">页面帮助</button></div>
+
+    <div v-if="project.runState === 'IDLE'" class="prototype-notice"><strong>等待开始</strong><span>项目已经准备好，尚未启动新的生产任务。</span></div>
+
+    <div class="prototype-grid3" :style="project.runState === 'IDLE' ? 'margin-top:16px' : ''">
+      <div class="prototype-panel"><div class="prototype-metric">{{ project.committedChapters }}</div><div class="prototype-metric-label">已完成章节</div></div>
+      <div class="prototype-panel"><div class="prototype-metric">{{ currentVolume ? `第 ${currentVolume.number} 卷` : phaseLabel(project.phase) }}</div><div class="prototype-metric-label">当前创作阶段</div></div>
+      <div class="prototype-panel"><div class="prototype-metric warning">{{ store.pendingDecisionCount }}</div><div class="prototype-metric-label">需要优先处理</div></div>
+    </div>
+
+    <div class="prototype-grid" style="margin-top:16px">
+      <section class="prototype-panel">
+        <h3>继续创作</h3>
+        <div class="prototype-item"><div><strong>{{ nextChapterLabel }}</strong><small>{{ recentChapters.length ? '最近正式章节已经确认，可以继续准备下一章。' : '先完成故事方向与第一章准备，再开始正式创作。' }}</small></div><button class="prototype-badge brand" type="button" @click="router.push(nextAction.to)">{{ nextAction.label }}</button></div>
+        <div style="height:10px" />
+        <h3>最近章节</h3>
+        <div v-if="recentChapters.length" class="prototype-list"><div v-for="chapter in recentChapters.slice(0, 3)" :key="chapter.id" class="prototype-item"><div><strong>第 {{ chapter.number }} 章 · {{ chapter.title }}</strong><small>已确认 · {{ chapter.wordCount.toLocaleString() }} 字</small></div></div></div>
+        <div v-else class="prototype-item"><div><strong>还没有正式章节</strong><small>第一章确认后，最近章节会显示在这里。</small></div></div>
+      </section>
+
+      <aside class="prototype-panel">
+        <h3>需要处理</h3>
+        <div v-if="store.pendingDecisionCount" class="prototype-list"><div class="prototype-item"><div><strong>有 {{ store.pendingDecisionCount }} 项内容需要确认</strong><small>它们会在确认后影响下一步创作安排。</small></div><span class="prototype-badge danger">需要处理</span></div></div>
+        <div v-else class="prototype-list"><div class="prototype-item"><div><strong>当前没有待确认事项</strong><small>需要确认、修改或重新检查的内容会集中显示在这里。</small></div><span class="prototype-badge brand">正常</span></div></div>
+        <div style="height:16px" />
+        <h3>长篇状态</h3>
+        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ overview.healthSummary.level === 'risk' ? '需处理' : overview.healthSummary.level === 'attention' ? '关注' : '正常' }}</span></div>
+      </aside>
+    </div>
+  </div>
+</template>

@@ -17,7 +17,7 @@ test('Post-B14 shell uses task-oriented IA and a real assistant dock', () => {
   assert.match(dock, /supportSession/)
   assert.match(dock, /presentAssistantSession/)
   assert.match(dock, /确认|正式修改|查询/) 
-  for (const label of ['创作', '规划', '当前卷', '待处理', '长篇健康', '资料', '完结准备']) assert.match(overview, new RegExp(label))
+  for (const marker of ['prototype-pagehead', 'prototype-grid3', 'prototype-grid', '继续创作', '需要处理', '长篇状态']) assert.match(overview, new RegExp(marker))
 })
 
 test('Post-B14 shell does not introduce a frontend authority or browser fallback', () => {
