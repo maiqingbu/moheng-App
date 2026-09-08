@@ -3,7 +3,9 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_assistant_repair_plan_impl, query_book_health_impl,
     query_project_library_impl, query_project_overview_impl, query_story_directions_impl,
-    query_volume_list_impl, support_session_impl, KernelState,
+    query_story_setup_impl, query_opening_ready_impl, query_production_center_impl,
+    query_decisions_impl, query_canon_impl, query_volume_list_impl, support_session_impl,
+    KernelState,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::{json, Value};
@@ -29,8 +31,15 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         "query_project_library" => query_project_library_impl(state),
         "query_project_overview" => query_project_overview_impl(state, request),
         "query_story_directions" => query_story_directions_impl(state, request),
+        "query_story_setup" => query_story_setup_impl(state, request),
+        "query_opening_ready" => query_opening_ready_impl(state, request),
+        "query_production_center" => query_production_center_impl(state, request),
+        "query_decisions" => query_decisions_impl(state, request),
+        "query_canon" => query_canon_impl(state, request),
         "query_volume_list" => query_volume_list_impl(state, request),
+        "query_reader_volumes" => query_volume_list_impl(state, request),
         "query_book_health" => query_book_health_impl(state, request),
+        "query_market_opportunities" => Ok(json!([])),
         "support_session" => support_session_impl(state, request),
         "query_assistant_repair_plan" => query_assistant_repair_plan_impl(state, request),
         "execute_command" => execute_command_impl(state, request),

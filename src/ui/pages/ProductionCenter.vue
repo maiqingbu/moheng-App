@@ -20,6 +20,17 @@ const stageLabel = (value: unknown) => ({ OPENING: '开篇准备', OPENING_PRODU
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
 const capabilityLabel = (value: unknown) => ({ RENDER_CHAPTER: '撰写章节', AUDIT_EXTRACT: '检查章节', QUALITY_EVALUATION: '评估叙事质量' } as Record<string, string>)[String(value)] ?? '创作步骤'
+const timelineLabel = (value: unknown) => ({ CONTEXT: '整理创作所需信息', PLAN: '建立章节规划', RENDER: '撰写正文候选', CANDIDATE: '检查正文候选', AUDIT: '完成质量检查', GATE: '执行准入检查', COMPLETED: '已完成' } as Record<string, string>)[String(value)] ?? '创作步骤'
+const timelineDescription = (item: { title?: unknown; description?: unknown }) => {
+  const title = String(item.title ?? '')
+  if (title === 'CONTEXT') return '已整理当前作品记录和本章所需上下文。'
+  if (title === 'PLAN') return '已建立本章目标、冲突和结构安排。'
+  if (title === 'RENDER') return '已形成正文候选，等待检查和确认。'
+  if (title === 'CANDIDATE') return '正在检查正文候选与当前作品约束。'
+  if (title === 'AUDIT') return '正在核对连续性、质量和正式准入条件。'
+  if (title === 'GATE') return '正式确认前的结构化检查正在进行。'
+  return sanitizeProductText(item.description, '当前步骤已完成。')
+}
 const statusLabel = (value: unknown) => productStatusLabel(value, '待检查')
 const detailLabel = (value: unknown, fallback = '当前状态已查询。') => sanitizeProductText(value, fallback)
 const scopeLabel = (value: unknown) => /^[A-Z_]+$/.test(String(value)) ? productScopeLabel(value) : sanitizeProductText(value, '当前作品')
@@ -132,7 +143,7 @@ async function executeRepair() {
         <div class="timeline">
           <div v-for="item in production.timeline" :key="item.id" class="timeline-item" :class="item.status">
             <div class="timeline-marker">{{ item.status === 'done' ? '✓' : item.order }}</div>
-            <div><strong>{{ item.title }}</strong><div class="muted" style="font-size:12px">{{ item.description }}</div></div>
+            <div><strong>{{ timelineLabel(item.title) }}</strong><div class="muted" style="font-size:12px">{{ timelineDescription(item) }}</div></div>
           </div>
         </div>
       </section>
