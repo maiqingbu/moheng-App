@@ -31,7 +31,9 @@ test('R7 package has real secret, inventory, checksum, consistency and acceptanc
 
 test('R7 source baseline and batch boundary are explicit', () => {
   const packageScript = read('scripts/assemble-post-b14-ui-r7-package.mjs')
+  const runner = read('scripts/run-post-b14-ui-r7-evidence.mjs')
   assert.match(packageScript, /6e2cc26f38f4582e5275aaf6bf686c44e7c3b18e/)
   assert.match(packageScript, /b15Started: false/)
   assert.match(packageScript, /rc1Started: false/)
+  assert.match(runner, /restore_historical_b01_evidence/)
 })

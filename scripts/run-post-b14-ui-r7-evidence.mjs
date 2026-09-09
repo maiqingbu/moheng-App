@@ -36,6 +36,7 @@ write('B13_UI_R7_REGRESSION.json', { schema: 'post-b14-ui-r7-b13-regression', so
 write('B14_UI_R7_REGRESSION.json', { schema: 'post-b14-ui-r7-b14-regression', sourceCommit, commands: [b14Endgame, b14Scale], status: pass([b14Endgame, b14Scale]) })
 const generateR7 = run('generate_r7_evidence', 'node', ['scripts/generate-post-b14-ui-r7-evidence.mjs'], { POST_B14_UI_R7_EVIDENCE_DIR: evidenceDir, POST_B14_UI_R7_SOURCE_COMMIT: sourceCommit })
 const rustAllTargets = run('rust_all_targets', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
+const restoreHistoricalB01 = run('restore_historical_b01_evidence', 'git', ['restore', '--', 'evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json'])
 write('COMMANDS_EXECUTED_R7.json', { schema: 'post-b14-ui-r7-commands-executed', sourceCommit, commands, status: pass(commands) })
 write('R7_RUNNER_BINDING.json', { schema: 'post-b14-ui-r7-runner-binding', sourceCommit, workingTreeDirtyBefore: false, workingTreeDirtyAfter: git(['status', '--porcelain', '--untracked-files=all']) !== '', excludedUncommittedPaths: [] })
 const status = pass(commands)
