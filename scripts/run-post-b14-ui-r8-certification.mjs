@@ -64,6 +64,7 @@ const contracts = run('contracts', 'npm', ['run', 'verify:contracts'])
 const productUx = run('product_ux', 'npm', ['run', 'verify:product-ux'])
 const r7Regression = run('post_b14_ui_r7_regression', 'npm', ['run', 'verify:post-b14-ui-r7'], { POST_B14_UI_R7_EVIDENCE_DIR: evidenceDir })
 const rustAllTargets = run('rust_all_targets', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'])
+const restoreHistoricalB01 = run('restore_historical_b01_evidence', 'git', ['restore', '--', 'evidence/B01/registry_integrity.json', 'evidence/B01/schema_inventory.json'])
 
 const r7B13 = fs.existsSync(path.join(evidenceDir, 'B13_UI_R7_REGRESSION.json')) ? readJson('B13_UI_R7_REGRESSION.json') : { status: 'FAIL', commands: [] }
 const r7B14 = fs.existsSync(path.join(evidenceDir, 'B14_UI_R7_REGRESSION.json')) ? readJson('B14_UI_R7_REGRESSION.json') : { status: 'FAIL', commands: [] }
