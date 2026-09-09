@@ -79,6 +79,4 @@ for (const [from, to, schema] of [
   ['ROUTE_INVENTORY_R5.json', 'ROUTE_INVENTORY_R7.json', 'post-b14-ui-r7-route-inventory'],
   ['GENERATION_FLOW_R5.json', 'GENERATION_FLOW_R7.json', 'post-b14-ui-r7-generation-flow'],
 ]) write(to, cloneWithR7Schema(from, schema))
-write('B13_UI_R7_REGRESSION.json', { ...readJson('B13_UI_R6_REGRESSION.json'), schema: 'post-b14-ui-r7-b13-regression', sourceCommit })
-write('B14_UI_R7_REGRESSION.json', { ...readJson('B14_UI_R6_REGRESSION.json'), schema: 'post-b14-ui-r7-b14-regression', sourceCommit })
 console.log(JSON.stringify({ sourceCommit, display: report.status, a11: allExpectedFieldsObserved && allExpectedFieldsMatched && receiptVerified && postVerifySucceeded ? 'PASS' : 'FAIL' }, null, 2))
