@@ -60,7 +60,9 @@
     "verify:post-b14-ui-r6": "node scripts/run-post-b14-ui-r6-evidence.mjs",
     "package:post-b14-ui-r6": "node scripts/assemble-post-b14-ui-r6-package.mjs",
     "verify:post-b14-ui-r7": "node scripts/run-post-b14-ui-r7-evidence.mjs",
-    "package:post-b14-ui-r7": "node scripts/assemble-post-b14-ui-r7-package.mjs"
+    "package:post-b14-ui-r7": "node scripts/assemble-post-b14-ui-r7-package.mjs",
+    "verify:post-b14-ui-r8": "export POST_B14_UI_R8_EVIDENCE_DIR=\"${POST_B14_UI_R8_EVIDENCE_DIR:-$(mktemp -d /tmp/moheng-post-b14-ui-r8-evidence.XXXXXX)}\" && node scripts/run-post-b14-ui-r8-certification.mjs",
+    "package:post-b14-ui-r8": "node scripts/assemble-post-b14-ui-r8-package.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",
