@@ -34,6 +34,13 @@ test('R8 secret scan covers staging and catches a synthetic credential mutation'
   const mutation = scanSecretStaging(stage, 'EVIDENCE/SECRET_SCAN_R8.json', 'source')
   assert.ok(mutation.realSecretFindings.length > 0)
   assert.equal(mutation.status, 'FAIL')
+
+  const entropyStage = makeTempStage()
+  write(entropyStage, 'EVIDENCE/SECRET_SCAN_R8.json', '{}\n')
+  write(entropyStage, 'EVIDENCE/ENTROPY_MUTATION.txt', 'R8EntropyMutation-9aB7cD8eF1gH2jK3Lm4N\n')
+  const entropyMutation = scanSecretStaging(entropyStage, 'EVIDENCE/SECRET_SCAN_R8.json', 'source')
+  assert.ok(entropyMutation.entropyCandidates.length > 0)
+  assert.equal(entropyMutation.status, 'FAIL')
 })
 
 test('R8 checksum verifier reads checksum entries and rejects mismatch, missing, and extra files', () => {
