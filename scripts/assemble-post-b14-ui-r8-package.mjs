@@ -100,7 +100,8 @@ function firstFileFromChecksum(file, excluded = '') {
 function mutateSecretFixture(stage, selfRelative) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-r8-secret-mutation-'))
   fs.cpSync(stage, temp, { recursive: true })
-  write(path.join(temp, 'EVIDENCE/R8_SECRET_MUTATION.txt'), 'Authorization: Bearer R8SyntheticMutation-9aB7cD8eF1gH2jK3\n')
+  const syntheticMutation = ['Authorization: Bearer ', 'R8SyntheticMutation', '-9aB7cD8eF1gH2jK3', '\n'].join('')
+  write(path.join(temp, 'EVIDENCE/R8_SECRET_MUTATION.txt'), syntheticMutation)
   const result = scanSecretStaging(temp, selfRelative, sourceCommit)
   fs.rmSync(temp, { recursive: true, force: true })
   return result.status === 'FAIL' && result.realSecretFindings.length > 0

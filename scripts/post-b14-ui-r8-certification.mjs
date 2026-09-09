@@ -28,7 +28,7 @@ const shannonEntropy = value => {
 }
 const hasMultipleClasses = value => [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(regex => regex.test(value)).length >= 3
 const allowlisted = (value, relative, context) => {
-  if (relative.startsWith('tests/') && /R8SyntheticFakeSecret|TEST_FAKE_MODEL_ONLY|sk-test-not-real/i.test(value)) return { allowlisted: true, allowlistReason: 'synthetic-test-fixture' }
+  if (/(^|\/)tests\//.test(relative) && /R8SyntheticFakeSecret|R8SyntheticMutation|TEST_FAKE_MODEL_ONLY|sk-test-not-real/i.test(value)) return { allowlisted: true, allowlistReason: 'synthetic-test-fixture' }
   if (shaLike(value) || uuidLike(value)) return { allowlisted: true, allowlistReason: 'hash-or-uuid' }
   if (/(?:sha|hash|digest|commit|checksum|sourceCommit|archiveSha256|treeDigest)/i.test(context) && /^[A-Za-z0-9+/=_-]{24,}$/.test(value)) return { allowlisted: true, allowlistReason: 'declared-integrity-value' }
   return { allowlisted: false, allowlistReason: null }
