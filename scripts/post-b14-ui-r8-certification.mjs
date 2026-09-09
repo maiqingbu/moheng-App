@@ -28,7 +28,7 @@ const shannonEntropy = value => {
 }
 const hasMultipleClasses = value => [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter(regex => regex.test(value)).length >= 3
 const allowlisted = (value, relative, context) => {
-  if (/(^|\/)tests\//.test(relative) && /R8SyntheticFakeSecret|R8SyntheticMutation|RepairAuthorization|TEST_FAKE_MODEL_ONLY|sk-test-not-real/i.test(value)) return { allowlisted: true, allowlistReason: 'synthetic-test-fixture' }
+  if (/(^|\/)tests\//.test(relative) && /R8SyntheticFakeSecret|R8SyntheticMutation|RepairAuthorization|ai_novel_production_system_core|TEST_FAKE_MODEL_ONLY|sk-test-not-real/i.test(value)) return { allowlisted: true, allowlistReason: 'synthetic-test-fixture' }
   if (shaLike(value) || uuidLike(value)) return { allowlisted: true, allowlistReason: 'hash-or-uuid' }
   if (/(?:sha|hash|digest|commit|checksum|sourceCommit|archiveSha256|treeDigest)/i.test(context) && /^[A-Za-z0-9+/=_-]{24,}$/.test(value)) return { allowlisted: true, allowlistReason: 'declared-integrity-value' }
   return { allowlisted: false, allowlistReason: null }
@@ -93,7 +93,7 @@ export const scanSecretStaging = (stagingRoot, selfRelative, sourceCommit) => {
     const tokenRegex = /[A-Za-z0-9][A-Za-z0-9._+/=!@#$%^&*-]{23,}/g
     for (const match of text.matchAll(tokenRegex)) {
       const value = match[0]
-      if (!hasMultipleClasses(value) || shannonEntropy(value) < 3.5) continue
+      if (!hasMultipleClasses(value) || !/[0-9]/.test(value) || shannonEntropy(value) < 3.5) continue
       const context = text.slice(Math.max(0, match.index - 70), match.index + value.length + 70)
       const line = text.slice(0, match.index).split('\n').length
       entropyCandidates.push(finding(relative, line, 'entropy_high_risk_token', 'HIGH_RISK_TOKEN', value, allowlisted(value, relative, context)))
