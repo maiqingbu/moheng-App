@@ -65,7 +65,7 @@ write(path.join(manifestRoot, 'GIT_SNAPSHOT.txt'), `HEAD=${sourceCommit}\nWORKTR
 write(path.join(stageRoot, 'README_ACCEPTANCE.md'), `# 墨衡 V2.1 Post-B14 / Pre-B15 UI Productization R7\n\n修复基线：${repairBaselineCommit}\n最终源码：${sourceCommit}\n本轮只收口展示层工程术语、A11 完整目标验证、Secret Scan 与 Final Acceptance Package Truth。B15/RC1 未启动。\n`)
 
 const secretPatterns = [
-  ['openai_api_key', /sk-[A-Za-z0-9_-]{20,}/g], ['bearer_token', /Bearer\s+[A-Za-z0-9._-]{20,}/gi], ['authorization_header', /Authorization\s*:\s*[^\s]{20,}/gi], ['aws_access_key', /AKIA[0-9A-Z]{16}/g], ['github_token', /gh[pousr]_[A-Za-z0-9_]{20,}/g], ['slack_token', /xox[baprs]-[A-Za-z0-9-]{20,}/g], ['jwt_like', /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g], ['private_key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g], ['database_credential', /(?:postgres|mysql|sqlite):\/\/[^\s"']+/gi], ['env_secret_assignment', /(?:API_KEY|SECRET|PASSWORD|TOKEN)\s*=\s*[^\s"']{16,}/gi],
+  ['openai_api_key', /\bsk-(?:(?:proj|live)-)?[A-Za-z0-9]{20,}\b/g], ['bearer_token', /\bBearer\s+[A-Za-z0-9._-]{20,}\b/gi], ['authorization_header', /\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._-]{20,}\b/gi], ['aws_access_key', /\bAKIA[0-9A-Z]{16}\b/g], ['github_token', /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g], ['slack_token', /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/g], ['jwt_like', /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g], ['private_key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g], ['database_credential', /\b(?:postgres|mysql):\/\/[^\s"']+/gi], ['env_secret_assignment', /\b(?:API_KEY|OPENAI_API_KEY|AWS_SECRET_ACCESS_KEY|PASSWORD|SECRET|TOKEN)\s*=\s*['"]?[A-Za-z0-9+/=_-]{16,}['"]?/gi],
 ]
 const allowlistedFake = /(?:TEST_FAKE_MODEL_ONLY|sk-test-not-real|R[456]_TEST_|R6_|R7_)/i
 const secretCandidateFindings = []
@@ -74,7 +74,7 @@ for (const relative of allFiles(stageRoot)) {
   try { text = fs.readFileSync(file, 'utf8') } catch { continue }
   for (const [pattern, regex] of secretPatterns) for (const match of text.matchAll(regex)) secretCandidateFindings.push({ pattern, file: relative, redacted: `${match[0].slice(0, 8)}…` })
 }
-const allowlistedTestFindings = secretCandidateFindings.filter(item => allowlistedFake.test(item.redacted) || item.file.includes('FROZEN_INPUTS'))
+const allowlistedTestFindings = secretCandidateFindings.filter(item => allowlistedFake.test(item.redacted))
 const realSecretFindings = secretCandidateFindings.filter(item => !allowlistedTestFindings.includes(item))
 const secretScan = { schema: 'post-b14-ui-r7-secret-scan', sourceCommit, filesScanned: allFiles(stageRoot).length, patterns: secretPatterns.map(([name]) => name), candidateFindings: secretCandidateFindings, allowlistedTestFindings, realSecretFindings, status: realSecretFindings.length === 0 ? 'PASS' : 'FAIL' }
 write(path.join(evidenceRoot, 'SECRET_SCAN_R7.json'), secretScan); write(path.join(evidenceDir, 'SECRET_SCAN_R7.json'), secretScan)
