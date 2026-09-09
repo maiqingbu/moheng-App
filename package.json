@@ -58,7 +58,9 @@
     "verify:post-b14-ui-r5": "node scripts/run-post-b14-ui-r5-evidence.mjs",
     "package:post-b14-ui-r5": "node scripts/assemble-post-b14-ui-r5-package.mjs",
     "verify:post-b14-ui-r6": "node scripts/run-post-b14-ui-r6-evidence.mjs",
-    "package:post-b14-ui-r6": "node scripts/assemble-post-b14-ui-r6-package.mjs"
+    "package:post-b14-ui-r6": "node scripts/assemble-post-b14-ui-r6-package.mjs",
+    "verify:post-b14-ui-r7": "node scripts/run-post-b14-ui-r7-evidence.mjs",
+    "package:post-b14-ui-r7": "node scripts/assemble-post-b14-ui-r7-package.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",

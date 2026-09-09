@@ -91,7 +91,7 @@ fn authority_snapshot(state: &KernelState, project_id: &str) -> Result<Value, St
             {"name":"ProjectRevision","count":1,"digest":revision_digest},
             {"name":"Canon","count":canon_count,"digest":canon_digest},
             {"name":"Projection","count":1,"digest":projection_digest},
-            {"name":"FTSProjectionSettings","count":fts_settings.len(),"digest":fts_settings_digest}
+            {"name":"FTSProjectionSettings","count":fts_settings.len(),"digest":fts_settings_digest,"fields":fts_settings.iter().map(|(key,value)| json!({"key":key,"value":value})).collect::<Vec<_>>()}
         ],
         "revision": revision,
         "source": "formal authority read owners"

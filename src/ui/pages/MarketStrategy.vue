@@ -11,7 +11,7 @@ onMounted(() => void store.loadMarket())
 
 <template>
   <div v-if="strategy" class="page">
-    <PageHeader title="市场与平台策略" subtitle="市场证据与作品权威分离，只用于机会判断和授权范围内的策略校准。" />
+    <PageHeader title="市场与平台策略" subtitle="市场信息与作品记录分开，只用于机会判断和授权范围内的策略校准。" />
     <div class="metric-grid section">
       <MetricCard label="目标平台" :value="strategy.targetPlatform" :note="strategy.platformPolicyVersion" />
       <MetricCard label="策略置信度" :value="`${strategy.confidence}%`" :note="`快照 ${strategy.snapshotCollectedAt}`" />

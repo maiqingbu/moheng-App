@@ -650,7 +650,7 @@ export class BrowserDemoPort implements FrontendPort {
     await wait(55)
     emit('accepted', '指令已接收，正在进入处理队列…')
     await wait(65)
-    emit('processing', '正在处理，并等待权威投影刷新…')
+    emit('processing', '正在处理，并等待作品状态刷新…')
     await wait(90)
 
     let finalStatus: CommandReceipt['finalStatus'] = 'committed'
@@ -732,7 +732,7 @@ export class BrowserDemoPort implements FrontendPort {
           case 'retcon_apply': message='Retcon 已按批准计划提交，并保留原正式历史与审计回执。'; break
           case 'export_create': message='正式成品导出任务已完成。'; break
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break
-          case 'integrity_check_run': message='完整性检查已完成，未发现权威数据断链。'; break
+          case 'integrity_check_run': message='完整性检查已完成，未发现作品数据断链。'; break
           case 'settings_save': if(request.payload?.settings) bundle.settings=clone(request.payload.settings as unknown as SettingsProjection); message='项目设置已保存。'; break
           case 'repair_plan_create': message='修改方案已保存，等待你的明确授权。'; break
           case 'repair_authorize': message='授权已记录，等待责任方执行并回传结果。'; break
