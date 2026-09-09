@@ -84,7 +84,7 @@ fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &s
     json!({
         "id": project_id,
         "title": title,
-        "subtitle": "本地权威项目",
+        "subtitle": "本地作品",
         "platform": "未设置",
         "genre": "未设置",
         "mode": "DIRECTOR",
@@ -112,7 +112,7 @@ fn library_catalog_fields(row: &crate::catalog::ProjectCatalogRow) -> Value {
     json!({
         "id": row.project_id,
         "title": row.title,
-        "subtitle": "本地权威项目",
+        "subtitle": "本地作品",
         "platform": "未设置",
         "genre": "未设置",
         "mode": "DIRECTOR",
@@ -456,8 +456,8 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
         "recentArtifacts": [],
         "healthSummary": {
             "level": "healthy",
-            "label": "权威项目库可用",
-            "note": "M0A 存储与完整性检查已通过"
+            "label": "作品数据正常",
+            "note": "作品数据检查已通过"
         }
     }))
 }

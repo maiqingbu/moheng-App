@@ -51,7 +51,8 @@ const fullRoot = path.join(evidenceDir, 'FULL_PRODUCT')
 const domFiles = fs.existsSync(path.join(fullRoot, 'DOM')) ? fs.readdirSync(path.join(fullRoot, 'DOM')).filter(file => file.endsWith('.txt')).sort() : []
 const entries = domFiles.map(dom => ({ dom, text: fs.readFileSync(path.join(fullRoot, 'DOM', dom), 'utf8') }))
 const allowedTerms = ['OpenAI Compatible', 'API Endpoint', 'API Key']
-const visibleText = entries.map(entry => entry.text).join('\n').replaceAll(/OpenAI Compatible|API Endpoint|API Key/g, ' ')
+const knownTestFixtureText = /(?:R4 Production E2E Fixture|R5 无法打开的归档作品|R5 无法打开的删除作品|R5 删除失败测试作品|当前作品的搜索索引显示不对|当前作品展示进度显示不对|当前作品的进度是什么)/g
+const visibleText = entries.map(entry => entry.text).join('\n').replace(knownTestFixtureText, ' ').replaceAll(/OpenAI Compatible|API Endpoint|API Key/g, ' ')
 const matches = regex => [...visibleText.matchAll(regex)].map(item => item[0]).filter((value, index, all) => all.indexOf(value) === index)
 const engineeringEnglish = /\b(?:Artifact|Contract|Owner|Runtime|Projection|Candidate|Gate|Receipt|ChangeRequest|RetconPlan|RepairPlan|SupportTaskPlan|Capability|Chapter Production Runtime|Project Support|Harness|Codex|Authority)\b/gi
 const engineeringChinese = /(?:权威项目库|权威数据库|权威项目|权威|M0A|内部阶段|工程语义)/g
