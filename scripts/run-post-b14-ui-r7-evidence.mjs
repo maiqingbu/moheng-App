@@ -14,7 +14,7 @@ function write(relative, value) { const file = path.join(evidenceDir, relative);
 function run(name, command, args, env = {}) { const start = new Date().toISOString(); const started = Date.now(); const result = spawnSync(command, args, { cwd: root, encoding: 'utf8', env: { ...process.env, ...env }, maxBuffer: 512 * 1024 * 1024 }); const output = `${result.stdout ?? ''}${result.stderr ?? ''}`; const exitCode = result.status ?? 1; const logPath = path.join(evidenceDir, 'COMMANDS', `${name}.log`); fs.mkdirSync(path.dirname(logPath), { recursive: true }); fs.writeFileSync(logPath, output); const record = { name, command: [command, ...args].join(' '), start, end: new Date().toISOString(), durationMs: Date.now() - started, exitCode, sourceCommit, evidencePath: path.relative(evidenceDir, logPath), status: exitCode === 0 ? 'PASS' : 'FAIL' }; commands.push(record); return record }
 
 const bridgeBuild = run('bridge_build', 'cargo', ['build', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'e2e-test', '--bin', 'post-b14-ui-r4-bridge'])
-const e2e = bridgeBuild.status === 'PASS' ? run('production_e2e_r7', 'node', ['scripts/capture-post-b14-ui-r5.mjs'], { POST_B14_UI_R5_EVIDENCE_DIR: evidenceDir, POST_B14_UI_R6: 'true' }) : { status: 'FAIL' }
+const e2e = bridgeBuild.status === 'PASS' ? run('production_e2e_r7', 'node', ['scripts/capture-post-b14-ui-r5.mjs'], { POST_B14_UI_R5_EVIDENCE_DIR: evidenceDir, POST_B14_UI_R6: 'true', POST_B14_UI_R7_PREVIEW: 'true' }) : { status: 'FAIL' }
 const nodeTests = run('node_tests', 'npm', ['test'])
 const r7Static = run('r7_static', 'node', ['--test', 'tests/post-b14-ui-r7.test.mjs'])
 const typecheck = run('typecheck', 'npm', ['run', 'typecheck'])

@@ -15,6 +15,7 @@ const bridgePort = Number(process.env.POST_B14_UI_R5_BRIDGE_PORT ?? 1594)
 const appPort = Number(process.env.POST_B14_UI_R5_APP_PORT ?? 1595)
 const browserModule = process.env.PLAYWRIGHT_MODULE || '/Users/mac/.npm-global/lib/node_modules/playwright'
 const sourceCommit = process.env.POST_B14_UI_R5_SOURCE_COMMIT || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+const previewMode = process.env.POST_B14_UI_R7_PREVIEW === 'true'
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-r5-fixture-'))
 const productionRoot = process.env.MOHENG_R6_PRODUCTION_ROOT || path.join(os.homedir(), 'Library/Application Support/com.moheng.ai-novel-production-system')
 const assistantRoot = path.join(evidenceDir, 'ASSISTANT')
@@ -81,9 +82,11 @@ async function startBridge() {
 }
 
 async function startApp(bridge) {
-  const app = spawn('npm', ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(appPort)], {
+  const appEnv = { ...process.env, VITE_R4_PRODUCTION_E2E: 'true', VITE_R4_BRIDGE_URL: bridge.url, VITE_R4_BRIDGE_TOKEN: bridge.token }
+  if (previewMode) execFileSync('npm', ['run', 'build'], { cwd: root, env: appEnv, stdio: 'ignore' })
+  const app = spawn('npm', [previewMode ? 'run' : 'run', previewMode ? 'preview' : 'dev', '--', '--host', '127.0.0.1', '--port', String(appPort)], {
     cwd: root,
-    env: { ...process.env, VITE_R4_PRODUCTION_E2E: 'true', VITE_R4_BRIDGE_URL: bridge.url, VITE_R4_BRIDGE_TOKEN: bridge.token },
+    env: appEnv,
     stdio: 'ignore',
   })
   await waitFor(`http://127.0.0.1:${appPort}/`)
