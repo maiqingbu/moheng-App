@@ -4819,6 +4819,7 @@ fn execute_b11_command(
             expected_revision,
             requested_at,
             request,
+            state.production_gateway.as_ref(),
         ),
         "pitch_select" => crate::project_entry::commit_selection(
             &handle,
@@ -5090,6 +5091,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     requested_at,
                     &request,
                     entry_kind,
+                    state.production_gateway.as_ref(),
                 )?)
             } else {
                 None

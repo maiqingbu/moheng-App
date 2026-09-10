@@ -364,7 +364,7 @@ fn p01_formal_provider_raw_response_persists_before_model_payload_parse() {
         "2026-08-28T00:00:00Z",
     )
     .unwrap_err();
-    assert!(error.contains("P01_MODEL_PAYLOAD_INVALID"));
+    assert!(error.contains("P01_MODEL_JSON_INVALID"));
     assert_eq!(*calls.lock().unwrap(), 1);
     assert_eq!(
         connection

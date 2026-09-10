@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "墨衡 · AI 小说生产系统",
+  "productName": "墨衡",
   "version": "0.1.0",
   "identifier": "com.moheng.ai-novel-production-system",
   "build": {

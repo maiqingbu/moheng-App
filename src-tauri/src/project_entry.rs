@@ -9,14 +9,18 @@
 use crate::commit::CommitService;
 use crate::generated::types::{ArtifactEnvelope, ArtifactRef, CommitBundle};
 use crate::hash::sha256_canonical;
+use crate::production::{execute_production_model_with_profile, ProductionModelGateway};
 use crate::project_db::ProjectHandle;
 use crate::repositories::project_entry::{self, EntryArtifactRow};
+use crate::repositories::runtime::{DurableJobService, JobSpec, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Map, Value};
 
 const MAX_IDEA_CHARS: usize = 8_000;
 const MAX_MARKET_MATERIAL_CHARS: usize = 12_000;
 const PITCH_COUNT: usize = 3;
+pub const GENERATE_STORY_DIRECTIONS: &str = "GENERATE_STORY_DIRECTIONS";
+const PROJECT_ENTRY_STAGES: &[&str] = &["ENTRY", "MODEL", "COMMIT"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -135,6 +139,241 @@ fn receipt_value(receipt: crate::generated::types::CommitReceipt) -> Result<Valu
     serde_json::to_value(receipt).map_err(|error| error.to_string())
 }
 
+fn required_pitch_field(pitch: &Value, field: &str) -> Result<String, String> {
+    pitch
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("B11_STORY_DIRECTION_FIELD_MISSING:{field}"))
+}
+
+fn normalize_story_direction_output(
+    output: Value,
+    source_digest: &str,
+    adjustment: &str,
+    generation: i64,
+    model_run_id: &str,
+    profile: &crate::production::ResolvedProviderProfile,
+    now: &str,
+) -> Result<Vec<Value>, String> {
+    let pitches = output
+        .get("pitches")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_INVALID:pitches".to_string())?;
+    if pitches.len() != PITCH_COUNT {
+        return Err("B11_STORY_DIRECTION_COUNT_INVALID".into());
+    }
+    let required = [
+        "name",
+        "promise",
+        "protagonistDesire",
+        "mechanism",
+        "worldConflict",
+        "longArc",
+        "openingHook",
+        "volumeGoal",
+        "commercialEdge",
+        "originality",
+        "difficulty",
+        "failureRisk",
+    ];
+    let mut names = std::collections::BTreeSet::new();
+    pitches
+        .iter()
+        .enumerate()
+        .map(|(index, pitch)| {
+            if !pitch.is_object() {
+                return Err("B11_STORY_DIRECTION_ITEM_INVALID".into());
+            }
+            let mut normalized = pitch.as_object().cloned().unwrap_or_default();
+            for field in required {
+                normalized.insert(
+                    field.to_string(),
+                    Value::String(required_pitch_field(pitch, field)?),
+                );
+            }
+            let name = normalized
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !names.insert(name) {
+                return Err("B11_STORY_DIRECTION_NOT_SUBSTANTIALLY_DIFFERENT".into());
+            }
+            normalized.insert("payloadSchema".into(), json!("project-pitch.r1"));
+            normalized.insert("sourceInputDigest".into(), json!(source_digest));
+            normalized.insert("generation".into(), json!(generation));
+            normalized.insert("createdAt".into(), json!(now));
+            normalized.insert(
+                "userAdjustment".into(),
+                if adjustment.trim().is_empty() {
+                    Value::Null
+                } else {
+                    json!(adjustment)
+                },
+            );
+            normalized.insert("authoritative".into(), json!(false));
+            normalized.insert("candidateStatus".into(), json!("CANDIDATE"));
+            normalized.insert(
+                "generationProvenance".into(),
+                json!({
+                    "provider":profile.provider,
+                    "model":profile.model,
+                    "modelRunId":model_run_id,
+                    "sourceInputDigest":source_digest,
+                    "transportCalls":1,
+                    "generation":generation
+                }),
+            );
+            normalized.insert("variant".into(), json!(format!("MODEL_{}", index + 1)));
+            Ok(Value::Object(normalized))
+        })
+        .collect()
+}
+
+fn fail_entry_job(
+    connection: &ProjectHandle,
+    project_id: &str,
+    job_id: &str,
+    error_code: &str,
+    now: &str,
+) -> Result<(), String> {
+    DurableJobService::fail_job(connection, project_id, job_id, error_code, now)
+        .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_story_directions(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    now: &str,
+    kind: EntryKind,
+    source_text: &str,
+    source_digest: &str,
+    payload: &Value,
+    generation: i64,
+    gateway: &dyn ProductionModelGateway,
+) -> Result<
+    (
+        Vec<Value>,
+        String,
+        crate::production::ResolvedProviderProfile,
+        String,
+    ),
+    String,
+> {
+    let job_id = StableIdentityFactory::from_command(
+        StableIdKind::Job,
+        &format!("{command_id}:story-directions"),
+    )?;
+    let model_run_id = StableIdentityFactory::from_command(
+        StableIdKind::ModelRun,
+        &format!("{command_id}:story-directions:model"),
+    )?;
+    let profile = gateway.resolve_profile()?;
+    DurableJobService::start_job(
+        connection,
+        &JobSpec {
+            job_id: job_id.clone(),
+            job_type: "BOOK".into(),
+            parent_job_id: None,
+            book_id: None,
+            volume_id: None,
+            chapter_id: None,
+            stages: PROJECT_ENTRY_STAGES
+                .iter()
+                .map(|stage| (*stage).into())
+                .collect(),
+        },
+        now,
+    )
+    .map_err(|error| error.to_string())?;
+    DurableJobService::transition_for_worker(
+        connection,
+        project_id,
+        &job_id,
+        "RUNNING",
+        "b11-project-entry",
+        now,
+    )
+    .map_err(|error| error.to_string())?;
+    let prompt = json!({
+        "task":"GENERATE_STORY_DIRECTIONS",
+        "inputKind":kind.as_str(),
+        "sourceText":source_text,
+        "sourceInputDigest":source_digest,
+        "preferences":payload.get("tags").cloned().unwrap_or_else(|| json!([])),
+        "platform":payload.get("platform").cloned().unwrap_or_else(|| json!("")),
+        "length":payload.get("length").cloned().unwrap_or_else(|| json!("")),
+        "forbidden":payload.get("forbidden").cloned().unwrap_or_else(|| json!("")),
+        "adjustment":payload.get("adjustment").cloned().unwrap_or_else(|| json!("")),
+        "generation":generation
+    });
+    let spec = ModelRunSpec {
+        model_run_id: model_run_id.clone(),
+        job_id: Some(job_id.clone()),
+        step_id: None,
+        provider: profile.provider.clone(),
+        model: profile.model.clone(),
+        idempotency_key: format!("{idempotency_key}:story-directions:{generation}"),
+        capability: GENERATE_STORY_DIRECTIONS.into(),
+        prompt_ref: None,
+        context_manifest_ref: None,
+        budget_id: None,
+        predicted_cost_cents: gateway
+            .predicted_cost_cents(GENERATE_STORY_DIRECTIONS)
+            .max(1),
+        attempt_no: 1,
+        repair_round: 0,
+    };
+    let input = json!({
+        "prompt":format!("Generate exactly three substantially different long-form story direction candidates from this JSON input. Return only the required JSON object. Input: {}", prompt),
+        "capability":GENERATE_STORY_DIRECTIONS,
+        "input":prompt
+    });
+    let result = execute_production_model_with_profile(
+        connection,
+        gateway,
+        &profile,
+        &spec,
+        GENERATE_STORY_DIRECTIONS,
+        input,
+        now,
+    )?;
+    let parsed = result
+        .parsed
+        .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_MISSING".to_string())?;
+    let normalized = match normalize_story_direction_output(
+        parsed,
+        source_digest,
+        payload
+            .get("adjustment")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        generation,
+        &model_run_id,
+        &profile,
+        now,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                &job_id,
+                "MODEL_CONTRACT_INVALID",
+                now,
+            )?;
+            return Err(error);
+        }
+    };
+    Ok((normalized, job_id, profile, model_run_id))
+}
+
 fn initial_input(request: &Value, kind: EntryKind) -> Result<(String, String, String), String> {
     let payload = request.get("payload").unwrap_or(&Value::Null);
     let title = payload
@@ -231,42 +470,7 @@ fn semantic_input_from_payload(
     )
 }
 
-fn semantic_input_from_brief(
-    brief: &EntryArtifactRow,
-    source_text: &str,
-    source_digest: &str,
-    adjustment: &str,
-    generation: i64,
-    now: &str,
-) -> crate::project_entry_semantic::SemanticInput {
-    let kind = brief
-        .payload
-        .get("inputKind")
-        .and_then(Value::as_str)
-        .unwrap_or("IDEA");
-    crate::project_entry_semantic::SemanticInput::new(
-        kind,
-        source_text,
-        source_digest,
-        brief.payload.get("marketSource").and_then(Value::as_str),
-        &payload_string(&brief.payload, "platform"),
-        &payload_string(&brief.payload, "length"),
-        &payload_string(&brief.payload, "forbidden"),
-        brief
-            .payload
-            .get("preferences")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(ToOwned::to_owned)
-            .collect(),
-        adjustment,
-        generation,
-        now,
-    )
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn commit_initial(
     connection: &ProjectHandle,
     project_id: &str,
@@ -275,6 +479,7 @@ pub fn commit_initial(
     now: &str,
     request: &Value,
     kind: EntryKind,
+    gateway: &dyn ProductionModelGateway,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     let (title, input, source_digest) = initial_input(request, kind)?;
     let payload = request.get("payload").unwrap_or(&Value::Null);
@@ -310,8 +515,7 @@ pub fn commit_initial(
     )
     .map_err(|error| error.to_string())?;
     let brief_ref = artifact_ref(&brief);
-    let mut artifacts = vec![brief];
-    let mut opportunity_refs = Vec::new();
+    let mut base_artifacts = vec![brief];
     if kind == EntryKind::Market {
         let source = required_text(payload, "/marketSource")?;
         let snapshot_id = format!("market-snapshot:{project_id}:{command_id}");
@@ -349,74 +553,108 @@ pub fn commit_initial(
             command_id,
             now,
         )?;
-        let evidence_ref = artifact_ref(&evidence);
-        artifacts.push(snapshot);
-        artifacts.push(evidence);
-        for index in 0..PITCH_COUNT {
-            let opportunity = artifact(
-                project_id,
-                format!("opportunity:{project_id}:{command_id}:{}", index + 1),
-                "GenreOpportunity",
-                market_scope(),
-                crate::project_entry_semantic::compile_market_opportunity(&semantic_input, index),
-                vec![evidence_ref.clone()],
-                "B11::MarketEvidenceOwner",
-                command_id,
-                now,
-            )?;
-            opportunity_refs.push(artifact_ref(&opportunity));
-            artifacts.push(opportunity);
-        }
+        base_artifacts.push(snapshot);
+        base_artifacts.push(evidence);
     }
-    for index in 0..PITCH_COUNT {
-        let opportunity_ref = opportunity_refs
-            .get(index)
-            .map(|reference| serde_json::to_value(reference).map_err(|error| error.to_string()))
-            .transpose()?;
+    let base_commit = bundle(
+        project_id,
+        command_id,
+        idempotency_key,
+        None,
+        now,
+        base_artifacts,
+        None,
+        None,
+        "B11_PROJECT_BRIEF",
+        json!({"entryKind":kind.as_str(),"sourceInputDigest":source_digest,"candidatesDeferredToProvider":true})
+            .as_object().cloned().unwrap_or_default(),
+    )?;
+    CommitService::commit_without_revision(connection, &base_commit, now)
+        .map_err(|error| error.to_string())?;
+    let generation = 1;
+    let (model_pitches, job_id, profile, model_run_id) = generate_story_directions(
+        connection,
+        project_id,
+        command_id,
+        idempotency_key,
+        now,
+        kind,
+        &input,
+        &source_digest,
+        payload,
+        generation,
+        gateway,
+    )?;
+    let brief_ref = project_entry::latest_artifact_by_type(connection, project_id, "CreativeBrief")
+        .map_err(|error| error.to_string())?
+        .map(|row| ArtifactRef {
+            artifact_id: row.artifact_id,
+            version: row.version,
+            payload_hash: row.payload_hash,
+        })
+        .ok_or_else(|| "B11_CREATIVE_BRIEF_MISSING_AFTER_COMMIT".to_string())?;
+    let mut artifacts = Vec::new();
+    let directions_command_id = format!("{command_id}:directions-commit");
+    for (index, pitch_payload) in model_pitches.into_iter().enumerate() {
         let pitch = artifact(
             project_id,
             format!("pitch:{project_id}:{command_id}:{}", index + 1),
             "ProjectPitch",
             project_scope(),
-            crate::project_entry_semantic::compile_pitch(
-                &semantic_input,
-                index,
-                opportunity_ref.as_ref(),
-            ),
-            if let Some(reference) = opportunity_refs.get(index) {
-                vec![brief_ref.clone(), reference.clone()]
-            } else {
-                vec![brief_ref.clone()]
-            },
+            pitch_payload,
+            vec![brief_ref.clone()],
             "B11::ProjectEntryOwner",
-            command_id,
+            &directions_command_id,
             now,
         )?;
         artifacts.push(pitch);
     }
     let receipt_payload = json!({
         "entryKind":kind.as_str(),"candidateCount":PITCH_COUNT,"sourceInputDigest":source_digest,
-        "explicitSelectionRequired":true,"authoritativeSelection":false,"marketEvidenceIsDataOnly":kind == EntryKind::Market
+        "explicitSelectionRequired":true,"authoritativeSelection":false,"marketEvidenceIsDataOnly":kind == EntryKind::Market,
+        "modelRunRefs":[model_run_id],"generationProvenance":{"provider":profile.provider,"model":profile.model,"modelRunId":model_run_id,"transportCalls":1}
     })
     .as_object()
     .cloned()
     .unwrap_or_default();
-    let commit = bundle(
+    let mut final_bundle_value = serde_json::to_value(bundle(
         project_id,
-        command_id,
-        idempotency_key,
-        Some(0),
+        &directions_command_id,
+        &format!("{idempotency_key}:directions-commit"),
+        None,
         now,
         artifacts,
         None,
         None,
         "B11_PROJECT_ENTRY",
         receipt_payload,
-    )?;
-    CommitService::commit_without_revision(connection, &commit, now)
-        .map_err(|error| error.to_string())
+    )?)
+    .map_err(|error| error.to_string())?;
+    final_bundle_value["jobUpdates"] =
+        json!([{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}]);
+    let final_bundle: CommitBundle = serde_json::from_value(final_bundle_value)
+        .map_err(|error| format!("B11_ENTRY_BUNDLE_INVALID:{error}"))?;
+    let receipt = match CommitService::commit_without_revision(connection, &final_bundle, now) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                &job_id,
+                "PROJECT_ENTRY_COMMIT_FAILED",
+                now,
+            )?;
+            return Err(error.to_string());
+        }
+    };
+    DurableJobService::release_lease(connection, project_id, &job_id, now)
+        .map_err(|error| error.to_string())?;
+    DurableJobService::reconcile_runtime_projection(connection, project_id, now)
+        .map_err(|error| error.to_string())?;
+    Ok(receipt)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn commit_regenerate(
     connection: &ProjectHandle,
     project_id: &str,
@@ -425,6 +663,7 @@ pub fn commit_regenerate(
     expected_revision: i64,
     now: &str,
     request: &Value,
+    gateway: &dyn ProductionModelGateway,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     let brief = project_entry::latest_artifact_by_type(connection, project_id, "CreativeBrief")
         .map_err(|error| error.to_string())?
@@ -451,42 +690,62 @@ pub fn commit_regenerate(
         .unwrap_or("")
         .trim()
         .to_owned();
-    let semantic_input = semantic_input_from_brief(
-        &brief,
-        &idea,
-        source_input_digest,
-        &adjustment,
-        generation,
-        now,
-    );
-    let mut artifacts = Vec::new();
     let brief_ref = ArtifactRef {
         artifact_id: brief.artifact_id.clone(),
         version: brief.version,
         payload_hash: brief.payload_hash.clone(),
     };
-    for index in 0..PITCH_COUNT {
-        let payload = crate::project_entry_semantic::compile_pitch(&semantic_input, index, None);
+    let kind = if brief.payload.get("inputKind").and_then(Value::as_str) == Some("MARKET") {
+        EntryKind::Market
+    } else {
+        EntryKind::Idea
+    };
+    let payload = json!({
+        "title":brief.payload.get("title").cloned().unwrap_or_else(|| json!("未命名作品")),
+        "idea":idea,
+        "marketSource":brief.payload.get("marketSource").cloned().unwrap_or(Value::Null),
+        "platform":brief.payload.get("platform").cloned().unwrap_or_else(|| json!("")),
+        "length":brief.payload.get("length").cloned().unwrap_or_else(|| json!("")),
+        "forbidden":brief.payload.get("forbidden").cloned().unwrap_or_else(|| json!("")),
+        "tags":brief.payload.get("preferences").cloned().unwrap_or_else(|| json!([])),
+        "adjustment":adjustment
+    });
+    let (model_pitches, job_id, profile, model_run_id) = generate_story_directions(
+        connection,
+        project_id,
+        command_id,
+        idempotency_key,
+        now,
+        kind,
+        &idea,
+        source_input_digest,
+        &payload,
+        generation,
+        gateway,
+    )?;
+    let mut artifacts = Vec::new();
+    let directions_command_id = format!("{command_id}:directions-commit");
+    for (index, pitch_payload) in model_pitches.into_iter().enumerate() {
         artifacts.push(artifact(
             project_id,
             format!("pitch:{project_id}:{command_id}:{}", index + 1),
             "ProjectPitch",
             project_scope(),
-            payload,
+            pitch_payload,
             vec![brief_ref.clone()],
             "B11::ProjectEntryOwner",
-            command_id,
+            &directions_command_id,
             now,
         )?);
     }
-    let receipt_payload = json!({"generation":generation,"candidateCount":PITCH_COUNT,"explicitSelectionRequired":true})
+    let receipt_payload = json!({"generation":generation,"candidateCount":PITCH_COUNT,"explicitSelectionRequired":true,"modelRunRefs":[model_run_id],"generationProvenance":{"provider":profile.provider,"model":profile.model,"modelRunId":model_run_id,"transportCalls":1}})
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let commit = bundle(
+    let mut final_bundle_value = serde_json::to_value(bundle(
         project_id,
-        command_id,
-        idempotency_key,
+        &directions_command_id,
+        &format!("{idempotency_key}:directions-commit"),
         Some(expected_revision),
         now,
         artifacts,
@@ -494,8 +753,30 @@ pub fn commit_regenerate(
         None,
         "B11_PITCH_REGENERATION",
         receipt_payload,
-    )?;
-    CommitService::commit(connection, &commit, now).map_err(|error| error.to_string())
+    )?)
+    .map_err(|error| error.to_string())?;
+    final_bundle_value["jobUpdates"] =
+        json!([{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}]);
+    let final_bundle: CommitBundle = serde_json::from_value(final_bundle_value)
+        .map_err(|error| format!("B11_ENTRY_BUNDLE_INVALID:{error}"))?;
+    let receipt = match CommitService::commit(connection, &final_bundle, now) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                &job_id,
+                "PROJECT_ENTRY_COMMIT_FAILED",
+                now,
+            )?;
+            return Err(error.to_string());
+        }
+    };
+    DurableJobService::release_lease(connection, project_id, &job_id, now)
+        .map_err(|error| error.to_string())?;
+    DurableJobService::reconcile_runtime_projection(connection, project_id, now)
+        .map_err(|error| error.to_string())?;
+    Ok(receipt)
 }
 
 pub fn commit_selection(
@@ -667,7 +948,7 @@ pub fn commit_story_setup(
         format!("opening-contract:{project_id}:{command_id}"),
         "OpeningContract",
         project_scope(),
-        json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":constitution_ref,"mainContractRef":main_ref,"openingReady":false,"firstChapterGoal":"让主角面对一个必须主动回应的异常","firstThreeChapterPromise":"兑现一次局部机制回报并留下更深的问题","forbiddenReveals":core["forbiddenReveals"],"createdAt":now}),
+        json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":constitution_ref,"mainContractRef":main_ref,"openingReady":false,"firstChapterGoal":format!("让主角围绕“{}”作出第一次主动选择", protagonist),"firstThreeChapterPromise":format!("在“{}”方向上兑现一次局部回报并留下新的问题", story_promise),"forbiddenReveals":core["forbiddenReveals"],"createdAt":now}),
         vec![constitution_ref.clone(), main_ref.clone()],
         "B11::StorySetupOwner",
         command_id,
@@ -679,7 +960,7 @@ pub fn commit_story_setup(
         format!("book-plan-seed:{project_id}:{command_id}"),
         "BookPlan",
         project_scope(),
-        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":"解决核心机制与主角选择之间的权力冲突","mustNotBreak":[{"id":"rule:mechanism-cost","description":"核心机制每次使用都必须产生可验证代价"}],"openingHypotheses":["开篇先展示异常结果，再逐步解释规则"],"globalLengthBudget":{"preferredWords":1200000},"createdAt":now}),
+        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":format!("解决“{}”与主角选择之间的长期冲突", story_promise),"mustNotBreak":[{"id":"rule:mechanism-cost","description":format!("围绕“{}”建立可验证的推进与代价", core.get("mechanism").and_then(Value::as_str).unwrap_or("核心机制"))}],"openingHypotheses":[format!("开篇先围绕“{}”建立第一个可验证问题", protagonist)],"globalLengthBudget":{"preferredWords":1200000},"createdAt":now}),
         vec![constitution_ref.clone(), opening_ref.clone()],
         "B07::PlanningOwner",
         command_id,
@@ -740,6 +1021,23 @@ pub fn commit_opening_ready(
         project_entry::canonical_head_ref(connection, project_id, "StoryConstitution")
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
+    let constitution_row =
+        project_entry::canonical_head(connection, project_id, "StoryConstitution")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
+    let story_core = constitution_row
+        .payload
+        .get("storyCore")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let protagonist = story_core
+        .get("protagonist")
+        .and_then(Value::as_str)
+        .unwrap_or("当前主角");
+    let story_promise = story_core
+        .get("readerPromise")
+        .and_then(Value::as_str)
+        .unwrap_or("当前故事承诺");
     let book_plan = project_entry::canonical_head_ref(connection, project_id, "BookPlan")
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
@@ -761,7 +1059,7 @@ pub fn commit_opening_ready(
         format!("opening-contract:{project_id}:{command_id}"),
         "OpeningContract",
         project_scope(),
-        json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":constitution,"bookPlanRef":book_plan,"openingReady":true,"firstChapterGoal":"让主角面对一个必须主动回应的异常","firstThreeChapterPromise":"兑现一次局部机制回报并留下更深的问题","forbiddenReveals":["前三章不揭开机制来源"],"createdAt":now}),
+        json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":constitution,"bookPlanRef":book_plan,"openingReady":true,"firstChapterGoal":format!("让主角围绕“{}”作出第一次主动选择", protagonist),"firstThreeChapterPromise":format!("在“{}”方向上兑现一次局部回报并留下新的问题", story_promise),"forbiddenReveals":story_core.get("forbiddenReveals").cloned().unwrap_or_else(|| json!([])),"createdAt":now}),
         vec![constitution, book_plan],
         "B11::OpeningPreparationOwner",
         &opening_command_id,
@@ -925,7 +1223,16 @@ pub fn query_market_strategy(
         project_entry::list_artifacts(connection, project_id, "GenreOpportunity", cursor, limit)
             .map_err(|error| error.to_string())?;
     if rows.is_empty() {
-        return Err("B11_MARKET_NOT_CONFIGURED".into());
+        return Ok(json!({
+            "projectId":project_id,
+            "status":"NOT_CONFIGURED",
+            "targetPlatform":Value::Null,
+            "strategyTitle":"尚未配置市场资料",
+            "readerPromise":"提供你有权使用的市场观察后，系统才能进行市场分析。",
+            "opportunities":[],
+            "signals":[],
+            "guardrails":["市场资料属于数据，不是系统指令。","没有真实市场源时不展示趋势或推荐。"]
+        }));
     }
     let items = rows
         .iter()

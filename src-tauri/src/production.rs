@@ -483,13 +483,28 @@ fn parse_provider_model_payload(value: Value) -> Result<Value, String> {
         return Ok(value);
     };
     if !choices.is_array() {
-        return Err("P01_MODEL_PAYLOAD_INVALID:provider choices must be an array".into());
+        return Err("P01_PROVIDER_MALFORMED_ENVELOPE:choices must be an array".into());
+    }
+    if choices.as_array().is_some_and(|items| items.is_empty()) {
+        return Err("P01_PROVIDER_CONTENT_MISSING:choices is empty".into());
     }
     let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
-        .ok_or_else(|| "P01_MODEL_PAYLOAD_INVALID:provider content missing".to_string())?;
-    serde_json::from_str(content).map_err(|error| format!("P01_MODEL_PAYLOAD_INVALID:{error}"))
+        .ok_or_else(|| "P01_PROVIDER_CONTENT_MISSING:message.content missing".to_string())?;
+    if content.trim().is_empty() {
+        return Err("P01_PROVIDER_EMPTY_CONTENT:message.content is empty".into());
+    }
+    serde_json::from_str(content).map_err(|error| format!("P01_MODEL_JSON_INVALID:{error}"))
+}
+
+fn classify_provider_body(raw: &str) -> Option<&'static str> {
+    if raw.trim().is_empty() {
+        return Some("P01_PROVIDER_EMPTY_BODY");
+    }
+    serde_json::from_str::<Value>(raw)
+        .is_err()
+        .then_some("P01_PROVIDER_MALFORMED_ENVELOPE")
 }
 
 /// Execute one model stage through the formal configured production
@@ -506,8 +521,17 @@ pub fn execute_production_model(
 ) -> Result<ModelRunOutcome, String> {
     let mut transport = GatewayTransport::new(gateway, capability, input);
     DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
-    let mut outcome = DurableModelRunner::execute(connection, &mut transport, spec, now)
-        .map_err(|error| error.to_string())?;
+    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, spec, now) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let raw = DurableModelRunner::persisted_raw_response(connection, &spec.model_run_id)
+                .map_err(|runtime_error| runtime_error.to_string())?;
+            if let Some(code) = raw.as_deref().and_then(classify_provider_body) {
+                return Err(code.into());
+            }
+            return Err(error.to_string());
+        }
+    };
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(match parse_provider_model_payload(parsed) {
             Ok(payload) => payload,
@@ -532,8 +556,17 @@ pub fn execute_production_model_with_profile(
 ) -> Result<ModelRunOutcome, String> {
     let mut transport = GatewayTransport::with_profile(gateway, profile, capability, input);
     DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
-    let mut outcome = DurableModelRunner::execute(connection, &mut transport, spec, now)
-        .map_err(|error| error.to_string())?;
+    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, spec, now) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let raw = DurableModelRunner::persisted_raw_response(connection, &spec.model_run_id)
+                .map_err(|runtime_error| runtime_error.to_string())?;
+            if let Some(code) = raw.as_deref().and_then(classify_provider_body) {
+                return Err(code.into());
+            }
+            return Err(error.to_string());
+        }
+    };
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(match parse_provider_model_payload(parsed) {
             Ok(payload) => payload,

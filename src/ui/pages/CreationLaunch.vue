@@ -9,12 +9,12 @@ import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 const router = useRouter()
 const store = useProjectLibraryStore()
 const projectTitle = ref('')
-const idea = ref('一个少年带着一柄来历不明的断剑来到寒江剑派。他想寻找失踪的兄长，却逐渐发现这个江湖里“名字”本身可能被人篡改。')
+const idea = ref('')
 const mode = ref<'AUTO'|'DIRECTOR'>('DIRECTOR')
-const platform = ref('AI 推荐')
-const length = ref('120–180 万字')
-const forbidden = ref('不要悲剧结局；不要后宫；避免主角长期被动；不要靠低智误会推进剧情。')
-const selectedTags = ref(['武侠','悬疑','成长'])
+const platform = ref('待判断')
+const length = ref('AI 推荐')
+const forbidden = ref('')
+const selectedTags = ref<string[]>([])
 const selectedMarket = ref('market-growth')
 const entryMode = ref<'idea' | 'market'>('idea')
 const marketSource = ref('')
@@ -26,12 +26,12 @@ const clarifyAnswers = ref({ priority:'悬疑感更强', protagonist:'可以受�
 
 const market = computed(() => store.market)
 onMounted(() => store.loadMarket())
-const platforms = ['AI 推荐','番茄小说','起点中文网','晋江文学城','其他']
+const platforms = ['待判断','番茄小说','起点中文网','晋江文学城','其他']
 const tags = ['武侠','悬疑','成长','志怪','群像','复仇','轻喜','慢热']
 const createState = computed(()=>store.commandState(createKey))
 const inference = computed(() => [
-  ['目标平台', platform.value === 'AI 推荐' ? '番茄小说（AI 推荐）' : platform.value],
-  ['题材方向', selectedTags.value.join(' · ') || '由 AI 推断'],
+  ['目标平台', platform.value],
+  ['题材方向', selectedTags.value.join(' · ') || '待判断'],
   ['目标篇幅', length.value],
   ['创作模式', mode.value === 'AUTO' ? '全自动模式' : '导演模式'],
   ['内容禁区', forbidden.value || '未设置']
@@ -43,12 +43,20 @@ function toggleTag(tag:string){
 
 function startPitch(){ entryMode.value = 'idea'; showInference.value = true }
 async function createFromIdea(){
-  const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value,clarifications:clarifyAnswers.value}})
-  if (receipt.finalStatus==='committed' && receipt.projectId) { showInference.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
+  try {
+    const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value,clarifications:clarifyAnswers.value}})
+    if (receipt.finalStatus==='committed' && receipt.projectId) { showInference.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
+  } catch {
+    // CommandFeedback keeps the typed provider failure visible in the modal.
+  }
 }
 async function createFromMarket(){
-  const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
-  if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
+  try {
+    const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
+    if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
+  } catch {
+    // CommandFeedback keeps the typed provider failure visible in the modal.
+  }
 }
 </script>
 
@@ -104,8 +112,8 @@ async function createFromMarket(){
     </div>
 
     <section class="section">
-      <div class="section-head"><div><h2>市场机会 · 本周趋势</h2><div class="muted" style="font-size:12px">市场用于发现需求，不复制任何具体作品情节、人物或文风。</div></div><div class="actions"><button class="btn small" @click="showMarket=true">查看完整市场分析</button></div></div>
-      <div class="market-grid">
+      <div v-if="market.length" class="section-head"><div><h2>市场机会</h2><div class="muted" style="font-size:12px">市场用于发现需求，不复制任何具体作品情节、人物或文风。</div></div><div class="actions"><button class="btn small" @click="showMarket=true">查看完整市场分析</button></div></div>
+      <div v-if="market.length" class="market-grid">
         <article v-for="item in market" :key="item.id" class="market-card" :class="{selected:selectedMarket===item.id}" @click="selectedMarket=item.id">
           <div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="item.kind==='稳健型'?'pine':item.kind==='潜力型'?'info':'warning'">{{ item.kind }}</span><span class="muted" style="font-size:10px">{{ item.collectedAt }}</span></div>
           <h3>{{ item.title }}</h3><div class="market-meta">{{ item.platform }} · {{ item.direction }}</div>
@@ -115,6 +123,7 @@ async function createFromMarket(){
           <button class="btn small" :class="selectedMarket===item.id?'primary':'soft'" style="width:100%;margin-top:12px" @click.stop="selectedMarket=item.id">{{ selectedMarket===item.id?'已选择此机会':'按此方向创作' }}</button>
         </article>
       </div>
+      <div v-else class="empty">尚未配置市场资料源；提供你有权使用的市场观察后，系统才能进行市场分析。</div>
     </section>
 
     <BaseModal :open="showInference" title="确认创作方向" subtitle="这些是系统根据你的输入整理出的正式创作约束。" @close="showInference=false">

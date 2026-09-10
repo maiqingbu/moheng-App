@@ -60,3 +60,11 @@ test('P01 formal provider evidence is source-bound to raw, unknown, and budget p
   assert.match(acceptance, /P01_FORMAL_PROVIDER_USAGE\.json/)
   assert.match(acceptance, /READY_FOR_REACCEPTANCE/)
 })
+
+test('Xiaomi provider uses structured JSON mode and typed response errors', () => {
+  assert.match(provider, /response_format/)
+  assert.match(provider, /thinking/)
+  for (const code of ['P01_PROVIDER_EMPTY_BODY', 'P01_PROVIDER_MALFORMED_ENVELOPE', 'P01_PROVIDER_CONTENT_MISSING', 'P01_PROVIDER_EMPTY_CONTENT', 'P01_MODEL_JSON_INVALID']) {
+    assert.match(production, new RegExp(code))
+  }
+})

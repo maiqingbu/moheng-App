@@ -234,6 +234,7 @@ impl OpenAiCompatibleProvider {
             "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. Fill unknown values with empty arrays or null only where the contract permits.",
             "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain the chapter prose.",
             "AUDIT_EXTRACT" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"qualityFindings\":array,\"canonCandidates\":array,\"knowledgeCandidates\":array,\"continuityCandidates\":array,\"taskProgressCandidates\":array,\"revealedReservationRefs\":array,\"evidenceRanges\":array}.",
+            "GENERATE_STORY_DIRECTIONS" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"pitches\":[{\"name\":string,\"promise\":string,\"protagonistDesire\":string,\"mechanism\":string,\"worldConflict\":string,\"longArc\":string,\"openingHook\":string,\"volumeGoal\":string,\"commercialEdge\":string,\"originality\":string,\"difficulty\":string,\"failureRisk\":string}]} with exactly three substantially different pitches.",
             "TEST_PROVIDER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"ok\":true}.",
             _ => "Return one valid JSON object only. Do not add Markdown, code fences, explanations, or text outside the JSON object.",
         }
@@ -258,6 +259,15 @@ impl OpenAiCompatibleProvider {
             payload["max_completion_tokens"] = json!(16_384);
         }
         payload
+    }
+
+    pub fn request_payload_digest(
+        &self,
+        request: &ProviderRequest,
+    ) -> Result<String, ProviderError> {
+        crate::hash::sha256_canonical(&Self::request_payload(&self.endpoint, request)).map_err(
+            |error| ProviderError::new(ProviderErrorKind::MalformedResponse, error.to_string()),
+        )
     }
 }
 
@@ -381,5 +391,20 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Return JSON only"));
+    }
+
+    #[test]
+    fn xiaomi_request_payload_digest_is_stable_and_secret_free() {
+        let provider = OpenAiCompatibleProvider::new("https://api.xiaomimimo.com/v1");
+        let digest = provider
+            .request_payload_digest(&ProviderRequest {
+                capability: "RENDER_CHAPTER".into(),
+                model_id: "mimo-v2.5-pro".into(),
+                prompt: "bounded-input".into(),
+                timeout_ms: 1000,
+            })
+            .unwrap();
+        assert_eq!(digest.len(), 64);
+        assert!(!digest.contains("sk-"));
     }
 }

@@ -19,6 +19,7 @@ const projectEntryTest = read('src-tauri/tests/b11_project_entry.rs')
 const assistantViewTest = read('tests/store/b11-assistant-presentation.test.ts')
 const b11UxTest = read('tests/b11-product-ux.test.mjs')
 const supportRepository = read('src-tauri/src/repositories/support.rs')
+const creationLaunch = read('src/ui/pages/CreationLaunch.vue')
 
 function sourceOnlyRustFiles() {
   const directory = path.join(root, 'src-tauri/src')
@@ -111,6 +112,24 @@ test('NEG-08 Start Creating cannot use BrowserDemo', () => {
   assert.match(entry, /productionRoot":"B08::ChapterProductionRuntime/)
   assert.doesNotMatch(entry, /demoPort|BrowserDemo|mockProduction/i)
   assert.match(runtimePort, /已拒绝回退到浏览器 Demo 状态/)
+})
+
+test('REAL-WIRE-A01 project entry uses the current provider ModelRun owner', () => {
+  const initial = entry.slice(entry.indexOf('pub fn commit_initial'), entry.indexOf('pub fn commit_regenerate'))
+  const regenerate = entry.slice(entry.indexOf('pub fn commit_regenerate'), entry.indexOf('pub fn commit_selection'))
+  assert.match(entry, /GENERATE_STORY_DIRECTIONS/)
+  assert.match(entry, /execute_production_model_with_profile/)
+  assert.doesNotMatch(initial, /compile_pitch|deterministic-recording|b11-semantic-compiler-r1/)
+  assert.match(regenerate, /generate_story_directions/)
+  assert.doesNotMatch(regenerate, /compile_pitch|deterministic-recording|b11-semantic-compiler-r1/)
+  assert.match(projectEntryTest, /provider_failure_keeps_brief_but_never_falls_back_to_candidates/)
+})
+
+test('REAL-WIRE-A02 formal project entry has no demo seed values or fake platform recommendation', () => {
+  assert.match(creationLaunch, /const idea = ref\('\s*'\)/)
+  assert.match(creationLaunch, /const platform = ref\('待判断'\)/)
+  assert.doesNotMatch(creationLaunch, /const idea = ref\('\s*一个少年带着一柄来历不明的断剑/)
+  assert.doesNotMatch(creationLaunch, /番茄小说（AI 推荐）/)
 })
 
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {

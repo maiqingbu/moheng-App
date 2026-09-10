@@ -112,3 +112,16 @@ oldModel     = gpt-4o-mini
 ```
 
 结论：`PRODUCTION_PROVIDER_BINDING = PASS`，但真实 Xiaomi Render 未完成，`FinalChapter = 0`、`ProductionReceipt = 0`。本批按正式指令进入 `DIAGNOSTIC_ONLY`，不标记 `REAL_XIAOMI_E2E_FINAL_PASS`。
+
+## Post-diagnostic 定点修复状态
+
+已完成源码修复但尚未重新进行新的真实桌面端 E2E：
+
+- Xiaomi 请求按 capability 发送 JSON mode、结构化 system prompt 与 `thinking=disabled`。
+- Provider response 分层错误已区分空 body、坏 envelope、content 缺失、空 content、JSON invalid。
+- B11 Project Entry 已接入 `GENERATE_STORY_DIRECTIONS` Durable Job/ModelRun/current Provider，并保留用户选择前的 CANDIDATE 边界。
+- Provider 失败只保留 CreativeBrief 与失败 Job，不再回落 deterministic candidates。
+- 正式新建作品移除断剑/寒江剑派等表单默认值，未配置市场源时不展示伪市场趋势。
+- 桌面端 productName 已改为“墨衡”。
+
+本状态需要新的真实 E2E 才能进入最终验收，不可沿用本报告中的旧失败包作为 PASS 证据。

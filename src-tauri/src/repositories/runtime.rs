@@ -439,6 +439,22 @@ impl DurableJobService {
         Ok(())
     }
 
+    pub fn fail_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        error_code: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET status='FAILED', error_code=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status NOT IN ('COMPLETED','CANCELLED')",
+            libsql_rusqlite::params![error_code, now, project_id, job_id],
+        )?;
+        Self::release_lease(connection, project_id, job_id, now)?;
+        Self::reconcile_runtime_projection(connection, project_id, now)?;
+        Ok(())
+    }
+
     pub fn transition(
         connection: &Connection,
         project_id: &str,
@@ -946,6 +962,20 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    pub fn persisted_raw_response(
+        connection: &Connection,
+        model_run_id: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        connection
+            .query_row(
+                "SELECT raw_response FROM model_responses WHERE model_run_id=?1",
+                [model_run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Resolve the chapter's existing Budget Authority binding.  Production
     /// model stages must use this lookup rather than creating an unscoped
     /// reservation or accepting a caller-provided budget id.
@@ -1004,14 +1034,18 @@ impl DurableModelRunner {
             "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
             libsql_rusqlite::params![now, spec.model_run_id],
         )?;
+        let job_error_code = error_message
+            .strip_prefix("P01_")
+            .and_then(|value| value.split(':').next())
+            .unwrap_or("MODEL_PAYLOAD_INVALID");
         if let Some(job_id) = &spec.job_id {
             let project_id: String =
                 connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
                     row.get(0)
                 })?;
             connection.execute(
-                "UPDATE jobs SET status='FAILED', error_code='MODEL_PAYLOAD_INVALID', updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status NOT IN ('COMPLETED','CANCELLED')",
-                libsql_rusqlite::params![now, project_id, job_id],
+                "UPDATE jobs SET status='FAILED', error_code=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status NOT IN ('COMPLETED','CANCELLED')",
+                libsql_rusqlite::params![job_error_code, now, project_id, job_id],
             )?;
             DurableJobService::release_lease(connection, &project_id, job_id, now)?;
             DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
@@ -1675,6 +1709,11 @@ fn finish_parse(
                 "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
                 libsql_rusqlite::params![now, spec.model_run_id],
             )?;
+            let provider_error_code = if raw.trim().is_empty() {
+                "PROVIDER_EMPTY_BODY"
+            } else {
+                "PROVIDER_MALFORMED_ENVELOPE"
+            };
             if let Some(job_id) = &spec.job_id {
                 let project_id: String = connection.query_row(
                     "SELECT project_id FROM project_meta LIMIT 1",
@@ -1682,8 +1721,8 @@ fn finish_parse(
                     |row| row.get(0),
                 )?;
                 connection.execute(
-                    "UPDATE jobs SET status='FAILED', error_code='MODEL_PAYLOAD_INVALID', updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status NOT IN ('COMPLETED','CANCELLED')",
-                    libsql_rusqlite::params![now, project_id, job_id],
+                    "UPDATE jobs SET status='FAILED', error_code=?1, updated_at=?2 WHERE project_id=?3 AND job_id=?4 AND status NOT IN ('COMPLETED','CANCELLED')",
+                    libsql_rusqlite::params![provider_error_code, now, project_id, job_id],
                 )?;
                 DurableJobService::release_lease(connection, &project_id, job_id, now)?;
                 DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
