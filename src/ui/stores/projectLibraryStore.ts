@@ -57,11 +57,17 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
 
   async function testProvider(key: string, settings: ProviderSettingsInput) {
     commandStates.value[key] = { status: 'submitting', message: '正在提交诊断…' }
-    const receipt = await frontendPort.testProvider(settings, (status, message) => {
-      commandStates.value[key] = { ...commandStates.value[key], status, message }
-    })
-    commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
-    return receipt
+    try {
+      const receipt = await frontendPort.testProvider(settings, (status, message) => {
+        commandStates.value[key] = { ...commandStates.value[key], status, message }
+      })
+      commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
+      return receipt
+    } catch (error) {
+      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : error && typeof error === 'object' && 'message' in error ? String(error.message) : JSON.stringify(error) || String(error)
+      commandStates.value[key] = { status: 'failed', message: message || 'Provider 测试未完成。' }
+      throw error
+    }
   }
 
   async function loadMarket() {

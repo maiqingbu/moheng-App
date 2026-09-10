@@ -59,6 +59,23 @@ impl ProviderSettingsRepository {
                 result[key] = value.clone();
             }
         }
+        // A saved provider profile must not inherit the historical UI demo
+        // model when the caller omitted or blanked the model fields. Keep the
+        // global no-file projection friendly for the settings screen, but
+        // make every partial persisted profile fail closed at production.
+        let model = source
+            .get("modelId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                source
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_default();
+        result["model"] = Value::String(model.to_string());
+        result["modelId"] = Value::String(model.to_string());
         result
     }
 

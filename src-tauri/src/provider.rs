@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,15 +65,26 @@ impl ProviderConfig {
             .or_else(|| settings.get("provider").and_then(Value::as_str))
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
-                ProviderError::new(ProviderErrorKind::Configuration, "provider id is required")
+                ProviderError::new(
+                    ProviderErrorKind::Configuration,
+                    "MODEL_CONFIG_MISSING:provider",
+                )
             })?;
+        let provider_id = if provider_id.eq_ignore_ascii_case("openai compatible") {
+            "openai-compatible"
+        } else {
+            provider_id
+        };
         let model_id = settings
             .get("modelId")
             .and_then(Value::as_str)
             .or_else(|| settings.get("model").and_then(Value::as_str))
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
-                ProviderError::new(ProviderErrorKind::Configuration, "model id is required")
+                ProviderError::new(
+                    ProviderErrorKind::Configuration,
+                    "MODEL_CONFIG_MISSING:model",
+                )
             })?;
         let endpoint = settings
             .get("endpoint")
@@ -219,20 +229,35 @@ impl OpenAiCompatibleProvider {
         })
     }
 
-    fn curl_config(url: &str, secret: &str, payload: &str, timeout_ms: u64) -> String {
-        fn quote(value: &str) -> String {
-            format!(
-                "\"{}\"",
-                value
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-            )
+    fn structured_prompt(capability: &str) -> &'static str {
+        match capability {
+            "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. Fill unknown values with empty arrays or null only where the contract permits.",
+            "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain the chapter prose.",
+            "AUDIT_EXTRACT" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"qualityFindings\":array,\"canonCandidates\":array,\"knowledgeCandidates\":array,\"continuityCandidates\":array,\"taskProgressCandidates\":array,\"revealedReservationRefs\":array,\"evidenceRanges\":array}.",
+            "TEST_PROVIDER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"ok\":true}.",
+            _ => "Return one valid JSON object only. Do not add Markdown, code fences, explanations, or text outside the JSON object.",
         }
-        format!(
-            "url = {}\nrequest = post\nheader = {}\nheader = {}\ndata = {}\nmax-time = {}\nsilent\nshow-error\nwrite-out = {}\n",
-            quote(url), quote("Content-Type: application/json"), quote(&format!("Authorization: Bearer {secret}")), quote(payload), (timeout_ms.max(1) as f64 / 1000.0).ceil() as u64, quote("\\nP01_HTTP_STATUS:%{http_code}")
-        )
+    }
+
+    fn is_xiaomi_endpoint(endpoint: &str) -> bool {
+        endpoint.to_ascii_lowercase().contains("xiaomimimo.com")
+    }
+
+    fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
+        let mut payload = json!({
+            "model": request.model_id,
+            "messages": [
+                {"role":"system","content":Self::structured_prompt(&request.capability)},
+                {"role":"user","content":request.prompt}
+            ],
+            "temperature": 0
+        });
+        if Self::is_xiaomi_endpoint(endpoint) {
+            payload["response_format"] = json!({"type":"json_object"});
+            payload["thinking"] = json!({"type":"disabled"});
+            payload["max_completion_tokens"] = json!(16_384);
+        }
+        payload
     }
 }
 
@@ -249,23 +274,25 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 "provider secret unavailable",
             ));
         }
-        let payload = json!({"model":request.model_id,"messages":[{"role":"user","content":request.prompt}],"temperature":0}).to_string();
-        let mut child = Command::new("/usr/bin/curl")
-            .args(["--config", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let payload = Self::request_payload(&self.endpoint, request).to_string();
+        let timeout_seconds = ((request.timeout_ms.max(1) as f64) / 1000.0).ceil() as u64;
+        let output = Command::new("/usr/bin/curl")
+            .args(["--silent", "--show-error", "--request", "POST"])
+            .arg("--header")
+            .arg("Content-Type: application/json")
+            .arg("--header")
+            .arg(format!("Authorization: Bearer {secret}"))
+            .arg("--data-raw")
+            .arg(&payload)
+            .arg("--max-time")
+            .arg(timeout_seconds.to_string())
+            .arg("--write-out")
+            .arg("\nP01_HTTP_STATUS:%{http_code}")
+            .arg(&url)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                ProviderError::new(ProviderErrorKind::Transport, "curl stdin unavailable")
-            })?
-            .write_all(Self::curl_config(&url, secret, &payload, request.timeout_ms).as_bytes())
-            .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?;
-        let output = child
+            .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?
             .wait_with_output()
             .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?;
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -329,5 +356,30 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             usage: ProviderUsage::default(),
             provider_request_id: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenAiCompatibleProvider, ProviderRequest};
+
+    #[test]
+    fn xiaomi_production_payload_enables_json_mode_and_disables_thinking() {
+        let payload = OpenAiCompatibleProvider::request_payload(
+            "https://api.xiaomimimo.com/v1",
+            &ProviderRequest {
+                capability: "RENDER_CHAPTER".into(),
+                model_id: "mimo-v2.5-pro".into(),
+                prompt: "{\"chapterId\":\"chapter:1\"}".into(),
+                timeout_ms: 1000,
+            },
+        );
+        assert_eq!(payload["response_format"]["type"], "json_object");
+        assert_eq!(payload["thinking"]["type"], "disabled");
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert!(payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Return JSON only"));
     }
 }

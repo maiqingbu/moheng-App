@@ -276,7 +276,7 @@ export interface TimelineItem {
   order: number
   title: string
   description: string
-  status: 'done' | 'active' | 'waiting' | 'locked' | 'blocked'
+  status: 'done' | 'active' | 'waiting' | 'locked' | 'blocked' | 'failed' | 'pending'
   receipt?: string
   elapsed?: string
 }
@@ -285,7 +285,7 @@ export interface ProductionTask {
   id: string
   title: string
   description: string
-  status: 'done' | 'active' | 'waiting' | 'blocked'
+  status: 'done' | 'active' | 'waiting' | 'blocked' | 'failed'
   progress?: number
   cost?: number
   elapsed?: string
@@ -438,6 +438,11 @@ export interface ProductionCenterProjection {
     budgetRemaining: number
   }
   productionStage?: 'CONTEXT' | 'PLAN' | 'RENDER' | 'CANDIDATE' | 'AUDIT' | 'GATE' | 'COMMIT' | 'RECONCILE' | 'COMPLETED' | 'IDLE'
+  jobStatus?: string | null
+  jobError?: string | null
+  isActive?: boolean
+  canRetry?: boolean
+  lastStage?: string
   committedChapters?: number
   candidateChapters?: number
   nextChapter?: {
@@ -457,7 +462,7 @@ export interface ProductionCenterProjection {
     compiledFromStateDigest?: string
   } | null
   triggeredContinuity?: Array<{ threadRef: string; disposition: string; bridge?: string }>
-  gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED'; reason: string }
+  gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
   stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
   candidateRef?: { artifactId: string; version: number; payloadHash: string } | null

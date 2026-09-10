@@ -6,6 +6,7 @@ import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import type { RunState } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 
 const store = useProjectStore()
@@ -47,6 +48,23 @@ const productUxStateMessage = computed(() => {
   if (productUxEvidenceMode.value === 'm14-error') return productErrorMessage('当前 Rust Runtime 处理异常，请刷新。', '操作未完成，请刷新当前作品后重试。')
   return ''
 })
+const productionStatus = computed(() => production.value?.jobStatus ?? null)
+const productionIsActive = computed(() => production.value?.isActive === true)
+const canRetryProduction = computed(() => production.value?.canRetry === true)
+const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (!production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
+const authoritativeRunState = computed<RunState>(() => {
+  switch (production.value?.jobStatus) {
+    case 'FAILED': return 'FAILED'
+    case 'WAITING_DECISION': return 'WAITING_DECISION'
+    case 'PAUSED': return 'PAUSED'
+    case 'RUNNING':
+    case 'WAITING_MODEL': return 'ACTIVE'
+    case 'BLOCKED': return 'BLOCKED'
+    case 'COMPLETED': return 'COMPLETED'
+    case 'CANCELLED': return 'IDLE'
+    default: return project.value?.runState ?? 'IDLE'
+  }
+})
 
 onMounted(() => void store.loadProduction())
 
@@ -54,25 +72,36 @@ async function startProduction() {
   const chapter = production.value?.nextChapter
   if (!chapter) throw new Error('B08_CHAPTER_REQUIRED')
   lastCommand.value = 'production-start'
-  await store.runCommand(lastCommand.value, {
-    type: 'production_start',
-    payload: {
-      chapterId: chapter.id,
-      volumeId: chapter.volumeId,
-      executionMode: chapter.executionMode,
-      entityIds: [],
-      references: [],
-      skillsEnabled: true,
-    },
-  })
+  try {
+    await store.runCommand(lastCommand.value, {
+      type: 'production_start',
+      payload: {
+        chapterId: chapter.id,
+        volumeId: chapter.volumeId,
+        executionMode: chapter.executionMode,
+        entityIds: [],
+        references: [],
+        skillsEnabled: true,
+        ...(canRetryProduction.value && production.value?.tasks[0]?.id
+          ? { retryOfJobId: production.value.tasks[0].id }
+          : {}),
+      },
+    })
+  } catch {
+    // The store has already placed the typed failure in CommandFeedback.
+  }
 }
 
 async function controlProduction(type: 'production_pause' | 'production_resume' | 'production_cancel') {
   lastCommand.value = type
-  await store.runCommand(lastCommand.value, {
-    type,
-    payload: production.value?.tasks[0]?.id ? { jobId: production.value.tasks[0].id } : {},
-  })
+  try {
+    await store.runCommand(lastCommand.value, {
+      type,
+      payload: production.value?.tasks[0]?.id ? { jobId: production.value.tasks[0].id } : {},
+    })
+  } catch {
+    // The store has already placed the typed failure in CommandFeedback.
+  }
 }
 
 async function authorizeRepair() {
@@ -110,11 +139,11 @@ async function executeRepair() {
 <template>
   <div v-if="project && production" class="page">
     <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。">
-      <button v-if="project.runState !== 'ACTIVE' && production.nextChapter" class="btn primary" @click="startProduction">开始第 {{ production.nextChapter.number }} 章</button>
-      <button v-if="project.runState === 'ACTIVE'" class="btn" @click="controlProduction('production_pause')">暂停</button>
-      <button v-if="project.runState === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
+      <button v-if="canStartProduction" class="btn primary" @click="startProduction">{{ canRetryProduction ? '重新生成' : '开始' }}第 {{ production.nextChapter?.number }} 章</button>
+      <button v-if="productionIsActive" class="btn" @click="controlProduction('production_pause')">暂停</button>
+      <button v-if="productionStatus === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
     </PageHeader>
-    <RuntimeBanner :state="project.runState" :reason="project.blockReason" />
+    <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
     <CommandFeedback :state="commandState" />
 
     <section v-if="productUxEvidenceMode === 'm13'" class="card pad section" data-product-ux-state="receipt">
@@ -131,7 +160,7 @@ async function executeRepair() {
     </section>
 
     <div class="metric-grid section">
-      <MetricCard label="当前阶段" :value="stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />
+      <MetricCard label="当前阶段" :value="production.jobStatus === 'FAILED' ? '生成失败' : stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />
       <MetricCard label="正式章节" :value="project.committedChapters" note="只有正式确认的正文会计入这里" />
       <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
@@ -161,7 +190,7 @@ async function executeRepair() {
         </section>
         <section class="card pad">
           <h2 class="card-title">创作步骤与结果</h2>
-          <div v-for="run in production.modelRuns" :key="run.modelRunId" class="task-row"><strong>{{ capabilityLabel(run.capability) }}</strong><small class="muted">已使用当前配置 · {{ statusLabel(run.status) }}</small></div>
+          <div v-for="run in production.modelRuns" :key="run.modelRunId" class="task-row"><strong>{{ capabilityLabel(run.capability) }}</strong><small class="muted">上次尝试：{{ run.model }} · {{ statusLabel(run.status) }}</small></div>
           <p class="muted">制作稿：{{ production.candidateRef ? '已生成，等待检查' : '无' }}</p>
           <p class="muted">正式正文：{{ production.finalChapterRef ? '已提交' : '无' }}</p>
         </section>

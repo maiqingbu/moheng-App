@@ -85,6 +85,36 @@ pub trait ProductionModelGateway: Send + Sync {
         None
     }
 
+    /// Resolve the provider once at the beginning of a production attempt.
+    /// The returned profile is the non-secret snapshot used for every new
+    /// ModelRun in that attempt.  Test/deterministic gateways retain their
+    /// capability-specific compatibility model by using the default.
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        let provider = self.provider().trim().to_string();
+        let model = self.model("RENDER_CHAPTER").trim().to_string();
+        if provider.is_empty() {
+            return Err("MODEL_CONFIG_MISSING:provider".into());
+        }
+        if model.is_empty() {
+            return Err("MODEL_CONFIG_MISSING:model".into());
+        }
+        Ok(ResolvedProviderProfile {
+            provider,
+            model,
+            endpoint: String::new(),
+            timeout_ms: 30_000,
+        })
+    }
+
+    fn invoke_typed_with_profile(
+        &self,
+        capability: &str,
+        input: &Value,
+        _profile: &ResolvedProviderProfile,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        self.invoke_typed(capability, input)
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
 
     /// Preserve uncertainty from the configured provider until the durable
@@ -99,6 +129,14 @@ pub trait ProductionModelGateway: Send + Sync {
         self.invoke(capability, input)
             .map_err(|_| TransportFailure::Unavailable)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProviderProfile {
+    pub provider: String,
+    pub model: String,
+    pub endpoint: String,
+    pub timeout_ms: u64,
 }
 
 pub struct UnavailableProductionGateway;
@@ -133,8 +171,7 @@ impl ConfiguredProductionGateway {
     pub fn for_desktop(paths: crate::project_db::paths::AppPaths) -> Self {
         let provider_id =
             std::env::var("MOHENG_PROVIDER_ID").unwrap_or_else(|_| "openai-compatible".into());
-        let model_id =
-            std::env::var("MOHENG_PROVIDER_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+        let model_id = std::env::var("MOHENG_PROVIDER_MODEL").unwrap_or_default();
         let endpoint = std::env::var("MOHENG_PROVIDER_ENDPOINT").unwrap_or_default();
         let mut gateway = Self::new(
             ProviderConfig {
@@ -154,25 +191,51 @@ impl ConfiguredProductionGateway {
         gateway
     }
 
-    fn invoke_provider(
-        &self,
-        capability: &str,
-        input: &Value,
-    ) -> Result<ProviderResponse, ProviderError> {
-        let config = self
-            .settings_paths
-            .as_ref()
-            .and_then(|paths| {
-                crate::repositories::provider::ProviderSettingsRepository::read_global(paths).ok()
-            })
-            .and_then(|settings| ProviderConfig::from_settings(&settings).ok())
-            .unwrap_or_else(|| self.config.clone());
+    fn current_config(&self) -> Result<ProviderConfig, ProviderError> {
+        if let Some(paths) = &self.settings_paths {
+            let settings =
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths)
+                    .map_err(|error| {
+                        ProviderError::new(
+                            ProviderErrorKind::Configuration,
+                            format!("provider settings unavailable: {error}"),
+                        )
+                    })?;
+            ProviderConfig::from_settings(&settings)
+        } else {
+            Ok(self.config.clone())
+        }
+    }
+
+    fn validate_config(config: &ProviderConfig) -> Result<(), ProviderError> {
         if !config.enabled {
             return Err(ProviderError::new(
                 ProviderErrorKind::Configuration,
-                "provider is not configured",
+                "MODEL_CONFIG_DISABLED",
             ));
         }
+        if config.model_id.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Configuration,
+                "MODEL_CONFIG_MISSING:model",
+            ));
+        }
+        if config.endpoint.trim().is_empty() {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Configuration,
+                "MODEL_ENDPOINT_MISSING",
+            ));
+        }
+        Ok(())
+    }
+
+    fn invoke_provider_with_config(
+        &self,
+        config: &ProviderConfig,
+        capability: &str,
+        input: &Value,
+    ) -> Result<ProviderResponse, ProviderError> {
+        Self::validate_config(config)?;
         let secret = self.secret_store.get(&config.provider_id).map_err(|_| {
             ProviderError::new(
                 ProviderErrorKind::Authentication,
@@ -186,15 +249,24 @@ impl ConfiguredProductionGateway {
             .unwrap_or_else(|| input.to_string());
         let request = ProviderRequest {
             capability: capability.into(),
-            model_id: config.model_id,
+            model_id: config.model_id.clone(),
             prompt,
             timeout_ms: config.timeout_ms,
         };
         if self.settings_paths.is_some() {
-            OpenAiCompatibleProvider::new(config.endpoint).invoke(&request, &secret)
+            OpenAiCompatibleProvider::new(config.endpoint.clone()).invoke(&request, &secret)
         } else {
             self.adapter.invoke(&request, &secret)
         }
+    }
+
+    fn invoke_provider(
+        &self,
+        capability: &str,
+        input: &Value,
+    ) -> Result<ProviderResponse, ProviderError> {
+        let config = self.current_config()?;
+        self.invoke_provider_with_config(&config, capability, input)
     }
 
     fn response_from_provider(response: ProviderResponse) -> ProductionModelResponse {
@@ -225,6 +297,39 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         self.config.model_id.clone()
     }
 
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        let config = self.current_config().map_err(|error| error.detail)?;
+        Self::validate_config(&config).map_err(|error| error.detail)?;
+        Ok(ResolvedProviderProfile {
+            provider: config.provider_id,
+            model: config.model_id,
+            endpoint: config.endpoint,
+            timeout_ms: config.timeout_ms,
+        })
+    }
+
+    fn invoke_typed_with_profile(
+        &self,
+        capability: &str,
+        input: &Value,
+        profile: &ResolvedProviderProfile,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        let config = ProviderConfig {
+            provider_id: profile.provider.clone(),
+            model_id: profile.model.clone(),
+            endpoint: profile.endpoint.clone(),
+            enabled: true,
+            timeout_ms: profile.timeout_ms,
+        };
+        self.invoke_provider_with_config(&config, capability, input)
+            .map(Self::response_from_provider)
+            .map_err(|error| match error.kind {
+                ProviderErrorKind::Timeout => TransportFailure::Timeout,
+                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
+                _ => TransportFailure::Unavailable,
+            })
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         self.invoke_provider(capability, input)
             .map(Self::response_from_provider)
@@ -248,6 +353,7 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
 
 pub struct GatewayTransport<'a> {
     gateway: &'a dyn ProductionModelGateway,
+    profile: Option<&'a ResolvedProviderProfile>,
     capability: &'a str,
     input: Value,
     raw_persist_failure: bool,
@@ -257,6 +363,22 @@ impl<'a> GatewayTransport<'a> {
     pub fn new(gateway: &'a dyn ProductionModelGateway, capability: &'a str, input: Value) -> Self {
         Self {
             gateway,
+            profile: None,
+            capability,
+            input,
+            raw_persist_failure: false,
+        }
+    }
+
+    pub fn with_profile(
+        gateway: &'a dyn ProductionModelGateway,
+        profile: &'a ResolvedProviderProfile,
+        capability: &'a str,
+        input: Value,
+    ) -> Self {
+        Self {
+            gateway,
+            profile: Some(profile),
             capability,
             input,
             raw_persist_failure: false,
@@ -271,6 +393,7 @@ impl<'a> GatewayTransport<'a> {
     ) -> Self {
         Self {
             gateway,
+            profile: None,
             capability,
             input,
             raw_persist_failure: true,
@@ -339,7 +462,13 @@ impl ModelTransport for GatewayTransport<'_> {
         _spec: &ModelRunSpec,
         _credential: &str,
     ) -> Result<TransportResponse, TransportFailure> {
-        let response = self.gateway.invoke_typed(self.capability, &self.input)?;
+        let response = match self.profile {
+            Some(profile) => {
+                self.gateway
+                    .invoke_typed_with_profile(self.capability, &self.input, profile)?
+            }
+            None => self.gateway.invoke_typed(self.capability, &self.input)?,
+        };
         Ok(TransportResponse {
             raw_response: response
                 .raw_response
@@ -376,6 +505,32 @@ pub fn execute_production_model(
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
     let mut transport = GatewayTransport::new(gateway, capability, input);
+    DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
+    let mut outcome = DurableModelRunner::execute(connection, &mut transport, spec, now)
+        .map_err(|error| error.to_string())?;
+    if let Some(parsed) = outcome.parsed.take() {
+        outcome.parsed = Some(match parse_provider_model_payload(parsed) {
+            Ok(payload) => payload,
+            Err(error) => {
+                DurableModelRunner::mark_model_payload_parse_failure(connection, spec, &error, now)
+                    .map_err(|runtime_error| runtime_error.to_string())?;
+                return Err(error);
+            }
+        });
+    }
+    Ok(outcome)
+}
+
+pub fn execute_production_model_with_profile(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: Value,
+    now: &str,
+) -> Result<ModelRunOutcome, String> {
+    let mut transport = GatewayTransport::with_profile(gateway, profile, capability, input);
     DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
     let mut outcome = DurableModelRunner::execute(connection, &mut transport, spec, now)
         .map_err(|error| error.to_string())?;
@@ -678,6 +833,11 @@ pub fn run_chapter_production(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or("b08-worker");
+    let retry_of_job_id = request
+        .pointer("/payload/retryOfJobId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
     let job_id = StableIdentityFactory::from_command(StableIdKind::Job, &command_id)?;
     let handle = manager
         .open(&project_id, "", &now)
@@ -704,6 +864,20 @@ pub fn run_chapter_production(
     .map_err(|error| error.to_string())?;
     if chapter_volume.is_none() {
         return Err("B08_CHAPTER_NOT_FOUND".into());
+    }
+    let provider_profile = gateway.resolve_profile()?;
+    if let Some(previous_job_id) = &retry_of_job_id {
+        DurableJobService::validate_retry_source(
+            connection,
+            &project_id,
+            previous_job_id,
+            &chapter_id,
+        )
+        .map_err(|error| match error {
+            RuntimeError::RetryJobNotFound => "B08_RETRY_JOB_NOT_FOUND".to_string(),
+            RuntimeError::RetryJobInvalid => "B08_RETRY_JOB_INVALID".to_string(),
+            other => other.to_string(),
+        })?;
     }
     let production_budget_id =
         DurableModelRunner::chapter_budget_id(connection, &project_id, &chapter_id)
@@ -739,6 +913,16 @@ pub fn run_chapter_production(
         &now,
     )
     .map_err(|error| error.to_string())?;
+    if let Some(previous_job_id) = &retry_of_job_id {
+        DurableJobService::record_retry_lineage(
+            connection,
+            &project_id,
+            &job_id,
+            previous_job_id,
+            &now,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     DurableJobService::transition_for_worker(
         connection,
         &project_id,
@@ -748,6 +932,8 @@ pub fn run_chapter_production(
         &now,
     )
     .map_err(|error| error.to_string())?;
+    DurableJobService::set_runtime_state(connection, &project_id, "ACTIVE", None, &now)
+        .map_err(|error| error.to_string())?;
 
     update_stage(connection, &project_id, &job_id, "CONTEXT", &now)?;
     let mut current_revision =
@@ -850,8 +1036,8 @@ pub fn run_chapter_production(
             model_run_id: planning_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: gateway.provider().into(),
-            model: gateway.model("PLAN_STRATEGY"),
+            provider: provider_profile.provider.clone(),
+            model: provider_profile.model.clone(),
             idempotency_key: format!("{idempotency_key}:plan"),
             capability: "PLAN_STRATEGY".into(),
             prompt_ref: None,
@@ -871,9 +1057,10 @@ pub fn run_chapter_production(
             "activeTaskRefs":compiler_input.active_task_refs,
             "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>()
         });
-        let planning_result = execute_production_model(
+        let planning_result = execute_production_model_with_profile(
             connection,
             gateway,
+            &provider_profile,
             &planning_spec,
             "PLAN_STRATEGY",
             planning_input,
@@ -1041,8 +1228,8 @@ pub fn run_chapter_production(
         model_run_id: render_run_id.clone(),
         job_id: Some(job_id.clone()),
         step_id: None,
-        provider: gateway.provider().into(),
-        model: gateway.model("RENDER_CHAPTER"),
+        provider: provider_profile.provider.clone(),
+        model: provider_profile.model.clone(),
         idempotency_key: format!("{idempotency_key}:render"),
         capability: "RENDER_CHAPTER".into(),
         prompt_ref: None,
@@ -1056,9 +1243,10 @@ pub fn run_chapter_production(
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
-    let render_result = execute_production_model(
+    let render_result = execute_production_model_with_profile(
         connection,
         gateway,
+        &provider_profile,
         &render_spec,
         "RENDER_CHAPTER",
         render_input,
@@ -1080,7 +1268,7 @@ pub fn run_chapter_production(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":gateway.provider(),"model":gateway.model("RENDER_CHAPTER")},
+        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":provider_profile.provider.clone(),"model":provider_profile.model.clone()},
         "creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null)
     });
     let mut candidate = artifact(
@@ -1311,8 +1499,8 @@ pub fn run_chapter_production(
         model_run_id: audit_run_id.clone(),
         job_id: Some(job_id.clone()),
         step_id: None,
-        provider: gateway.provider().into(),
-        model: gateway.model("AUDIT_EXTRACT"),
+        provider: provider_profile.provider.clone(),
+        model: provider_profile.model.clone(),
         idempotency_key: format!("{idempotency_key}:audit"),
         capability: "AUDIT_EXTRACT".into(),
         prompt_ref: None,
@@ -1322,9 +1510,10 @@ pub fn run_chapter_production(
         attempt_no: 1,
         repair_round: 0,
     };
-    let audit_result = execute_production_model(
+    let audit_result = execute_production_model_with_profile(
         connection,
         gateway,
+        &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
         json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
@@ -1628,7 +1817,7 @@ pub fn run_chapter_production(
         };
     DurableJobService::release_lease(connection, &project_id, &job_id, &now)
         .map_err(|error| error.to_string())?;
-    DurableJobService::set_runtime_state(connection, &project_id, "ACTIVE", None, &now)
+    DurableJobService::set_runtime_state(connection, &project_id, "COMPLETED", None, &now)
         .map_err(|error| error.to_string())?;
     update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(

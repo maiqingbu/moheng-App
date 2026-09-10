@@ -5664,41 +5664,12 @@ pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<
 
 #[tauri::command]
 fn provider_config(settings: &Value) -> Result<crate::provider::ProviderConfig, String> {
-    let provider_id = settings
-        .get("providerId")
-        .and_then(Value::as_str)
-        .or_else(|| settings.get("provider").and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "P01_PROVIDER_ID_REQUIRED".to_string())?;
-    let provider_id = if provider_id.eq_ignore_ascii_case("openai compatible") {
-        "openai-compatible"
-    } else {
-        provider_id
-    };
-    let model_id = settings
-        .get("modelId")
-        .and_then(Value::as_str)
-        .or_else(|| settings.get("model").and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "P01_MODEL_ID_REQUIRED".to_string())?;
-    let endpoint = settings
-        .get("endpoint")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    Ok(crate::provider::ProviderConfig {
-        provider_id: provider_id.to_string(),
-        model_id: model_id.to_string(),
-        enabled: settings
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(!endpoint.is_empty()),
-        endpoint,
-        timeout_ms: settings
-            .get("timeoutMs")
-            .and_then(Value::as_u64)
-            .unwrap_or(30_000)
-            .clamp(500, 120_000),
+    crate::provider::ProviderConfig::from_settings(settings).map_err(|error| {
+        match error.detail.as_str() {
+            "MODEL_CONFIG_MISSING:provider" => "P01_PROVIDER_ID_REQUIRED".into(),
+            "MODEL_CONFIG_MISSING:model" => "P01_MODEL_ID_REQUIRED".into(),
+            _ => format!("P01_{}", error.detail),
+        }
     })
 }
 

@@ -37,8 +37,6 @@ watch(inWorkspace, value => { if (value) assistantCollapsed.value = false }, { i
 
 <template>
   <div class="prototype-window">
-    <div class="prototype-titlebar" data-tauri-drag-region><div class="prototype-dots" data-tauri-drag-region><span class="prototype-dot red" /><span class="prototype-dot amber" /><span class="prototype-dot green" /></div>墨衡 · AI 小说创作系统</div>
-
     <div class="prototype-topbar">
       <button class="prototype-brand" type="button" @click="router.push('/projects')"><span class="prototype-logo">墨</span><span class="prototype-brand-copy"><strong>墨衡</strong><small>长篇小说创作工作台</small></span></button>
       <div class="prototype-projectbar"><button v-if="inWorkspace" class="prototype-btn ghost" type="button" @click="router.push('/projects')"><strong>{{ projectTitle }}</strong></button><strong v-else>作品库</strong><span v-if="inWorkspace" class="prototype-pill">{{ currentVolume }}</span><span v-if="inWorkspace" class="prototype-projectbar-meta">已写 {{ committedChapters }} 章</span></div>

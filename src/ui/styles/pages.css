@@ -46,6 +46,7 @@
 .timeline-marker { width:32px; height:32px; border-radius:50%; border:1px solid var(--line); background:var(--surface); display:grid; place-items:center; color:var(--ink-4); font-size:11px; font-weight:800; z-index:1; }
 .timeline-item.done .timeline-marker { background:var(--success-soft); border-color:transparent; color:var(--success); }
 .timeline-item.active .timeline-marker { background:var(--pine-600); border-color:var(--pine-600); color:#fff; box-shadow:0 0 0 5px var(--pine-50); }
+.timeline-item.failed .timeline-marker { background:var(--red-soft); border-color:var(--red); color:var(--red); }
 .timeline-item.locked { opacity:.55; }
 .task-list { display:grid; gap:8px; }
 .task-row { padding:12px 13px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }

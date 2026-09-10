@@ -11,6 +11,10 @@ pub enum RuntimeError {
     ProjectNotFound,
     #[error("job not found")]
     JobNotFound,
+    #[error("retry job not found")]
+    RetryJobNotFound,
+    #[error("retry job invalid")]
+    RetryJobInvalid,
     #[error("invalid job transition: {0} -> {1}")]
     InvalidTransition(String, String),
     #[error("job lease already held")]
@@ -393,6 +397,48 @@ impl DurableJobService {
         Ok(())
     }
 
+    pub fn validate_retry_source(
+        connection: &Connection,
+        project_id: &str,
+        previous_job_id: &str,
+        chapter_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let previous: Option<(String, Option<String>)> = connection
+            .query_row(
+                "SELECT status, chapter_id FROM jobs WHERE project_id=?1 AND job_id=?2",
+                libsql_rusqlite::params![project_id, previous_job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((status, previous_chapter_id)) = previous else {
+            return Err(RuntimeError::RetryJobNotFound);
+        };
+        if status != "FAILED" || previous_chapter_id.as_deref() != Some(chapter_id) {
+            return Err(RuntimeError::RetryJobInvalid);
+        }
+        Ok(())
+    }
+
+    pub fn record_retry_lineage(
+        connection: &Connection,
+        project_id: &str,
+        new_job_id: &str,
+        previous_job_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "INSERT INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, 'JOB_RETRY_CREATED', ?4, ?5)",
+            libsql_rusqlite::params![
+                format!("event:retry:{new_job_id}"),
+                project_id,
+                new_job_id,
+                serde_json::json!({"retryOfJobId":previous_job_id,"lineage":"RETRY"}).to_string(),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn transition(
         connection: &Connection,
         project_id: &str,
@@ -588,6 +634,43 @@ impl DurableJobService {
             libsql_rusqlite::params![project_id, run_state, block_reason, now],
         )?;
         Ok(())
+    }
+
+    /// Recompute the rebuildable project runtime projection from the latest
+    /// relevant chapter Job. The Job is the authority; this helper exists so
+    /// terminal transport failures cannot leave a stale ACTIVE projection.
+    pub fn reconcile_runtime_projection(
+        connection: &Connection,
+        project_id: &str,
+        now: &str,
+    ) -> Result<String, RuntimeError> {
+        let job: Option<(String, Option<String>)> = connection
+            .query_row(
+                "SELECT status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, job_id DESC LIMIT 1",
+                [project_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (run_state, block_reason) = match job {
+            Some((status, error_code)) => match status.as_str() {
+                "RUNNING" | "WAITING_MODEL" => ("ACTIVE", None),
+                "WAITING_DECISION" => ("WAITING_DECISION", error_code),
+                "PAUSED" => ("PAUSED", error_code),
+                "BLOCKED" => ("BLOCKED", error_code),
+                "FAILED" => ("FAILED", error_code),
+                "COMPLETED" => ("COMPLETED", None),
+                _ => ("IDLE", error_code),
+            },
+            None => ("IDLE", None),
+        };
+        Self::set_runtime_state(
+            connection,
+            project_id,
+            run_state,
+            block_reason.as_deref(),
+            now,
+        )?;
+        Ok(run_state.into())
     }
 
     pub fn recover_after_restart(
@@ -921,6 +1004,18 @@ impl DurableModelRunner {
             "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
             libsql_rusqlite::params![now, spec.model_run_id],
         )?;
+        if let Some(job_id) = &spec.job_id {
+            let project_id: String =
+                connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+                    row.get(0)
+                })?;
+            connection.execute(
+                "UPDATE jobs SET status='FAILED', error_code='MODEL_PAYLOAD_INVALID', updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status NOT IN ('COMPLETED','CANCELLED')",
+                libsql_rusqlite::params![now, project_id, job_id],
+            )?;
+            DurableJobService::release_lease(connection, &project_id, job_id, now)?;
+            DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
+        }
         Ok(())
     }
 
@@ -1411,6 +1506,7 @@ fn mark_confirmed_failure(
         )?;
         DurableJobService::release_lease(connection, &project_id, job_id, now)?;
     }
+    DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
     Ok(())
 }
 
@@ -1480,11 +1576,12 @@ fn mark_raw_persistence_failure(
     )?;
     if let Some(job_id) = &spec.job_id {
         connection.execute(
-            "UPDATE jobs SET status='FAILED', error_code='RAW_RESPONSE_PERSIST_FAILED', updated_at=?1 WHERE project_id=?2 AND job_id=?3",
-            libsql_rusqlite::params![now, project_id, job_id],
-        )?;
+        "UPDATE jobs SET status='FAILED', error_code='RAW_RESPONSE_PERSIST_FAILED', updated_at=?1 WHERE project_id=?2 AND job_id=?3",
+        libsql_rusqlite::params![now, project_id, job_id],
+    )?;
         DurableJobService::release_lease(connection, &project_id, job_id, now)?;
     }
+    DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
     Ok(())
 }
 
@@ -1578,6 +1675,19 @@ fn finish_parse(
                 "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
                 libsql_rusqlite::params![now, spec.model_run_id],
             )?;
+            if let Some(job_id) = &spec.job_id {
+                let project_id: String = connection.query_row(
+                    "SELECT project_id FROM project_meta LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                connection.execute(
+                    "UPDATE jobs SET status='FAILED', error_code='MODEL_PAYLOAD_INVALID', updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status NOT IN ('COMPLETED','CANCELLED')",
+                    libsql_rusqlite::params![now, project_id, job_id],
+                )?;
+                DurableJobService::release_lease(connection, &project_id, job_id, now)?;
+                DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
+            }
             return Err(RuntimeError::Json(error));
         }
     };

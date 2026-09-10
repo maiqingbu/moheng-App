@@ -11,6 +11,8 @@ pub enum ProductionRepositoryError {
 
 pub struct ProductionRepository;
 
+type ProductionJobRow = (String, String, Option<String>, String, Option<String>);
+
 impl ProductionRepository {
     pub fn center_projection(
         connection: &Connection,
@@ -23,23 +25,27 @@ impl ProductionRepository {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0));
-        let job: Option<(String, String, Option<String>, String)> = connection
+        let job: Option<ProductionJobRow> = connection
             .query_row(
-                "SELECT job_id, current_stage, chapter_id, status FROM jobs WHERE project_id=?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+                "SELECT job_id, COALESCE(current_stage,'IDLE'), chapter_id, status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, job_id DESC LIMIT 1",
                 [project_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
         let current_stage = job
             .as_ref()
-            .map(|(_, stage, _, _)| stage.clone())
+            .map(|(_, stage, _, _, _)| stage.clone())
             .unwrap_or_else(|| "IDLE".into());
         let active_detail = job
             .as_ref()
-            .map(|(id, _, chapter, status)| {
+            .map(|(id, _, chapter, status, error_code)| {
                 format!(
-                    "{status} · {id} · {}",
-                    chapter.as_deref().unwrap_or("未绑定章节")
+                    "{status} · {id} · {}{}",
+                    chapter.as_deref().unwrap_or("未绑定章节"),
+                    error_code
+                        .as_deref()
+                        .map(|value| format!(" · {value}"))
+                        .unwrap_or_default()
                 )
             })
             .unwrap_or_else(|| "暂无生产任务".into());
@@ -64,7 +70,7 @@ impl ProductionRepository {
             .map(|(order, stage)| {
                 json!({
                     "id": format!("b08:{stage}"), "order": order + 1, "title": stage,
-                    "description": "B08 Chapter Production Runtime", "status": if order < stage_order { "done" } else if order == stage_order { "active" } else { "pending" }
+                    "description": "B08 Chapter Production Runtime", "status": if order < stage_order { "done" } else if order == stage_order && job.as_ref().is_some_and(|(_, _, _, status, _)| status == "FAILED") { "failed" } else if order == stage_order { "active" } else { "pending" }
                 })
             })
             .collect::<Vec<_>>();
@@ -82,8 +88,8 @@ impl ProductionRepository {
             .collect::<Result<Vec<_>, _>>()?;
         let task = job
             .as_ref()
-            .map(|(id, _, chapter, status)| {
-                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"progress":if status=="COMPLETED" {100} else {50}})
+            .map(|(id, _, chapter, status, _)| {
+                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"status":if status=="FAILED" {"failed"} else if status=="COMPLETED" {"done"} else if matches!(status.as_str(), "RUNNING" | "WAITING_MODEL") {"active"} else {"waiting"},"progress":if status=="COMPLETED" {100} else if status=="FAILED" {0} else {50}})
             })
             .into_iter()
             .collect::<Vec<_>>();
@@ -96,7 +102,7 @@ impl ProductionRepository {
             .optional()?;
         let active_chapter_id = job
             .as_ref()
-            .and_then(|(_, _, chapter, _)| chapter.clone())
+            .and_then(|(_, _, chapter, _, _)| chapter.clone())
             .or_else(|| next_chapter.as_ref().map(|row| row.0.clone()));
         let plan_row: Option<(String, i64, String, String)> = active_chapter_id
             .as_ref()
@@ -223,7 +229,7 @@ impl ProductionRepository {
                 payload
             })
             .unwrap_or(Value::Null);
-        let model_runs = if let Some((job_id, _, _, _)) = &job {
+        let model_runs = if let Some((job_id, _, _, _, _)) = &job {
             let mut statement = connection.prepare(
                 "SELECT model_run_id,capability,provider,model,status FROM model_runs WHERE project_id=?1 AND job_id=?2 AND capability IN ('PLAN_STRATEGY','RENDER_CHAPTER','AUDIT_EXTRACT') ORDER BY created_at,model_run_id",
             )?;
@@ -263,12 +269,27 @@ impl ProductionRepository {
             },
         ).optional()?;
         let next_chapter_projection = next_chapter.map(|(id, number, title, volume_id)| json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":if plan_projection.is_some() {"LONG_FORM"} else {"OPENING_BOOTSTRAP"}}));
+        let job_status = job.as_ref().map(|(_, _, _, status, _)| status.clone());
+        let job_error = job
+            .as_ref()
+            .and_then(|(_, _, _, _, error_code)| error_code.clone());
+        let is_active = matches!(job_status.as_deref(), Some("RUNNING" | "WAITING_MODEL"));
+        let can_retry = job_status.as_deref() == Some("FAILED") && final_ref.is_none();
+        let gate_status = if job_status.as_deref() == Some("FAILED") {
+            "BLOCKED"
+        } else if final_ref.is_some() {
+            "PASS"
+        } else if stale_status == "PLAN_STALE" {
+            "BLOCKED"
+        } else {
+            "PENDING"
+        };
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
-            "signing":{"status":"NOT_STARTED","verdict":"B08 production gate is authoritative"},"activeWork":{"label":current_stage,"detail":active_detail},
-            "productionStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
+            "signing":{"status":"NOT_STARTED","verdict":"B08 production gate is authoritative"},"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
+            "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
-            "gate":{"status":if final_ref.is_some() {"PASS"} else if stale_status=="PLAN_STALE" {"BLOCKED"} else {"PENDING"},"reason":if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED"} else {""}},
+            "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
             "readerDesire":quality.get("softAssessment").cloned().unwrap_or(Value::Null),

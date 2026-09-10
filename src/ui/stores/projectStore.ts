@@ -386,9 +386,19 @@ export const useProjectStore = defineStore('project-projection', () => {
       expectedRevision,
       requestedAt: request.requestedAt ?? new Date().toISOString()
     }
-    const receipt = await frontendPort.executeCommand(envelope, (status, message) => {
-      setStateIfCurrent({ ...commandStates.value[key], commandId, status, message })
-    })
+    let receipt: CommandReceipt
+    try {
+      receipt = await frontendPort.executeCommand(envelope, (status, message) => {
+        setStateIfCurrent({ ...commandStates.value[key], commandId, status, message })
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setStateIfCurrent({ status: 'failed', message, commandId })
+      if (request.type.startsWith('production_')) {
+        try { await loadProduction(true) } catch { /* preserve the original command error */ }
+      }
+      throw error
+    }
 
     if (receipt.commandId !== binding.commandId || (projectScoped && receipt.projectId !== binding.sourceProjectId)) {
       const error = new Error('PROTOCOL / PROJECT_BINDING_ERROR')
@@ -408,9 +418,15 @@ export const useProjectStore = defineStore('project-projection', () => {
 
   async function testProvider(key:string, nextSettings:ProviderSettingsInput) {
     commandStates.value[key]={status:'submitting',message:'正在提交诊断…'}
-    const receipt=await frontendPort.testProvider(nextSettings,(status,message)=>{commandStates.value[key]={...commandStates.value[key],status,message}})
-    commandStates.value[key]={status:receipt.finalStatus,message:receipt.message,commandId:receipt.commandId}
-    return receipt
+    try {
+      const receipt=await frontendPort.testProvider(nextSettings,(status,message)=>{commandStates.value[key]={...commandStates.value[key],status,message}})
+      commandStates.value[key]={status:receipt.finalStatus,message:receipt.message,commandId:receipt.commandId}
+      return receipt
+    } catch (error) {
+      const message=error instanceof Error ? error.message : typeof error === 'string' ? error : error && typeof error === 'object' && 'message' in error ? String(error.message) : JSON.stringify(error) || String(error)
+      commandStates.value[key]={status:'failed',message:message || 'Provider 测试未完成。'}
+      throw error
+    }
   }
 
   function commandState(key:string):CommandUiState { return commandStates.value[key] ?? { status:'idle',message:'' } }

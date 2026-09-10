@@ -358,6 +358,159 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
 }
 
 #[test]
+fn xiaomi_r06_retry_creates_new_job_and_preserves_failed_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state
+        .manager
+        .create("p-xiaomi-r06", "Xiaomi R06", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-xiaomi-r06");
+    let old_job_id = "job:xiaomi:r06-old";
+    connection.execute(
+        "INSERT INTO jobs(job_id,project_id,job_type,chapter_id,status,current_stage,error_code,created_at,updated_at) VALUES (?1,'p-xiaomi-r06','CHAPTER',?2,'FAILED','RENDER','MODEL_TRANSPORT_FAILED',?3,?3)",
+        libsql_rusqlite::params![old_job_id, chapter_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO model_runs(model_run_id,project_id,job_id,provider,model,idempotency_key,capability,status,created_at,updated_at) VALUES ('mr:xiaomi:r06-old','p-xiaomi-r06',?1,'openai-compatible','gpt-4o-mini','key:xiaomi:r06-old','RENDER_CHAPTER','FAILED',?2,?2)",
+        libsql_rusqlite::params![old_job_id, NOW],
+    ).unwrap();
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:xiaomi:r06:new","idempotencyKey":"key:xiaomi:r06:new",
+        "projectId":"p-xiaomi-r06","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"retryOfJobId":old_job_id}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert!(result["finalChapterRef"]["artifactId"].as_str().is_some());
+    let new_job_id = result["jobId"].as_str().unwrap();
+    assert_ne!(new_job_id, old_job_id);
+    let connection = state
+        .manager
+        .open("p-xiaomi-r06", "Xiaomi R06", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id=?1",
+                [old_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "FAILED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id=?1",
+                [new_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "COMPLETED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT model FROM model_runs WHERE job_id=?1 AND capability='RENDER_CHAPTER'",
+                [new_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "production:RENDER_CHAPTER"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id='p-xiaomi-r06' AND artifact_type='ProductionReceipt' AND artifact_status='COMMITTED'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(payload_json,'$.retryOfJobId') FROM production_events WHERE job_id=?1 AND event_type='JOB_RETRY_CREATED'", [new_job_id], |row| row.get(0)).unwrap(), old_job_id);
+}
+
+#[test]
+fn xiaomi_r07_retry_blocks_before_render_when_plan_is_stale() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state
+        .manager
+        .create("p-xiaomi-r07", "Xiaomi R07", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-xiaomi-r07");
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    let context_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "xiaomi:r07:context").unwrap();
+    let context_payload = json!({"payloadSchema":"context-manifest.r1","chapterId":chapter_id});
+    let context_hash = sha256_canonical(&context_payload).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,'p-xiaomi-r07','ContextManifest', 'CHAPTER',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![context_id, scope, context_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![context_id, context_payload.to_string(), context_hash]).unwrap();
+    let context_ref = json!({"artifactId":context_id,"version":1,"payloadHash":context_hash});
+    let plan_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "xiaomi:r07:plan").unwrap();
+    let plan_payload = json!({"payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":0,"compiledFromStateDigest":"0".repeat(64),"contextManifestRef":context_ref,"chapterGoal":"retry","activeTaskRefs":[],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[]});
+    let plan_hash = sha256_canonical(&plan_payload).unwrap();
+    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,'p-xiaomi-r07','ChapterPlan','CHAPTER',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![plan_id, scope, plan_hash, NOW]).unwrap();
+    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![plan_id, plan_payload.to_string(), plan_hash]).unwrap();
+    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p-xiaomi-r07','ChapterPlan','CHAPTER',?1,?2,1,?3)", libsql_rusqlite::params![scope, plan_id, plan_hash]).unwrap();
+    let old_job_id = "job:xiaomi:r07-old";
+    connection.execute("INSERT INTO jobs(job_id,project_id,job_type,chapter_id,status,current_stage,error_code,created_at,updated_at) VALUES (?1,'p-xiaomi-r07', 'CHAPTER',?2,'FAILED','RENDER','MODEL_TRANSPORT_FAILED',?3,?3)", libsql_rusqlite::params![old_job_id, chapter_id, NOW]).unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:xiaomi:r07:new","idempotencyKey":"key:xiaomi:r07:new",
+        "projectId":"p-xiaomi-r07","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","skillsEnabled":false,"retryOfJobId":old_job_id}
+    })).unwrap_err();
+    assert_eq!(error, "PLAN_STALE:RECOMPILE_REQUIRED");
+    let connection = state
+        .manager
+        .open("p-xiaomi-r07", "Xiaomi R07", NOW)
+        .unwrap();
+    let new_job_id: String = connection.query_row("SELECT job_id FROM jobs WHERE project_id='p-xiaomi-r07' AND job_id!=?1 ORDER BY created_at DESC LIMIT 1", [old_job_id], |row| row.get(0)).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id=?1",
+                [old_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "FAILED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id=?1",
+                [&new_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "BLOCKED"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE job_id=?1",
+                [&new_job_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(

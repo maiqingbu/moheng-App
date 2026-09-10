@@ -27,15 +27,18 @@ const testState=computed(()=>isProjectSettings.value ? projectStore.commandState
 const backupState=computed(()=>projectStore.commandState('project-backup'))
 const integrityState=computed(()=>projectStore.commandState('project-integrity'))
 
+function providerSettings(){
+  const model=form.model.trim()
+  return {...form,model,modelId:model,enabled:Boolean(form.endpoint.trim()),...(apiKey.value ? {apiKey:apiKey.value} : {})}
+}
 async function save(){
-  const settings={...form,...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  const settings=providerSettings()
   if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings}})
-  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form} }
+  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,enabled:settings.enabled} }
   apiKey.value=''
-  applyTheme()
 }
 async function test(){
-  const settings={...form,...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  const settings=providerSettings()
   if(isProjectSettings.value) await projectStore.testProvider('provider-test',settings)
   else await libraryStore.testProvider('global-provider-test',settings)
 }
