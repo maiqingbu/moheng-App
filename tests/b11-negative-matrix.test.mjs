@@ -20,6 +20,7 @@ const assistantViewTest = read('tests/store/b11-assistant-presentation.test.ts')
 const b11UxTest = read('tests/b11-product-ux.test.mjs')
 const supportRepository = read('src-tauri/src/repositories/support.rs')
 const creationLaunch = read('src/ui/pages/CreationLaunch.vue')
+const pitchReview = read('src/ui/pages/PitchReview.vue')
 const productLanguage = read('src/ui/presentation/productLanguage.ts')
 
 function sourceOnlyRustFiles() {
@@ -161,6 +162,13 @@ test('S1 legacy blank titles use one canonical display fallback for cover and de
   assert.match(library, /displayTitle\(item\)\.charCodeAt\(0\)/)
   assert.match(library, /输入作品名“\{\{ displayTitle\(actionTarget\) \}\}”确认删除/)
   assert.match(library, /deleteConfirm!==displayTitle\(actionTarget\)/)
+})
+
+test('S1-UX01 persisted story-direction failures remain visible with a retry action', () => {
+  const contracts = read('src/application/contracts.ts')
+  assert.match(contracts, /generationState/)
+  assert.match(pitchReview, /generationState/)
+  assert.match(pitchReview, /重试生成故事方向/)
 })
 
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {

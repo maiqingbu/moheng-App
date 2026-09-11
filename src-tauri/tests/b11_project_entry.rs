@@ -798,6 +798,35 @@ fn b11_provider_failure_keeps_brief_but_never_falls_back_to_candidates() {
 }
 
 #[test]
+fn b11_s1_failed_story_direction_is_projected_after_reopen() {
+    let state = state_with_gateway(Arc::new(FailingEntryGateway));
+    let created = execute_command_impl(&state, idea_request("cmd:b11:s1:failure-projection")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+
+    let error = execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "story_directions_generate",
+            &project_id,
+            "cmd:b11:s1:failure-projection:directions",
+            0,
+        ),
+    )
+    .unwrap_err();
+    assert!(error.contains("transport") || error.contains("unavailable"));
+
+    let directions = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(directions["generationState"]["status"], "FAILED");
+    assert_eq!(directions["generationState"]["retryAvailable"], true);
+    assert!(directions["generationState"]["jobId"].as_str().is_some());
+    println!("S1_R1_L5_FAILURE_PROJECTION status=FAILED retryAvailable=true");
+}
+
+#[test]
 fn b11_market_entry_requires_user_material_and_keeps_market_evidence_out_of_canon() {
     let state = state();
     let mut request = idea_request("cmd:b11:market-missing");
