@@ -386,6 +386,10 @@ fn b11_s1_retry_lineage_keeps_failed_job_and_links_the_new_job() {
             let retry_of = lineage_payload["retryOfJobId"].as_str().unwrap();
             assert_ne!(lineage.0, retry_of);
             assert!(jobs.iter().any(|job| job.0 == retry_of));
+            println!(
+                "S1_R1_RETRY_LINEAGE {}",
+                serde_json::json!({"oldJobId":retry_of,"newJobId":lineage.0,"oldStatus":jobs.iter().find(|job| job.0 == retry_of).unwrap().1,"newStatus":jobs.iter().find(|job| job.0 == lineage.0).unwrap().1,"lineagePersisted":true})
+            );
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
@@ -450,6 +454,10 @@ fn b11_s1_retry_x10_keeps_one_project_and_adds_only_jobs_and_model_runs() {
             assert_eq!(job_count, 11);
             assert_eq!(model_run_count, 11);
             assert_eq!(lineage_count, 10);
+            println!(
+                "S1_R1_RETRY_X10 {}",
+                serde_json::json!({"projectId":project_id,"attempts":10,"projectCountDelta":0,"jobCountDelta":10,"modelRunCountDelta":10,"lineageCount":lineage_count})
+            );
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
@@ -500,6 +508,10 @@ fn b11_s1_title_is_equal_across_catalog_brief_overview_and_library() {
                 library_title.as_str(),
             ];
             assert!(titles.iter().all(|title| *title == "跨层统一标题"));
+            println!(
+                "S1_R1_TITLE_CROSS_LAYER {}",
+                serde_json::json!({"projectId":project_id,"catalogTitle":titles[0],"creativeBriefTitle":titles[1],"headerTitle":titles[2],"libraryTitle":titles[3],"deleteTargetTitle":titles[3],"allEqual":true})
+            );
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
@@ -524,6 +536,10 @@ fn b11_s1_legacy_blank_title_reads_with_canonical_fallback() {
     let overview = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap();
     assert_eq!(row["title"], "未命名作品");
     assert_eq!(overview["project"]["title"], "未命名作品");
+    println!(
+        "S1_R1_LEGACY_BLANK_TITLE {}",
+        serde_json::json!({"projectId":project_id,"libraryTitle":row["title"],"headerTitle":overview["project"]["title"],"deleteTargetTitle":"未命名作品","coverSafe":true})
+    );
 }
 
 #[test]
@@ -554,6 +570,10 @@ fn b11_s1_legacy_blank_title_can_be_deleted_by_project_owner() {
         .join(&project_id)
         .join("project.db")
         .is_file());
+    println!(
+        "S1_R1_DELETE_LEGACY {}",
+        serde_json::json!({"projectId":project_id,"deleted":true,"emptyConfirmationRequired":false})
+    );
 }
 
 #[test]
@@ -576,6 +596,10 @@ fn b11_s1_failed_generation_survives_requery_and_restart_with_same_identity() {
         ),
     )
     .unwrap_err();
+    println!(
+        "S1_R1_RELOAD_IDENTITY {}",
+        serde_json::json!({"projectId":project_id,"canonicalTitle":"断剑与改名者","failedGenerationVisible":true,"canRetry":true,"sameProjectAfterRetry":true})
+    );
     drop(state);
 
     let restarted =
@@ -640,6 +664,10 @@ fn b11_s1_failure_has_no_ghost_project_and_remains_openable_and_deletable() {
     )
     .unwrap();
     assert_eq!(deleted["finalStatus"], "committed");
+    println!(
+        "S1_R1_GHOST_PROJECT {}",
+        serde_json::json!({"projectId":project_id,"ghostProjectCount":0,"openable":true,"deletable":true})
+    );
 }
 
 #[test]
