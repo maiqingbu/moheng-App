@@ -152,7 +152,7 @@ test('REAL-WIRE-A04 typed provider failures remain actionable in the product sur
 })
 
 test('REAL-WIRE-A05 project entry logs the typed failure for desktop diagnosis', () => {
-  assert.match(creationLaunch, /console\.error\('\[project-entry\] story-direction generation failed', error\)/)
+  assert.match(creationLaunch, /console\.error\('\[project-entry\] project creation failed', error\)/)
 })
 
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {

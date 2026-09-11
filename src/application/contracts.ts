@@ -708,6 +708,7 @@ export type CommandType =
   | 'project_rename'
   | 'market_refresh'
   | 'market_pulse_refresh'
+  | 'story_directions_generate'
   | 'pitch_regenerate'
   | 'pitch_select'
   | 'story_setup_save'

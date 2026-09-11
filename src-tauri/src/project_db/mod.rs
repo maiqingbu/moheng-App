@@ -24,6 +24,19 @@ use std::sync::{Arc, Mutex};
 /// depend on the wall clock, so a constant is safe and keeps reads deterministic.
 const DEFAULT_NOW: &str = "1970-01-01T00:00:00Z";
 
+/// Canonical project title used by every project-creation path.
+///
+/// A blank title is valid user input at the launch step, but it must never
+/// become a blank identity in either the project database or the catalog.
+pub fn normalize_project_title(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        "未命名作品".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Rebuildable runtime-state projection read back from a project's own DB.
 /// Derived from project_runtime_state; never a second authority.
 pub struct LibraryRuntimeProjection {
@@ -213,6 +226,7 @@ impl ProjectManager {
         title: &str,
         now: &str,
     ) -> Result<ProjectHandle, ManagerError> {
+        let normalized_title = normalize_project_title(title);
         self.acquire_writer(project_id)?;
         let result = (|| {
             let final_dir = self.paths.project_dir(project_id)?;
@@ -236,7 +250,7 @@ impl ProjectManager {
             // under its final name.
             (|| -> Result<(), ManagerError> {
                 let connection = open_connection(&database, false)?;
-                migrate_project(&connection, project_id, title, now)?;
+                migrate_project(&connection, project_id, &normalized_title, now)?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 crate::repositories::ops::SearchService::ensure_projection(
@@ -265,7 +279,7 @@ impl ProjectManager {
                     &catalog,
                     project_id,
                     &final_dir.to_string_lossy(),
-                    title,
+                    &normalized_title,
                     now,
                 )?;
                 Ok(())

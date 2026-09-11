@@ -106,6 +106,31 @@ fn idea_request(command_id: &str) -> serde_json::Value {
     })
 }
 
+fn generate_directions_fixture(state: &KernelState, project_id: &str, command_id: &str) {
+    let generated = execute_command_impl(
+        state,
+        json!({
+            "type":"story_directions_generate",
+            "commandId":command_id,
+            "idempotencyKey":format!("{command_id}:key"),
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap();
+    assert_eq!(generated["finalStatus"], "committed");
+}
+
+fn create_idea_fixture(state: &KernelState, command_id: &str) -> String {
+    let created = execute_command_impl(state, idea_request(command_id)).unwrap();
+    assert_eq!(created["finalStatus"], "committed");
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    generate_directions_fixture(state, &project_id, &format!("{command_id}:directions"));
+    project_id
+}
+
 fn market_request(command_id: &str, material: &str) -> serde_json::Value {
     json!({
         "type":"project_create_from_market",
@@ -133,6 +158,7 @@ fn create_opening_ready_fixture(state: &KernelState, prefix: &str) -> String {
         "payload":{"title":"真实 owner 流程","idea":"近未来城市里的记忆调查员追查一宗被篡改的档案犯罪。","platform":"番茄小说","mode":"DIRECTOR"}
     })).unwrap();
     let project_id = created["projectId"].as_str().unwrap().to_owned();
+    generate_directions_fixture(state, &project_id, &format!("{prefix}:directions"));
     let directions = query_story_directions_impl(
         state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
@@ -141,26 +167,142 @@ fn create_opening_ready_fixture(state: &KernelState, prefix: &str) -> String {
     let pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
     execute_command_impl(state, json!({
         "type":"pitch_select","commandId":format!("{prefix}:select"),"idempotencyKey":format!("{prefix}:select:key"),
-        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,"payload":{"pitchIds":[pitch_id],"mode":"single"}
+        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,"payload":{"pitchIds":[pitch_id],"mode":"single"}
     })).unwrap();
     execute_command_impl(state, json!({
         "type":"story_setup_save","commandId":format!("{prefix}:setup"),"idempotencyKey":format!("{prefix}:setup:key"),
-        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
+        "projectId":project_id,"expectedRevision":2,"requestedAt":NOW,
         "payload":{"storyCore":{"protagonist":"记忆调查员","desire":"找回被篡改的真实经历","mechanism":"档案校验会留下可追踪痕迹","conflict":"城市档案权与个人记忆冲突","readerPromise":"每次调查都揭开一层真实代价","forbiddenReveals":[]}}
     })).unwrap();
     execute_command_impl(state, json!({
         "type":"opening_ready","commandId":format!("{prefix}:opening"),"idempotencyKey":format!("{prefix}:opening:key"),
-        "projectId":project_id,"expectedRevision":2,"requestedAt":NOW,"payload":{"approved":true}
+        "projectId":project_id,"expectedRevision":3,"requestedAt":NOW,"payload":{"approved":true}
     })).unwrap();
     project_id
 }
 
 #[test]
+fn b11_project_creation_defers_provider_and_initial_generation_reuses_project() {
+    let state = state();
+    let mut request = idea_request("cmd:b11:s1:split");
+    request["payload"]["title"] = json!("   ");
+
+    let created = execute_command_impl(&state, request).unwrap();
+    assert_eq!(created["finalStatus"], "committed");
+    assert!(created["entryReceipt"]["receiptId"].as_str().is_some());
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+
+    state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            let pitch_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProjectPitch'",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let job_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let model_run_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(pitch_count, 0);
+            assert_eq!(job_count, 0);
+            assert_eq!(model_run_count, 0);
+            let title: String = connection
+                .query_row(
+                    "SELECT title FROM project_meta WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(title, "未命名作品");
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+
+    let generated = execute_command_impl(
+        &state,
+        json!({
+            "type":"story_directions_generate",
+            "commandId":"cmd:b11:s1:split:directions",
+            "idempotencyKey":"cmd:b11:s1:split:directions:key",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap();
+    assert_eq!(generated["finalStatus"], "committed");
+
+    let directions = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(directions["pitches"].as_array().unwrap().len(), 3);
+
+    let retried = execute_command_impl(
+        &state,
+        json!({
+            "type":"story_directions_generate",
+            "commandId":"cmd:b11:s1:split:retry",
+            "idempotencyKey":"cmd:b11:s1:split:retry:key",
+            "projectId":project_id,
+            "expectedRevision":1,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap();
+    assert_eq!(retried["finalStatus"], "committed");
+    state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            let project_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM project_meta WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let job_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let model_run_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(project_count, 1);
+            assert_eq!(job_count, 2);
+            assert_eq!(model_run_count, 2);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn b11_idea_entry_persists_three_substantive_candidates_without_auto_selection() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:idea")).unwrap();
-    assert_eq!(created["finalStatus"], "committed");
-    let project_id = created["projectId"].as_str().unwrap().to_string();
+    let project_id = create_idea_fixture(&state, "cmd:b11:idea");
 
     let directions = query_story_directions_impl(
         &state,
@@ -230,14 +372,22 @@ fn b11_idea_entry_persists_three_substantive_candidates_without_auto_selection()
 #[test]
 fn b11_provider_failure_keeps_brief_but_never_falls_back_to_candidates() {
     let state = state_with_gateway(Arc::new(FailingEntryGateway));
-    let error = execute_command_impl(&state, idea_request("cmd:b11:provider-failure")).unwrap_err();
+    let created = execute_command_impl(&state, idea_request("cmd:b11:provider-failure")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"story_directions_generate",
+            "commandId":"cmd:b11:provider-failure:directions",
+            "idempotencyKey":"cmd:b11:provider-failure:directions:key",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    )
+    .unwrap_err();
     assert!(error.contains("transport") || error.contains("unavailable"));
-    let project_id =
-        ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
-            ai_novel_production_system_core::stable_id::StableIdKind::Project,
-            "cmd:b11:provider-failure",
-        )
-        .unwrap();
     state
         .manager
         .with_read_connection(&project_id, NOW, |connection| {
@@ -333,8 +483,7 @@ fn b11_market_entry_requires_user_material_and_keeps_market_evidence_out_of_cano
 #[test]
 fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:flow")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap().to_string();
+    let project_id = create_idea_fixture(&state, "cmd:b11:flow");
     let directions = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
@@ -450,8 +599,7 @@ fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
 #[test]
 fn b11_assistant_repair_plan_uses_h03_authorization_and_postverify() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:assistant-repair")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap().to_string();
+    let project_id = create_idea_fixture(&state, "cmd:b11:assistant-repair");
     let plan = query_assistant_repair_plan_impl(
         &state,
         json!({"projectId":project_id,"scope":"assistant","question":"当前卷进度显示不对，帮我修复。","requestedAt":NOW}),
@@ -496,8 +644,7 @@ fn b11_assistant_repair_plan_uses_h03_authorization_and_postverify() {
 #[test]
 fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explicit_selection() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:regenerate")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap().to_string();
+    let project_id = create_idea_fixture(&state, "cmd:b11:regenerate");
     let regenerated = execute_command_impl(
         &state,
         json!({
@@ -505,7 +652,7 @@ fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explic
             "commandId":"cmd:b11:regenerate:pitches",
             "idempotencyKey":"cmd:b11:regenerate:pitches:key",
             "projectId":project_id,
-            "expectedRevision":0,
+            "expectedRevision":1,
             "requestedAt":NOW,
             "payload":{"adjustment":"让主角更早主动承担代价"}
         }),
@@ -537,7 +684,7 @@ fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explic
             "commandId":"cmd:b11:regenerate:merge",
             "idempotencyKey":"cmd:b11:regenerate:merge:key",
             "projectId":project_id,
-            "expectedRevision":1,
+            "expectedRevision":2,
             "requestedAt":NOW,
             "payload":{"pitchIds":selected_ids,"mode":"combine"}
         }),
@@ -564,8 +711,7 @@ fn b11_regeneration_creates_a_new_candidate_generation_and_merge_requires_explic
 #[test]
 fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:assistant-query")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap();
+    let project_id = create_idea_fixture(&state, "cmd:b11:assistant-query");
     let directions = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
@@ -574,12 +720,12 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
     let selected_pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
     execute_command_impl(&state, json!({
         "type":"pitch_select","commandId":"cmd:b11:assistant-query:select","idempotencyKey":"cmd:b11:assistant-query:select:key",
-        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
         "payload":{"pitchIds":[selected_pitch_id],"mode":"single"}
     })).unwrap();
     execute_command_impl(&state, json!({
         "type":"story_setup_save","commandId":"cmd:b11:assistant-query:setup","idempotencyKey":"cmd:b11:assistant-query:setup:key",
-        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
+        "projectId":project_id,"expectedRevision":2,"requestedAt":NOW,
         "payload":{"storyCore":{"protagonist":"被逐出宗门的炼丹师","desire":"证明废丹的价值","mechanism":"废丹让妖兽进化并留下代价","conflict":"宗门封锁秘密","readerPromise":"每次升级都伴随选择与代价","forbiddenReveals":[]}}
     })).unwrap();
     let supported = support_session_impl(
@@ -655,6 +801,8 @@ fn b11_idea_semantic_causality_changes_direction_fields_not_only_digest() {
         .as_str()
         .unwrap()
         .to_owned();
+    generate_directions_fixture(&state, &first_id, "cmd:b11:causal:fantasy:directions");
+    generate_directions_fixture(&state, &second_id, "cmd:b11:causal:future:directions");
     let first_pitches = query_story_directions_impl(
         &state,
         json!({"projectId":first_id,"scope":"directions","pageSize":10}),
@@ -693,6 +841,8 @@ fn b11_market_semantic_causality_changes_opportunity_and_pitch_fields() {
         .as_str()
         .unwrap()
         .to_owned();
+    generate_directions_fixture(&state, &urban, "cmd:b11:market:urban:directions");
+    generate_directions_fixture(&state, &fantasy, "cmd:b11:market:fantasy:directions");
     let urban_market = query_market_strategy_impl(
         &state,
         json!({"projectId":urban,"scope":"market","pageSize":10}),
@@ -731,8 +881,7 @@ fn b11_market_semantic_causality_changes_opportunity_and_pitch_fields() {
 #[test]
 fn b11_regenerate_adjustment_causality_changes_semantic_fields() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:adjustment")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let project_id = create_idea_fixture(&state, "cmd:b11:adjustment");
     let before = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
@@ -740,7 +889,7 @@ fn b11_regenerate_adjustment_causality_changes_semantic_fields() {
     .unwrap();
     execute_command_impl(&state, json!({
         "type":"pitch_regenerate","commandId":"cmd:b11:adjustment:regen","idempotencyKey":"cmd:b11:adjustment:regen:key",
-        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
         "payload":{"adjustment":"强化人物关系，弱化升级，让主角更主动地保护同伴"}
     })).unwrap();
     let after = query_story_directions_impl(
@@ -762,8 +911,7 @@ fn b11_regenerate_adjustment_causality_changes_semantic_fields() {
 #[test]
 fn b11_candidate_merge_causality_preserves_both_semantic_contributions() {
     let state = state();
-    let created = execute_command_impl(&state, idea_request("cmd:b11:merge-causal")).unwrap();
-    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let project_id = create_idea_fixture(&state, "cmd:b11:merge-causal");
     let directions = query_story_directions_impl(
         &state,
         json!({"projectId":project_id,"scope":"directions","pageSize":10}),
@@ -775,7 +923,7 @@ fn b11_candidate_merge_causality_preserves_both_semantic_contributions() {
     let second_id = second["id"].as_str().unwrap();
     execute_command_impl(&state, json!({
         "type":"pitch_select","commandId":"cmd:b11:merge-causal:select","idempotencyKey":"cmd:b11:merge-causal:select:key",
-        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "projectId":project_id,"expectedRevision":1,"requestedAt":NOW,
         "payload":{"pitchIds":[first_id,second_id],"mode":"combine"}
     })).unwrap();
     state.manager.with_read_connection(&project_id, NOW, |connection| {

@@ -1,21 +1,36 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 
 const store = useProjectStore()
+const route = useRoute()
 const router = useRouter()
 const selected = ref<string[]>([])
 const combineOpen = ref(false)
 const constraintsOpen = ref(false)
 const newConstraint = ref('保持“名字可被篡改”的核心机制，但减少过多规则解释；前三章必须让主角更主动。')
 const commandKey = 'pitch-confirm'
+const initialGenerationKey = 'story-directions-generate'
 const regenerateKey = 'pitch-regenerate'
 const pitches = computed(()=>store.directions?.pitches ?? [])
-onMounted(()=>void store.loadDirections())
+const initialGenerationState = computed(()=>store.commandState(initialGenerationKey))
+onMounted(async()=>{
+  try {
+    const projectId = typeof route.params.id === 'string' ? route.params.id : ''
+    if (projectId && store.currentProjectId !== projectId) await store.openProject(projectId)
+    await store.loadDirections()
+    if (route.query.generate !== '1' || pitches.value.length) return
+    await router.replace({ query: { ...route.query, generate: undefined } })
+    await store.runCommand(initialGenerationKey, { type:'story_directions_generate', projectId:store.currentProjectId ?? undefined, payload:{} })
+    await store.loadDirections(true)
+  } catch {
+    // Store-owned load/command state keeps the typed failure visible on this page.
+  }
+})
 const commandState = computed(()=>store.commandState(commandKey))
 const regenerateState = computed(()=>store.commandState(regenerateKey))
 const bookPlanState = computed(()=>store.commandState('book-plan-revise'))
@@ -40,7 +55,7 @@ async function confirm(){
       <div><strong>当前选择：{{ selected.length ? pitches.filter(p=>selected.includes(p.id)).map(p=>p.name).join(' + ') : '尚未选择' }}</strong><div class="muted" style="font-size:11px">组合方案最多选择两份，系统会重新检查故事承诺、主角欲望、核心机制和主要冲突是否一致。</div></div>
       <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :disabled="!selected.length || ['submitting','accepted','processing'].includes(commandState.status)" @click="confirm">确认故事方向</button></div>
     </div>
-    <CommandFeedback :state="commandState" /><CommandFeedback :state="regenerateState" />
+    <CommandFeedback :state="commandState" /><CommandFeedback :state="initialGenerationState" /><CommandFeedback :state="regenerateState" />
 
     <section v-if="store.directions" class="card pad section" style="margin-top:14px">
       <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示会影响创作的核心内容，详细检查由系统自动完成。</p></div><button class="btn" @click="reviseBookPlan">修订书级战略</button></div>

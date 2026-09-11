@@ -479,7 +479,6 @@ pub fn commit_initial(
     now: &str,
     request: &Value,
     kind: EntryKind,
-    gateway: &dyn ProductionModelGateway,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     let (title, input, source_digest) = initial_input(request, kind)?;
     let payload = request.get("payload").unwrap_or(&Value::Null);
@@ -566,92 +565,11 @@ pub fn commit_initial(
         None,
         None,
         "B11_PROJECT_BRIEF",
-        json!({"entryKind":kind.as_str(),"sourceInputDigest":source_digest,"candidatesDeferredToProvider":true})
+        json!({"entryKind":kind.as_str(),"sourceInputDigest":source_digest,"candidatesDeferredToProvider":true,"marketEvidenceIsDataOnly":kind == EntryKind::Market})
             .as_object().cloned().unwrap_or_default(),
     )?;
     CommitService::commit_without_revision(connection, &base_commit, now)
-        .map_err(|error| error.to_string())?;
-    let generation = 1;
-    let (model_pitches, job_id, profile, model_run_id) = generate_story_directions(
-        connection,
-        project_id,
-        command_id,
-        idempotency_key,
-        now,
-        kind,
-        &input,
-        &source_digest,
-        payload,
-        generation,
-        gateway,
-    )?;
-    let brief_ref = project_entry::latest_artifact_by_type(connection, project_id, "CreativeBrief")
-        .map_err(|error| error.to_string())?
-        .map(|row| ArtifactRef {
-            artifact_id: row.artifact_id,
-            version: row.version,
-            payload_hash: row.payload_hash,
-        })
-        .ok_or_else(|| "B11_CREATIVE_BRIEF_MISSING_AFTER_COMMIT".to_string())?;
-    let mut artifacts = Vec::new();
-    let directions_command_id = format!("{command_id}:directions-commit");
-    for (index, pitch_payload) in model_pitches.into_iter().enumerate() {
-        let pitch = artifact(
-            project_id,
-            format!("pitch:{project_id}:{command_id}:{}", index + 1),
-            "ProjectPitch",
-            project_scope(),
-            pitch_payload,
-            vec![brief_ref.clone()],
-            "B11::ProjectEntryOwner",
-            &directions_command_id,
-            now,
-        )?;
-        artifacts.push(pitch);
-    }
-    let receipt_payload = json!({
-        "entryKind":kind.as_str(),"candidateCount":PITCH_COUNT,"sourceInputDigest":source_digest,
-        "explicitSelectionRequired":true,"authoritativeSelection":false,"marketEvidenceIsDataOnly":kind == EntryKind::Market,
-        "modelRunRefs":[model_run_id],"generationProvenance":{"provider":profile.provider,"model":profile.model,"modelRunId":model_run_id,"transportCalls":1}
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_default();
-    let mut final_bundle_value = serde_json::to_value(bundle(
-        project_id,
-        &directions_command_id,
-        &format!("{idempotency_key}:directions-commit"),
-        None,
-        now,
-        artifacts,
-        None,
-        None,
-        "B11_PROJECT_ENTRY",
-        receipt_payload,
-    )?)
-    .map_err(|error| error.to_string())?;
-    final_bundle_value["jobUpdates"] =
-        json!([{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}]);
-    let final_bundle: CommitBundle = serde_json::from_value(final_bundle_value)
-        .map_err(|error| format!("B11_ENTRY_BUNDLE_INVALID:{error}"))?;
-    let receipt = match CommitService::commit_without_revision(connection, &final_bundle, now) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            fail_entry_job(
-                connection,
-                project_id,
-                &job_id,
-                "PROJECT_ENTRY_COMMIT_FAILED",
-                now,
-            )?;
-            return Err(error.to_string());
-        }
-    };
-    DurableJobService::release_lease(connection, project_id, &job_id, now)
-        .map_err(|error| error.to_string())?;
-    DurableJobService::reconcile_runtime_projection(connection, project_id, now)
-        .map_err(|error| error.to_string())?;
-    Ok(receipt)
+        .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

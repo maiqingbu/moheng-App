@@ -41,15 +41,15 @@ function toggleTag(tag:string){
 async function createFromIdea(){
   try {
     const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value}})
-    if (receipt.finalStatus==='committed' && receipt.projectId) router.push(`/projects/${receipt.projectId}/directions`)
+    if (receipt.finalStatus==='committed' && receipt.projectId) router.push(`/projects/${receipt.projectId}/directions?generate=1`)
   } catch (error) {
-    console.error('[project-entry] story-direction generation failed', error)
+    console.error('[project-entry] project creation failed', error)
   }
 }
 async function createFromMarket(){
   try {
     const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
-    if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
+    if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions?generate=1`) }
   } catch {
     // CommandFeedback keeps the typed provider failure visible in the modal.
   }

@@ -109,9 +109,10 @@ fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &s
 /// caller overlays them. Keeping the catalog fields in one place prevents a
 /// healthy/degrated drift when the library adds a field (B01 修订 P0 §七).
 fn library_catalog_fields(row: &crate::catalog::ProjectCatalogRow) -> Value {
+    let title = crate::project_db::normalize_project_title(&row.title);
     json!({
         "id": row.project_id,
-        "title": row.title,
+        "title": title,
         "subtitle": "本地作品",
         "platform": "未设置",
         "genre": "未设置",
@@ -4811,6 +4812,16 @@ fn execute_b11_command(
         .open(project_id, "", requested_at)
         .map_err(|error| error.to_string())?;
     let receipt = match command_type {
+        "story_directions_generate" => crate::project_entry::commit_regenerate(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+            state.production_gateway.as_ref(),
+        ),
         "pitch_regenerate" => crate::project_entry::commit_regenerate(
             &handle,
             project_id,
@@ -4857,7 +4868,7 @@ fn execute_b11_command(
         "projectId":project_id,
         "resultProjectId":project_id,
         "finalStatus":"committed",
-        "message":match command_type { "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
+        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
         "receiptId":receipt["receiptId"],
         "beforeRevision":receipt["beforeRevision"],
         "afterRevision":receipt["afterRevision"],
@@ -4901,7 +4912,8 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
-        "pitch_regenerate"
+        "story_directions_generate"
+        | "pitch_regenerate"
         | "pitch_select"
         | "story_setup_save"
         | "opening_ready"
@@ -5048,10 +5060,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             }
         }
         "project_create_from_idea" | "project_create_from_market" => {
-            let title = request
+            let raw_title = request
                 .pointer("/payload/title")
                 .and_then(Value::as_str)
                 .unwrap_or("未命名作品");
+            let title = crate::project_db::normalize_project_title(raw_title);
             let entry_kind = if command_type == "project_create_from_market" {
                 crate::project_entry::EntryKind::Market
             } else {
@@ -5078,7 +5091,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 Ok(_) => return Err("IDEMPOTENCY_CONFLICT".to_string()),
                 Err(crate::project_db::ManagerError::ProjectNotFound) => state
                     .manager
-                    .create(&id, title, requested_at)
+                    .create(&id, &title, requested_at)
                     .map_err(|error| error.to_string())?,
                 Err(error) => return Err(error.to_string()),
             };
@@ -5091,7 +5104,6 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     requested_at,
                     &request,
                     entry_kind,
-                    state.production_gateway.as_ref(),
                 )?)
             } else {
                 None

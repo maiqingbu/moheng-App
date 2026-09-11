@@ -43,6 +43,9 @@ const filteredProjects = computed(() => {
 
 function blockLabel(reason: ProjectLibraryItem['blockReason']) { return reason ? blockReasonLabels[reason] : '' }
 function readErrorLabel(error: unknown) { return productErrorMessage(error, '暂时无法打开这部作品，请重试。') }
+function displayTitle(item: ProjectLibraryItem | null | undefined) {
+  return item?.title?.trim() || '未命名作品'
+}
 
 function statusClass(item: ProjectLibraryItem) {
   if (item.runState === 'FAILED' || item.runState === 'BLOCKED') return 'danger'
@@ -96,7 +99,7 @@ async function restoreProject(item: ProjectLibraryItem) {
 
 async function deleteProject() {
   const target = actionTarget.value
-  if (!target || deleteConfirm.value !== target.title) return
+  if (!target || deleteConfirm.value !== displayTitle(target)) return
   const request: { type: 'project_delete'; projectId: string; expectedRevision?: number } = { type:'project_delete', projectId:target.id }
   if (target.revision != null) request.expectedRevision = target.revision
   try {
@@ -147,9 +150,9 @@ async function deleteProject() {
         <div v-if="filteredProjects.length" class="project-grid">
           <article v-for="item in filteredProjects" :key="item.id" class="project-card">
             <button class="project-card-main" @click="openProject(item)">
-              <div class="project-cover" :class="`cover-${Math.abs(item.title.charCodeAt(0))%4}`"><span>{{ item.title.slice(0,1) }}</span><small>{{ item.genre.split('·')[0].trim() }}</small></div>
+              <div class="project-cover" :class="`cover-${Math.abs(displayTitle(item).charCodeAt(0))%4}`"><span>{{ displayTitle(item).slice(0,1) }}</span><small>{{ item.genre.split('·')[0].trim() }}</small></div>
               <div class="project-card-copy">
-                <div class="project-card-title-row"><h3>{{ item.title }}</h3><span class="badge" :class="statusClass(item)">{{ item.pendingDecisions ? `待决定 ${item.pendingDecisions}` : runStateLabel(item.runState) }}</span></div>
+                <div class="project-card-title-row"><h3>{{ displayTitle(item) }}</h3><span class="badge" :class="statusClass(item)">{{ item.pendingDecisions ? `待决定 ${item.pendingDecisions}` : runStateLabel(item.runState) }}</span></div>
                 <p>{{ item.subtitle }}</p>
                 <div class="project-tags"><span>{{ item.platform }}</span><span>{{ item.genre }}</span><span>{{ item.mode==='AUTO'?'全自动':'导演模式' }}</span></div>
                 <div class="project-progress-row"><div class="progress"><span :style="{width:`${item.progress}%`}" /></div><b>{{ item.progress }}%</b></div>
@@ -174,7 +177,7 @@ async function deleteProject() {
         <button class="archived-toggle" @click="showArchived=!showArchived"><span><strong>已归档作品</strong><small>{{ store.archivedProjects.length }} 部 · 归档不会删除正文或版本</small></span><span>{{ showArchived ? '收起' : '展开' }}⌄</span></button>
         <div v-if="showArchived" class="archived-list card">
           <div v-for="item in store.archivedProjects" :key="item.id" class="archived-row">
-            <div><strong>{{ item.title }}</strong><div class="muted" style="font-size:11px">{{ item.genre }} · 最后更新 {{ productTimeLabel(item.updatedAt) }}</div></div>
+            <div><strong>{{ displayTitle(item) }}</strong><div class="muted" style="font-size:11px">{{ item.genre }} · 最后更新 {{ productTimeLabel(item.updatedAt) }}</div></div>
             <div class="actions"><button class="btn small" :disabled="!item.operational" @click="restoreProject(item)">恢复到作品库</button><button class="btn small ghost danger-text" @click="askAction(item,'delete')">删除</button></div>
           </div>
           <div v-if="!store.archivedProjects.length" class="empty">暂无归档作品</div>
@@ -182,23 +185,23 @@ async function deleteProject() {
       </section>
     </template>
 
-    <BaseModal :open="!!actionTarget && actionMode==='duplicate'" title="复制作品" :subtitle="actionTarget ? `将创建《${actionTarget.title}》的独立副本。` : ''" @close="closeAction">
+    <BaseModal :open="!!actionTarget && actionMode==='duplicate'" title="复制作品" :subtitle="actionTarget ? `将创建《${displayTitle(actionTarget)}》的独立副本。` : ''" @close="closeAction">
       <div class="banner info"><div><div class="banner-title">副本会作为独立作品创建</div><div class="banner-copy">正文、图谱和版本会复制，但运行状态会重置为“未运行”，不会继续原作品正在执行的任务。</div></div></div>
       <CommandFeedback v-if="actionTarget" :state="store.commandState(`duplicate-${actionTarget.id}`)" />
       <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn primary" @click="duplicateProject">创建副本</button></template>
     </BaseModal>
 
-    <BaseModal :open="!!actionTarget && actionMode==='archive'" title="归档作品" :subtitle="actionTarget ? `归档《${actionTarget.title}》后，它会从默认作品列表隐藏。` : ''" @close="closeAction">
+    <BaseModal :open="!!actionTarget && actionMode==='archive'" title="归档作品" :subtitle="actionTarget ? `归档《${displayTitle(actionTarget)}》后，它会从默认作品列表隐藏。` : ''" @close="closeAction">
       <div class="banner warning"><div><div class="banner-title">归档不是删除</div><div class="banner-copy">正式章节、作品图谱、候选稿、模型回执和版本历史都会保留；正在运行的作品必须先暂停。</div></div></div>
       <CommandFeedback v-if="actionTarget" :state="store.commandState(`archive-${actionTarget.id}`)" />
       <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn warning" @click="archiveProject">确认归档</button></template>
     </BaseModal>
 
-    <BaseModal :open="!!actionTarget && actionMode==='delete'" title="永久删除作品" :subtitle="actionTarget ? `删除《${actionTarget.title}》是不可逆操作。` : ''" @close="closeAction">
+    <BaseModal :open="!!actionTarget && actionMode==='delete'" title="永久删除作品" :subtitle="actionTarget ? `删除《${displayTitle(actionTarget)}》是不可逆操作。` : ''" @close="closeAction">
       <div class="banner danger"><div><div class="banner-title">删除前请确认</div><div class="banner-copy">删除作品时会同时清理与它关联的临时内容和缓存，并保留必要的安全操作记录。</div></div></div>
-      <label v-if="actionTarget" class="field" style="margin-top:16px"><span class="field-label">输入作品名“{{ actionTarget.title }}”确认删除</span><input v-model="deleteConfirm" class="input" /></label>
+      <label v-if="actionTarget" class="field" style="margin-top:16px"><span class="field-label">输入作品名“{{ displayTitle(actionTarget) }}”确认删除</span><input v-model="deleteConfirm" class="input" /></label>
       <CommandFeedback v-if="actionTarget" :state="store.commandState(`delete-${actionTarget.id}`)" />
-      <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn danger" :disabled="!actionTarget || deleteConfirm!==actionTarget.title" @click="deleteProject">永久删除</button></template>
+      <template #footer><button class="btn" @click="closeAction">取消</button><button class="btn danger" :disabled="!actionTarget || deleteConfirm!==displayTitle(actionTarget)" @click="deleteProject">永久删除</button></template>
     </BaseModal>
   </div>
 </template>
