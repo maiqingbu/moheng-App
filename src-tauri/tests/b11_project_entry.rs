@@ -1,9 +1,10 @@
+use ai_novel_production_system_core::catalog::CatalogRepository;
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_assistant_repair_plan_impl, query_book_health_impl,
     query_canon_impl, query_chapter_versions_impl, query_decisions_impl, query_history_impl,
-    query_market_strategy_impl, query_opening_ready_impl, query_project_overview_impl,
-    query_story_directions_impl, query_story_setup_impl, query_volume_detail_impl,
-    support_session_impl, KernelState,
+    query_market_strategy_impl, query_opening_ready_impl, query_project_library_impl,
+    query_project_overview_impl, query_story_directions_impl, query_story_setup_impl,
+    query_volume_detail_impl, support_session_impl, KernelState,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
@@ -147,6 +148,36 @@ fn market_request(command_id: &str, material: &str) -> serde_json::Value {
             "forbidden":"不要套路化误会"
         }
     })
+}
+
+fn failing_story_direction_request(
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    expected_revision: i64,
+) -> serde_json::Value {
+    json!({
+        "type":command_type,
+        "commandId":command_id,
+        "idempotencyKey":format!("{command_id}:key"),
+        "projectId":project_id,
+        "expectedRevision":expected_revision,
+        "requestedAt":NOW,
+        "payload":{}
+    })
+}
+
+fn mark_legacy_blank_title(state: &KernelState, project_id: &str) {
+    let handle = state.manager.open(project_id, "", NOW).unwrap();
+    handle
+        .execute(
+            "UPDATE project_meta SET title='' WHERE project_id=?1",
+            [project_id],
+        )
+        .unwrap();
+    drop(handle);
+    let catalog = CatalogRepository::open(&state.paths, NOW).unwrap();
+    CatalogRepository::rename(&catalog, project_id, "", NOW).unwrap();
 }
 
 fn create_opening_ready_fixture(state: &KernelState, prefix: &str) -> String {
@@ -297,6 +328,315 @@ fn b11_project_creation_defers_provider_and_initial_generation_reuses_project() 
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
+}
+
+#[test]
+fn b11_s1_retry_lineage_keeps_failed_job_and_links_the_new_job() {
+    let state = state_with_gateway(Arc::new(FailingEntryGateway));
+    let created = execute_command_impl(&state, idea_request("cmd:b11:s1:lineage")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+
+    let first = execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "story_directions_generate",
+            &project_id,
+            "cmd:b11:s1:lineage:first",
+            0,
+        ),
+    )
+    .unwrap_err();
+    assert!(first.contains("transport") || first.contains("unavailable"));
+    let retry = execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "pitch_regenerate",
+            &project_id,
+            "cmd:b11:s1:lineage:retry",
+            0,
+        ),
+    )
+    .unwrap_err();
+    assert!(retry.contains("transport") || retry.contains("unavailable"));
+
+    state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            let jobs: Vec<(String, String)> = connection
+                .prepare(
+                    "SELECT job_id,status FROM jobs WHERE project_id=?1 ORDER BY created_at,job_id",
+                )
+                .unwrap()
+                .query_map([&project_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(jobs.len(), 2);
+            assert_eq!(jobs[0].1, "FAILED");
+            assert_eq!(jobs[1].1, "FAILED");
+            let lineage: String = connection
+                .query_row(
+                    "SELECT payload_json FROM production_events WHERE project_id=?1 AND event_type='JOB_RETRY_CREATED'",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(lineage.contains(&jobs[0].0));
+            assert!(lineage.contains(&jobs[1].0));
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn b11_s1_retry_x10_keeps_one_project_and_adds_only_jobs_and_model_runs() {
+    let state = state_with_gateway(Arc::new(FailingEntryGateway));
+    let created = execute_command_impl(&state, idea_request("cmd:b11:s1:x10")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "story_directions_generate",
+            &project_id,
+            "cmd:b11:s1:x10:first",
+            0,
+        ),
+    )
+    .unwrap_err();
+    for attempt in 1..=10 {
+        execute_command_impl(
+            &state,
+            failing_story_direction_request(
+                "pitch_regenerate",
+                &project_id,
+                &format!("cmd:b11:s1:x10:retry-{attempt}"),
+                0,
+            ),
+        )
+        .unwrap_err();
+    }
+
+    let library = query_project_library_impl(&state).unwrap();
+    let projects = library["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["id"], project_id);
+    state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            let job_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM jobs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let model_run_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let lineage_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='JOB_RETRY_CREATED'",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(job_count, 11);
+            assert_eq!(model_run_count, 11);
+            assert_eq!(lineage_count, 10);
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn b11_s1_title_is_equal_across_catalog_brief_overview_and_library() {
+    let state = state();
+    let mut request = idea_request("cmd:b11:s1:title-cross-layer");
+    request["payload"]["title"] = json!("  跨层统一标题  ");
+    let created = execute_command_impl(&state, request).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+
+    let catalog = CatalogRepository::open(&state.paths, NOW).unwrap();
+    let catalog_title: String = catalog
+        .query_row(
+            "SELECT title FROM projects WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let overview = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap();
+    let library = query_project_library_impl(&state).unwrap();
+    let library_title = library["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["id"] == project_id)
+        .unwrap()["title"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            let brief_payload: String = connection
+                .query_row(
+                    "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='CreativeBrief' LIMIT 1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let brief: serde_json::Value = serde_json::from_str(&brief_payload).unwrap();
+            let titles = [
+                catalog_title.as_str(),
+                brief["title"].as_str().unwrap(),
+                overview["project"]["title"].as_str().unwrap(),
+                library_title.as_str(),
+            ];
+            assert!(titles.iter().all(|title| *title == "跨层统一标题"));
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn b11_s1_legacy_blank_title_reads_with_canonical_fallback() {
+    let state = state();
+    let mut request = idea_request("cmd:b11:s1:legacy-read");
+    request["payload"]["title"] = json!("历史空标题作品");
+    let created = execute_command_impl(&state, request).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    mark_legacy_blank_title(&state, &project_id);
+
+    let library = query_project_library_impl(&state).unwrap();
+    let row = library["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["id"] == project_id)
+        .unwrap();
+    let overview = query_project_overview_impl(&state, json!({"projectId":project_id})).unwrap();
+    assert_eq!(row["title"], "未命名作品");
+    assert_eq!(overview["project"]["title"], "未命名作品");
+}
+
+#[test]
+fn b11_s1_legacy_blank_title_can_be_deleted_by_project_owner() {
+    let state = state();
+    let mut request = idea_request("cmd:b11:s1:legacy-delete");
+    request["payload"]["title"] = json!("待删除历史空标题作品");
+    let created = execute_command_impl(&state, request).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    mark_legacy_blank_title(&state, &project_id);
+
+    let deleted = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_delete",
+            "commandId":"cmd:b11:s1:legacy-delete:command",
+            "idempotencyKey":"cmd:b11:s1:legacy-delete:command:key",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW
+        }),
+    )
+    .unwrap();
+    assert_eq!(deleted["finalStatus"], "committed");
+    assert!(state
+        .paths
+        .trash_dir()
+        .join(&project_id)
+        .join("project.db")
+        .is_file());
+}
+
+#[test]
+fn b11_s1_failed_generation_survives_requery_and_restart_with_same_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(root.clone()),
+        Arc::new(FailingEntryGateway),
+    );
+    let created = execute_command_impl(&state, idea_request("cmd:b11:s1:reload")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "story_directions_generate",
+            &project_id,
+            "cmd:b11:s1:reload:failure",
+            0,
+        ),
+    )
+    .unwrap_err();
+    drop(state);
+
+    let restarted =
+        KernelState::with_production_gateway(AppPaths::new(root), Arc::new(FailingEntryGateway));
+    let library = query_project_library_impl(&restarted).unwrap();
+    let row = library["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["id"] == project_id)
+        .unwrap();
+    assert_eq!(row["title"], "断剑与改名者");
+    assert_eq!(row["operational"], true);
+    let overview =
+        query_project_overview_impl(&restarted, json!({"projectId":project_id})).unwrap();
+    assert_eq!(overview["project"]["id"], project_id);
+    execute_command_impl(
+        &restarted,
+        failing_story_direction_request(
+            "pitch_regenerate",
+            &project_id,
+            "cmd:b11:s1:reload:retry",
+            0,
+        ),
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn b11_s1_failure_has_no_ghost_project_and_remains_openable_and_deletable() {
+    let state = state_with_gateway(Arc::new(FailingEntryGateway));
+    let created = execute_command_impl(&state, idea_request("cmd:b11:s1:ghost")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    execute_command_impl(
+        &state,
+        failing_story_direction_request(
+            "story_directions_generate",
+            &project_id,
+            "cmd:b11:s1:ghost:failure",
+            0,
+        ),
+    )
+    .unwrap_err();
+    let library = query_project_library_impl(&state).unwrap();
+    let ghosts = library["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|project| project["operational"] != true || project["id"].is_null())
+        .count();
+    assert_eq!(ghosts, 0);
+    let deleted = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_delete",
+            "commandId":"cmd:b11:s1:ghost:delete",
+            "idempotencyKey":"cmd:b11:s1:ghost:delete:key",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW
+        }),
+    )
+    .unwrap();
+    assert_eq!(deleted["finalStatus"], "committed");
 }
 
 #[test]
