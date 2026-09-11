@@ -155,6 +155,14 @@ test('REAL-WIRE-A05 project entry logs the typed failure for desktop diagnosis',
   assert.match(creationLaunch, /console\.error\('\[project-entry\] project creation failed', error\)/)
 })
 
+test('S1 legacy blank titles use one canonical display fallback for cover and delete confirmation', () => {
+  const library = read('src/ui/pages/ProjectLibrary.vue')
+  assert.match(library, /function displayTitle\(item: ProjectLibraryItem \| null \| undefined\)/)
+  assert.match(library, /displayTitle\(item\)\.charCodeAt\(0\)/)
+  assert.match(library, /输入作品名“\{\{ displayTitle\(actionTarget\) \}\}”确认删除/)
+  assert.match(library, /deleteConfirm!==displayTitle\(actionTarget\)/)
+})
+
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {
   assert.match(assistantViewTest, /现有记录不足以确认这件事/)
   assert.match(assistantView, /buildEvidence/)

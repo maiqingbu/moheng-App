@@ -374,15 +374,18 @@ fn b11_s1_retry_lineage_keeps_failed_job_and_links_the_new_job() {
             assert_eq!(jobs.len(), 2);
             assert_eq!(jobs[0].1, "FAILED");
             assert_eq!(jobs[1].1, "FAILED");
-            let lineage: String = connection
+            let lineage: (String, String) = connection
                 .query_row(
-                    "SELECT payload_json FROM production_events WHERE project_id=?1 AND event_type='JOB_RETRY_CREATED'",
+                    "SELECT job_id,payload_json FROM production_events WHERE project_id=?1 AND event_type='JOB_RETRY_CREATED'",
                     [&project_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .unwrap();
-            assert!(lineage.contains(&jobs[0].0));
-            assert!(lineage.contains(&jobs[1].0));
+            assert!(jobs.iter().any(|job| job.0 == lineage.0));
+            let lineage_payload: serde_json::Value = serde_json::from_str(&lineage.1).unwrap();
+            let retry_of = lineage_payload["retryOfJobId"].as_str().unwrap();
+            assert_ne!(lineage.0, retry_of);
+            assert!(jobs.iter().any(|job| job.0 == retry_of));
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();

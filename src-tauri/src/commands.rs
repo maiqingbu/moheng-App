@@ -81,6 +81,7 @@ fn stable_project_id(command_id: &str) -> Result<String, String> {
 }
 
 fn project_snapshot(project_id: &str, title: &str, revision: i64, updated_at: &str) -> Value {
+    let title = crate::project_db::normalize_project_title(title);
     json!({
         "id": project_id,
         "title": title,

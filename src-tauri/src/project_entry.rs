@@ -14,6 +14,7 @@ use crate::project_db::ProjectHandle;
 use crate::repositories::project_entry::{self, EntryArtifactRow};
 use crate::repositories::runtime::{DurableJobService, JobSpec, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
+use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
 
 const MAX_IDEA_CHARS: usize = 8_000;
@@ -275,6 +276,15 @@ fn generate_story_directions(
         &format!("{command_id}:story-directions:model"),
     )?;
     let profile = gateway.resolve_profile()?;
+    let retry_of_job_id = connection
+        .query_row(
+            "SELECT j.job_id, j.status FROM jobs j JOIN model_runs r ON r.project_id=j.project_id AND r.job_id=j.job_id WHERE j.project_id=?1 AND r.capability=?2 ORDER BY j.created_at DESC, j.job_id DESC LIMIT 1",
+            [project_id, GENERATE_STORY_DIRECTIONS],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .and_then(|(job_id, status)| (status == "FAILED").then_some(job_id));
     DurableJobService::start_job(
         connection,
         &JobSpec {
@@ -292,6 +302,16 @@ fn generate_story_directions(
         now,
     )
     .map_err(|error| error.to_string())?;
+    if let Some(previous_job_id) = retry_of_job_id {
+        DurableJobService::record_retry_lineage(
+            connection,
+            project_id,
+            &job_id,
+            &previous_job_id,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     DurableJobService::transition_for_worker(
         connection,
         project_id,
