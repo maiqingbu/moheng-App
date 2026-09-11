@@ -5,7 +5,6 @@ use ai_novel_production_system_core::generated::validators::validate_long_form_h
 use ai_novel_production_system_core::health::{
     classify_context_growth, classify_cost_drift, classify_quality_drift, HealthFactorResult,
 };
-use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::connection::migrate_project;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectHandle;
@@ -13,15 +12,15 @@ use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
 use std::sync::Arc;
 
+mod support;
+use support::EntryFixtureGateway;
+
 const NOW: &str = "2026-09-04T02:00:00Z";
 
 fn state() -> KernelState {
     let temp = tempfile::tempdir().unwrap();
     let root = Box::leak(Box::new(temp)).path().to_path_buf();
-    KernelState::with_production_gateway(
-        AppPaths::new(root),
-        Arc::new(UnavailableProductionGateway),
-    )
+    KernelState::with_production_gateway(AppPaths::new(root), Arc::new(EntryFixtureGateway))
 }
 
 fn create_project(state: &KernelState, command_id: &str) -> String {

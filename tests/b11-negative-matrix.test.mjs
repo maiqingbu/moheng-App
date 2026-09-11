@@ -20,6 +20,7 @@ const assistantViewTest = read('tests/store/b11-assistant-presentation.test.ts')
 const b11UxTest = read('tests/b11-product-ux.test.mjs')
 const supportRepository = read('src-tauri/src/repositories/support.rs')
 const creationLaunch = read('src/ui/pages/CreationLaunch.vue')
+const productLanguage = read('src/ui/presentation/productLanguage.ts')
 
 function sourceOnlyRustFiles() {
   const directory = path.join(root, 'src-tauri/src')
@@ -130,6 +131,28 @@ test('REAL-WIRE-A02 formal project entry has no demo seed values or fake platfor
   assert.match(creationLaunch, /const platform = ref\('待判断'\)/)
   assert.doesNotMatch(creationLaunch, /const idea = ref\('\s*一个少年带着一柄来历不明的断剑/)
   assert.doesNotMatch(creationLaunch, /番茄小说（AI 推荐）/)
+})
+
+test('REAL-WIRE-A03 story directions are generated from current input, not fixed clarification answers', () => {
+  assert.doesNotMatch(creationLaunch, /clarifyAnswers|clarifications/)
+  assert.match(creationLaunch, /@click="createFromIdea"/)
+})
+
+test('REAL-WIRE-A04 typed provider failures remain actionable in the product surface', () => {
+  for (const code of [
+    'P01_PROVIDER_EMPTY_BODY',
+    'P01_PROVIDER_MALFORMED_ENVELOPE',
+    'P01_PROVIDER_CONTENT_MISSING',
+    'P01_PROVIDER_EMPTY_CONTENT',
+    'P01_MODEL_JSON_INVALID',
+    'B11_STORY_DIRECTION_OUTPUT_INVALID',
+  ]) {
+    assert.match(productLanguage, new RegExp(code))
+  }
+})
+
+test('REAL-WIRE-A05 project entry logs the typed failure for desktop diagnosis', () => {
+  assert.match(creationLaunch, /console\.error\('\[project-entry\] story-direction generation failed', error\)/)
 })
 
 test('NEG-09 Project Assistant cannot answer a project fact without evidence', () => {

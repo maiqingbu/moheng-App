@@ -16,13 +16,10 @@ const length = ref('AI 推荐')
 const forbidden = ref('')
 const selectedTags = ref<string[]>([])
 const selectedMarket = ref('market-growth')
-const entryMode = ref<'idea' | 'market'>('idea')
 const marketSource = ref('')
 const marketMaterial = ref('')
-const showInference = ref(false)
 const showMarket = ref(false)
 const createKey = 'project-create'
-const clarifyAnswers = ref({ priority:'悬疑感更强', protagonist:'可以受挫，但关键节点必须主动选择', relation:'师徒关系重要，但不要压过主线' })
 
 const market = computed(() => store.market)
 onMounted(() => store.loadMarket())
@@ -41,13 +38,12 @@ function toggleTag(tag:string){
   selectedTags.value = selectedTags.value.includes(tag) ? selectedTags.value.filter(t=>t!==tag) : [...selectedTags.value,tag].slice(0,4)
 }
 
-function startPitch(){ entryMode.value = 'idea'; showInference.value = true }
 async function createFromIdea(){
   try {
-    const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value,clarifications:clarifyAnswers.value}})
-    if (receipt.finalStatus==='committed' && receipt.projectId) { showInference.value=false; router.push(`/projects/${receipt.projectId}/directions`) }
-  } catch {
-    // CommandFeedback keeps the typed provider failure visible in the modal.
+    const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value}})
+    if (receipt.finalStatus==='committed' && receipt.projectId) router.push(`/projects/${receipt.projectId}/directions`)
+  } catch (error) {
+    console.error('[project-entry] story-direction generation failed', error)
   }
 }
 async function createFromMarket(){
@@ -73,15 +69,16 @@ async function createFromMarket(){
         <textarea v-model="idea" aria-label="故事想法" placeholder="例如：我想看一个不愿当英雄的人，被迫卷进一场关于名字与记忆的江湖阴谋……" />
         <div class="composer-foot">
           <div class="actions">
-            <button class="btn soft" @click="entryMode='market';showMarket=true">从市场机会开始</button>
+            <button class="btn soft" @click="showMarket=true">从市场机会开始</button>
             <span class="muted" style="font-size:11px">支持一句话、梗概、人物设想、旧稿片段</span>
           </div>
-          <button class="btn primary large" :disabled="!idea.trim()" @click="startPitch">生成三份故事方向</button>
+          <button class="btn primary large" :disabled="!idea.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromIdea">生成三份故事方向</button>
         </div>
       </div>
+      <CommandFeedback :state="createState" />
       <div class="entry-paths" style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
-        <button class="btn primary" @click="entryMode='idea';showInference=true">我已经有故事想法</button>
-        <button class="btn soft" @click="entryMode='market';showMarket=true">帮我找值得写的方向</button>
+        <button class="btn primary" :disabled="!idea.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromIdea">我已经有故事想法</button>
+        <button class="btn soft" @click="showMarket=true">帮我找值得写的方向</button>
       </div>
     </section>
 
@@ -125,12 +122,6 @@ async function createFromMarket(){
       </div>
       <div v-else class="empty">尚未配置市场资料源；提供你有权使用的市场观察后，系统才能进行市场分析。</div>
     </section>
-
-    <BaseModal :open="showInference" title="确认创作方向" subtitle="这些是系统根据你的输入整理出的正式创作约束。" @close="showInference=false">
-      <div class="inference-list"><div v-for="row in inference" :key="row[0]" class="inference-row"><span class="muted">{{ row[0] }}</span><strong style="max-width:66%;text-align:right">{{ row[1] }}</strong></div></div>
-      <div v-if="mode==='DIRECTOR'" class="section" style="margin-top:16px"><h3 style="font-size:13px">三个高价值澄清问题</h3><div style="display:grid;gap:10px"><label class="field"><span class="field-label">更在意哪种阅读体验？</span><select v-model="clarifyAnswers.priority" class="select"><option>悬疑感更强</option><option>成长爽感更强</option><option>人物关系更强</option></select></label><label class="field"><span class="field-label">主角可以被压到什么程度？</span><input v-model="clarifyAnswers.protagonist" class="input" /></label><label class="field"><span class="field-label">人物关系希望占多大比重？</span><input v-model="clarifyAnswers.relation" class="input" /></label></div></div><div class="banner info" style="margin-top:16px"><div><div class="banner-title">下一步会生成三份实质不同的故事方向</div><div class="banner-copy">分别偏向忠于原始想法、商业增强和差异化，不会只是改名字。</div></div></div>
-      <CommandFeedback :state="createState" /><template #footer><button class="btn" @click="showInference=false">继续修改</button><button class="btn primary" :disabled="['submitting','accepted','processing'].includes(createState.status)" @click="createFromIdea">确认并生成方向</button></template>
-    </BaseModal>
 
     <BaseModal :open="showMarket" title="市场机会分析" subtitle="来源、日期与置信度都必须可追溯；低置信度数据不会冒充确定结论。" @close="showMarket=false">
       <div style="display:grid;gap:12px">

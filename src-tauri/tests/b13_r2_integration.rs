@@ -2,7 +2,6 @@ use ai_novel_production_system_core::commands::{
     execute_command_impl, query_book_health_impl, KernelState,
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
-use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use ai_novel_production_system_core::volume_lifecycle::VolumeLifecycleOwner;
@@ -10,15 +9,15 @@ use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+mod support;
+use support::EntryFixtureGateway;
+
 const NOW: &str = "2026-09-05T00:00:00Z";
 
 fn state() -> KernelState {
     let temp = tempfile::tempdir().unwrap();
     let root = Box::leak(Box::new(temp)).path().to_path_buf();
-    KernelState::with_production_gateway(
-        AppPaths::new(root),
-        Arc::new(UnavailableProductionGateway),
-    )
+    KernelState::with_production_gateway(AppPaths::new(root), Arc::new(EntryFixtureGateway))
 }
 
 fn create_project(state: &KernelState) -> String {

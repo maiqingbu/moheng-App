@@ -19,6 +19,13 @@ export interface LibraryCommandUiState {
   commandId?: string
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object' && 'message' in error) return String(error.message)
+  return '操作未完成。'
+}
+
 export const useProjectLibraryStore = defineStore('project-library-projection', () => {
   const projection = ref<ProjectLibraryProjection | null>(null)
   const market = ref<MarketOpportunity[]>([])
@@ -98,7 +105,7 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
       })
     } catch (error) {
       if (commandStates.value[key]?.commandId === commandId) {
-        commandStates.value[key] = { status: 'failed', message: error instanceof Error ? error.message : '操作未完成。', commandId }
+        commandStates.value[key] = { status: 'failed', message: errorMessage(error), commandId }
       }
       throw error
     }

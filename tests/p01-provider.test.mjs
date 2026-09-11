@@ -11,6 +11,7 @@ const runtime = read('src-tauri/src/repositories/runtime.rs')
 const acceptance = read('scripts/run-p01-acceptance.mjs')
 const settings = read('src/ui/pages/SettingsPage.vue')
 const contracts = read('src/application/contracts.ts')
+const libraryStore = read('src/ui/stores/projectLibraryStore.ts')
 
 test('P01 production composition binds configured provider gateway', () => {
   assert.match(commands, /ConfiguredProductionGateway::for_desktop/)
@@ -64,7 +65,15 @@ test('P01 formal provider evidence is source-bound to raw, unknown, and budget p
 test('Xiaomi provider uses structured JSON mode and typed response errors', () => {
   assert.match(provider, /response_format/)
   assert.match(provider, /thinking/)
+  assert.match(provider, /payload\["stream"\]\s*=\s*json!\(false\)/)
   for (const code of ['P01_PROVIDER_EMPTY_BODY', 'P01_PROVIDER_MALFORMED_ENVELOPE', 'P01_PROVIDER_CONTENT_MISSING', 'P01_PROVIDER_EMPTY_CONTENT', 'P01_MODEL_JSON_INVALID']) {
     assert.match(production, new RegExp(code))
   }
+})
+
+test('Xiaomi uses its documented api-key header and the library preserves Tauri errors', () => {
+  assert.match(provider, /api-key/)
+  assert.match(provider, /request_headers/)
+  assert.match(libraryStore, /function errorMessage/)
+  assert.match(libraryStore, /message: errorMessage\(error\)/)
 })

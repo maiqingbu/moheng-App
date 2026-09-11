@@ -79,6 +79,19 @@ const errorLabels: Record<string, string> = {
   'B12_DECISION_STALE': '作品状态已经变化，原确认已失效，请重新查看方案。',
   'B12_RETCON_EVIDENCE_REQUIRED': '请先提供这条事实对应的核验依据。',
   'PROTOCOL / PROJECT_NOT_FOUND': '没有找到这部作品，请返回作品库重新打开。',
+  P01_PROVIDER_EMPTY_BODY: '模型服务返回了空内容，请重试或检查服务配置。',
+  P01_PROVIDER_MALFORMED_ENVELOPE: '模型服务返回格式异常，请检查服务兼容性。',
+  P01_PROVIDER_CONTENT_MISSING: '模型服务没有返回可用内容，请重试。',
+  P01_PROVIDER_EMPTY_CONTENT: '模型服务返回内容为空，请重试。',
+  P01_MODEL_JSON_INVALID: '模型服务返回的内容不是有效的结构化结果，请重试。',
+  P01_MODEL_PAYLOAD_INVALID: '模型服务返回的内容无法识别，请重试。',
+  B11_STORY_DIRECTION_OUTPUT_INVALID: '模型返回的故事方向格式不完整，请重试。',
+  B11_STORY_DIRECTION_COUNT_INVALID: '模型没有返回完整的三个故事方向，请重试。',
+  B11_STORY_DIRECTION_ITEM_INVALID: '模型返回的故事方向内容不完整，请重试。',
+  B11_STORY_DIRECTION_NOT_SUBSTANTIALLY_DIFFERENT: '模型返回的故事方向区分度不足，请重试。',
+  B11_STORY_DIRECTION_FIELD_MISSING: '模型返回的故事方向缺少必要内容，请重试。',
+  B11_STORY_DIRECTION_OUTPUT_MISSING: '模型没有返回故事方向，请重试。',
+  B08_PROVIDER_NOT_CONFIGURED: '尚未完成模型服务配置，请先保存服务地址和访问密钥。',
 }
 
 function textOf(value: unknown): string {

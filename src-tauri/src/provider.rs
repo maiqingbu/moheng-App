@@ -256,9 +256,20 @@ impl OpenAiCompatibleProvider {
         if Self::is_xiaomi_endpoint(endpoint) {
             payload["response_format"] = json!({"type":"json_object"});
             payload["thinking"] = json!({"type":"disabled"});
+            payload["stream"] = json!(false);
             payload["max_completion_tokens"] = json!(16_384);
         }
         payload
+    }
+
+    fn request_headers(endpoint: &str, secret: &str) -> Vec<String> {
+        let mut headers = vec!["Content-Type: application/json".into()];
+        if Self::is_xiaomi_endpoint(endpoint) {
+            headers.push(format!("api-key: {secret}"));
+        } else {
+            headers.push(format!("Authorization: Bearer {secret}"));
+        }
+        headers
     }
 
     pub fn request_payload_digest(
@@ -286,12 +297,12 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
         }
         let payload = Self::request_payload(&self.endpoint, request).to_string();
         let timeout_seconds = ((request.timeout_ms.max(1) as f64) / 1000.0).ceil() as u64;
-        let output = Command::new("/usr/bin/curl")
-            .args(["--silent", "--show-error", "--request", "POST"])
-            .arg("--header")
-            .arg("Content-Type: application/json")
-            .arg("--header")
-            .arg(format!("Authorization: Bearer {secret}"))
+        let mut command = Command::new("/usr/bin/curl");
+        command.args(["--silent", "--show-error", "--request", "POST"]);
+        for header in Self::request_headers(&self.endpoint, secret) {
+            command.arg("--header").arg(header);
+        }
+        let output = command
             .arg("--data-raw")
             .arg(&payload)
             .arg("--max-time")
@@ -386,6 +397,7 @@ mod tests {
         );
         assert_eq!(payload["response_format"]["type"], "json_object");
         assert_eq!(payload["thinking"]["type"], "disabled");
+        assert_eq!(payload["stream"], false);
         assert_eq!(payload["messages"][0]["role"], "system");
         assert!(payload["messages"][0]["content"]
             .as_str()
@@ -406,5 +418,19 @@ mod tests {
             .unwrap();
         assert_eq!(digest.len(), 64);
         assert!(!digest.contains("sk-"));
+    }
+
+    #[test]
+    fn xiaomi_headers_use_the_documented_api_key_authentication() {
+        let headers = OpenAiCompatibleProvider::request_headers(
+            "https://api.xiaomimimo.com/v1",
+            "test-secret",
+        );
+        assert!(headers
+            .iter()
+            .any(|header| header == "api-key: test-secret"));
+        assert!(!headers
+            .iter()
+            .any(|header| header.starts_with("Authorization: Bearer")));
     }
 }
