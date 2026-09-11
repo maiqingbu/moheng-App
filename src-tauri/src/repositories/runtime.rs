@@ -348,6 +348,22 @@ impl DurableJobService {
         Self::set_runtime_state(connection, project_id, "PAUSED", Some("PLAN_STALE"), now)?;
         Ok(())
     }
+
+    pub fn latest_failed_job_for_capability(
+        connection: &Connection,
+        project_id: &str,
+        capability: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let latest: Option<(String, String)> = connection
+            .query_row(
+                "SELECT j.job_id, j.status FROM jobs j JOIN model_runs r ON r.project_id=j.project_id AND r.job_id=j.job_id WHERE j.project_id=?1 AND r.capability=?2 ORDER BY j.created_at DESC, j.job_id DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, capability],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(latest.and_then(|(job_id, status)| (status == "FAILED").then_some(job_id)))
+    }
+
     pub fn start_job(
         connection: &Connection,
         spec: &JobSpec,
