@@ -1141,8 +1141,22 @@ pub fn query_directions(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
         });
+    let generation_state = DurableJobService::latest_failed_job_for_capability(
+        connection,
+        project_id,
+        GENERATE_STORY_DIRECTIONS,
+    )
+    .map_err(|error| error.to_string())?
+    .map(|job_id| {
+        json!({
+            "status":"FAILED",
+            "jobId":job_id,
+            "retryAvailable":true
+        })
+    });
     Ok(json!({
         "pitches":items.clone(),"selectedPitchId":selected_pitch_id,"nextCursor":next,"total":total,
+        "generationState":generation_state,
         "strategy":{"storyPromise":items.first().and_then(|item| item.get("promise")).cloned().unwrap_or_else(|| json!("等待用户选择故事方向。")),"protagonistDirection":items.first().and_then(|item| item.get("protagonistDesire")).cloned().unwrap_or_else(|| json!("等待用户选择。")),"endingBoundary":"在长篇生产中逐步编译，不在入口阶段锁死后续章节。","lengthBudget":"120–180 万字","currentBookPlanVersion":"尚未确认","currentMainContractVersion":"尚未确认"}
     }))
 }

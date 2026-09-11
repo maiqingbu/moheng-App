@@ -17,6 +17,7 @@ const commandKey = 'pitch-confirm'
 const initialGenerationKey = 'story-directions-generate'
 const regenerateKey = 'pitch-regenerate'
 const pitches = computed(()=>store.directions?.pitches ?? [])
+const persistedGenerationFailure = computed(()=>store.directions?.generationState?.status === 'FAILED')
 const initialGenerationState = computed(()=>store.commandState(initialGenerationKey))
 onMounted(async()=>{
   try {
@@ -48,14 +49,14 @@ async function confirm(){
 <template>
   <div class="page">
     <PageHeader title="规划 · 故事方向" subtitle="先明确作品方向与故事承诺，再进入故事核心和当前卷规划。">
-      <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" @click="regenerate">重新推荐</button>
+      <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" @click="regenerate">{{ persistedGenerationFailure ? '重试生成故事方向' : '重新推荐' }}</button>
     </PageHeader>
 
     <div class="pitch-toolbar">
       <div><strong>当前选择：{{ selected.length ? pitches.filter(p=>selected.includes(p.id)).map(p=>p.name).join(' + ') : '尚未选择' }}</strong><div class="muted" style="font-size:11px">组合方案最多选择两份，系统会重新检查故事承诺、主角欲望、核心机制和主要冲突是否一致。</div></div>
       <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :disabled="!selected.length || ['submitting','accepted','processing'].includes(commandState.status)" @click="confirm">确认故事方向</button></div>
     </div>
-    <CommandFeedback :state="commandState" /><CommandFeedback :state="initialGenerationState" /><CommandFeedback :state="regenerateState" />
+    <CommandFeedback :state="commandState" /><CommandFeedback :state="initialGenerationState" /><CommandFeedback :state="regenerateState" /><div v-if="persistedGenerationFailure && regenerateState.status === 'idle' && initialGenerationState.status === 'idle'" class="command-feedback failed" role="status"> <strong>未完成</strong><span> · 上次生成未完成，可以重试故事方向。</span></div>
 
     <section v-if="store.directions" class="card pad section" style="margin-top:14px">
       <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示会影响创作的核心内容，详细检查由系统自动完成。</p></div><button class="btn" @click="reviseBookPlan">修订书级战略</button></div>

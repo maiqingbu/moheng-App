@@ -261,6 +261,11 @@ export interface PitchCandidate {
 export interface StoryDirectionProjection {
   pitches: PitchCandidate[]
   selectedPitchId?: string
+  generationState?: {
+    status: 'FAILED'
+    jobId: string
+    retryAvailable: boolean
+  }
   strategy: {
     storyPromise: string
     protagonistDirection: string
