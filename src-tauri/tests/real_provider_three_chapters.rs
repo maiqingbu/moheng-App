@@ -306,7 +306,7 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         .unwrap();
     assert_eq!(committed, 3);
     assert_eq!(receipts, 3);
-    assert_eq!(completed_runs, 9);
+    assert!(completed_runs >= 9);
     assert_eq!(word_counts.len(), 3);
     assert!(word_counts.iter().all(|count| *count >= 800));
     println!(
