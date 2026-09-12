@@ -198,6 +198,11 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
     drop(connection);
 
     for (index, chapter_id) in chapter_ids.iter().enumerate() {
+        let chapter_goal = [
+            "完成首次记忆修复委托，并让沈砚亲眼确认修复会抹去自己的现实痕迹。",
+            "让沈砚在停止调查与继续追查之间作出主动选择，并找到篡改并非事故的证据。",
+            "让沈砚追踪第一条幕后线索，兑现前三章的局部谜题回报，同时保留姐姐去向悬念。",
+        ][index];
         let receipt = execute(
             &state,
             json!({
@@ -211,7 +216,8 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
                     "chapterId":chapter_id,
                     "executionMode":"OPENING_BOOTSTRAP",
                     "skillsEnabled":false,
-                    "targetChineseCharacters":1800
+                    "targetChineseCharacters":1800,
+                    "chapterGoalHint":chapter_goal
                 }
             }),
         );

@@ -1102,7 +1102,8 @@ pub fn run_chapter_production(
             "compiledFromStateDigest":manifest.compiled_from_state_digest,
             "contextManifestRef":context_ref,
             "activeTaskRefs":compiler_input.active_task_refs,
-            "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>()
+            "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
+            "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
         });
         let planning_result = execute_production_model_with_profile(
             connection,
