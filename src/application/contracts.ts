@@ -323,6 +323,7 @@ export type DecisionCategory =
 
 export interface DecisionItem {
   id: string
+  decisionType?: string
   title: string
   summary: string
   category: DecisionCategory
@@ -331,6 +332,7 @@ export interface DecisionItem {
   createdAt: string
   recommendation?: string
   evidence?: string[]
+  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB'>
 }
 
 export interface ChapterListItem {

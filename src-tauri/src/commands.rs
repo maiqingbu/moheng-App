@@ -17,9 +17,7 @@ use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use crate::provider::ProviderAdapter;
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
-use crate::runtime::{
-    pending_decision_count, DurableJobService, DurableModelRunner, JobSpec, SecretStore,
-};
+use crate::runtime::{pending_decision_count, DurableJobService, JobSpec, SecretStore};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -702,54 +700,39 @@ fn execute_decision_submit(
         "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
         _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
     };
-    let handle = state
-        .manager
-        .open(project_id, "", requested_at)
-        .map_err(|error| error.to_string())?;
-    let (decision_type, outcome, source_ref): (String, String, String) = handle
-        .query_row(
-            "SELECT decision_type,outcome,COALESCE(source_ref,'') FROM decisions WHERE project_id=?1 AND decision_id=?2",
-            libsql_rusqlite::params![project_id, decision_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|error| error.to_string())?;
-    if decision_type != "UNKNOWN_REMOTE_OUTCOME" || !matches!(outcome.as_str(), "OPEN" | "PENDING")
-    {
-        return Err("UNKNOWN_REMOTE_OUTCOME decision is no longer open".into());
+    if action == "RETRY_REMOTE" {
+        state.production_gateway.resolve_profile()?;
     }
-    let capability: String = handle
-        .query_row(
-            "SELECT capability FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
-            libsql_rusqlite::params![project_id, source_ref],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    if action == "RETRY_REMOTE" && capability != "GENERATE_STORY_DIRECTIONS" {
-        return Err("UNKNOWN_REMOTE_OUTCOME retry is not wired for this capability".into());
-    }
-    let terminal_action = if action == "RETRY_REMOTE" {
-        "MARK_FAILED"
-    } else {
-        action
-    };
-    DurableModelRunner::resolve_unknown_terminal(
-        &handle,
-        &source_ref,
-        terminal_action,
+    let spec = project_command_spec(
+        project_id,
+        project_id,
+        command_id,
+        idempotency_key,
+        "decision_submit",
+        digest,
+        expected_revision,
         requested_at,
-    )
-    .map_err(|error| error.to_string())?;
-    if action == "RETRY_REMOTE" {
-        handle
-            .execute(
-                "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE project_id=?2 AND decision_id=?3",
-                libsql_rusqlite::params![requested_at, project_id, decision_id],
+        true,
+    );
+    let outcome = state
+        .manager
+        .commit_project_command(spec, |connection| {
+            crate::repositories::runtime::resolve_unknown_decision(
+                connection,
+                project_id,
+                decision_id,
+                action,
+                requested_at,
             )
-            .map_err(|error| error.to_string())?;
-    }
-    drop(handle);
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())?;
+    let (replayed, receipt) = match outcome {
+        ProjectCommandOutcome::Replayed(receipt) => (true, receipt),
+        ProjectCommandOutcome::Committed { receipt, .. } => (false, receipt),
+    };
 
-    if action == "RETRY_REMOTE" {
+    let retry_status = if action == "RETRY_REMOTE" && !replayed {
         let adjustment = request
             .pointer("/payload/note")
             .and_then(Value::as_str)
@@ -760,11 +743,11 @@ fn execute_decision_submit(
             "commandId":command_id,
             "idempotencyKey":idempotency_key,
             "projectId":project_id,
-            "expectedRevision":expected_revision,
+            "expectedRevision":receipt.after_revision,
             "requestedAt":requested_at,
             "payload":{"adjustment":adjustment,"regeneratePitches":true}
         });
-        return execute_b11_command(
+        match execute_b11_command(
             state,
             &retry_request,
             "pitch_regenerate",
@@ -772,18 +755,26 @@ fn execute_decision_submit(
             command_id,
             idempotency_key,
             requested_at,
-            expected_revision,
+            Some(receipt.after_revision),
             digest,
-        );
-    }
+        ) {
+            Ok(_) => "COMPLETED",
+            Err(_) => "FAILED",
+        }
+    } else if action == "RETRY_REMOTE" {
+        "RECORDED"
+    } else {
+        "NOT_REQUESTED"
+    };
 
-    Ok(json!({
-        "commandId":command_id,
-        "projectId":project_id,
-        "resultProjectId":project_id,
-        "finalStatus":"committed",
-        "message":if action == "CANCEL_JOB" { "已取消远程未知任务。" } else { "已将远程未知任务按失败处理。" }
-    }))
+    let mut response = project_command_response(&receipt);
+    response["message"] = json!(match action {
+        "RETRY_REMOTE" => "重试决定已记录，请查看故事方向的最新状态。",
+        "CANCEL_JOB" => "已取消远程未知任务。",
+        _ => "已将远程未知任务按失败处理。",
+    });
+    response["result"] = json!({"action":action,"retryStatus":retry_status});
+    Ok(response)
 }
 
 pub fn query_chapter_versions_impl(state: &KernelState, request: Value) -> Result<Value, String> {

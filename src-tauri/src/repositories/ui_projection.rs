@@ -158,10 +158,10 @@ pub fn decisions(
             let category = payload.get("category").and_then(Value::as_str).unwrap_or("项目事项");
             let priority = payload.get("priority").and_then(Value::as_str).unwrap_or("normal");
             Ok(json!({
-                "id":row.get::<_,String>(0)?,"title":payload.get("title").and_then(Value::as_str).unwrap_or(category),
+                "id":row.get::<_,String>(0)?,"decisionType":row.get::<_,String>(1)?,"title":payload.get("title").and_then(Value::as_str).unwrap_or(category),
                 "summary":row.get::<_,String>(3)?,"category":category,"priority":priority,
                 "status":if outcome == "OPEN" || outcome == "PENDING" { "pending" } else { "resolved" },
-                "createdAt":row.get::<_,String>(5)?,"recommendation":payload.get("recommendation"),"evidence":payload.get("evidence")
+                "createdAt":row.get::<_,String>(5)?,"recommendation":payload.get("recommendation"),"evidence":payload.get("evidence"),"allowedActions":payload.get("allowedActions")
             }))
         },
     )?;

@@ -24,11 +24,17 @@ async function load() {
   selectedId.value = items.value[0]?.id ?? ''
 }
 function setFilter(next: DecisionFilter) { filter.value = next }
-async function submit() {
+const actionLabels = {
+  RETRY_REMOTE: '重新尝试',
+  MARK_FAILED: '标记失败',
+  CANCEL_JOB: '取消任务'
+} as const
+const allowedActions = computed(() => selected.value?.allowedActions ?? [])
+async function submit(choice: 'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB') {
   if (!selected.value) return
   await store.runCommand(commandKey.value, {
     type: 'decision_submit',
-    payload: { decisionId: selected.value.id, choice: 'recommended', note: note.value }
+    payload: { decisionId: selected.value.id, choice, note: note.value }
   })
   note.value = ''
   await load()
@@ -65,7 +71,10 @@ watch(filter, load)
         </div>
         <label class="field section"><span class="field-label">补充意见</span><textarea v-model="note" class="textarea" placeholder="用读者语言描述你的要求" /></label>
         <CommandFeedback :state="state" />
-        <button v-if="selected.status === 'pending'" class="btn primary" @click="submit">采用建议并继续</button>
+        <div v-if="selected.status === 'pending' && allowedActions.length" class="button-row">
+          <button v-for="action in allowedActions" :key="action" class="btn" :class="{ primary: action === 'RETRY_REMOTE' }" @click="submit(action)">{{ actionLabels[action] }}</button>
+        </div>
+        <div v-else-if="selected.status === 'pending'" class="muted">请前往对应工作区完成这项决定。</div>
       </section>
     </div>
   </div>

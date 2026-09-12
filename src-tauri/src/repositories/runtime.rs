@@ -70,6 +70,62 @@ pub struct RecoverySummary {
 
 pub struct DurableJobService;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownDecisionResolution {
+    pub source_ref: String,
+    pub capability: String,
+}
+
+pub fn resolve_unknown_decision(
+    connection: &Connection,
+    project_id: &str,
+    decision_id: &str,
+    action: &str,
+    now: &str,
+) -> Result<UnknownDecisionResolution, RuntimeError> {
+    let row: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT decision_type,outcome,COALESCE(source_ref,'') FROM decisions WHERE project_id=?1 AND decision_id=?2",
+            libsql_rusqlite::params![project_id, decision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (decision_type, outcome, source_ref) = row.ok_or(RuntimeError::JobNotFound)?;
+    if decision_type != "UNKNOWN_REMOTE_OUTCOME"
+        || !matches!(outcome.as_str(), "OPEN" | "PENDING")
+        || decision_id != format!("decision:model-run:{source_ref}")
+    {
+        return Err(RuntimeError::UnknownRemoteOutcome);
+    }
+    let capability: String = connection
+        .query_row(
+            "SELECT capability FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+            libsql_rusqlite::params![project_id, source_ref],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(RuntimeError::JobNotFound)?;
+    if action == "RETRY_REMOTE" && capability != "GENERATE_STORY_DIRECTIONS" {
+        return Err(RuntimeError::UnknownRemoteOutcome);
+    }
+    let terminal_action = if action == "RETRY_REMOTE" {
+        "MARK_FAILED"
+    } else {
+        action
+    };
+    DurableModelRunner::resolve_unknown_terminal(connection, &source_ref, terminal_action, now)?;
+    if action == "RETRY_REMOTE" {
+        connection.execute(
+            "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE project_id=?2 AND decision_id=?3",
+            libsql_rusqlite::params![now, project_id, decision_id],
+        )?;
+    }
+    Ok(UnknownDecisionResolution {
+        source_ref,
+        capability,
+    })
+}
+
 pub fn pending_decision_count(
     connection: &Connection,
     project_id: &str,

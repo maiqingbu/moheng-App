@@ -169,14 +169,14 @@ fn decision_submit_retries_unknown_story_direction_in_the_same_project() {
 
     let revision = state.manager.overview(&project_id).unwrap().1;
     let request = json!({
-            "type":"decision_submit",
-            "commandId":"decision-retry-submit",
-            "idempotencyKey":"decision-retry-submit-key",
-            "projectId":project_id,
-            "expectedRevision":revision,
-            "requestedAt":NOW,
-            "payload":{"decisionId":decision_id,"choice":"recommended"}
-        });
+        "type":"decision_submit",
+        "commandId":"decision-retry-submit",
+        "idempotencyKey":"decision-retry-submit-key",
+        "projectId":project_id,
+        "expectedRevision":revision,
+        "requestedAt":NOW,
+        "payload":{"decisionId":decision_id,"choice":"recommended"}
+    });
     let result = execute_command_impl(&state, request.clone()).unwrap();
 
     assert_eq!(result["finalStatus"], "committed");
