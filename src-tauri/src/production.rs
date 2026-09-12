@@ -1286,7 +1286,12 @@ pub fn run_chapter_production(
         attempt_no: 1,
         repair_round: 0,
     };
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload});
+    let target_chinese_characters = request
+        .pointer("/payload/targetChineseCharacters")
+        .and_then(Value::as_i64)
+        .unwrap_or(1_800)
+        .clamp(800, 5_000);
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"targetChineseCharacters":target_chinese_characters});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
