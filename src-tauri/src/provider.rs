@@ -254,6 +254,7 @@ impl OpenAiCompatibleProvider {
             "temperature": 0
         });
         if Self::is_xiaomi_endpoint(endpoint) {
+            payload["temperature"] = json!(1.0);
             payload["thinking"] = json!({"type":"disabled"});
             payload["stream"] = json!(false);
             payload["max_completion_tokens"] = json!(16_384);
@@ -395,6 +396,7 @@ mod tests {
             },
         );
         assert!(payload.get("response_format").is_none());
+        assert_eq!(payload["temperature"], 1.0);
         assert_eq!(payload["thinking"]["type"], "disabled");
         assert_eq!(payload["stream"], false);
         assert_eq!(payload["max_completion_tokens"], 16_384);
