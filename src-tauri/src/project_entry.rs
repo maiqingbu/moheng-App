@@ -1251,9 +1251,12 @@ pub fn query_opening_ready(
         .and_then(Value::as_bool)
         == Some(true)
         && plan.is_some();
+    let opening_progress = project_entry::opening_progress(connection, project_id)
+        .map_err(|error| error.to_string())?;
     Ok(json!({
         "projectId":project_id,"ready":ready,"firstChapterPlan":plan.as_ref().map(|row| json!({"artifactId":row.artifact_id,"version":row.version,"payloadHash":row.payload_hash,"owner":"B07::PlanningOwner"})),
         "firstChapter":topology.as_ref().map(|item| json!({"bookId":item.book_id,"volumeId":item.volume_id,"chapterId":item.chapter_id})),
+        "openingProgress":serde_json::to_value(opening_progress).map_err(|error| error.to_string())?,
         "firstChapterGoal":"让主角面对一个必须主动回应的异常","firstThreeChapterPromise":"兑现一次局部机制回报并留下更深的问题","forbiddenReveals":["前三章不揭开机制来源"],"readerDesire":"看见主角如何用自己的选择承担机制代价。"
     }))
 }
