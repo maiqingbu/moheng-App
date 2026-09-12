@@ -244,6 +244,12 @@ impl OpenAiCompatibleProvider {
         endpoint.to_ascii_lowercase().contains("xiaomimimo.com")
     }
 
+    fn is_aliyun_maas_endpoint(endpoint: &str) -> bool {
+        endpoint
+            .to_ascii_lowercase()
+            .contains(".maas.aliyuncs.com/")
+    }
+
     fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
         let mut payload = json!({
             "model": request.model_id,
@@ -258,6 +264,10 @@ impl OpenAiCompatibleProvider {
             payload["thinking"] = json!({"type":"disabled"});
             payload["stream"] = json!(false);
             payload["max_completion_tokens"] = json!(16_384);
+        } else if Self::is_aliyun_maas_endpoint(endpoint) {
+            payload["enable_thinking"] = json!(false);
+            payload["stream"] = json!(false);
+            payload["max_tokens"] = json!(8_192);
         }
         payload
     }
@@ -462,6 +472,24 @@ mod tests {
             .unwrap();
         assert_eq!(digest.len(), 64);
         assert!(!digest.contains("sk-"));
+    }
+
+    #[test]
+    fn aliyun_maas_payload_disables_thinking_and_bounds_output() {
+        let payload = OpenAiCompatibleProvider::request_payload(
+            "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+            &ProviderRequest {
+                capability: "RENDER_CHAPTER".into(),
+                model_id: "qwen-flash".into(),
+                prompt: "bounded-input".into(),
+                timeout_ms: 1000,
+            },
+        );
+        assert_eq!(payload["enable_thinking"], false);
+        assert_eq!(payload["stream"], false);
+        assert_eq!(payload["max_tokens"], 8_192);
+        assert!(payload.get("thinking").is_none());
+        assert!(payload.get("max_completion_tokens").is_none());
     }
 
     #[test]
