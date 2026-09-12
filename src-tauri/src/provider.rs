@@ -254,7 +254,6 @@ impl OpenAiCompatibleProvider {
             "temperature": 0
         });
         if Self::is_xiaomi_endpoint(endpoint) {
-            payload["response_format"] = json!({"type":"json_object"});
             payload["thinking"] = json!({"type":"disabled"});
             payload["stream"] = json!(false);
             payload["max_completion_tokens"] = json!(16_384);
@@ -385,7 +384,7 @@ mod tests {
     use super::{OpenAiCompatibleProvider, ProviderRequest};
 
     #[test]
-    fn xiaomi_production_payload_enables_json_mode_and_disables_thinking() {
+    fn xiaomi_production_payload_uses_documented_text_mode_and_disables_thinking() {
         let payload = OpenAiCompatibleProvider::request_payload(
             "https://api.xiaomimimo.com/v1",
             &ProviderRequest {
@@ -395,9 +394,10 @@ mod tests {
                 timeout_ms: 1000,
             },
         );
-        assert_eq!(payload["response_format"]["type"], "json_object");
+        assert!(payload.get("response_format").is_none());
         assert_eq!(payload["thinking"]["type"], "disabled");
         assert_eq!(payload["stream"], false);
+        assert_eq!(payload["max_completion_tokens"], 16_384);
         assert_eq!(payload["messages"][0]["role"], "system");
         assert!(payload["messages"][0]["content"]
             .as_str()
