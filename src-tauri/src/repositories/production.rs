@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 pub enum ProductionRepositoryError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] libsql_rusqlite::Error),
+    #[error("serialization: {0}")]
+    Serialization(String),
 }
 
 pub struct ProductionRepository;
@@ -25,6 +27,11 @@ impl ProductionRepository {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0));
+        let opening_progress =
+            crate::repositories::project_entry::opening_progress(connection, project_id)
+                .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
+        let opening_progress = serde_json::to_value(opening_progress)
+            .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
         let job: Option<ProductionJobRow> = connection
             .query_row(
                 "SELECT job_id, COALESCE(current_stage,'IDLE'), chapter_id, status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, job_id DESC LIMIT 1",
@@ -268,7 +275,28 @@ impl ProductionRepository {
                 Ok(json!({"repairPlanId":row.get::<_,String>(0)?,"basedOnProjectRevision":row.get::<_,i64>(1)?,"diagnosis":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"findingRefs":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or_else(|_| json!([])),"targetAuthorityOwner":row.get::<_,String>(4)?,"proposedOperations":serde_json::from_str::<Value>(&row.get::<_,String>(5)?).unwrap_or_else(|_| json!([])),"affectedArtifacts":serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or_else(|_| json!([])),"affectedScopes":serde_json::from_str::<Value>(&row.get::<_,String>(7)?).unwrap_or_else(|_| json!([])),"riskLevel":row.get::<_,String>(8)?,"requiresBackup":row.get::<_,i64>(9)? != 0,"expectedPostconditions":serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or_else(|_| json!([])),"operationDigest":row.get::<_,String>(11)?,"status":row.get::<_,String>(12)?,"authorizationId":row.get::<_,Option<String>>(13)?,"consumedAt":row.get::<_,Option<String>>(14)?,"executionReceipt":execution_receipt}))
             },
         ).optional()?;
-        let next_chapter_projection = next_chapter.map(|(id, number, title, volume_id)| json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":if plan_projection.is_some() {"LONG_FORM"} else {"OPENING_BOOTSTRAP"}}));
+        let next_chapter_has_volume_plan = next_chapter
+            .as_ref()
+            .and_then(|(_, _, _, volume_id)| {
+                crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                    connection, project_id, volume_id,
+                )
+                .ok()
+                .flatten()
+            })
+            .is_some();
+        let next_chapter_projection = next_chapter.map(|(id, number, title, volume_id)| {
+            let execution_mode = if !next_chapter_has_volume_plan
+                && number <= crate::repositories::project_entry::OPENING_CHAPTER_COUNT
+            {
+                "OPENING_BOOTSTRAP"
+            } else if plan_projection.is_some() {
+                "LONG_FORM"
+            } else {
+                "OPENING_BOOTSTRAP"
+            };
+            json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode})
+        });
         let job_status = job.as_ref().map(|(_, _, _, status, _)| status.clone());
         let job_error = job
             .as_ref()
@@ -293,6 +321,7 @@ impl ProductionRepository {
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
             "readerDesire":quality.get("softAssessment").cloned().unwrap_or(Value::Null),
+            "openingProgress":opening_progress,
             "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
     }

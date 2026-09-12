@@ -1796,6 +1796,7 @@ pub fn run_chapter_production(
     let candidate_ref = effective_candidate_ref.clone();
     let final_ref = reference(&final_artifact);
     let canon_delta = extraction.canon_candidates.iter().map(|item| json!({
+        "entityId":item.entity_id,
         "factId":item.fact_id,
         "subjectId":item.subject_id,
         "predicate":item.predicate,
@@ -1807,6 +1808,8 @@ pub fn run_chapter_production(
             "chapterId":chapter_id,
             "eventId":item.event_type.as_ref().map(|_| format!("event:{}", item.fact_id)),
             "storyTime":item.story_time,
+            "canonicalName":item.canonical_name,
+            "entityType":item.entity_type,
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
             "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
@@ -1927,6 +1930,12 @@ struct EvidenceSpan {
 struct CanonCandidate {
     fact_id: String,
     subject_id: String,
+    #[serde(default)]
+    entity_id: Option<String>,
+    #[serde(default)]
+    canonical_name: Option<String>,
+    #[serde(default)]
+    entity_type: Option<String>,
     predicate: String,
     object_json: Value,
     authority_level: String,
@@ -2128,7 +2137,9 @@ fn validate_actual_extraction(
                 &candidate.subject_id,
             )
             .map_err(|error| error.to_string())?;
-        if !subject_exists {
+        let subject_created_in_commit =
+            candidate.entity_id.as_deref() == Some(candidate.subject_id.as_str());
+        if !subject_exists && !subject_created_in_commit {
             return Err("B08_CANON_SUBJECT_NOT_FOUND".into());
         }
         let current = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key(

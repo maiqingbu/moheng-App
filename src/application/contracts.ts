@@ -95,6 +95,15 @@ export interface OpeningReadyProjection {
   firstThreeChapterPromise: string
   forbiddenReveals: string[]
   readerDesire: string
+  openingProgress?: OpeningProgressProjection
+}
+
+export interface OpeningProgressProjection {
+  completed: number
+  total: number
+  currentChapter: number | null
+  previousCommitted: boolean
+  nextPrepared: boolean
 }
 
 export interface AssistantRepairPlan {
@@ -480,6 +489,7 @@ export interface ProductionCenterProjection {
   quality?: NarrativeQualityProjection | null
   tasteProfile?: NarrativeTasteProjection | null
   readerDesire?: { readerDesire?: string; qualityScore?: number } | null
+  openingProgress?: OpeningProgressProjection
 }
 
 export interface RepairWorkflowProjection {

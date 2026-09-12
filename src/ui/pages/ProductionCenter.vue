@@ -17,6 +17,7 @@ const lastCommand = ref('none')
 const commandState = computed(() => store.commandState(lastCommand.value))
 const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
 const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
+const openingProgress = computed(() => production.value?.openingProgress)
 const stageLabel = (value: unknown) => ({ OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
@@ -162,6 +163,7 @@ async function executeRepair() {
     <div class="metric-grid section">
       <MetricCard label="当前阶段" :value="production.jobStatus === 'FAILED' ? '生成失败' : stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />
       <MetricCard label="正式章节" :value="project.committedChapters" note="只有正式确认的正文会计入这里" />
+      <MetricCard label="黄金三章" :value="`第 ${openingProgress?.completed ?? 0} / ${openingProgress?.total ?? 3} 章`" :note="openingProgress?.currentChapter ? `当前第 ${openingProgress.currentChapter} 章` : '黄金三章已完成'" />
       <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
     </div>
@@ -169,6 +171,7 @@ async function executeRepair() {
     <div class="production-layout section">
       <section class="card pad">
         <div class="card-head"><div><h2 class="card-title">生产时间线</h2><p class="card-subtitle">上下文 → 规划 → 撰写 → 检查 → 准入 → 提交 → 后续安排</p></div></div>
+        <div v-if="openingProgress" class="task-row"><strong>黄金三章：第 {{ openingProgress.completed }} / {{ openingProgress.total }} 章</strong><span>当前第 {{ openingProgress.currentChapter ?? '—' }} 章 · 上一章{{ openingProgress.previousCommitted ? '已正式提交' : '尚无' }} · 下一章{{ openingProgress.nextPrepared ? '已准备' : '未准备' }}</span></div>
         <div class="timeline">
           <div v-for="item in production.timeline" :key="item.id" class="timeline-item" :class="item.status">
             <div class="timeline-marker">{{ item.status === 'done' ? '✓' : item.order }}</div>

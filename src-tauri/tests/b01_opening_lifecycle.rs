@@ -1,6 +1,6 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_context_manifest_impl, query_opening_ready_impl,
-    query_production_center_impl, query_story_directions_impl, KernelState,
+    execute_command_impl, query_opening_ready_impl, query_production_center_impl,
+    query_story_directions_impl, KernelState,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
@@ -126,15 +126,16 @@ impl ProductionModelGateway for B01Gateway {
 fn state() -> (KernelState, tempfile::TempDir) {
     let temp = tempfile::tempdir().expect("temp project directory");
     let root = temp.path().to_path_buf();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(root),
-        Arc::new(B01Gateway::new()),
-    );
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(root), Arc::new(B01Gateway::new()));
     (state, temp)
 }
 
 fn revision(state: &KernelState, project_id: &str) -> i64 {
-    state.manager.project_revision(project_id).expect("revision")
+    state
+        .manager
+        .project_revision(project_id)
+        .expect("revision")
 }
 
 fn command(
@@ -178,8 +179,17 @@ fn create_project_through_opening_ready(state: &KernelState) -> String {
         }),
     )
     .expect("create project");
-    let project_id = created["projectId"].as_str().expect("project id").to_owned();
-    command(state, &project_id, "b01:directions", "story_directions_generate", json!({}));
+    let project_id = created["projectId"]
+        .as_str()
+        .expect("project id")
+        .to_owned();
+    command(
+        state,
+        &project_id,
+        "b01:directions",
+        "story_directions_generate",
+        json!({}),
+    );
     let directions = query_story_directions_impl(
         state,
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":10}),
@@ -244,7 +254,10 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
             |row| row.get(0),
         )
         .expect("chapter count");
-    assert_eq!(chapter_count, 3, "opening ready must create all golden-three topology");
+    assert_eq!(
+        chapter_count, 3,
+        "opening ready must create all golden-three topology"
+    );
     let budget_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id IN (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3)",
@@ -280,8 +293,14 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
         .expect("production center");
         assert_eq!(center["openingProgress"]["completed"], expected_chapter - 1);
         assert_eq!(center["openingProgress"]["total"], 3);
-        assert_eq!(center["openingProgress"]["currentChapter"], expected_chapter);
-        assert_eq!(center["openingProgress"]["previousCommitted"], expected_chapter > 1);
+        assert_eq!(
+            center["openingProgress"]["currentChapter"],
+            expected_chapter
+        );
+        assert_eq!(
+            center["openingProgress"]["previousCommitted"],
+            expected_chapter > 1
+        );
         assert_eq!(center["openingProgress"]["nextPrepared"], true);
         assert_eq!(center["nextChapter"]["number"], expected_chapter);
         assert_eq!(center["nextChapter"]["executionMode"], "OPENING_BOOTSTRAP");
@@ -301,28 +320,37 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
             }),
         );
         assert_eq!(result["finalStatus"], "committed");
-        final_refs.push(result["finalChapterRef"]["artifactId"].as_str().unwrap().to_owned());
+        final_refs.push(
+            result["finalChapterRef"]["artifactId"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
 
         if expected_chapter == 2 {
-            let context = query_context_manifest_impl(
-                &state,
-                json!({
-                    "request":{
-                        "projectId":project_id,
-                        "scope":"CHAPTER",
-                        "chapterId":center["nextChapter"]["id"],
-                        "volumeId":center["nextChapter"]["volumeId"],
-                        "executionMode":"OPENING_BOOTSTRAP",
-                        "entityIds":[],
-                        "references":[]
-                    }
-                }),
-            )
-            .expect("chapter two context");
+            let connection = state
+                .manager
+                .open(&project_id, "", NOW)
+                .expect("context db");
+            let scope = json!({
+                "level":"CHAPTER",
+                "chapterId":center["nextChapter"]["id"]
+            })
+            .to_string();
+            let context_raw: String = connection
+                .query_row(
+                    "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ContextManifest' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
+                    [&project_id, &scope],
+                    |row| row.get(0),
+                )
+                .expect("chapter two context");
+            let context: Value = serde_json::from_str(&context_raw).expect("context json");
             let source_refs = context["narrativeStateSources"]
                 .as_array()
                 .expect("narrative state sources");
-            assert!(source_refs.iter().any(|source| source["ref"] == "fact:b01:door-open"));
+            assert!(source_refs
+                .iter()
+                .any(|source| source["ref"] == "fact:b01:door-open"));
         }
     }
 

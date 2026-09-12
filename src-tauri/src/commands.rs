@@ -974,7 +974,26 @@ fn narrative_state_from_request(
     let references = request_strings(request, "references");
     let reference_refs = references.iter().map(String::as_str).collect::<Vec<_>>();
     let chapter_id = request.get("chapterId").and_then(Value::as_str);
-    let (facts, facts_truncated) =
+    let opening_bootstrap =
+        request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
+    let previous_chapter_ids = if opening_bootstrap {
+        chapter_id
+            .map(|chapter| {
+                crate::repositories::narrative::NarrativeRepository::previous_committed_chapter_ids(
+                    connection, project_id, chapter, 2,
+                )
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let previous_chapter_refs = previous_chapter_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let (mut facts, mut facts_truncated) =
         crate::repositories::narrative::NarrativeRepository::current_canon_bounded(
             connection,
             project_id,
@@ -989,7 +1008,7 @@ fn narrative_state_from_request(
         100,
     )
     .map_err(|e| e.to_string())?;
-    let (knowledge, knowledge_truncated) =
+    let (mut knowledge, mut knowledge_truncated) =
         crate::repositories::narrative::NarrativeRepository::knowledge_for_entities_bounded(
             connection,
             project_id,
@@ -997,7 +1016,7 @@ fn narrative_state_from_request(
             100,
         )
         .map_err(|e| e.to_string())?;
-    let events = chapter_id
+    let (mut events, mut events_truncated) = chapter_id
         .map(|chapter| {
             crate::repositories::narrative::NarrativeRepository::canon_events(
                 connection, project_id, chapter, 100,
@@ -1005,6 +1024,7 @@ fn narrative_state_from_request(
         })
         .transpose()
         .map_err(|e| e.to_string())?
+        .map(|events| (events, false))
         .unwrap_or_default();
     let relations_truncated =
         crate::repositories::narrative::NarrativeRepository::has_more_relations(
@@ -1014,15 +1034,56 @@ fn narrative_state_from_request(
             100,
         )
         .map_err(|e| e.to_string())?;
-    let events_truncated = chapter_id
-        .map(|chapter| {
-            crate::repositories::narrative::NarrativeRepository::has_more_events(
-                connection, project_id, chapter, 100,
+    events_truncated = events_truncated
+        || chapter_id
+            .map(|chapter| {
+                crate::repositories::narrative::NarrativeRepository::has_more_events(
+                    connection, project_id, chapter, 100,
+                )
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+    if !previous_chapter_refs.is_empty() {
+        let (prior_facts, prior_facts_truncated) =
+            crate::repositories::narrative::NarrativeRepository::canon_facts_for_chapters_bounded(
+                connection,
+                project_id,
+                &previous_chapter_refs,
+                100,
             )
-        })
-        .transpose()
-        .map_err(|e| e.to_string())?
-        .unwrap_or(false);
+            .map_err(|e| e.to_string())?;
+        facts.extend(prior_facts);
+        let mut fact_ids = BTreeSet::new();
+        facts.retain(|fact| fact_ids.insert(fact.fact_id.clone()));
+        facts_truncated = facts_truncated || prior_facts_truncated;
+
+        let (prior_knowledge, prior_knowledge_truncated) =
+            crate::repositories::narrative::NarrativeRepository::knowledge_for_chapters_bounded(
+                connection,
+                project_id,
+                &previous_chapter_refs,
+                100,
+            )
+            .map_err(|e| e.to_string())?;
+        knowledge.extend(prior_knowledge);
+        let mut knowledge_ids = BTreeSet::new();
+        knowledge.retain(|item| knowledge_ids.insert(item.knowledge_id.clone()));
+        knowledge_truncated = knowledge_truncated || prior_knowledge_truncated;
+
+        let (prior_events, prior_events_truncated) =
+            crate::repositories::narrative::NarrativeRepository::canon_events_for_chapters_bounded(
+                connection,
+                project_id,
+                &previous_chapter_refs,
+                100,
+            )
+            .map_err(|e| e.to_string())?;
+        events.extend(prior_events);
+        let mut event_ids = BTreeSet::new();
+        events.retain(|event| event_ids.insert(event.event_id.clone()));
+        events_truncated = events_truncated || prior_events_truncated;
+    }
     let obligations_truncated =
         crate::repositories::narrative::NarrativeRepository::has_more_obligations(
             connection,
