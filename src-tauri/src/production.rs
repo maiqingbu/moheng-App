@@ -495,6 +495,20 @@ fn parse_provider_model_payload(value: Value) -> Result<Value, String> {
     if content.trim().is_empty() {
         return Err("P01_PROVIDER_EMPTY_CONTENT:message.content is empty".into());
     }
+    let content = content.trim();
+    let content = if let Some(fenced) = content.strip_prefix("```") {
+        let fenced = fenced
+            .strip_prefix("json")
+            .or_else(|| fenced.strip_prefix("JSON"))
+            .unwrap_or(fenced);
+        fenced
+            .trim_start()
+            .strip_suffix("```")
+            .map(str::trim)
+            .unwrap_or(content)
+    } else {
+        content
+    };
     serde_json::from_str(content).map_err(|error| format!("P01_MODEL_JSON_INVALID:{error}"))
 }
 
@@ -2159,6 +2173,19 @@ fn semantic_windows_overlap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_payload_parser_accepts_a_json_code_fence_without_accepting_extra_text() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "```json\n{\"ok\":true}\n```"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload(value).unwrap(),
+            json!({"ok": true})
+        );
+    }
 
     #[test]
     fn evidence_ranges_are_bounded_by_actual_candidate_text() {

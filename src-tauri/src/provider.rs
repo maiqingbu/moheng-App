@@ -272,6 +272,14 @@ impl OpenAiCompatibleProvider {
         headers
     }
 
+    fn curl_metadata<'a>(stderr: &'a str, label: &str) -> Option<&'a str> {
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn request_payload_digest(
         &self,
         request: &ProviderRequest,
@@ -308,7 +316,9 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             .arg("--max-time")
             .arg(timeout_seconds.to_string())
             .arg("--write-out")
-            .arg("\nP01_HTTP_STATUS:%{http_code}")
+            .arg(
+                "%{stderr}P01_HTTP_STATUS:%{http_code}\nP01_CONTENT_TYPE:%{content_type}\nP01_RESPONSE_BYTES:%{size_download}\n",
+            )
             .arg(&url)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -316,9 +326,8 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?
             .wait_with_output()
             .map_err(|error| ProviderError::new(ProviderErrorKind::Transport, error.to_string()))?;
-        let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        let marker = "P01_HTTP_STATUS:";
-        let (body, status) = raw.rsplit_once(marker).ok_or_else(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let status = Self::curl_metadata(&stderr, "P01_HTTP_STATUS:").ok_or_else(|| {
             if output.status.code() == Some(28) {
                 ProviderError::new(ProviderErrorKind::Timeout, "provider request timed out")
             } else {
@@ -367,11 +376,15 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 "provider rejected request",
             ));
         }
-        // `curl --write-out` adds the status delimiter, not part of the
-        // provider body.  Remove only that delimiter's leading newline; do
-        // not trim the provider payload, because its exact bytes are the
-        // durable replay/audit input.
-        let raw_response = body.strip_suffix('\n').unwrap_or(body).to_string();
+        let raw_response = String::from_utf8_lossy(&output.stdout).to_string();
+        if raw_response.trim().is_empty() {
+            eprintln!(
+                "P01_PROVIDER_EMPTY_BODY http_status={} content_type={} response_bytes={}",
+                status,
+                Self::curl_metadata(&stderr, "P01_CONTENT_TYPE:").unwrap_or("unknown"),
+                Self::curl_metadata(&stderr, "P01_RESPONSE_BYTES:").unwrap_or("unknown"),
+            );
+        }
         Ok(ProviderResponse {
             raw_response,
             usage: ProviderUsage::default(),
@@ -383,6 +396,27 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
 #[cfg(test)]
 mod tests {
     use super::{OpenAiCompatibleProvider, ProviderRequest};
+
+    #[test]
+    fn curl_metadata_extracts_safe_response_facts() {
+        let stderr = "curl: note\nP01_HTTP_STATUS:200\nP01_CONTENT_TYPE:application/json\nP01_RESPONSE_BYTES:42\n";
+        assert_eq!(
+            OpenAiCompatibleProvider::curl_metadata(stderr, "P01_HTTP_STATUS:"),
+            Some("200")
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::curl_metadata(stderr, "P01_CONTENT_TYPE:"),
+            Some("application/json")
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::curl_metadata(stderr, "P01_RESPONSE_BYTES:"),
+            Some("42")
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::curl_metadata(stderr, "P01_API_KEY:"),
+            None
+        );
+    }
 
     #[test]
     fn xiaomi_production_payload_uses_documented_text_mode_and_disables_thinking() {
