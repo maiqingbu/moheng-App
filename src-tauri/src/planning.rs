@@ -73,6 +73,20 @@ pub fn normalize_chapter_plan_model_output(
                 *item = json!({"slotNo":index + 1,"objective":objective,"tentative":true});
             }
         }
+        items.truncate(8);
+        let fallbacks = [
+            "根据本章结果重新评估下一步行动。",
+            "保持长期悬念，并为后续冲突留出空间。",
+            "让新的选择产生可验证的叙事后果。",
+        ];
+        while items.len() < 3 {
+            let index = items.len();
+            items.push(json!({
+                "slotNo":index + 1,
+                "objective":fallbacks[index],
+                "tentative":true
+            }));
+        }
     }
     if triggered_thread_refs.is_empty()
         && plan
@@ -1060,6 +1074,12 @@ mod tests {
             aliased["horizonPreview"][0],
             json!({"slotNo":1,"objective":"追查线索","tentative":true})
         );
+        assert_eq!(aliased["horizonPreview"].as_array().unwrap().len(), 3);
+        assert!(aliased["horizonPreview"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|slot| slot["tentative"] == true));
     }
 
     #[test]
