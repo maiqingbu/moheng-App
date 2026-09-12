@@ -340,6 +340,16 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 "provider status invalid",
             )
         })?;
+        let content_type = Self::curl_metadata(&stderr, "P01_CONTENT_TYPE:").unwrap_or("unknown");
+        let response_bytes =
+            Self::curl_metadata(&stderr, "P01_RESPONSE_BYTES:").unwrap_or("unknown");
+        let request_payload_digest = self
+            .request_payload_digest(request)
+            .unwrap_or_else(|_| "unavailable".into());
+        eprintln!(
+            "P01_PROVIDER_RESPONSE http_status={} content_type={} response_bytes={} request_payload_digest={}",
+            status, content_type, response_bytes, request_payload_digest
+        );
         if status == 0 {
             if output.status.code() == Some(28) {
                 return Err(ProviderError::new(
@@ -380,9 +390,7 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
         if raw_response.trim().is_empty() {
             eprintln!(
                 "P01_PROVIDER_EMPTY_BODY http_status={} content_type={} response_bytes={}",
-                status,
-                Self::curl_metadata(&stderr, "P01_CONTENT_TYPE:").unwrap_or("unknown"),
-                Self::curl_metadata(&stderr, "P01_RESPONSE_BYTES:").unwrap_or("unknown"),
+                status, content_type, response_bytes,
             );
         }
         Ok(ProviderResponse {
