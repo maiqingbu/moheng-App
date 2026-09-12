@@ -1173,6 +1173,63 @@ impl DurableModelRunner {
         Self::execute(connection, transport, spec, now)
     }
 
+    pub fn resolve_unknown_terminal(
+        connection: &Connection,
+        model_run_id: &str,
+        action: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        if !matches!(action, "MARK_FAILED" | "CANCEL_JOB") {
+            return Err(RuntimeError::UnknownRemoteOutcome);
+        }
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [model_run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RuntimeError::JobNotFound)?;
+        if status != "UNKNOWN_REMOTE_OUTCOME" {
+            return Err(RuntimeError::InvalidTransition(
+                status,
+                "explicit-unknown-decision".into(),
+            ));
+        }
+        let project_id: String = connection.query_row(
+            "SELECT project_id FROM model_runs WHERE model_run_id=?1",
+            [model_run_id],
+            |row| row.get(0),
+        )?;
+        let job_status = if action == "CANCEL_JOB" {
+            "CANCELLED"
+        } else {
+            "FAILED"
+        };
+        resolve_unknown_responsibility(connection, model_run_id, now)?;
+        connection.execute(
+            "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
+            libsql_rusqlite::params![now, model_run_id],
+        )?;
+        connection.execute(
+            "UPDATE decisions SET outcome=?1, updated_at=?2 WHERE decision_id=?3",
+            libsql_rusqlite::params![action, now, format!("decision:model-run:{model_run_id}")],
+        )?;
+        connection.execute(
+            "UPDATE jobs SET status=?1, updated_at=?2 WHERE project_id=?3 AND job_id=(SELECT job_id FROM model_runs WHERE model_run_id=?4)",
+            libsql_rusqlite::params![job_status, now, project_id, model_run_id],
+        )?;
+        if let Some(job_id) = connection.query_row(
+            "SELECT job_id FROM model_runs WHERE model_run_id=?1",
+            [model_run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )? {
+            DurableJobService::release_lease(connection, &project_id, &job_id, now)?;
+        }
+        DurableJobService::reconcile_runtime_projection(connection, &project_id, now)?;
+        Ok(())
+    }
+
     pub fn resolve_unknown<T: ModelTransport>(
         connection: &Connection,
         model_run_id: &str,
@@ -1244,24 +1301,7 @@ impl DurableModelRunner {
                 result
             }
             "MARK_FAILED" | "CANCEL_JOB" => {
-                let job_status = if action == "CANCEL_JOB" {
-                    "CANCELLED"
-                } else {
-                    "FAILED"
-                };
-                resolve_unknown_responsibility(connection, model_run_id, now)?;
-                connection.execute(
-                    "UPDATE model_runs SET status='FAILED', updated_at=?1 WHERE model_run_id=?2",
-                    libsql_rusqlite::params![now, model_run_id],
-                )?;
-                connection.execute(
-                    "UPDATE decisions SET outcome=?1, updated_at=?2 WHERE decision_id=?3",
-                    libsql_rusqlite::params![action, now, decision_id],
-                )?;
-                connection.execute(
-                    "UPDATE jobs SET status=?1, updated_at=?2 WHERE job_id=(SELECT job_id FROM model_runs WHERE model_run_id=?3)",
-                    libsql_rusqlite::params![job_status, now, model_run_id],
-                )?;
+                Self::resolve_unknown_terminal(connection, model_run_id, action, now)?;
                 Ok(ModelRunOutcome {
                     status: "FAILED".into(),
                     parsed: None,

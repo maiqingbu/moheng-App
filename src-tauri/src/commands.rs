@@ -17,7 +17,9 @@ use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use crate::provider::ProviderAdapter;
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
-use crate::runtime::{pending_decision_count, DurableJobService, JobSpec, SecretStore};
+use crate::runtime::{
+    pending_decision_count, DurableJobService, DurableModelRunner, JobSpec, SecretStore,
+};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -673,6 +675,115 @@ pub fn query_decisions_impl(state: &KernelState, request: Value) -> Result<Value
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
         .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_decision_submit(
+    state: &KernelState,
+    request: &Value,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    let decision_id = request
+        .pointer("/payload/decisionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "IPC_INVALID:payload.decisionId".to_string())?;
+    let choice = request
+        .pointer("/payload/choice")
+        .and_then(Value::as_str)
+        .unwrap_or("recommended");
+    let action = match choice {
+        "recommended" => "RETRY_REMOTE",
+        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
+        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
+    };
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let (decision_type, outcome, source_ref): (String, String, String) = handle
+        .query_row(
+            "SELECT decision_type,outcome,COALESCE(source_ref,'') FROM decisions WHERE project_id=?1 AND decision_id=?2",
+            libsql_rusqlite::params![project_id, decision_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if decision_type != "UNKNOWN_REMOTE_OUTCOME" || !matches!(outcome.as_str(), "OPEN" | "PENDING")
+    {
+        return Err("UNKNOWN_REMOTE_OUTCOME decision is no longer open".into());
+    }
+    let capability: String = handle
+        .query_row(
+            "SELECT capability FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+            libsql_rusqlite::params![project_id, source_ref],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if action == "RETRY_REMOTE" && capability != "GENERATE_STORY_DIRECTIONS" {
+        return Err("UNKNOWN_REMOTE_OUTCOME retry is not wired for this capability".into());
+    }
+    let terminal_action = if action == "RETRY_REMOTE" {
+        "MARK_FAILED"
+    } else {
+        action
+    };
+    DurableModelRunner::resolve_unknown_terminal(
+        &handle,
+        &source_ref,
+        terminal_action,
+        requested_at,
+    )
+    .map_err(|error| error.to_string())?;
+    if action == "RETRY_REMOTE" {
+        handle
+            .execute(
+                "UPDATE decisions SET outcome='RETRY_REMOTE', updated_at=?1 WHERE project_id=?2 AND decision_id=?3",
+                libsql_rusqlite::params![requested_at, project_id, decision_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    drop(handle);
+
+    if action == "RETRY_REMOTE" {
+        let adjustment = request
+            .pointer("/payload/note")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let retry_request = json!({
+            "type":"pitch_regenerate",
+            "commandId":command_id,
+            "idempotencyKey":idempotency_key,
+            "projectId":project_id,
+            "expectedRevision":expected_revision,
+            "requestedAt":requested_at,
+            "payload":{"adjustment":adjustment,"regeneratePitches":true}
+        });
+        return execute_b11_command(
+            state,
+            &retry_request,
+            "pitch_regenerate",
+            project_id,
+            command_id,
+            idempotency_key,
+            requested_at,
+            expected_revision,
+            digest,
+        );
+    }
+
+    Ok(json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "resultProjectId":project_id,
+        "finalStatus":"committed",
+        "message":if action == "CANCEL_JOB" { "已取消远程未知任务。" } else { "已将远程未知任务按失败处理。" }
+    }))
 }
 
 pub fn query_chapter_versions_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -4903,6 +5014,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         "settings_save" | "global_settings_save" => {
             let id = project_id;
             save_provider_settings(
+                state,
+                &request,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
+            )
+        }
+        "decision_submit" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_decision_submit(
                 state,
                 &request,
                 id,

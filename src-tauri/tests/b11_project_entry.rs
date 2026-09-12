@@ -132,6 +132,80 @@ fn create_idea_fixture(state: &KernelState, command_id: &str) -> String {
     project_id
 }
 
+#[test]
+fn decision_submit_retries_unknown_story_direction_in_the_same_project() {
+    let state = state();
+    let created = execute_command_impl(&state, idea_request("decision-retry-entry")).unwrap();
+    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let job_id = "job:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let model_run_id = "mr:bbbbbbbbbbbbbbbbbbbbbbbb";
+    let decision_id = format!("decision:model-run:{model_run_id}");
+    connection
+        .execute(
+            "INSERT INTO jobs(job_id,project_id,job_type,status,current_stage,attempt_no,repair_round,created_at,updated_at) VALUES (?1,?2,'BOOK','WAITING_DECISION','ENTRY',0,0,?3,?3)",
+            libsql_rusqlite::params![job_id, project_id, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO model_runs(model_run_id,project_id,job_id,provider,model,idempotency_key,capability,attempt_no,repair_round,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES (?1,?2,?3,'fixture-provider','fixture-model','decision-retry-key','GENERATE_STORY_DIRECTIONS',1,0,1,0,'UNKNOWN_REMOTE_OUTCOME',?4,?4)",
+            libsql_rusqlite::params![model_run_id, project_id, job_id, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO decisions(decision_id,project_id,decision_type,outcome,reason,source_ref,payload_json,created_at,updated_at) VALUES (?1,?2,'UNKNOWN_REMOTE_OUTCOME','OPEN','remote result is unknown',?3,?4,?5,?5)",
+            libsql_rusqlite::params![
+                decision_id,
+                project_id,
+                model_run_id,
+                json!({"allowedActions":["RETRY_REMOTE","MARK_FAILED","CANCEL_JOB"]}).to_string(),
+                NOW
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let revision = state.manager.overview(&project_id).unwrap().1;
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"decision_submit",
+            "commandId":"decision-retry-submit",
+            "idempotencyKey":"decision-retry-submit-key",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"decisionId":decision_id,"choice":"recommended"}
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE decision_id=?1",
+                [&decision_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "RETRY_REMOTE"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProjectPitch' AND artifact_status='COMMITTED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+}
+
 fn market_request(command_id: &str, material: &str) -> serde_json::Value {
     json!({
         "type":"project_create_from_market",
