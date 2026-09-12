@@ -1,13 +1,16 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_story_directions_impl, KernelState,
 };
+use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
+use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const NOW: &str = "2026-09-12T06:00:00Z";
@@ -66,7 +69,18 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         .as_millis();
     let prefix = format!("real-qwen-three-chapters:{run}");
     let title = format!("Harness 真实三章验收 {run}");
-    let state = KernelState::new(paths.clone());
+    let gateway = ConfiguredProductionGateway::new(
+        ProviderConfig {
+            provider_id: "openai-compatible".into(),
+            model_id: EXPECTED_MODEL.into(),
+            endpoint: EXPECTED_ENDPOINT.into(),
+            enabled: true,
+            timeout_ms: 120_000,
+        },
+        Arc::new(OpenAiCompatibleProvider::new(EXPECTED_ENDPOINT)),
+        Arc::new(secret_store),
+    );
+    let state = KernelState::with_production_gateway(paths.clone(), Arc::new(gateway));
 
     let created = execute(
         &state,
