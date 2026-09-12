@@ -82,120 +82,165 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
     );
     let state = KernelState::with_production_gateway(paths.clone(), Arc::new(gateway));
 
-    let created = execute(
-        &state,
-        json!({
-            "type":"project_create_from_idea",
-            "commandId":format!("{prefix}:create"),
-            "idempotencyKey":format!("{prefix}:create:key"),
-            "requestedAt":NOW,
-            "payload":{
-                "title":title,
-                "idea":"一名负责修复城市记忆档案的年轻调查员，发现每修复一段被篡改的记忆，现实中就会失去一个与自己有关的真实痕迹。前三章必须完成首次委托、发现代价、主动追查幕后来源。",
-                "platform":"长篇网络小说",
-                "mode":"DIRECTOR",
-                "tags":["都市悬疑","成长","记忆谜案"],
-                "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不提前揭露幕后真凶"
-            }
-        }),
-    );
-    let project_id = created["projectId"].as_str().unwrap().to_owned();
+    let (project_id, chapter_ids) = if let Ok(project_id) = std::env::var("MOHENG_REAL_PROJECT_ID")
+    {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let mut statement = connection
+            .prepare("SELECT job_id FROM jobs WHERE project_id=?1 AND status IN ('RUNNING','PAUSED','BLOCKED') ORDER BY created_at,job_id")
+            .unwrap();
+        let active_jobs = statement
+            .query_map([&project_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(statement);
+        drop(connection);
+        for (index, job_id) in active_jobs.iter().enumerate() {
+            execute(
+                &state,
+                json!({
+                    "type":"production_cancel",
+                    "commandId":format!("{prefix}:cancel-stale:{index}"),
+                    "idempotencyKey":format!("{prefix}:cancel-stale:{index}:key"),
+                    "projectId":project_id,
+                    "expectedRevision":current_revision(&state, &project_id),
+                    "requestedAt":NOW,
+                    "payload":{"jobId":job_id}
+                }),
+            );
+        }
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let mut statement = connection
+            .prepare("SELECT chapter_id FROM chapters WHERE project_id=?1 ORDER BY chapter_no")
+            .unwrap();
+        let chapter_ids = statement
+            .query_map([&project_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            chapter_ids.len(),
+            3,
+            "resume project must contain three planned chapters"
+        );
+        (project_id, chapter_ids)
+    } else {
+        let created = execute(
+            &state,
+            json!({
+                "type":"project_create_from_idea",
+                "commandId":format!("{prefix}:create"),
+                "idempotencyKey":format!("{prefix}:create:key"),
+                "requestedAt":NOW,
+                "payload":{
+                    "title":title,
+                    "idea":"一名负责修复城市记忆档案的年轻调查员，发现每修复一段被篡改的记忆，现实中就会失去一个与自己有关的真实痕迹。前三章必须完成首次委托、发现代价、主动追查幕后来源。",
+                    "platform":"长篇网络小说",
+                    "mode":"DIRECTOR",
+                    "tags":["都市悬疑","成长","记忆谜案"],
+                    "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不提前揭露幕后真凶"
+                }
+            }),
+        );
+        let project_id = created["projectId"].as_str().unwrap().to_owned();
 
-    execute(
-        &state,
-        json!({
-            "type":"story_directions_generate",
-            "commandId":format!("{prefix}:directions"),
-            "idempotencyKey":format!("{prefix}:directions:key"),
-            "projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),
-            "requestedAt":NOW,
-            "payload":{}
-        }),
-    );
-    let directions = query_story_directions_impl(
-        &state,
-        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
-    )
-    .unwrap();
-    let pitches = directions["pitches"].as_array().unwrap();
-    assert_eq!(pitches.len(), 3);
-    let pitch_id = pitches[0]["id"].as_str().unwrap();
+        execute(
+            &state,
+            json!({
+                "type":"story_directions_generate",
+                "commandId":format!("{prefix}:directions"),
+                "idempotencyKey":format!("{prefix}:directions:key"),
+                "projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),
+                "requestedAt":NOW,
+                "payload":{}
+            }),
+        );
+        let directions = query_story_directions_impl(
+            &state,
+            json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+        )
+        .unwrap();
+        let pitches = directions["pitches"].as_array().unwrap();
+        assert_eq!(pitches.len(), 3);
+        let pitch_id = pitches[0]["id"].as_str().unwrap();
 
-    execute(
-        &state,
-        json!({
-            "type":"pitch_select",
-            "commandId":format!("{prefix}:select"),
-            "idempotencyKey":format!("{prefix}:select:key"),
-            "projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),
-            "requestedAt":NOW,
-            "payload":{"pitchIds":[pitch_id],"mode":"single"}
-        }),
-    );
-    execute(
-        &state,
-        json!({
-            "type":"story_setup_save",
-            "commandId":format!("{prefix}:setup"),
-            "idempotencyKey":format!("{prefix}:setup:key"),
-            "projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),
-            "requestedAt":NOW,
-            "payload":{"storyCore":{
-                "protagonist":"城市记忆档案调查员沈砚",
-                "desire":"找回被人从公共档案中抹去的姐姐",
-                "mechanism":"修复被篡改的记忆会同步抹去修复者的一段现实痕迹",
-                "conflict":"维护城市稳定的档案局要求掩盖真相，沈砚必须在自我消失前留下证据",
-                "readerPromise":"每章解决一个可验证的小谜题，同时让失去痕迹的代价持续升级",
-                "forbiddenReveals":["前三章不得揭晓最终幕后者","不得证明姐姐已经死亡"]
-            }}
-        }),
-    );
-    execute(
-        &state,
-        json!({
-            "type":"opening_ready",
-            "commandId":format!("{prefix}:opening"),
-            "idempotencyKey":format!("{prefix}:opening:key"),
-            "projectId":project_id,
-            "expectedRevision":current_revision(&state, &project_id),
-            "requestedAt":NOW,
-            "payload":{"approved":true}
-        }),
-    );
+        execute(
+            &state,
+            json!({
+                "type":"pitch_select",
+                "commandId":format!("{prefix}:select"),
+                "idempotencyKey":format!("{prefix}:select:key"),
+                "projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),
+                "requestedAt":NOW,
+                "payload":{"pitchIds":[pitch_id],"mode":"single"}
+            }),
+        );
+        execute(
+            &state,
+            json!({
+                "type":"story_setup_save",
+                "commandId":format!("{prefix}:setup"),
+                "idempotencyKey":format!("{prefix}:setup:key"),
+                "projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),
+                "requestedAt":NOW,
+                "payload":{"storyCore":{
+                    "protagonist":"城市记忆档案调查员沈砚",
+                    "desire":"找回被人从公共档案中抹去的姐姐",
+                    "mechanism":"修复被篡改的记忆会同步抹去修复者的一段现实痕迹",
+                    "conflict":"维护城市稳定的档案局要求掩盖真相，沈砚必须在自我消失前留下证据",
+                    "readerPromise":"每章解决一个可验证的小谜题，同时让失去痕迹的代价持续升级",
+                    "forbiddenReveals":["前三章不得揭晓最终幕后者","不得证明姐姐已经死亡"]
+                }}
+            }),
+        );
+        execute(
+            &state,
+            json!({
+                "type":"opening_ready",
+                "commandId":format!("{prefix}:opening"),
+                "idempotencyKey":format!("{prefix}:opening:key"),
+                "projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),
+                "requestedAt":NOW,
+                "payload":{"approved":true}
+            }),
+        );
 
-    let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let (volume_id, first_chapter_id): (String, String) = connection
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let (volume_id, first_chapter_id): (String, String) = connection
         .query_row(
             "SELECT v.volume_id,c.chapter_id FROM volumes v JOIN chapters c ON c.project_id=v.project_id AND c.volume_id=v.volume_id WHERE v.project_id=?1 AND c.chapter_no=1",
             [&project_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let mut chapter_ids = vec![first_chapter_id];
-    for chapter_no in 2..=3 {
-        let chapter_id = StableIdentityFactory::from_command(
-            StableIdKind::Chapter,
-            &format!("{prefix}:chapter:{chapter_no}"),
-        )
-        .unwrap();
-        connection
+        let mut chapter_ids = vec![first_chapter_id];
+        for chapter_no in 2..=3 {
+            let chapter_id = StableIdentityFactory::from_command(
+                StableIdKind::Chapter,
+                &format!("{prefix}:chapter:{chapter_no}"),
+            )
+            .unwrap();
+            connection
             .execute(
                 "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'IMPORTANT','PLANNED',0,?6,?6)",
                 libsql_rusqlite::params![chapter_id, project_id, volume_id, chapter_no, format!("第{chapter_no}章"), NOW],
             )
             .unwrap();
-        connection
+            connection
             .execute(
                 "INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'IMPORTANT',12,500,?4)",
                 libsql_rusqlite::params![format!("budget:{project_id}:opening:{chapter_no}"), project_id, chapter_id, NOW],
             )
             .unwrap();
-        chapter_ids.push(chapter_id);
-    }
-    drop(connection);
+            chapter_ids.push(chapter_id);
+        }
+        drop(connection);
+        (project_id, chapter_ids)
+    };
 
     for (index, chapter_id) in chapter_ids.iter().enumerate() {
         let chapter_goal = [
