@@ -15,7 +15,19 @@ use std::collections::BTreeSet;
 pub fn normalize_chapter_plan_model_output(
     mut plan: Value,
     triggered_thread_refs: &[String],
+    authoritative_bindings: &Value,
 ) -> Value {
+    plan["payloadSchema"] = json!("chapter-plan.r1");
+    for field in [
+        "chapterId",
+        "compiledFromProjectRevision",
+        "compiledFromStateDigest",
+        "contextManifestRef",
+    ] {
+        if let Some(value) = authoritative_bindings.get(field) {
+            plan[field] = value.clone();
+        }
+    }
     for field in ["requiredStateOutcomes", "forbiddenTransitions"] {
         if let Some(items) = plan.get_mut(field).and_then(Value::as_array_mut) {
             for item in items {
@@ -973,7 +985,16 @@ mod tests {
             "continuityActions":["继续追查"],
             "horizonPreview":["发现代价","主动追查","锁定线索"]
         });
-        let normalized = normalize_chapter_plan_model_output(plan, &[]);
+        let bindings = json!({
+            "chapterId":"chapter:bound",
+            "compiledFromProjectRevision":7,
+            "compiledFromStateDigest":"a".repeat(64),
+            "contextManifestRef":{"artifactId":"context:bound","version":1,"payloadHash":"b".repeat(64)}
+        });
+        let normalized = normalize_chapter_plan_model_output(plan, &[], &bindings);
+        assert_eq!(normalized["payloadSchema"], "chapter-plan.r1");
+        assert_eq!(normalized["chapterId"], "chapter:bound");
+        assert_eq!(normalized["compiledFromProjectRevision"], 7);
         assert_eq!(
             normalized["requiredStateOutcomes"][0]["kind"],
             "MODEL_STATED"
@@ -989,6 +1010,7 @@ mod tests {
         let with_required_thread = normalize_chapter_plan_model_output(
             json!({"continuityActions":["不能推断对应线程"]}),
             &["thread:required".into()],
+            &bindings,
         );
         assert_eq!(
             with_required_thread["continuityActions"][0],

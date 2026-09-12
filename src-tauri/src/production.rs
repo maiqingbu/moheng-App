@@ -1111,7 +1111,7 @@ pub fn run_chapter_production(
             &provider_profile,
             &planning_spec,
             "PLAN_STRATEGY",
-            planning_input,
+            planning_input.clone(),
             &now,
         )?;
         let plan_payload = planning_result
@@ -1125,6 +1125,7 @@ pub fn run_chapter_production(
                 .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
                 .map(|thread| thread.thread_id.clone())
                 .collect::<Vec<_>>(),
+            &planning_input,
         );
         crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
             .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
