@@ -1585,6 +1585,7 @@ pub fn run_chapter_production(
     let audit_payload = audit_result
         .parsed
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+    let audit_payload = normalize_audit_model_output(audit_payload, &effective_body);
     let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_CONTRACT:{error}"))?;
     validate_actual_extraction(
@@ -1995,6 +1996,75 @@ struct AuditExtraction {
     next_chapter_recompile_required: bool,
 }
 
+fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
+    let body_chars = body.chars().collect::<Vec<_>>();
+    let normalize_evidence = |value: &Value| -> Option<Value> {
+        let start = value.get("start")?.as_u64()? as usize;
+        let end = value.get("end")?.as_u64()? as usize;
+        if start >= end || end > body_chars.len() {
+            return None;
+        }
+        let quote = body_chars[start..end].iter().collect::<String>();
+        Some(json!({"start":start,"end":end,"quote":quote}))
+    };
+    let candidate_requirements = [
+        (
+            "canonCandidates",
+            &[
+                "factId",
+                "subjectId",
+                "predicate",
+                "objectJson",
+                "authorityLevel",
+            ][..],
+        ),
+        (
+            "knowledgeCandidates",
+            &["knowledgeId", "knowerId", "factId", "epistemicState"][..],
+        ),
+        ("continuityCandidates", &["threadRef", "disposition"][..]),
+        ("taskProgressCandidates", &["taskId", "status"][..]),
+    ];
+    let mut dropped = serde_json::Map::new();
+    for (field, required) in candidate_requirements {
+        let Some(items) = payload.get_mut(field).and_then(Value::as_array_mut) else {
+            payload[field] = json!([]);
+            continue;
+        };
+        let before = items.len();
+        items.retain_mut(|item| {
+            let Some(object) = item.as_object_mut() else {
+                return false;
+            };
+            if !required.iter().all(|key| object.contains_key(*key)) {
+                return false;
+            }
+            let Some(evidence) = object.get("evidence").and_then(&normalize_evidence) else {
+                return false;
+            };
+            object.insert("evidence".into(), evidence);
+            true
+        });
+        dropped.insert(field.into(), json!(before - items.len()));
+    }
+    let ranges = payload
+        .get("evidenceRanges")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(&normalize_evidence)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    payload["evidenceRanges"] = json!(ranges);
+    payload["normalization"] = json!({
+        "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
+        "droppedCandidates":dropped
+    });
+    payload
+}
+
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
     validate_candidate_evidence_range(body, evidence.start, evidence.end)?;
     let actual = body
@@ -2208,5 +2278,27 @@ mod tests {
         assert!(validate_candidate_evidence_range("你好世界", 0, 4).is_ok());
         assert!(validate_candidate_evidence_range("你好世界", 3, 2).is_err());
         assert!(validate_candidate_evidence_range("你好世界", 0, 5).is_err());
+    }
+
+    #[test]
+    fn audit_normalization_drops_unbound_authority_candidates_and_rebuilds_exact_quotes() {
+        let payload = json!({
+            "qualityFindings":[{"description":"节奏清晰"}],
+            "canonCandidates":[{"type":"EVENT","content":"无法绑定正式实体"}],
+            "knowledgeCandidates":[{"topic":"未知事实","detail":"无法绑定知情者"}],
+            "continuityCandidates":[{"entity":"沈砚","stateChange":"继续追查"}],
+            "taskProgressCandidates":[{"taskId":"task:outside","status":"ACTIVE"}],
+            "evidenceRanges":[{"start":0,"end":2,"context":"不可信模型摘录"}]
+        });
+        let normalized = normalize_audit_model_output(payload, "你好世界");
+        assert_eq!(normalized["canonCandidates"], json!([]));
+        assert_eq!(normalized["knowledgeCandidates"], json!([]));
+        assert_eq!(normalized["continuityCandidates"], json!([]));
+        assert_eq!(normalized["taskProgressCandidates"], json!([]));
+        assert_eq!(normalized["evidenceRanges"][0]["quote"], "你好");
+        assert_eq!(
+            normalized["normalization"]["policy"],
+            "DROP_UNBOUND_AUTHORITY_CANDIDATES"
+        );
     }
 }
