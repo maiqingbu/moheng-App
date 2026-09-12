@@ -31,23 +31,45 @@ pub fn normalize_chapter_plan_model_output(
     for field in ["requiredStateOutcomes", "forbiddenTransitions"] {
         if let Some(items) = plan.get_mut(field).and_then(Value::as_array_mut) {
             for item in items {
-                if let Some(statement) = item
+                let normalized = if let Some(statement) = item
                     .as_str()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    *item = json!({"kind":"MODEL_STATED","value":statement});
+                    Some(json!({"kind":"MODEL_STATED","value":statement}))
+                } else {
+                    item.as_object().and_then(|object| {
+                        let kind = object
+                            .get("kind")
+                            .or_else(|| object.get("stateKey"))
+                            .or_else(|| object.get("outcomeId"))
+                            .or_else(|| object.get("transitionId"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())?;
+                        let value = object
+                            .get("value")
+                            .cloned()
+                            .or_else(|| object.get("description").cloned())
+                            .unwrap_or(Value::Null);
+                        Some(json!({"kind":kind,"value":value}))
+                    })
+                };
+                if let Some(normalized) = normalized {
+                    *item = normalized;
                 }
             }
         }
     }
     if let Some(items) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
         for (index, item) in items.iter_mut().enumerate() {
-            if let Some(objective) = item
+            let objective = item
                 .as_str()
+                .or_else(|| item.get("objective").and_then(Value::as_str))
+                .or_else(|| item.get("description").and_then(Value::as_str))
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+                .filter(|value| !value.is_empty());
+            if let Some(objective) = objective {
                 *item = json!({"slotNo":index + 1,"objective":objective,"tentative":true});
             }
         }
@@ -1015,6 +1037,28 @@ mod tests {
         assert_eq!(
             with_required_thread["continuityActions"][0],
             "不能推断对应线程"
+        );
+
+        let aliased = normalize_chapter_plan_model_output(
+            json!({
+                "requiredStateOutcomes":[{"outcomeId":"FIRST_CASE","stateKey":"case.status","value":"DONE","description":"完成委托"}],
+                "forbiddenTransitions":[{"transitionId":"NO_REVEAL","description":"不得揭晓"}],
+                "horizonPreview":[{"horizonId":"H1","description":"追查线索","refs":[]}]
+            }),
+            &[],
+            &bindings,
+        );
+        assert_eq!(
+            aliased["requiredStateOutcomes"][0],
+            json!({"kind":"case.status","value":"DONE"})
+        );
+        assert_eq!(
+            aliased["forbiddenTransitions"][0],
+            json!({"kind":"NO_REVEAL","value":"不得揭晓"})
+        );
+        assert_eq!(
+            aliased["horizonPreview"][0],
+            json!({"slotNo":1,"objective":"追查线索","tentative":true})
         );
     }
 
