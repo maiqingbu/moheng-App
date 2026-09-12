@@ -1117,6 +1117,15 @@ pub fn run_chapter_production(
         let plan_payload = planning_result
             .parsed
             .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
+        let plan_payload = crate::planning::normalize_chapter_plan_model_output(
+            plan_payload,
+            &compiler_input
+                .continuity_threads
+                .iter()
+                .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+                .map(|thread| thread.thread_id.clone())
+                .collect::<Vec<_>>(),
+        );
         crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
             .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
         crate::planning::validate_current_chapter_plan(

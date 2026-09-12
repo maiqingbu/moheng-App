@@ -12,6 +12,45 @@ use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
+pub fn normalize_chapter_plan_model_output(
+    mut plan: Value,
+    triggered_thread_refs: &[String],
+) -> Value {
+    for field in ["requiredStateOutcomes", "forbiddenTransitions"] {
+        if let Some(items) = plan.get_mut(field).and_then(Value::as_array_mut) {
+            for item in items {
+                if let Some(statement) = item
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    *item = json!({"kind":"MODEL_STATED","value":statement});
+                }
+            }
+        }
+    }
+    if let Some(items) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
+        for (index, item) in items.iter_mut().enumerate() {
+            if let Some(objective) = item
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                *item = json!({"slotNo":index + 1,"objective":objective,"tentative":true});
+            }
+        }
+    }
+    if triggered_thread_refs.is_empty()
+        && plan
+            .get("continuityActions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| !item.is_object()))
+    {
+        plan["continuityActions"] = json!([]);
+    }
+    plan
+}
+
 pub fn approve_book_plan(
     seed: &Value,
     signing_pass: bool,
@@ -924,6 +963,37 @@ mod tests {
 
     fn chapter_plan() -> Value {
         json!({"payloadSchema":"chapter-plan.r1","chapterId":"chapter:1","compiledFromProjectRevision":1,"compiledFromStateDigest":"a".repeat(64),"contextManifestRef":{"artifactId":"context:1","version":1,"payloadHash":"b".repeat(64)},"chapterGoal":"advance","activeTaskRefs":["task:required"],"continuityActions":[{"threadRef":"thread:promise","disposition":"DEFER_WITH_BRIDGE","bridge":"interrupted meeting"}],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[{"slotNo":1,"objective":"one","tentative":true},{"slotNo":2,"objective":"two","tentative":true},{"slotNo":3,"objective":"three","tentative":true}]})
+    }
+
+    #[test]
+    fn model_plan_normalization_repairs_only_typed_container_shapes() {
+        let plan = json!({
+            "requiredStateOutcomes":["完成首次委托"],
+            "forbiddenTransitions":["不得揭晓幕后者"],
+            "continuityActions":["继续追查"],
+            "horizonPreview":["发现代价","主动追查","锁定线索"]
+        });
+        let normalized = normalize_chapter_plan_model_output(plan, &[]);
+        assert_eq!(
+            normalized["requiredStateOutcomes"][0]["kind"],
+            "MODEL_STATED"
+        );
+        assert_eq!(
+            normalized["forbiddenTransitions"][0]["value"],
+            "不得揭晓幕后者"
+        );
+        assert_eq!(normalized["continuityActions"], json!([]));
+        assert_eq!(normalized["horizonPreview"][0]["slotNo"], 1);
+        assert_eq!(normalized["horizonPreview"][0]["tentative"], true);
+
+        let with_required_thread = normalize_chapter_plan_model_output(
+            json!({"continuityActions":["不能推断对应线程"]}),
+            &["thread:required".into()],
+        );
+        assert_eq!(
+            with_required_thread["continuityActions"][0],
+            "不能推断对应线程"
+        );
     }
 
     #[test]
