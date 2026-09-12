@@ -1016,7 +1016,7 @@ fn narrative_state_from_request(
             100,
         )
         .map_err(|e| e.to_string())?;
-    let (mut events, mut events_truncated) = chapter_id
+    let mut events = chapter_id
         .map(|chapter| {
             crate::repositories::narrative::NarrativeRepository::canon_events(
                 connection, project_id, chapter, 100,
@@ -1024,8 +1024,8 @@ fn narrative_state_from_request(
         })
         .transpose()
         .map_err(|e| e.to_string())?
-        .map(|events| (events, false))
         .unwrap_or_default();
+    let mut events_truncated = false;
     let relations_truncated =
         crate::repositories::narrative::NarrativeRepository::has_more_relations(
             connection,

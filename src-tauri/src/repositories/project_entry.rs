@@ -300,12 +300,20 @@ pub fn opening_progress(
     } else {
         completed >= OPENING_CHAPTER_COUNT
     };
+    let next_prepared = match current_chapter {
+        Some(chapter_no) if chapter_no < OPENING_CHAPTER_COUNT => connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_no=?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status!='REJECTED')",
+            libsql_rusqlite::params![project_id, chapter_no + 1],
+            |row| row.get(0),
+        )?,
+        _ => false,
+    };
     Ok(OpeningProgress {
         completed,
         total: OPENING_CHAPTER_COUNT,
         current_chapter,
         previous_committed,
-        next_prepared: current_chapter.is_some(),
+        next_prepared,
     })
 }
 

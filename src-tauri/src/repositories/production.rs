@@ -9,6 +9,8 @@ pub enum ProductionRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("serialization: {0}")]
     Serialization(String),
+    #[error("narrative: {0}")]
+    Narrative(String),
 }
 
 pub struct ProductionRepository;
@@ -275,16 +277,16 @@ impl ProductionRepository {
                 Ok(json!({"repairPlanId":row.get::<_,String>(0)?,"basedOnProjectRevision":row.get::<_,i64>(1)?,"diagnosis":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"findingRefs":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or_else(|_| json!([])),"targetAuthorityOwner":row.get::<_,String>(4)?,"proposedOperations":serde_json::from_str::<Value>(&row.get::<_,String>(5)?).unwrap_or_else(|_| json!([])),"affectedArtifacts":serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or_else(|_| json!([])),"affectedScopes":serde_json::from_str::<Value>(&row.get::<_,String>(7)?).unwrap_or_else(|_| json!([])),"riskLevel":row.get::<_,String>(8)?,"requiresBackup":row.get::<_,i64>(9)? != 0,"expectedPostconditions":serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or_else(|_| json!([])),"operationDigest":row.get::<_,String>(11)?,"status":row.get::<_,String>(12)?,"authorizationId":row.get::<_,Option<String>>(13)?,"consumedAt":row.get::<_,Option<String>>(14)?,"executionReceipt":execution_receipt}))
             },
         ).optional()?;
-        let next_chapter_has_volume_plan = next_chapter
-            .as_ref()
-            .and_then(|(_, _, _, volume_id)| {
-                crate::repositories::narrative::NarrativeRepository::volume_plan_route(
-                    connection, project_id, volume_id,
-                )
-                .ok()
-                .flatten()
-            })
-            .is_some();
+        let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()
+        {
+            crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+                connection, project_id, volume_id,
+            )
+            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
+            .is_some()
+        } else {
+            false
+        };
         let next_chapter_projection = next_chapter.map(|(id, number, title, volume_id)| {
             let execution_mode = if !next_chapter_has_volume_plan
                 && number <= crate::repositories::project_entry::OPENING_CHAPTER_COUNT

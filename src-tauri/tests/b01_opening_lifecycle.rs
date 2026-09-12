@@ -301,7 +301,10 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
             center["openingProgress"]["previousCommitted"],
             expected_chapter > 1
         );
-        assert_eq!(center["openingProgress"]["nextPrepared"], true);
+        assert_eq!(
+            center["openingProgress"]["nextPrepared"],
+            expected_chapter < 3
+        );
         assert_eq!(center["nextChapter"]["number"], expected_chapter);
         assert_eq!(center["nextChapter"]["executionMode"], "OPENING_BOOTSTRAP");
 
