@@ -75,7 +75,7 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             model_id: EXPECTED_MODEL.into(),
             endpoint: EXPECTED_ENDPOINT.into(),
             enabled: true,
-            timeout_ms: 120_000,
+            timeout_ms: 300_000,
         },
         Arc::new(OpenAiCompatibleProvider::new(EXPECTED_ENDPOINT)),
         Arc::new(secret_store),
@@ -85,6 +85,15 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
     let (project_id, chapter_ids) = if let Ok(project_id) = std::env::var("MOHENG_REAL_PROJECT_ID")
     {
         let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let mut decision_statement = connection
+            .prepare("SELECT decision_id FROM decisions WHERE project_id=?1 AND decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome IN ('OPEN','PENDING') ORDER BY created_at,decision_id")
+            .unwrap();
+        let unknown_decisions = decision_statement
+            .query_map([&project_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(decision_statement);
         let mut statement = connection
             .prepare("SELECT job_id FROM jobs WHERE project_id=?1 AND status IN ('RUNNING','PAUSED','BLOCKED') ORDER BY created_at,job_id")
             .unwrap();
@@ -95,6 +104,20 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             .unwrap();
         drop(statement);
         drop(connection);
+        for (index, decision_id) in unknown_decisions.iter().enumerate() {
+            execute(
+                &state,
+                json!({
+                    "type":"decision_submit",
+                    "commandId":format!("{prefix}:resolve-unknown:{index}"),
+                    "idempotencyKey":format!("{prefix}:resolve-unknown:{index}:key"),
+                    "projectId":project_id,
+                    "expectedRevision":current_revision(&state, &project_id),
+                    "requestedAt":NOW,
+                    "payload":{"decisionId":decision_id,"choice":"CANCEL_JOB"}
+                }),
+            );
+        }
         for (index, job_id) in active_jobs.iter().enumerate() {
             execute(
                 &state,
