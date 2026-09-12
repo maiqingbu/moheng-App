@@ -168,9 +168,7 @@ fn decision_submit_retries_unknown_story_direction_in_the_same_project() {
     drop(connection);
 
     let revision = state.manager.overview(&project_id).unwrap().1;
-    let result = execute_command_impl(
-        &state,
-        json!({
+    let request = json!({
             "type":"decision_submit",
             "commandId":"decision-retry-submit",
             "idempotencyKey":"decision-retry-submit-key",
@@ -178,11 +176,18 @@ fn decision_submit_retries_unknown_story_direction_in_the_same_project() {
             "expectedRevision":revision,
             "requestedAt":NOW,
             "payload":{"decisionId":decision_id,"choice":"recommended"}
-        }),
-    )
-    .unwrap();
+        });
+    let result = execute_command_impl(&state, request.clone()).unwrap();
 
     assert_eq!(result["finalStatus"], "committed");
+    assert!(result["receiptId"].as_str().is_some());
+    assert_eq!(result["beforeRevision"], revision);
+    assert_eq!(result["afterRevision"], revision + 1);
+    let replay = execute_command_impl(&state, request).unwrap();
+    assert_eq!(replay["receiptId"], result["receiptId"]);
+    assert_eq!(replay["requestDigest"], result["requestDigest"]);
+    assert_eq!(replay["beforeRevision"], result["beforeRevision"]);
+    assert_eq!(replay["afterRevision"], result["afterRevision"]);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     assert_eq!(
         connection

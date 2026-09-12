@@ -45,3 +45,17 @@ test('B11 market entry uses user-provided material instead of a fake global oppo
   assert.match(launch, /project_create_from_market/)
   assert.doesNotMatch(launch, /marketOpportunityId:selectedMarket/)
 })
+
+test('B11 decision inbox renders only backend-authorized decision actions', () => {
+  const page = read('src/ui/pages/DecisionInbox.vue')
+  const contracts = read('src/application/contracts.ts')
+  const projection = read('src-tauri/src/repositories/ui_projection.rs')
+  assert.match(contracts, /decisionType\?: string/)
+  assert.match(contracts, /allowedActions\?: Array<'RETRY_REMOTE' \| 'MARK_FAILED' \| 'CANCEL_JOB'>/)
+  assert.match(projection, /"decisionType"/)
+  assert.match(projection, /"allowedActions"/)
+  assert.match(page, /RETRY_REMOTE/)
+  assert.match(page, /MARK_FAILED/)
+  assert.match(page, /CANCEL_JOB/)
+  assert.doesNotMatch(page, /choice: 'recommended'/)
+})
