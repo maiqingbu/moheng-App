@@ -294,6 +294,7 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
     )
     .expect("production center after evaluation");
+    assert_eq!(center["projectPhase"], "SIGNING");
     assert_eq!(center["signing"]["status"], "PASS");
     assert_eq!(center["signing"]["receipt"]["id"], signing_receipt_id);
     assert_eq!(
@@ -404,6 +405,7 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     .expect("final production center");
     assert_eq!(final_center["bookPlan"]["status"], "APPROVED");
     assert_eq!(final_center["bookPlan"]["seedPreserved"], true);
+    assert_eq!(final_center["projectPhase"], "POST_SIGNING_PLANNING");
     println!("B02_RESULT opening_evaluation=PASS signing_receipt=PASS real_evidence=PASS approved_book_plan=PASS seed_preserved=PASS canon_unchanged=PASS status=PASS");
 }
 
