@@ -15,7 +15,7 @@ export interface ProductionRuntimePollerOptions {
 }
 
 export interface ProductionRuntimePoller {
-  start: () => void
+  start: (options?: { waitForActive?: boolean }) => void
   stop: () => void
   isRunning: () => boolean
 }
@@ -33,6 +33,7 @@ export function createProductionRuntimePoller(
   let running = false
   let queryInFlight = false
   let sawActiveRuntime = false
+  let waitForActive = false
 
   const stop = () => {
     running = false
@@ -50,7 +51,7 @@ export function createProductionRuntimePoller(
       if (!running) return
       options.onProjection(projection)
       if (projection.jobStatus === 'RUNNING' || projection.jobStatus === 'WAITING_MODEL') sawActiveRuntime = true
-      if (sawActiveRuntime && isProductionJobTerminal(projection.jobStatus)) stop()
+      if ((!waitForActive || sawActiveRuntime) && isProductionJobTerminal(projection.jobStatus)) stop()
     } catch (error) {
       if (running) options.onError?.(error)
     } finally {
@@ -59,10 +60,11 @@ export function createProductionRuntimePoller(
   }
 
   return {
-    start: () => {
+    start: (options = {}) => {
       if (running) return
       running = true
       sawActiveRuntime = false
+      waitForActive = options.waitForActive === true
       void tick()
       timer = setInterval(() => void tick(), Math.max(100, intervalMs))
     },

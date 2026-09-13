@@ -85,7 +85,7 @@ const runtimePoller = createProductionRuntimePoller({
 onMounted(() => {
   void store.loadProduction(true)
     .then(value => {
-      if (value?.isActive === true) runtimePoller.start()
+      if (value?.jobStatus && !isProductionJobTerminal(value.jobStatus)) runtimePoller.start()
     })
     .catch(() => undefined)
 })
@@ -104,7 +104,7 @@ async function startProduction() {
     return
   }
   lastCommand.value = 'production-start'
-  runtimePoller.start()
+  runtimePoller.start({ waitForActive: true })
   try {
     await store.runCommand(lastCommand.value, {
       type: 'production_start',

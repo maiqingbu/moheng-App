@@ -67,7 +67,7 @@ describe('B01 runtime phase synchronization', () => {
     const query = vi.fn(async () => snapshots.shift() ?? snapshots.at(-1)!)
     const poller = createProductionRuntimePoller({ query, intervalMs: 100, onProjection: () => undefined })
 
-    poller.start()
+    poller.start({ waitForActive: true })
     await vi.advanceTimersByTimeAsync(200)
 
     expect(query).toHaveBeenCalledTimes(3)
