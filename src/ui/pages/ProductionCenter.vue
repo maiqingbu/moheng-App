@@ -234,7 +234,7 @@ async function executeRepair() {
     <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
       <div class="card-head">
         <div>
-          <span class="eyebrow">B02 · Opening Evaluation / 模拟签约</span>
+          <span class="eyebrow">开篇评估 · 模拟签约</span>
           <h2 class="card-title" style="margin-top:6px">开篇评估</h2>
           <p class="card-subtitle">只读取三章已正式提交的正文、事实与证据；评估结果和签约回执来自后端正式记录。</p>
         </div>
