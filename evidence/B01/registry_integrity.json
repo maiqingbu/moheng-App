@@ -37,6 +37,12 @@
       "write_owner": "M3A"
     },
     {
+      "authoritative_table": "backup_manifests",
+      "authority_key": "backup_manifest",
+      "projection_only": 0,
+      "write_owner": "BackupService"
+    },
+    {
       "authoritative_table": "books",
       "authority_key": "book",
       "projection_only": 0,
@@ -163,10 +169,22 @@
       "write_owner": "ProjectManager"
     },
     {
+      "authoritative_table": "decisions",
+      "authority_key": "decision",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
       "authoritative_table": "dependency_edges",
       "authority_key": "dependency_edge",
       "projection_only": 0,
       "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "domain_receipts",
+      "authority_key": "domain_receipt",
+      "projection_only": 0,
+      "write_owner": "CommitService"
     },
     {
       "authoritative_table": "entity_index",
@@ -187,16 +205,40 @@
       "write_owner": "M3B"
     },
     {
+      "authoritative_table": "gate_certificates",
+      "authority_key": "gate_certificate",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
       "authoritative_table": "gc_receipts",
       "authority_key": "gc_receipt",
       "projection_only": 0,
       "write_owner": "MaintenanceService"
     },
     {
+      "authoritative_table": "impact_frontier",
+      "authority_key": "impact_frontier",
+      "projection_only": 0,
+      "write_owner": "B12::ChangeRetconOwner"
+    },
+    {
+      "authoritative_table": "impact_items",
+      "authority_key": "impact_item",
+      "projection_only": 0,
+      "write_owner": "B12::ChangeRetconOwner"
+    },
+    {
       "authoritative_table": "impact_sets",
       "authority_key": "impact_set",
       "projection_only": 0,
       "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "integrity_runs",
+      "authority_key": "integrity_run",
+      "projection_only": 0,
+      "write_owner": "IntegrityService"
     },
     {
       "authoritative_table": "jobs",
@@ -379,10 +421,34 @@
       "write_owner": "MaintenanceService"
     },
     {
+      "authoritative_table": "search_documents",
+      "authority_key": "search_documents",
+      "projection_only": 1,
+      "write_owner": "SearchService"
+    },
+    {
+      "authoritative_table": "b04_runtime_profiles",
+      "authority_key": "sqlite_runtime_profile",
+      "projection_only": 0,
+      "write_owner": "SQLiteOps"
+    },
+    {
       "authoritative_table": "stale_queue",
       "authority_key": "stale_queue",
       "projection_only": 0,
       "write_owner": "M4A"
+    },
+    {
+      "authoritative_table": "state_deltas",
+      "authority_key": "state_delta",
+      "projection_only": 0,
+      "write_owner": "CommitService"
+    },
+    {
+      "authoritative_table": "vacuum_reports",
+      "authority_key": "vacuum_report",
+      "projection_only": 0,
+      "write_owner": "SQLiteOps"
     },
     {
       "authoritative_table": "volumes",
@@ -401,6 +467,18 @@
       "authority_key": "volume_plan_index",
       "projection_only": 1,
       "write_owner": "M3A"
+    },
+    {
+      "authoritative_table": "volume_planning_state_projection",
+      "authority_key": "volume_planning_state_projection",
+      "projection_only": 1,
+      "write_owner": "B09::PlanningStateProjectionOwner"
+    },
+    {
+      "authoritative_table": "wal_governance_reports",
+      "authority_key": "wal_governance_report",
+      "projection_only": 0,
+      "write_owner": "SQLiteOps"
     }
   ],
   "missing_authoritative_tables": [],
@@ -441,6 +519,18 @@
       "family": "artifact",
       "retention_class": "POLICY",
       "table_name": "artifacts"
+    },
+    {
+      "authority_key": "sqlite_runtime_profile",
+      "family": "sqlite_ops",
+      "retention_class": "AUDIT",
+      "table_name": "b04_runtime_profiles"
+    },
+    {
+      "authority_key": "backup_manifest",
+      "family": "backup",
+      "retention_class": "PERMANENT",
+      "table_name": "backup_manifests"
     },
     {
       "authority_key": "book_health_projection",
@@ -575,10 +665,22 @@
       "table_name": "copy_receipts"
     },
     {
+      "authority_key": "decision",
+      "family": "decision",
+      "retention_class": "PERMANENT",
+      "table_name": "decisions"
+    },
+    {
       "authority_key": "dependency_edge",
       "family": "dependency",
       "retention_class": "PERMANENT",
       "table_name": "dependency_edges"
+    },
+    {
+      "authority_key": "domain_receipt",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "domain_receipts"
     },
     {
       "authority_key": "entity_index",
@@ -599,16 +701,40 @@
       "table_name": "foreshadows"
     },
     {
+      "authority_key": "gate_certificate",
+      "family": "receipt",
+      "retention_class": "PERMANENT",
+      "table_name": "gate_certificates"
+    },
+    {
       "authority_key": "gc_receipt",
       "family": "receipt",
       "retention_class": "PERMANENT",
       "table_name": "gc_receipts"
     },
     {
+      "authority_key": "impact_frontier",
+      "family": "change",
+      "retention_class": "POLICY",
+      "table_name": "impact_frontier"
+    },
+    {
+      "authority_key": "impact_item",
+      "family": "change",
+      "retention_class": "POLICY",
+      "table_name": "impact_items"
+    },
+    {
       "authority_key": "impact_set",
       "family": "change",
       "retention_class": "POLICY",
       "table_name": "impact_sets"
+    },
+    {
+      "authority_key": "integrity_run",
+      "family": "integrity",
+      "retention_class": "AUDIT",
+      "table_name": "integrity_runs"
     },
     {
       "authority_key": "job_checkpoint",
@@ -785,10 +911,40 @@
       "table_name": "retention_policies"
     },
     {
+      "authority_key": "search_documents",
+      "family": "search_projection",
+      "retention_class": "POLICY",
+      "table_name": "search_documents"
+    },
+    {
       "authority_key": "stale_queue",
       "family": "change",
       "retention_class": "POLICY",
       "table_name": "stale_queue"
+    },
+    {
+      "authority_key": "state_delta",
+      "family": "state",
+      "retention_class": "PERMANENT",
+      "table_name": "state_deltas"
+    },
+    {
+      "authority_key": "vacuum_report",
+      "family": "sqlite_ops",
+      "retention_class": "AUDIT",
+      "table_name": "vacuum_reports"
+    },
+    {
+      "authority_key": "volume",
+      "family": "planning_audit",
+      "retention_class": "AUDIT",
+      "table_name": "volume_close_records"
+    },
+    {
+      "authority_key": "volume",
+      "family": "planning_audit",
+      "retention_class": "AUDIT",
+      "table_name": "volume_handoffs"
     },
     {
       "authority_key": "volume_health_projection",
@@ -803,10 +959,28 @@
       "table_name": "volume_plan_index"
     },
     {
+      "authority_key": "volume_planning_state_projection",
+      "family": "planning_projection",
+      "retention_class": "POLICY",
+      "table_name": "volume_planning_state_projection"
+    },
+    {
+      "authority_key": "volume",
+      "family": "planning_audit",
+      "retention_class": "AUDIT",
+      "table_name": "volume_route_replans"
+    },
+    {
       "authority_key": "volume",
       "family": "structural",
       "retention_class": "PERMANENT",
       "table_name": "volumes"
+    },
+    {
+      "authority_key": "wal_governance_report",
+      "family": "sqlite_ops",
+      "retention_class": "AUDIT",
+      "table_name": "wal_governance_reports"
     }
   ]
 }
