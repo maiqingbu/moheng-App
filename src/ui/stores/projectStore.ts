@@ -81,6 +81,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const commandStates = ref<Record<string, CommandUiState>>({})
   const advancedMode = ref(false)
   let loadSequence = 0
+  const inFlightCommands = new Map<string, Promise<CommandReceipt>>()
 
   const project = computed(() => overview.value?.project ?? null)
   const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
@@ -354,7 +355,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     await Promise.all(jobs)
   }
 
-  async function runCommand(key: string, request: CommandRequest) {
+  async function executeCommand(key: string, request: CommandRequest) {
     const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
     const binding: CommandBinding = {
       commandId,
@@ -414,6 +415,37 @@ export const useProjectStore = defineStore('project-projection', () => {
     }
     void useProjectLibraryStore().refresh()
     return receipt
+  }
+
+  function inFlightCommandKey(request: CommandRequest): string | null {
+    if (!['opening_ready', 'opening_start_creating', 'production_start'].includes(request.type)) return null
+    const projectId = request.projectId ?? currentProjectId.value
+    if (!projectId) return null
+    const chapterId = request.type === 'production_start' ? request.payload?.chapterId : undefined
+    if (request.type === 'production_start' && typeof chapterId !== 'string') return null
+    return [projectId, request.type, chapterId ?? ''].join('|')
+  }
+
+  async function runCommand(key: string, request: CommandRequest) {
+    const dedupeKey = inFlightCommandKey(request)
+    if (!dedupeKey) return executeCommand(key, request)
+    const active = inFlightCommands.get(dedupeKey)
+    if (active) {
+      const current = commandStates.value[key]
+      commandStates.value[key] = {
+        status: 'processing',
+        message: '当前操作正在进行，请查看实时进度。',
+        commandId: current?.commandId,
+      }
+      return active
+    }
+    const promise = executeCommand(key, request)
+    inFlightCommands.set(dedupeKey, promise)
+    try {
+      return await promise
+    } finally {
+      if (inFlightCommands.get(dedupeKey) === promise) inFlightCommands.delete(dedupeKey)
+    }
   }
 
   async function testProvider(key:string, nextSettings:ProviderSettingsInput) {

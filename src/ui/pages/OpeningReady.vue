@@ -12,6 +12,8 @@ const opening = computed(() => store.openingReady)
 const openingProgress = computed(() => opening.value?.openingProgress)
 const approvalState = computed(() => store.commandState('opening-ready'))
 const startState = computed(() => store.commandState('opening-start'))
+const approvalInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(approvalState.value.status))
+const startInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(startState.value.status))
 
 onMounted(() => void store.loadOpeningReady())
 
@@ -23,6 +25,10 @@ async function approveOpening() {
 async function startCreating() {
   const receipt = await store.runCommand('opening-start', { type: 'opening_start_creating', payload: {} })
   if (receipt.finalStatus === 'committed') router.push(`/projects/${store.currentProjectId ?? ''}/production`)
+}
+
+function focusOpeningProgress() {
+  document.querySelector<HTMLElement>('[data-opening-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 </script>
 
@@ -41,7 +47,7 @@ async function startCreating() {
         <MetricCard label="当前状态" :value="opening.ready ? '已准备' : '待确认'" :note="opening.firstChapterPlan ? '已生成第一章最小规划' : '尚未生成规划'" />
         <MetricCard label="黄金三章" :value="`第 ${openingProgress?.completed ?? 0} / ${openingProgress?.total ?? 3} 章`" :note="openingProgress?.currentChapter ? `当前第 ${openingProgress.currentChapter} 章` : '下一章尚未准备'" />
       </div>
-      <section class="card pad section">
+      <section class="card pad section" data-opening-progress>
         <div class="card-head"><div><h2 class="card-title">开篇边界</h2><p class="card-subtitle">不在入口阶段生成未来章节，也不跳过正式规划与生产链。</p></div></div>
         <div class="task-row"><strong>前三章暂不揭开</strong><span>{{ opening.forbiddenReveals.join('；') }}</span></div>
         <div class="task-row"><strong>黄金三章进度</strong><span>第 {{ openingProgress?.completed ?? 0 }} / {{ openingProgress?.total ?? 3 }} 章 · 当前第 {{ openingProgress?.currentChapter ?? '—' }} 章</span></div>
@@ -49,7 +55,7 @@ async function startCreating() {
         <div v-if="opening.firstChapterPlan" class="task-row"><strong>第一章规划已存在</strong><span>可以进入正式创作中心继续操作。</span></div>
         <CommandFeedback :state="approvalState" />
         <CommandFeedback :state="startState" />
-        <div class="actions" style="justify-content:flex-end;margin-top:16px"><button v-if="!opening.ready" class="btn primary" :disabled="['submitting','accepted','processing'].includes(approvalState.status)" @click="approveOpening">确认开篇准备</button><button v-else class="btn primary" :disabled="['submitting','accepted','processing'].includes(startState.status)" @click="startCreating">进入正式创作</button></div>
+        <div class="actions" style="justify-content:flex-end;margin-top:16px"><button v-if="!opening.ready" class="btn primary" @click="approvalInFlight ? focusOpeningProgress() : approveOpening()">{{ approvalInFlight ? '查看当前开篇进度' : '确认开篇准备' }}</button><button v-else class="btn primary" @click="startInFlight ? focusOpeningProgress() : startCreating()">{{ startInFlight ? '查看当前开篇进度' : '进入正式创作' }}</button></div>
       </section>
     </template>
   </div>

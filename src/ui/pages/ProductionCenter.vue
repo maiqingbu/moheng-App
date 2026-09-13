@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
@@ -8,6 +8,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import type { RunState } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -15,22 +16,26 @@ const project = computed(() => store.project)
 const production = computed(() => store.production)
 const lastCommand = ref('none')
 const commandState = computed(() => store.commandState(lastCommand.value))
+const productionStartState = computed(() => store.commandState('production-start'))
 const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
 const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
 const openingProgress = computed(() => production.value?.openingProgress)
-const stageLabel = (value: unknown) => ({ OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
+const stageLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成', OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
 const capabilityLabel = (value: unknown) => ({ RENDER_CHAPTER: '撰写章节', AUDIT_EXTRACT: '检查章节', QUALITY_EVALUATION: '评估叙事质量' } as Record<string, string>)[String(value)] ?? '创作步骤'
-const timelineLabel = (value: unknown) => ({ CONTEXT: '整理创作所需信息', PLAN: '建立章节规划', RENDER: '撰写正文候选', CANDIDATE: '检查正文候选', AUDIT: '完成质量检查', GATE: '执行准入检查', COMPLETED: '已完成' } as Record<string, string>)[String(value)] ?? '创作步骤'
-const timelineDescription = (item: { title?: unknown; description?: unknown }) => {
+const timelineLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成' } as Record<string, string>)[String(value)] ?? '创作步骤'
+const timelineDescription = (item: { title?: unknown; description?: unknown; status?: unknown }) => {
   const title = String(item.title ?? '')
   if (title === 'CONTEXT') return '已整理当前作品记录和本章所需上下文。'
   if (title === 'PLAN') return '已建立本章目标、冲突和结构安排。'
   if (title === 'RENDER') return '已形成正文候选，等待检查和确认。'
   if (title === 'CANDIDATE') return '正在检查正文候选与当前作品约束。'
   if (title === 'AUDIT') return '正在核对连续性、质量和正式准入条件。'
-  if (title === 'GATE') return '正式确认前的结构化检查正在进行。'
+  if (title === 'GATE') return '正式确认前的一致性与准入校验正在进行。'
+  if (title === 'COMMIT') return '正在把正文、事实和回执正式写入作品记录。'
+  if (title === 'RECONCILE') return '正在回写正式结果并准备下一章。'
+  if (item.status === 'blocked' && production.value?.jobStatus === 'CANCELLED') return '当前任务已取消，未伪装为完成。'
   return sanitizeProductText(item.description, '当前步骤已完成。')
 }
 const statusLabel = (value: unknown) => productStatusLabel(value, '待检查')
@@ -52,7 +57,8 @@ const productUxStateMessage = computed(() => {
 const productionStatus = computed(() => production.value?.jobStatus ?? null)
 const productionIsActive = computed(() => production.value?.isActive === true)
 const canRetryProduction = computed(() => production.value?.canRetry === true)
-const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (!production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
+const productionStartInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(productionStartState.value.status))
+const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
 const authoritativeRunState = computed<RunState>(() => {
   switch (production.value?.jobStatus) {
     case 'FAILED': return 'FAILED'
@@ -67,12 +73,38 @@ const authoritativeRunState = computed<RunState>(() => {
   }
 })
 
-onMounted(() => void store.loadProduction())
+const runtimePoller = createProductionRuntimePoller({
+  query: async () => {
+    const value = await store.loadProduction(true)
+    if (!value) throw new Error('生产状态暂不可用。')
+    return value
+  },
+  onProjection: projection => { store.production = projection },
+})
+
+onMounted(() => {
+  void store.loadProduction(true)
+    .then(value => {
+      if (value?.isActive === true) runtimePoller.start()
+    })
+    .catch(() => undefined)
+})
+
+onUnmounted(() => runtimePoller.stop())
+
+function focusProductionProgress() {
+  document.querySelector<HTMLElement>('[data-production-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
 
 async function startProduction() {
   const chapter = production.value?.nextChapter
   if (!chapter) throw new Error('B08_CHAPTER_REQUIRED')
+  if (productionStartInFlight.value || productionIsActive.value) {
+    focusProductionProgress()
+    return
+  }
   lastCommand.value = 'production-start'
+  runtimePoller.start()
   try {
     await store.runCommand(lastCommand.value, {
       type: 'production_start',
@@ -90,6 +122,8 @@ async function startProduction() {
     })
   } catch {
     // The store has already placed the typed failure in CommandFeedback.
+  } finally {
+    if (!productionIsActive.value || isProductionJobTerminal(production.value?.jobStatus)) runtimePoller.stop()
   }
 }
 
@@ -140,7 +174,7 @@ async function executeRepair() {
 <template>
   <div v-if="project && production" class="page">
     <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。">
-      <button v-if="canStartProduction" class="btn primary" @click="startProduction">{{ canRetryProduction ? '重新生成' : '开始' }}第 {{ production.nextChapter?.number }} 章</button>
+      <button v-if="canStartProduction" class="btn primary" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? '重新生成' : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_pause')">暂停</button>
       <button v-if="productionStatus === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
     </PageHeader>
@@ -169,7 +203,7 @@ async function executeRepair() {
     </div>
 
     <div class="production-layout section">
-      <section class="card pad">
+      <section class="card pad" data-production-progress>
         <div class="card-head"><div><h2 class="card-title">生产时间线</h2><p class="card-subtitle">上下文 → 规划 → 撰写 → 检查 → 准入 → 提交 → 后续安排</p></div></div>
         <div v-if="openingProgress" class="task-row"><strong>黄金三章：第 {{ openingProgress.completed }} / {{ openingProgress.total }} 章</strong><span>当前第 {{ openingProgress.currentChapter ?? '—' }} 章 · 上一章{{ openingProgress.previousCommitted ? '已正式提交' : '尚无' }} · 下一章{{ openingProgress.nextPrepared ? '已准备' : '未准备' }}</span></div>
         <div class="timeline">

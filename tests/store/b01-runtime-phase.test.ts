@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
-import type { CommandReceipt, CommandRequest } from '../../src/application/contracts'
+import type { CommandReceipt, CommandRequest, ProductionCenterProjection } from '../../src/application/contracts'
 import { createProductionRuntimePoller } from '../../src/ui/runtime/productionRuntimeSync'
 
 const holder = vi.hoisted(() => ({ port: null as unknown }))
@@ -39,7 +39,7 @@ describe('B01 runtime phase synchronization', () => {
       return {
         jobStatus: productionStage === 'COMPLETED' ? 'COMPLETED' : 'RUNNING',
         productionStage,
-      }
+      } as unknown as ProductionCenterProjection
     })
     const seen: string[] = []
     const poller = createProductionRuntimePoller({
@@ -89,7 +89,7 @@ describe('B01 runtime phase synchronization', () => {
 
     expect(port.executeCommand).toHaveBeenCalledTimes(1)
     expect(store.commandState('production-start').status).toBe('processing')
-    resolveCommand(receipt(request))
+    resolveCommand(receipt(port.executeCommand.mock.calls[0][0] as CommandRequest))
     await expect(first).resolves.toMatchObject({ finalStatus: 'committed' })
     await expect(second).resolves.toMatchObject({ finalStatus: 'committed' })
     expect(port.executeCommand).toHaveBeenCalledTimes(1)
@@ -121,7 +121,7 @@ describe('B01 runtime phase synchronization', () => {
     }
     const command = store.runCommand('production-start', request)
     await store.openProject('project-b')
-    resolveCommand(receipt(request))
+    resolveCommand(receipt(port.executeCommand.mock.calls[0][0] as CommandRequest))
     await command
 
     expect(port.executeCommand).toHaveBeenCalledTimes(1)

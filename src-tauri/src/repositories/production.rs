@@ -69,17 +69,38 @@ impl ProductionRepository {
             "RECONCILE",
             "COMPLETED",
         ];
-        let stage_order = stages
-            .iter()
-            .position(|stage| *stage == current_stage)
-            .unwrap_or(usize::MAX);
+        let stage_order = stages.iter().position(|stage| *stage == current_stage);
+        let timeline_status = |order: usize| {
+            let Some((_, _, _, status, _)) = job.as_ref() else {
+                return "pending";
+            };
+            if status == "COMPLETED" {
+                return "done";
+            }
+            let Some(current_order) = stage_order else {
+                return "pending";
+            };
+            if order < current_order {
+                return "done";
+            }
+            if order > current_order {
+                return "pending";
+            }
+            match status.as_str() {
+                "FAILED" => "failed",
+                "BLOCKED" | "CANCELLED" => "blocked",
+                "PAUSED" | "WAITING_DECISION" | "WAITING_BUDGET" => "waiting",
+                "RUNNING" | "WAITING_MODEL" => "active",
+                _ => "pending",
+            }
+        };
         let timeline = stages
             .iter()
             .enumerate()
             .map(|(order, stage)| {
                 json!({
                     "id": format!("b08:{stage}"), "order": order + 1, "title": stage,
-                    "description": "B08 Chapter Production Runtime", "status": if order < stage_order { "done" } else if order == stage_order && job.as_ref().is_some_and(|(_, _, _, status, _)| status == "FAILED") { "failed" } else if order == stage_order { "active" } else { "pending" }
+                    "description": "B08 Chapter Production Runtime", "status": timeline_status(order)
                 })
             })
             .collect::<Vec<_>>();
@@ -98,7 +119,7 @@ impl ProductionRepository {
         let task = job
             .as_ref()
             .map(|(id, _, chapter, status, _)| {
-                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"status":if status=="FAILED" {"failed"} else if status=="COMPLETED" {"done"} else if matches!(status.as_str(), "RUNNING" | "WAITING_MODEL") {"active"} else {"waiting"},"progress":if status=="COMPLETED" {100} else if status=="FAILED" {0} else {50}})
+                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"status":if status=="FAILED" {"failed"} else if status=="COMPLETED" {"done"} else if matches!(status.as_str(), "RUNNING" | "WAITING_MODEL") {"active"} else {"waiting"},"progress":if status=="COMPLETED" {json!(100)} else {Value::Null}})
             })
             .into_iter()
             .collect::<Vec<_>>();

@@ -16,7 +16,7 @@ test('B01 production topology is bounded to the golden three and never a test SQ
   assert.match(repository, /OPENING_CHAPTER_COUNT\s*:\s*i64\s*=\s*3/)
   assert.match(repository, /for chapter_no in 1\.\.=OPENING_CHAPTER_COUNT/)
   assert.match(production, /B08_OPENING_ORDER_REQUIRED/)
-  assert.match(productionRepository, /status.*pending/)
+  assert.match(productionRepository, /return "pending"/)
   assert.doesNotMatch(productionRepository, /else if status=="FAILED" \{0\} else \{50\}/)
   assert.doesNotMatch(integration, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapters/i)
   assert.doesNotMatch(integration, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapter_production_budgets/i)
