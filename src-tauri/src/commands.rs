@@ -4528,6 +4528,7 @@ fn execute_planning_command(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_planning_command_with_observer(
     state: &KernelState,
     request: &Value,
