@@ -79,6 +79,25 @@ pub const B02_BOOK_PLAN_PHASES: &[&str] = &[
     "COMMIT_BOOK_PLAN",
     "COMPLETED",
 ];
+pub const B03_VOLUME_INTENT_KIND: &str = "B03::VOLUME_INTENT";
+pub const B03_VOLUME_PLAN_KIND: &str = "B03::VOLUME_PLAN";
+pub const B03_VOLUME_INTENT_PHASES: &[&str] = &[
+    "READ_BOOK_PLAN",
+    "READ_CURRENT_STATE",
+    "BUILD_VOLUME_GOAL",
+    "VALIDATE_VOLUME_GOAL",
+    "COMMIT_VOLUME_INTENT",
+    "COMPLETED",
+];
+pub const B03_VOLUME_PLAN_PHASES: &[&str] = &[
+    "READ_VOLUME_INTENT",
+    "BUILD_TASK_ROUTE",
+    "VALIDATE_DEPENDENCIES",
+    "CALCULATE_CAPACITY",
+    "VALIDATE_ROUTE",
+    "COMMIT_VOLUME_PLAN",
+    "COMPLETED",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct RecoverySummary {
@@ -206,6 +225,93 @@ fn days_in_month(year: i32, month: i32) -> i32 {
 }
 
 impl DurableJobService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_b03_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        job_id: &str,
+        kind: &str,
+        phases: &[&str],
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        if phases.is_empty() || !matches!(kind, B03_VOLUME_INTENT_KIND | B03_VOLUME_PLAN_KIND) {
+            return Err(RuntimeError::InvalidTransition(
+                "B03".into(),
+                "phase_job".into(),
+            ));
+        }
+        Self::start_job(
+            connection,
+            &JobSpec {
+                job_id: job_id.into(),
+                job_type: "VOLUME".into(),
+                parent_job_id: None,
+                book_id: Some(kind.into()),
+                volume_id: Some(volume_id.into()),
+                chapter_id: None,
+                stages: phases.iter().map(|phase| (*phase).into()).collect(),
+            },
+            now,
+        )?;
+        Self::acquire_lease(
+            connection,
+            project_id,
+            job_id,
+            worker_id,
+            &lease_expiry(now),
+            now,
+        )?;
+        Self::transition_for_worker(connection, project_id, job_id, "RUNNING", worker_id, now)
+    }
+
+    pub fn complete_b03_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::update_stage(connection, project_id, job_id, "COMPLETED", now)?;
+        Self::transition_for_worker(connection, project_id, job_id, "COMPLETED", worker_id, now)?;
+        Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
+    }
+
+    pub fn fail_b03_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        error_code: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::fail_job(connection, project_id, job_id, error_code, now)
+    }
+
+    pub fn b03_volume_operation(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let row: Option<(String, String, String, String, Option<String>)> = connection
+            .query_row(
+                "SELECT job_id,book_id,current_stage,status,error_code FROM jobs WHERE project_id=?1 AND volume_id=?2 AND book_id IN (?3,?4) ORDER BY updated_at DESC,job_id DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, volume_id, B03_VOLUME_INTENT_KIND, B03_VOLUME_PLAN_KIND],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(job_id, kind, phase, status, error_code)| {
+            serde_json::json!({
+                "jobId":job_id,
+                "kind":kind,
+                "phase":phase,
+                "status":status,
+                "errorCode":error_code,
+                "active":matches!(status.as_str(), "RUNNING" | "WAITING_MODEL"),
+            })
+        }))
+    }
+
     pub fn start_b02_phase_job(
         connection: &Connection,
         project_id: &str,

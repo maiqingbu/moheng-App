@@ -3,7 +3,11 @@
   "properties":{
     "payloadSchema":{"const":"volume-plan.r1"}, "volumeIntentRef":{"$ref":"../artifact/artifact-ref.schema.json"}, "routeVersion":{"type":"integer","minimum":1}, "tasks":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/VolumeTask"}}, "routeInvariants":{"type":"array","items":{"type":"string"}}, "requiredExitConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}},
     "climaxReservation":{"type":["object","null"],"properties":{"taskId":{"type":"string","minLength":1},"minRemainingCapacity":{"type":"integer","minimum":0}},"required":["taskId","minRemainingCapacity"],"additionalProperties":false},
-    "capacityBudget":{"type":"object","properties":{"minChapters":{"type":"integer","minimum":1},"preferredChapters":{"type":"integer","minimum":1},"maxChapters":{"type":"integer","minimum":1}},"required":["minChapters","preferredChapters","maxChapters"],"additionalProperties":false}
+    "capacityBudget":{"type":"object","properties":{"minChapters":{"type":"integer","minimum":1},"preferredChapters":{"type":"integer","minimum":1},"maxChapters":{"type":"integer","minimum":1}},"required":["minChapters","preferredChapters","maxChapters"],"additionalProperties":false},
+    "goalContractRefs":{"type":"array","items":{"$ref":"../artifact/artifact-ref.schema.json"}},
+    "compiledFromProjectRevision":{"type":"integer","minimum":0},
+    "sourceEvidenceRefs":{"type":"array","items":{"type":"string","minLength":1}},
+    "semanticDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"}
   },
   "required":["payloadSchema","volumeIntentRef","routeVersion","tasks","routeInvariants","requiredExitConditions","capacityBudget"], "additionalProperties":false
 }

@@ -19,7 +19,7 @@ const commands = [
   ['architecture', 'node scripts/verify-architecture.mjs', 'architecture_gate.log'],
   ['module_boundary', 'npm run verify:boundaries', 'module_boundary.log'],
   ['m0a', 'npm run verify:m0a', 'm0a_gate.log'],
-  ['b03_targeted', 'cargo test --manifest-path src-tauri/Cargo.toml --test b03_runtime -- --nocapture', 'b03_targeted_test.log'],
+  ['b03_targeted', 'cargo test --manifest-path src-tauri/Cargo.toml --test b03_runtime --test b03_volume_planning -- --nocapture', 'b03_targeted_test.log'],
   ['cargo_all_targets', 'cargo test --manifest-path src-tauri/Cargo.toml --all-targets -- --nocapture', 'cargo_all_targets.log'],
   ['cargo_fmt', 'cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check', 'cargo_fmt.log'],
   ['cargo_check', 'cargo check --manifest-path src-tauri/Cargo.toml --all-targets', 'cargo_check.log'],

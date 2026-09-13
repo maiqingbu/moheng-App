@@ -16,6 +16,7 @@ pub struct VolumeMetadata {
     pub status: String,
     pub chapter_start: i64,
     pub chapter_end: i64,
+    pub target_words: i64,
 }
 
 pub struct VolumeLifecycleRepository;
@@ -28,7 +29,7 @@ impl VolumeLifecycleRepository {
     ) -> Result<Option<VolumeMetadata>, VolumeLifecycleRepositoryError> {
         connection
             .query_row(
-                "SELECT book_id, volume_no, status, chapter_start, chapter_end FROM volumes WHERE project_id=?1 AND volume_id=?2",
+                "SELECT book_id, volume_no, status, chapter_start, chapter_end, target_words FROM volumes WHERE project_id=?1 AND volume_id=?2",
                 libsql_rusqlite::params![project_id, volume_id],
                 |row| {
                     Ok(VolumeMetadata {
@@ -37,6 +38,7 @@ impl VolumeLifecycleRepository {
                         status: row.get(2)?,
                         chapter_start: row.get(3)?,
                         chapter_end: row.get(4)?,
+                        target_words: row.get(5)?,
                     })
                 },
             )

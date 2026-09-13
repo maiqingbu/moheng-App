@@ -5,7 +5,12 @@
     "entryConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}}, "mustAchieve":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/GoalConstraint"}}, "mustNotBreak":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/GoalConstraint"}}, "requiredExitConditions":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/Condition"}},
     "futureReservationRefs":{"type":"array","items":{"type":"string"}}, "crossVolumeResponsibilityRefs":{"type":"array","items":{"type":"string"}},
     "targetChapterRange":{"type":"object","properties":{"min":{"type":"integer","minimum":1},"preferred":{"type":"integer","minimum":1},"max":{"type":"integer","minimum":1}},"required":["min","preferred","max"],"additionalProperties":false},
-    "targetWordRange":{"type":"object","properties":{"min":{"type":["integer","null"],"minimum":1},"preferred":{"type":"integer","minimum":1},"max":{"type":["integer","null"],"minimum":1}},"required":["preferred"],"additionalProperties":false}
+    "targetWordRange":{"type":"object","properties":{"min":{"type":["integer","null"],"minimum":1},"preferred":{"type":"integer","minimum":1},"max":{"type":["integer","null"],"minimum":1}},"required":["preferred"],"additionalProperties":false},
+    "sourceBookPlanRef":{"$ref":"../artifact/artifact-ref.schema.json"},
+    "compiledFromProjectRevision":{"type":"integer","minimum":0},
+    "sourceCanonRefs":{"type":"array","items":{"type":"string","minLength":1}},
+    "sourceEvidenceRefs":{"type":"array","items":{"type":"string","minLength":1}},
+    "semanticDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"}
   },
   "required":["payloadSchema","volumeFunction","entryConditions","mustAchieve","mustNotBreak","requiredExitConditions","futureReservationRefs","crossVolumeResponsibilityRefs","targetChapterRange","targetWordRange"], "additionalProperties":false
 }

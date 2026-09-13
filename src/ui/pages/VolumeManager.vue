@@ -1,33 +1,89 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { createVolumePlanningRuntimePoller } from '../runtime/volumePlanningRuntimeSync'
 
 const store = useProjectStore()
 const router = useRouter()
 const items = computed(() => store.volumes?.items ?? [])
 const state = computed(() => store.commandState('volume-build'))
 const signingPassed = computed(() => store.project?.signingStatus === 'PASS')
+const currentVolume = computed(() => items.value.find(volume => volume.status !== 'CLOSED') ?? items.value[0] ?? null)
+const runtimeOperation = computed(() => store.volumeDetail?.runtimeOperation ?? null)
+const planningInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(state.value.status))
+const buildInFlight = ref(false)
+const planningActive = computed(() => buildInFlight.value || planningInFlight.value || runtimeOperation.value?.active === true)
+const actionLabel = computed(() => planningActive.value ? '查看当前卷规划进度' : '建立当前卷目标')
+const actionDisabled = computed(() => !signingPassed.value && !planningActive.value)
 const signingLabel = (value: boolean) => value ? '已通过' : '尚未通过'
 const volumeStatusLabel = (value: string) => ({ LOCKED: '待解锁', CLOSED: '已关闭', PRODUCING: '生产中', PAUSED: '已暂停', PLANNING: '规划中' } as Record<string, string>)[value] ?? '待确认'
-onMounted(() => void store.loadVolumes())
+const runtimePoller = createVolumePlanningRuntimePoller({
+  query: async () => {
+    if (!currentVolume.value) throw new Error('当前没有可规划的卷。')
+    const value = await store.loadVolumeDetail(currentVolume.value.id, true)
+    if (!value) throw new Error('当前卷状态暂不可用。')
+    return value
+  },
+  onProjection: projection => { store.volumeDetail = projection },
+})
+
+onMounted(() => {
+  void (async () => {
+    const loaded = await store.loadVolumes()
+    const current = loaded?.items.find(volume => volume.status !== 'CLOSED') ?? loaded?.items[0]
+    if (current) await store.loadVolumeDetail(current.id)
+    if (store.volumeDetail?.runtimeOperation?.active) runtimePoller.start()
+  })()
+})
+onUnmounted(() => runtimePoller.stop())
+
+function focusPlanningProgress() {
+  document.querySelector<HTMLElement>('[data-volume-planning-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
 async function build() {
-  const current = items.value.find(volume => volume.status !== 'CLOSED') ?? items.value[0]
+  const current = currentVolume.value
   if (!current) return
-  await store.runCommand('volume-build', { type: 'planning_create_volume_intent', payload: { volumeId: current.id } })
-  await store.runCommand('volume-build', { type: 'planning_create_volume_plan', payload: { volumeId: current.id } })
-  await store.loadVolumes(true)
+  if (planningActive.value) {
+    focusPlanningProgress()
+    return
+  }
+  buildInFlight.value = true
+  runtimePoller.start({ waitForActive: true })
+  try {
+    await store.runCommand('volume-build', { type: 'planning_create_volume_intent', payload: { volumeId: current.id } })
+    await store.runCommand('volume-build', { type: 'planning_create_volume_plan', payload: { volumeId: current.id } })
+    await store.loadVolumes(true)
+    await store.loadVolumeDetail(current.id, true)
+  } catch {
+    // Store-owned feedback keeps the typed failure visible.
+  } finally {
+    buildInFlight.value = false
+    if (!store.volumeDetail?.runtimeOperation?.active) runtimePoller.stop()
+  }
 }
 </script>
 
 <template>
   <div class="page">
     <PageHeader title="当前卷" subtitle="区分规划、实际进展、系统推算与暂定安排，不把计划当成已经发生的事实。">
-      <button class="btn primary" :disabled="!signingPassed" @click="build">建立当前卷规划</button>
+      <button class="btn primary" :disabled="actionDisabled" @click="build">{{ actionLabel }}</button>
     </PageHeader>
     <CommandFeedback :state="state" />
+
+    <section v-if="planningActive || runtimeOperation" class="card pad section" data-volume-planning-progress>
+      <div class="card-head"><div><h2 class="card-title">当前卷规划进度</h2><p class="card-subtitle">阶段来自后端持久化运行回执，页面只轮询投影。</p></div><span class="badge" :class="runtimeOperation?.active ? 'warning' : 'success'">{{ runtimeOperation?.active ? '正在建立当前卷目标' : '规划已完成' }}</span></div>
+      <div v-if="runtimeOperation" class="timeline">
+        <div v-for="step in runtimeOperation.steps ?? []" :key="step.id" class="timeline-item">
+          <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</div>
+          <div><strong>{{ step.label }}</strong><div class="muted" style="font-size:12px">{{ step.status === 'active' ? '正在处理' : step.status === 'done' ? '已完成' : step.status === 'failed' ? '处理失败' : '等待处理' }}</div></div>
+        </div>
+      </div>
+      <div v-else class="muted">正在建立当前卷目标…</div>
+    </section>
 
     <div v-if="!signingPassed" class="banner warning section">
       <div><div class="banner-title">卷级生产尚未解锁</div><div class="banner-copy">开篇评估通过并生成正式回执后，才能建立详细卷计划和启动后续长篇生产。</div></div>

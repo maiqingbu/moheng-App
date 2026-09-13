@@ -379,6 +379,863 @@ pub fn validate_volume_intent(plan: &Value) -> Result<(), String> {
         .map_err(|error| format!("VOLUME_INTENT_CONTRACT:{error}"))
 }
 
+fn non_empty_array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
+    let items = value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{key} must be an array"))?;
+    if items.is_empty() {
+        return Err(format!("{key} must not be empty"));
+    }
+    Ok(items)
+}
+
+pub fn validate_volume_intent_semantics(intent: &Value) -> Result<(), String> {
+    validate_volume_intent(intent)?;
+    if intent
+        .get("mustAchieve")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_INTENT_MUST_ACHIEVE_REQUIRED".into());
+    }
+    if intent
+        .get("mustNotBreak")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_INTENT_MUST_NOT_BREAK_REQUIRED".into());
+    }
+    if intent
+        .get("requiredExitConditions")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_INTENT_EXIT_CONDITIONS_REQUIRED".into());
+    }
+    if intent
+        .get("sourceBookPlanRef")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        return Err("VOLUME_INTENT_BOOK_PLAN_REF_REQUIRED".into());
+    }
+    if intent
+        .get("compiledFromProjectRevision")
+        .and_then(Value::as_i64)
+        .is_none()
+    {
+        return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
+    }
+    Ok(())
+}
+
+fn push_unique_goal(items: &mut Vec<Value>, goal: Value) {
+    let id = goal.get("id").and_then(Value::as_str);
+    if id.is_some_and(|id| {
+        items
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some(id))
+    }) {
+        return;
+    }
+    items.push(goal);
+}
+
+fn source_strings(sources: &Value, key: &str, nested_key: &str) -> Vec<String> {
+    sources
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get(nested_key).and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compile_volume_intent_from_authority(
+    volume_id: &str,
+    volume_no: i64,
+    chapter_start: i64,
+    chapter_end: i64,
+    target_words: i64,
+    book_plan_ref: &ArtifactRef,
+    book_plan: &Value,
+    sources: &Value,
+    project_revision: i64,
+) -> Result<Value, String> {
+    if book_plan.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED") {
+        return Err("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".into());
+    }
+    if project_revision < 0 {
+        return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
+    }
+    let mut must_achieve = book_plan
+        .get("mustAchieve")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(seed) = book_plan
+        .get("volumeIntentSeeds")
+        .and_then(Value::as_array)
+        .and_then(|seeds| {
+            seeds.iter().find(|seed| {
+                seed.get("seedId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.ends_with(&volume_no.to_string()))
+            })
+        })
+    {
+        if let (Some(seed_id), Some(description)) = (
+            seed.get("seedId").and_then(Value::as_str),
+            seed.get("description").and_then(Value::as_str),
+        ) {
+            push_unique_goal(
+                &mut must_achieve,
+                json!({
+                    "id":format!("goal:{volume_id}:seed:{seed_id}"),
+                    "description":description
+                }),
+            );
+        }
+    }
+    for responsibility in sources
+        .get("responsibilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(id), Some(description)) = (
+            responsibility.get("obligationId").and_then(Value::as_str),
+            responsibility.get("description").and_then(Value::as_str),
+        ) {
+            push_unique_goal(
+                &mut must_achieve,
+                json!({
+                    "id":format!("goal:{volume_id}:responsibility:{id}"),
+                    "description":format!("推进跨卷责任：{description}")
+                }),
+            );
+        }
+    }
+    for event in sources
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        if let (Some(id), Some(event_type)) = (
+            event.get("eventId").and_then(Value::as_str),
+            event.get("eventType").and_then(Value::as_str),
+        ) {
+            let object = event
+                .get("objectJson")
+                .and_then(|value| value.get("text"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| {
+                    event
+                        .get("objectJson")
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "未知对象".into())
+                });
+            push_unique_goal(
+                &mut must_achieve,
+                json!({
+                    "id":format!("goal:{volume_id}:event:{id}"),
+                    "description":format!("承接已发生事件 {event_type}：{object} 并给出可核对后果")
+                }),
+            );
+        }
+    }
+    if must_achieve.is_empty() {
+        for fact in sources
+            .get("facts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(8)
+        {
+            if let (Some(id), Some(predicate), Some(object)) = (
+                fact.get("factId").and_then(Value::as_str),
+                fact.get("predicate").and_then(Value::as_str),
+                fact.get("objectJson"),
+            ) {
+                push_unique_goal(
+                    &mut must_achieve,
+                    json!({
+                        "id":format!("goal:{volume_id}:fact:{id}"),
+                        "description":format!("围绕已确认事实 {predicate}={object} 推进本卷责任")
+                    }),
+                );
+            }
+        }
+    }
+    if must_achieve.is_empty() {
+        for event in sources
+            .get("events")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(8)
+        {
+            if let (Some(id), Some(event_type)) = (
+                event.get("eventId").and_then(Value::as_str),
+                event.get("eventType").and_then(Value::as_str),
+            ) {
+                push_unique_goal(
+                    &mut must_achieve,
+                    json!({
+                        "id":format!("goal:{volume_id}:event:{id}"),
+                        "description":format!("承接已发生事件 {event_type} 并给出可核对后果")
+                    }),
+                );
+            }
+        }
+    }
+    if must_achieve.is_empty() {
+        return Err("VOLUME_INTENT_MUST_ACHIEVE_REQUIRED".into());
+    }
+
+    let mut must_not_break = book_plan
+        .get("mustNotBreak")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for fact in sources
+        .get("facts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        if let (Some(id), Some(predicate), Some(object)) = (
+            fact.get("factId").and_then(Value::as_str),
+            fact.get("predicate").and_then(Value::as_str),
+            fact.get("objectJson"),
+        ) {
+            push_unique_goal(
+                &mut must_not_break,
+                json!({"id":format!("rule:{volume_id}:fact:{id}"),"description":format!("不得违背已确认 Canon：{predicate}={object}")}),
+            );
+        }
+    }
+    for knowledge in sources
+        .get("knowledge")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        if let (Some(id), Some(state)) = (
+            knowledge.get("knowledgeId").and_then(Value::as_str),
+            knowledge.get("epistemicState").and_then(Value::as_str),
+        ) {
+            push_unique_goal(
+                &mut must_not_break,
+                json!({"id":format!("rule:{volume_id}:knowledge:{id}"),"description":format!("保持知识边界状态 {state}，不得让角色无证据获得未知信息")}),
+            );
+        }
+    }
+    for relation in sources
+        .get("relations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        if let (Some(id), Some(predicate), Some(subject), Some(object)) = (
+            relation.get("relationId").and_then(Value::as_str),
+            relation.get("predicate").and_then(Value::as_str),
+            relation.get("subjectId").and_then(Value::as_str),
+            relation.get("objectId").and_then(Value::as_str),
+        ) {
+            push_unique_goal(
+                &mut must_not_break,
+                json!({
+                    "id":format!("rule:{volume_id}:relation:{id}"),
+                    "description":format!("保持已确认关系 {subject} {predicate} {object}，不得无证据跳变")
+                }),
+            );
+        }
+    }
+    if must_not_break.is_empty() {
+        return Err("VOLUME_INTENT_MUST_NOT_BREAK_REQUIRED".into());
+    }
+
+    let future_reservation_refs = book_plan
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reservation| {
+            let volume_match = reservation
+                .get("reservedForVolumeNo")
+                .and_then(Value::as_i64)
+                .is_some_and(|number| number == volume_no)
+                || reservation
+                    .get("reservedForVolumeId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == volume_id);
+            let unscoped = reservation.get("reservedForVolumeNo").is_none()
+                && reservation.get("reservedForVolumeId").is_none();
+            volume_match || unscoped
+        })
+        .filter_map(|reservation| {
+            reservation
+                .get("reservationId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let source_canon_refs = [
+        source_strings(sources, "facts", "factId"),
+        source_strings(sources, "relations", "relationId"),
+        source_strings(sources, "events", "eventId"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect::<Vec<_>>();
+    let source_evidence_refs = source_strings(sources, "evidence", "evidenceId");
+    if source_evidence_refs.is_empty() {
+        return Err("VOLUME_INTENT_SOURCE_EVIDENCE_REQUIRED".into());
+    }
+    let responsibilities = sources
+        .get("responsibilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("obligationId").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let required_exit_conditions = must_achieve
+        .iter()
+        .filter_map(|goal| goal.get("id").and_then(Value::as_str))
+        .map(|id| json!({"kind":"GOAL_ACHIEVED","value":id}))
+        .collect::<Vec<_>>();
+    let preferred_chapters = (chapter_end - chapter_start + 1).max(1);
+    let target_words = target_words
+        .max(preferred_chapters.saturating_mul(1000))
+        .max(1);
+    let semantic_digest = sha256_canonical(&json!({
+        "volumeId":volume_id,
+        "volumeNo":volume_no,
+        "bookPlan":book_plan,
+        "sources":sources,
+        "revision":project_revision,
+    }))
+    .map_err(|error| error.to_string())?;
+    let seed_description = book_plan
+        .get("volumeIntentSeeds")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("承接全书战略并推进当前卷目标");
+    let payload = json!({
+        "payloadSchema":"volume-intent.r1",
+        "volumeFunction":format!("{seed_description}（第{volume_no}卷，基于当前真实 Canon 与责任）"),
+        "entryConditions":[
+            {"kind":"BOOK_PLAN_APPROVED","value":book_plan_ref},
+            {"kind":"VOLUME_EXISTS","value":volume_id},
+            {"kind":"PROJECT_REVISION","value":project_revision}
+        ],
+        "mustAchieve":must_achieve,
+        "mustNotBreak":must_not_break,
+        "requiredExitConditions":required_exit_conditions,
+        "futureReservationRefs":future_reservation_refs,
+        "crossVolumeResponsibilityRefs":responsibilities,
+        "targetChapterRange":{"min":preferred_chapters.min(1),"preferred":preferred_chapters,"max":preferred_chapters},
+        "targetWordRange":{"preferred":target_words},
+        "sourceBookPlanRef":book_plan_ref,
+        "compiledFromProjectRevision":project_revision,
+        "sourceCanonRefs":source_canon_refs,
+        "sourceEvidenceRefs":source_evidence_refs,
+        "semanticDigest":semantic_digest
+    });
+    validate_volume_intent_semantics(&payload)?;
+    Ok(payload)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compile_goal_contract(
+    story_constitution_ref: &ArtifactRef,
+    story_constitution: &Value,
+    main_contract_ref: &ArtifactRef,
+    main_contract: &Value,
+    book_plan_ref: &ArtifactRef,
+    book_plan: &Value,
+    volume_intent_ref: &ArtifactRef,
+    volume_intent: &Value,
+) -> Result<Value, String> {
+    if story_constitution.as_object().is_none() {
+        return Err("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED".into());
+    }
+    if main_contract.as_object().is_none() {
+        return Err("GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED".into());
+    }
+    if book_plan.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED") {
+        return Err("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".into());
+    }
+    validate_volume_intent_semantics(volume_intent)
+        .map_err(|_| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+    Ok(json!({
+        "contractType":"GoalContractR1",
+        "hard":true,
+        "refs":{"storyConstitution":story_constitution_ref,"mainContract":main_contract_ref,"bookPlan":book_plan_ref,"volumeIntent":volume_intent_ref},
+        "storyConstitution":story_constitution,
+        "mainContract":main_contract,
+        "bookPlan":book_plan,
+        "volumeIntent":volume_intent
+    }))
+}
+
+fn task_id(task: &Value) -> Result<&str, String> {
+    task.get("taskId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "VOLUME_PLAN_TASK_ID_REQUIRED".into())
+}
+
+pub fn validate_volume_plan_semantics(plan: &Value) -> Result<(), String> {
+    validate_volume_route(plan)?;
+    let tasks =
+        non_empty_array(plan, "tasks").map_err(|_| "VOLUME_PLAN_TASKS_REQUIRED".to_string())?;
+    if plan
+        .get("routeInvariants")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_PLAN_ROUTE_INVARIANTS_REQUIRED".into());
+    }
+    if plan
+        .get("requiredExitConditions")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_PLAN_EXIT_CONDITIONS_REQUIRED".into());
+    }
+    let ids = tasks
+        .iter()
+        .map(task_id)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if ids.len() != tasks.len() {
+        return Err("VOLUME_PLAN_TASK_ID_DUPLICATE".into());
+    }
+    for task in tasks {
+        let id = task_id(task)?;
+        let predicate = task
+            .get("completionPredicate")
+            .and_then(Value::as_object)
+            .ok_or("VOLUME_PLAN_COMPLETION_PREDICATE_REQUIRED")?;
+        let kind = predicate
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.trim().is_empty())
+            .ok_or("VOLUME_PLAN_COMPLETION_PREDICATE_REQUIRED")?;
+        if matches!(kind, "VAGUE" | "PROGRESS" | "SUITABLE_PROGRESS") {
+            return Err("VOLUME_PLAN_COMPLETION_PREDICATE_UNDETERMINED".into());
+        }
+        if predicate.get("value").is_none_or(Value::is_null) {
+            return Err("VOLUME_PLAN_COMPLETION_PREDICATE_VALUE_REQUIRED".into());
+        }
+        for dependency in task
+            .get("dependsOnTaskIds")
+            .and_then(Value::as_array)
+            .ok_or("VOLUME_PLAN_DEPENDENCIES_REQUIRED")?
+        {
+            let dependency = dependency
+                .as_str()
+                .ok_or("VOLUME_PLAN_DEPENDENCY_INVALID")?;
+            if !ids.contains(dependency) {
+                return Err(format!("VOLUME_PLAN_DANGLING_DEPENDENCY:{dependency}"));
+            }
+            if dependency == id {
+                return Err("VOLUME_PLAN_DEPENDENCY_CYCLE".into());
+            }
+        }
+    }
+    let mut unresolved = ids.clone();
+    loop {
+        let ready = tasks
+            .iter()
+            .filter(|task| {
+                task_id(task)
+                    .map(|id| {
+                        unresolved.contains(id)
+                            && task
+                                .get("dependsOnTaskIds")
+                                .and_then(Value::as_array)
+                                .is_some_and(|dependencies| {
+                                    dependencies.iter().all(|dependency| {
+                                        dependency.as_str().is_none_or(|dependency| {
+                                            !unresolved.contains(dependency)
+                                        })
+                                    })
+                                })
+                    })
+                    .unwrap_or(false)
+            })
+            .filter_map(|task| task_id(task).ok())
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            break;
+        }
+        for task_id in ready {
+            unresolved.remove(task_id);
+        }
+    }
+    if !unresolved.is_empty() {
+        return Err("VOLUME_PLAN_DEPENDENCY_CYCLE".into());
+    }
+    let budget = plan
+        .get("capacityBudget")
+        .and_then(Value::as_object)
+        .ok_or("VOLUME_PLAN_CAPACITY_REQUIRED")?;
+    let min = budget
+        .get("minChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let preferred = budget
+        .get("preferredChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let max = budget
+        .get("maxChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if min < 1 || min > preferred || preferred > max {
+        return Err("VOLUME_PLAN_CAPACITY_INVALID".into());
+    }
+    if !tasks
+        .iter()
+        .any(|task| task.get("class").and_then(Value::as_str) == Some("REQUIRED"))
+    {
+        return Err("VOLUME_PLAN_REQUIRED_TASK_MISSING".into());
+    }
+    Ok(())
+}
+
+pub fn compile_volume_plan_from_authority(
+    volume_intent_ref: &ArtifactRef,
+    volume_intent: &Value,
+    goal_contract: &Value,
+    project_revision: i64,
+) -> Result<Value, String> {
+    validate_volume_intent_semantics(volume_intent)
+        .map_err(|_| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+    if project_revision < 0 {
+        return Err("VOLUME_PLAN_COMPILED_REVISION_REQUIRED".into());
+    }
+    let source_canon_refs = volume_intent
+        .get("sourceCanonRefs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let source_evidence_refs = volume_intent
+        .get("sourceEvidenceRefs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let continuity_refs = volume_intent
+        .get("crossVolumeResponsibilityRefs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut tasks = Vec::new();
+    let mut previous_required: Option<String> = None;
+    for (index, goal) in volume_intent
+        .get("mustAchieve")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let goal_id = goal
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("VOLUME_PLAN_GOAL_ID_REQUIRED")?;
+        let task_id = format!("task:required:{goal_id}");
+        let predicate = if index == 0 && !source_canon_refs.is_empty() {
+            json!({"kind":"CANON_EVIDENCE_PRESENT","value":source_canon_refs[0]})
+        } else {
+            json!({"kind":"TASK_SATISFIED","value":task_id})
+        };
+        let dependencies = previous_required
+            .iter()
+            .cloned()
+            .map(Value::String)
+            .collect::<Vec<_>>();
+        tasks.push(json!({
+            "taskId":task_id,
+            "class":"REQUIRED",
+            "objective":goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
+            "dependsOnTaskIds":dependencies,
+            "continuityThreadRefs":continuity_refs,
+            "reservationRefs":[],
+            "completionPredicate":predicate,
+            "estimatedChapterCost":{"preferred":1}
+        }));
+        previous_required = Some(task_id);
+    }
+    let book_plan = goal_contract
+        .get("bookPlan")
+        .ok_or("GOAL_CONTRACT_BOOK_PLAN_REQUIRED")?;
+    if let Some(items) = book_plan
+        .get("relationshipMacroDirections")
+        .and_then(Value::as_array)
+    {
+        for item in items.iter().take(8) {
+            let id = item.get("id").and_then(Value::as_str).unwrap_or("relation");
+            tasks.push(json!({
+                "taskId":format!("task:optional:{id}"),
+                "class":"OPTIONAL",
+                "objective":item.get("description").cloned().unwrap_or_else(|| json!("观察关系变化")),
+                "dependsOnTaskIds":[],
+                "continuityThreadRefs":continuity_refs,
+                "reservationRefs":[],
+                "completionPredicate":{"kind":"RELATION_STATE_ADVANCED","value":id},
+                "estimatedChapterCost":{"preferred":1}
+            }));
+        }
+    }
+    let mut climax_task: Option<String> = None;
+    if let Some(items) = book_plan.get("majorMysteryGoals").and_then(Value::as_array) {
+        for item in items.iter().take(1) {
+            let id = item.get("id").and_then(Value::as_str).unwrap_or("mystery");
+            let task_id = format!("task:climax:{id}");
+            tasks.push(json!({
+                "taskId":task_id,
+                "class":"CLIMAX",
+                "objective":item.get("description").cloned().unwrap_or_else(|| json!("完成本卷关键回报")),
+                "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
+                "continuityThreadRefs":continuity_refs,
+                "reservationRefs":[],
+                "completionPredicate":{"kind":"MYSTERY_RESOLVED","value":id},
+                "estimatedChapterCost":{"preferred":2}
+            }));
+            climax_task = Some(task_id);
+        }
+    }
+    let reservations = volume_intent
+        .get("futureReservationRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for reservation in reservations {
+        tasks.push(json!({
+            "taskId":format!("task:reserved:{reservation}"),
+            "class":"RESERVED",
+            "objective":format!("保护并在授权窗口处理保留项 {reservation}"),
+            "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
+            "continuityThreadRefs":continuity_refs,
+            "reservationRefs":[reservation],
+            "completionPredicate":{"kind":"FUTURE_RESERVATION_FULFILLED","value":reservation},
+            "estimatedChapterCost":{"preferred":1}
+        }));
+    }
+    if tasks.is_empty() {
+        return Err("VOLUME_PLAN_TASKS_REQUIRED".into());
+    }
+    let required_exit_conditions = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.get("class").and_then(Value::as_str),
+                Some("REQUIRED" | "CLIMAX" | "RESERVED")
+            )
+        })
+        .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+        .map(|id| json!({"kind":"TASK_SATISFIED","value":id}))
+        .collect::<Vec<_>>();
+    if required_exit_conditions.is_empty() {
+        return Err("VOLUME_PLAN_EXIT_CONDITIONS_REQUIRED".into());
+    }
+    let mut route_invariants = volume_intent
+        .get("mustNotBreak")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("description").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    route_invariants.push("所有任务必须保持 Goal Contract 的 authority 依赖".into());
+    route_invariants.push("Task Reality 只能从运行时状态投影读取，不写入本计划".into());
+    let chapter_range = volume_intent
+        .get("targetChapterRange")
+        .cloned()
+        .ok_or("VOLUME_PLAN_CAPACITY_REQUIRED")?;
+    let min_chapters = chapter_range
+        .get("min")
+        .and_then(Value::as_i64)
+        .unwrap_or(1)
+        .max(1);
+    let preferred_chapters = chapter_range
+        .get("preferred")
+        .and_then(Value::as_i64)
+        .unwrap_or(min_chapters)
+        .max(min_chapters);
+    let max_chapters = chapter_range
+        .get("max")
+        .and_then(Value::as_i64)
+        .unwrap_or(preferred_chapters)
+        .max(preferred_chapters);
+    let semantic_digest = sha256_canonical(&json!({"intent":volume_intent,"goalContract":goal_contract,"tasks":tasks,"revision":project_revision})).map_err(|error| error.to_string())?;
+    let payload = json!({
+        "payloadSchema":"volume-plan.r1",
+        "volumeIntentRef":volume_intent_ref,
+        "routeVersion":1,
+        "tasks":tasks,
+        "routeInvariants":route_invariants,
+        "requiredExitConditions":required_exit_conditions,
+        "capacityBudget":{"minChapters":min_chapters,"preferredChapters":preferred_chapters,"maxChapters":max_chapters},
+        "goalContractRefs":[goal_contract["refs"]["storyConstitution"].clone(),goal_contract["refs"]["mainContract"].clone(),goal_contract["refs"]["bookPlan"].clone(),goal_contract["refs"]["volumeIntent"].clone()],
+        "compiledFromProjectRevision":project_revision,
+        "sourceEvidenceRefs":source_evidence_refs,
+        "semanticDigest":semantic_digest,
+        "climaxReservation":climax_task.map(|task_id| json!({"taskId":task_id,"minRemainingCapacity":1}))
+    });
+    validate_volume_plan_semantics(&payload)?;
+    Ok(payload)
+}
+
+/// Normalizes an explicitly supplied route against the current Goal Contract.
+/// The product path normally supplies no plan and uses the deterministic
+/// compiler above; this compatibility normalizer keeps older callers bounded
+/// while still preventing empty invariants, exit conditions, or predicates.
+pub fn normalize_volume_plan_candidate(
+    mut candidate: Value,
+    volume_intent_ref: &ArtifactRef,
+    volume_intent: &Value,
+    goal_contract: &Value,
+    project_revision: i64,
+) -> Result<Value, String> {
+    if !candidate.is_object() {
+        return Err("VOLUME_PLAN_REQUIRED".into());
+    }
+    candidate["payloadSchema"] = json!("volume-plan.r1");
+    candidate["volumeIntentRef"] = json!(volume_intent_ref);
+    if candidate
+        .get("routeVersion")
+        .and_then(Value::as_i64)
+        .is_none_or(|version| version < 1)
+    {
+        candidate["routeVersion"] = json!(1);
+    }
+    {
+        let tasks = candidate
+            .get_mut("tasks")
+            .and_then(Value::as_array_mut)
+            .ok_or("VOLUME_PLAN_TASKS_REQUIRED")?;
+        for task in tasks.iter_mut() {
+            let id = task_id(task)?.to_owned();
+            if task
+                .get("completionPredicate")
+                .and_then(Value::as_object)
+                .and_then(|predicate| predicate.get("value"))
+                .is_none()
+            {
+                task["completionPredicate"] = json!({"kind":"TASK_SATISFIED","value":id});
+            }
+            if task.get("continuityThreadRefs").is_none() {
+                task["continuityThreadRefs"] = json!([]);
+            }
+            if task.get("reservationRefs").is_none() {
+                task["reservationRefs"] = json!([]);
+            }
+            if task.get("dependsOnTaskIds").is_none() {
+                task["dependsOnTaskIds"] = json!([]);
+            }
+            if task.get("estimatedChapterCost").is_none() {
+                task["estimatedChapterCost"] = json!({"preferred":1});
+            }
+        }
+    }
+    if candidate
+        .get("routeInvariants")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        candidate["routeInvariants"] = json!([
+            "所有任务必须遵循当前 Goal Contract 的硬约束",
+            "Task Reality 由正式运行状态投影提供，不写入 VolumePlan"
+        ]);
+        if let Some(items) = volume_intent.get("mustNotBreak").and_then(Value::as_array) {
+            for item in items.iter().take(8) {
+                if let Some(description) = item.get("description").and_then(Value::as_str) {
+                    candidate["routeInvariants"]
+                        .as_array_mut()
+                        .expect("route invariants array")
+                        .push(json!(description));
+                }
+            }
+        }
+    }
+    if candidate
+        .get("requiredExitConditions")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        let task_ids = candidate
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|task| {
+                matches!(
+                    task.get("class").and_then(Value::as_str),
+                    Some("REQUIRED" | "CLIMAX" | "RESERVED")
+                )
+            })
+            .filter_map(|task| task.get("taskId").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        candidate["requiredExitConditions"] = json!(task_ids
+            .iter()
+            .map(|id| json!({"kind":"TASK_SATISFIED","value":id}))
+            .collect::<Vec<_>>());
+    }
+    if candidate.get("capacityBudget").is_none() {
+        candidate["capacityBudget"] = volume_intent
+            .get("targetChapterRange")
+            .cloned()
+            .map(|range| {
+                json!({
+                    "minChapters":range.get("min").and_then(Value::as_i64).unwrap_or(1).max(1),
+                    "preferredChapters":range.get("preferred").and_then(Value::as_i64).unwrap_or(1).max(1),
+                    "maxChapters":range.get("max").and_then(Value::as_i64).unwrap_or(1).max(1)
+                })
+            })
+            .unwrap_or_else(|| json!({"minChapters":1,"preferredChapters":1,"maxChapters":1}));
+    }
+    let goal_contract_refs = [
+        "storyConstitution",
+        "mainContract",
+        "bookPlan",
+        "volumeIntent",
+    ]
+    .into_iter()
+    .filter_map(|key| goal_contract.get("refs")?.get(key).cloned())
+    .filter(|reference| !reference.is_null())
+    .collect::<Vec<_>>();
+    candidate["goalContractRefs"] = json!(goal_contract_refs);
+    candidate["compiledFromProjectRevision"] = json!(project_revision);
+    candidate["sourceEvidenceRefs"] = volume_intent
+        .get("sourceEvidenceRefs")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    candidate["semanticDigest"] =
+        json!(sha256_canonical(&candidate).map_err(|error| error.to_string())?);
+    validate_volume_plan_semantics(&candidate)?;
+    Ok(candidate)
+}
+
 /// B07's semantic boundary for a Change target.  B12 may assemble the outer
 /// CommitBundle, but it cannot turn a JSON patch into a planning authority
 /// without this owner validation having accepted the candidate.

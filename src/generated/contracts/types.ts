@@ -130,6 +130,11 @@ export interface VolumeIntentR1 {
   "crossVolumeResponsibilityRefs": Array<string>
   "targetChapterRange": { "min": number; "preferred": number; "max": number }
   "targetWordRange": { "min"?: number | null; "preferred": number; "max"?: number | null }
+  "sourceBookPlanRef"?: ArtifactRef
+  "compiledFromProjectRevision"?: number
+  "sourceCanonRefs"?: Array<string>
+  "sourceEvidenceRefs"?: Array<string>
+  "semanticDigest"?: string
 }
 
 export interface VolumePlanR1 {
@@ -141,6 +146,10 @@ export interface VolumePlanR1 {
   "requiredExitConditions": Array<Condition>
   "climaxReservation"?: { "taskId": string; "minRemainingCapacity": number } | null
   "capacityBudget": { "minChapters": number; "preferredChapters": number; "maxChapters": number }
+  "goalContractRefs"?: Array<ArtifactRef>
+  "compiledFromProjectRevision"?: number
+  "sourceEvidenceRefs"?: Array<string>
+  "semanticDigest"?: string
 }
 
 export interface ContextManifestR1 {

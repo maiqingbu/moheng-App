@@ -722,6 +722,16 @@ pub struct VolumeIntentR1 {
     pub cross_volume_responsibility_refs: Vec<String>,
     pub target_chapter_range: VolumeIntentR1TargetChapterRange,
     pub target_word_range: VolumeIntentR1TargetWordRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_book_plan_ref: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_from_project_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_canon_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -754,6 +764,14 @@ pub struct VolumePlanR1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub climax_reservation: Option<VolumePlanR1ClimaxReservation>,
     pub capacity_budget: VolumePlanR1CapacityBudget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_contract_refs: Option<Vec<ArtifactRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_from_project_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_evidence_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

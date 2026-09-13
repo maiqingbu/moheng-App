@@ -16,6 +16,8 @@ pub enum UiProjectionError {
     Json(#[from] serde_json::Error),
     #[error("operations: {0}")]
     Operations(#[from] super::ops::OpsError),
+    #[error("runtime: {0}")]
+    Runtime(String),
     #[error("projection not found")]
     NotFound,
 }
@@ -29,6 +31,57 @@ fn offset(cursor: Option<&str>) -> i64 {
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0)
         .max(0)
+}
+
+fn b03_phase_label(phase: &str) -> &'static str {
+    match phase {
+        "READ_BOOK_PLAN" => "读取正式总纲",
+        "READ_CURRENT_STATE" => "读取当前事实",
+        "BUILD_VOLUME_GOAL" => "建立当前卷目标",
+        "VALIDATE_VOLUME_GOAL" => "校验卷目标",
+        "COMMIT_VOLUME_INTENT" => "提交卷目标",
+        "READ_VOLUME_INTENT" => "读取卷目标",
+        "BUILD_TASK_ROUTE" => "规划任务路线",
+        "VALIDATE_DEPENDENCIES" => "检查任务依赖",
+        "CALCULATE_CAPACITY" => "计算创作容量",
+        "VALIDATE_ROUTE" => "校验路线约束",
+        "COMMIT_VOLUME_PLAN" => "提交任务路线",
+        "COMPLETED" => "已完成",
+        _ => "处理中",
+    }
+}
+
+fn b03_phase_steps(kind: &str, current: &str, status: &str) -> Vec<Value> {
+    let phases = if kind == crate::repositories::runtime::B03_VOLUME_INTENT_KIND {
+        crate::repositories::runtime::B03_VOLUME_INTENT_PHASES
+    } else {
+        crate::repositories::runtime::B03_VOLUME_PLAN_PHASES
+    };
+    let current_index = phases.iter().position(|phase| *phase == current);
+    phases
+        .iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            let step_status = if status == "COMPLETED" {
+                "done"
+            } else if let Some(current_index) = current_index {
+                if index < current_index {
+                    "done"
+                } else if index == current_index {
+                    if status == "FAILED" {
+                        "failed"
+                    } else {
+                        "active"
+                    }
+                } else {
+                    "pending"
+                }
+            } else {
+                "pending"
+            };
+            json!({"id":phase,"label":b03_phase_label(phase),"status":step_status})
+        })
+        .collect()
 }
 
 fn page(mut items: Vec<Value>, total: i64, start: i64, limit: usize) -> ProjectionPage {
@@ -59,6 +112,29 @@ pub fn volume_detail(
     else {
         return Err(UiProjectionError::NotFound);
     };
+    let runtime_operation = crate::repositories::runtime::DurableJobService::b03_volume_operation(
+        connection, project_id, volume_id,
+    )
+    .map_err(|error| UiProjectionError::Runtime(error.to_string()))?
+    .map(|mut operation| {
+        let kind = operation
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let phase = operation
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let operation_status = operation
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        operation["steps"] = json!(b03_phase_steps(&kind, &phase, &operation_status));
+        operation
+    });
     let committed: i64 = connection.query_row(
         "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND volume_id=?2 AND status='COMMITTED'",
         libsql_rusqlite::params![project_id, volume_id],
@@ -109,6 +185,7 @@ pub fn volume_detail(
         "contractVersion":"VolumeContract",
         "stateLedgerVersion":ledger_version.unwrap_or_else(|| "未生成".into()),
         "arcs":[],"chapters":chapters,"openObligations":open_obligations,"overdueForeshadows":overdue_foreshadows,
+        "runtimeOperation":runtime_operation,
         "exitEligibility":{"ready":ready,"blockers":if ready { Vec::<String>::new() } else { vec!["本卷退出条件尚未全部满足".to_string()] }},
         "nextVolumeEligibility":if ready { "已解锁下一卷规划" } else { "完成本卷退出条件后解锁" }
     }))

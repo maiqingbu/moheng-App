@@ -14,7 +14,7 @@ const concurrentSuccesses = Number(concurrentMatch[1])
 const concurrentActive = Number(concurrentMatch[2])
 const concurrentHolder = concurrentMatch[3]
 if (concurrentSuccesses !== 1 || concurrentActive !== 1) throw new Error('concurrent lease invariant failed')
-const changedFiles = execFileSync('git', ['diff', '--name-status', '82172418fbae09d8856e35f6aad19c7514444e6c', sourceCommit], { cwd: root, encoding: 'utf8' })
+const changedFiles = execFileSync('git', ['diff', '--name-status', '5a0f27cc59f2a182e637ef713b26a827ea002ef8', sourceCommit], { cwd: root, encoding: 'utf8' })
 writeFileSync(resolve(evidenceDir, 'changed-files.txt'), changedFiles)
 
 const evidence = {
@@ -151,6 +151,6 @@ for (const [name, payload] of Object.entries(evidence)) {
 }
 writeFileSync(resolve(evidenceDir, 'telemetry_redaction.log'), `PASS sourceCommit=${sourceCommit} telemetry contains provider/model/attempt/latency/usage/cost status only; no prompt, raw response, Authorization header, or API key.\n`)
 writeFileSync(resolve(evidenceDir, 'environment.json'), `${JSON.stringify({ batch: 'B03', milestone: 'M0D', sourceCommit, node: process.version, platform: process.platform, evidenceDir }, null, 2)}\n`)
-writeFileSync(resolve(evidenceDir, 'regression_summary.json'), `${JSON.stringify({ batch: 'B03', sourceCommit, predecessor: { batch: 'B02', baselineCommit: '82172418fbae09d8856e35f6aad19c7514444e6c', status: 'FROZEN_PASS' }, fullRust: gates.metrics.allRustTests, targetedRust: gates.metrics.b03TargetedRustTests, node: gates.metrics.nodeTests, vitest: gates.metrics.vitestTests, contract: `${gates.metrics.contractValid} valid accepted, ${gates.metrics.contractInvalid} invalid rejected` }, null, 2)}\n`)
+writeFileSync(resolve(evidenceDir, 'regression_summary.json'), `${JSON.stringify({ batch: 'B03', sourceCommit, predecessor: { batch: 'B02', baselineCommit: '5a0f27cc59f2a182e637ef713b26a827ea002ef8', status: 'FROZEN_PASS' }, fullRust: gates.metrics.allRustTests, targetedRust: gates.metrics.b03TargetedRustTests, node: gates.metrics.nodeTests, vitest: gates.metrics.vitestTests, contract: `${gates.metrics.contractValid} valid accepted, ${gates.metrics.contractInvalid} invalid rejected` }, null, 2)}\n`)
 writeFileSync(resolve(evidenceDir, 'commands.log'), gates.gates.map(gate => `${gate.status} ${gate.name}: ${gate.command}`).join('\n') + '\n')
 console.log(`B03 evidence assembled: ${Object.keys(evidence).length} structured files at ${evidenceDir}`)

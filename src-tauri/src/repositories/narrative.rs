@@ -2,7 +2,7 @@ use crate::generated::types::ArtifactRef;
 use crate::narrative::{build_continuity_threads, ContinuityThreadView, ResumeContext};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const TASK_STATE_CHUNK_SIZE: usize = 100;
@@ -408,6 +408,171 @@ impl NarrativeRepository {
             },
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Reads the bounded authority set consumed by B03's deterministic volume
+    /// compilers.  This is a read projection only: all returned values come
+    /// from the existing Canon/obligation tables and no planning authority is
+    /// created here.
+    pub fn volume_planning_sources(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        limit: i64,
+    ) -> Result<Value, NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let chapter_ids = {
+            let mut statement = connection.prepare(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND volume_id=?2 ORDER BY chapter_no,chapter_id LIMIT ?3",
+            )?;
+            let rows = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, volume_id, bound],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let chapter_json = serde_json::to_string(&chapter_ids)?;
+        let facts = {
+            let mut statement = connection.prepare(
+                "SELECT fact_id,subject_id,predicate,object_json,authority_level FROM canon_facts WHERE project_id=?1 AND superseded_by IS NULL ORDER BY fact_id LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(libsql_rusqlite::params![project_id, bound], |row| {
+                    let object_json: String = row.get(3)?;
+                    Ok(CanonFactRecord {
+                        fact_id: row.get(0)?,
+                        subject_id: row.get(1)?,
+                        predicate: row.get(2)?,
+                        object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                        authority_level: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let relations = {
+            let mut statement = connection.prepare(
+                "SELECT relation_id,subject_id,predicate,object_id,authority_level FROM canon_relations WHERE project_id=?1 AND superseded_by IS NULL ORDER BY relation_id LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(libsql_rusqlite::params![project_id, bound], |row| {
+                    Ok(RelationRecord {
+                        relation_id: row.get(0)?,
+                        subject_id: row.get(1)?,
+                        predicate: row.get(2)?,
+                        object_id: row.get(3)?,
+                        authority_level: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let knowledge = {
+            let mut statement = connection.prepare(
+                "SELECT knowledge_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id FROM canon_knowledge WHERE project_id=?1 ORDER BY knowledge_id LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(libsql_rusqlite::params![project_id, bound], |row| {
+                    Ok(KnowledgeRecord {
+                        knowledge_id: row.get(0)?,
+                        knower_id: row.get(1)?,
+                        fact_id: row.get(2)?,
+                        epistemic_state: row.get(3)?,
+                        visibility_scope: row.get(4)?,
+                        from_chapter_id: row.get(5)?,
+                        from_story_time: None,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let events = {
+            let mut statement = connection.prepare(
+                "SELECT event_id,chapter_id,event_type,subject_id,object_json,story_time,payload_json,event_ordinal FROM canon_events WHERE project_id=?1 AND (chapter_id IN (SELECT value FROM json_each(?2)) OR ?2='[]') ORDER BY chapter_id,event_ordinal,event_id LIMIT ?3",
+            )?;
+            let rows = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, chapter_json, bound],
+                    |row| {
+                        let object_json: Option<String> = row.get(4)?;
+                        let payload_json: String = row.get(6)?;
+                        Ok(json!({
+                            "eventId": row.get::<_, String>(0)?,
+                            "chapterId": row.get::<_, String>(1)?,
+                            "eventType": row.get::<_, String>(2)?,
+                            "subjectId": row.get::<_, Option<String>>(3)?,
+                            "objectJson": object_json.and_then(|raw| serde_json::from_str::<Value>(&raw).ok()).unwrap_or(Value::Null),
+                            "storyTime": row.get::<_, Option<String>>(5)?,
+                            "payloadJson": serde_json::from_str::<Value>(&payload_json).unwrap_or_else(|_| json!({})),
+                            "eventOrdinal": row.get::<_, i64>(7)?,
+                        }))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let evidence = {
+            let mut statement = connection.prepare(
+                "SELECT evidence_id,fact_id,relation_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end FROM canon_evidence WHERE project_id=?1 AND (final_chapter_id IN (SELECT value FROM json_each(?2)) OR ?2='[]') ORDER BY created_at,evidence_id LIMIT ?3",
+            )?;
+            let rows = statement
+                .query_map(
+                    libsql_rusqlite::params![project_id, chapter_json, bound],
+                    |row| {
+                        Ok(EvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            fact_id: row.get(1)?,
+                            relation_id: row.get(2)?,
+                            event_id: row.get(3)?,
+                            final_chapter_id: row.get(4)?,
+                            source_artifact_id: row.get(5)?,
+                            version: row.get(6)?,
+                            evidence_type: row.get(7)?,
+                            quote: row.get(8)?,
+                            range_start: row.get(9)?,
+                            range_end: row.get(10)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let responsibilities = {
+            let mut statement = connection.prepare(
+                "SELECT obligation_id,obligation_type,scope,authority_level,lifecycle,description,must_resolve_before_chapter,prerequisites_json,source_event_id,resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND scope IN ('BOOK','VOLUME') AND lifecycle IN ('APPROVED','PLANTED','PROGRESSING') ORDER BY authority_level,obligation_id LIMIT ?2",
+            )?;
+            let rows = statement
+                .query_map(libsql_rusqlite::params![project_id, bound], |row| {
+                    let prerequisites: String = row.get(7)?;
+                    let resume_condition: String = row.get(9)?;
+                    Ok(json!({
+                        "obligationId": row.get::<_, String>(0)?,
+                        "obligationType": row.get::<_, String>(1)?,
+                        "scope": row.get::<_, String>(2)?,
+                        "authorityLevel": row.get::<_, String>(3)?,
+                        "lifecycle": row.get::<_, String>(4)?,
+                        "description": row.get::<_, String>(5)?,
+                        "mustResolveBeforeChapter": row.get::<_, Option<String>>(6)?,
+                        "prerequisites": serde_json::from_str::<Value>(&prerequisites).unwrap_or_else(|_| json!([])),
+                        "sourceEventId": row.get::<_, Option<String>>(8)?,
+                        "resumeCondition": serde_json::from_str::<Value>(&resume_condition).unwrap_or_else(|_| json!({})),
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        Ok(json!({
+            "volumeId": volume_id,
+            "chapterIds": chapter_ids,
+            "facts": facts,
+            "relations": relations,
+            "knowledge": knowledge,
+            "events": events,
+            "evidence": evidence,
+            "responsibilities": responsibilities,
+        }))
     }
 
     pub fn current_canon(

@@ -109,7 +109,7 @@ export function generateAcceptance(evidenceDir = process.env.B03_EVIDENCE_DIR ??
     predecessor: {
       batch: 'B02',
       status: 'FROZEN_PASS',
-      baselineCommit: '82172418fbae09d8856e35f6aad19c7514444e6c'
+      baselineCommit: '5a0f27cc59f2a182e637ef713b26a827ea002ef8'
     },
     keyNumbers: actualMetrics,
     evidenceGenerator: {

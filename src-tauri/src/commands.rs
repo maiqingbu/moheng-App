@@ -1677,7 +1677,7 @@ pub fn plan_route_from_authority(
     let truncated = tasks.len() > bound;
     tasks.truncate(bound);
     Ok(
-        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"continuityThreads":continuity_threads,"futureReservations":future_reservations,"currentChapterPlan":current_chapter_plan,"horizonPreview":horizon_preview,"stale":if route_stale { json!({"status":"STALE","reason":"受影响内容需要重新核对"}) } else { json!({"status":"FRESH"}) },"owner":"B07::PlanningRoute","truncated":truncated}),
+        json!({"projectId":project_id,"projectRevision":revision,"volumeId":volume_id,"volumeIntentRef":volume_intent_ref,"volumePlanRef":route_ref,"routeVersion":route.get("routeVersion").cloned().unwrap_or(Value::Null),"tasks":tasks,"routeInvariants":route.get("routeInvariants").cloned().unwrap_or_else(|| json!([])),"requiredExitConditions":route.get("requiredExitConditions").cloned().unwrap_or_else(|| json!([])),"capacityBudget":route.get("capacityBudget").cloned().unwrap_or_else(|| json!({})),"goalContractRefs":route.get("goalContractRefs").cloned().unwrap_or_else(|| json!([])),"compiledFromProjectRevision":route.get("compiledFromProjectRevision").cloned().unwrap_or(Value::Null),"sourceEvidenceRefs":route.get("sourceEvidenceRefs").cloned().unwrap_or_else(|| json!([])),"semanticDigest":route.get("semanticDigest").cloned().unwrap_or(Value::Null),"taskReality":progress.get("tasks").cloned().unwrap_or_else(|| json!([])),"planningPressure":progress.get("planningPressure").cloned().unwrap_or_else(|| json!({})),"continuityThreads":continuity_threads,"futureReservations":future_reservations,"currentChapterPlan":current_chapter_plan,"horizonPreview":horizon_preview,"stale":if route_stale { json!({"status":"STALE","reason":"受影响内容需要重新核对"}) } else { json!({"status":"FRESH"}) },"owner":"B07::PlanningRoute","truncated":truncated}),
     )
 }
 
@@ -4504,6 +4504,20 @@ fn notify_b02_planning_phase(
     Ok(())
 }
 
+fn notify_b03_volume_phase(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    job_id: &str,
+    phase: &str,
+    now: &str,
+    observer: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    DurableJobService::update_stage(connection, project_id, job_id, phase, now)
+        .map_err(|error| error.to_string())?;
+    observer(phase);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_planning_command(
     state: &KernelState,
@@ -4544,8 +4558,10 @@ fn execute_planning_command_with_observer(
         .pointer("/payload/plan")
         .cloned()
         .unwrap_or(Value::Null);
+    let supplied_plan = !payload.is_null();
     let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
     let mut b02_plan_job: Option<String> = None;
+    let mut b03_volume_job: Option<(String, String)> = None;
     let b02_plan_worker = "b02-book-plan-worker";
     let (artifact_type, scope, scope_key) = match command_type {
         "planning_finalize_book_plan" | "book_plan_revise" => (
@@ -4586,30 +4602,117 @@ fn execute_planning_command_with_observer(
         .open(project_id, "", requested_at)
         .map_err(|e| e.to_string())?;
     if artifact_type == "VolumeIntent" {
-        let volume_exists = crate::repositories::narrative::NarrativeRepository::volume_exists(
-            &handle, project_id, &scope_key,
+        let metadata =
+            crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+                &handle, project_id, &scope_key,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+        let book_plan_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle, project_id, "BookPlan",
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+        let book_plan =
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle,
+                project_id,
+                &book_plan_ref,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+        if book_plan.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED") {
+            return Err("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".into());
+        }
+        if !payload.is_null() {
+            crate::planning::validate_volume_intent(&payload)?;
+        }
+        let project_revision =
+            crate::repositories::narrative::NarrativeRepository::project_revision(
+                &handle, project_id,
+            )
+            .map_err(|e| e.to_string())?;
+        let sources = crate::repositories::narrative::NarrativeRepository::volume_planning_sources(
+            &handle, project_id, &scope_key, 100,
         )
         .map_err(|e| e.to_string())?;
-        if !volume_exists {
-            return Err("VOLUME_NOT_FOUND".into());
-        }
-        if !crate::repositories::narrative::NarrativeRepository::approved_book_plan_exists(
-            &handle, project_id,
+        let job_id = StableIdentityFactory::from_command(
+            StableIdKind::Job,
+            &format!("{command_id}:volume-intent"),
+        )?;
+        let worker_id = "b03-volume-intent-worker".to_string();
+        DurableJobService::start_b03_phase_job(
+            &handle,
+            project_id,
+            &scope_key,
+            &job_id,
+            crate::runtime::B03_VOLUME_INTENT_KIND,
+            crate::runtime::B03_VOLUME_INTENT_PHASES,
+            &worker_id,
+            requested_at,
         )
-        .map_err(|e| e.to_string())?
-        {
-            return Err("BOOK_PLAN_APPROVED_REQUIRED".into());
-        }
+        .map_err(|error| error.to_string())?;
+        DurableJobService::set_runtime_state(&handle, project_id, "ACTIVE", None, requested_at)
+            .map_err(|error| error.to_string())?;
+        DurableJobService::set_project_phase(
+            &handle,
+            project_id,
+            "VOLUME_INTENT_PLANNING",
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+        notify_b03_volume_phase(
+            &handle,
+            project_id,
+            &job_id,
+            "READ_BOOK_PLAN",
+            requested_at,
+            observer,
+        )?;
+        notify_b03_volume_phase(
+            &handle,
+            project_id,
+            &job_id,
+            "READ_CURRENT_STATE",
+            requested_at,
+            observer,
+        )?;
         if payload.is_null() {
-            let target_chapters =
-                crate::repositories::narrative::NarrativeRepository::volume_target_chapters(
-                    &handle, project_id, &scope_key,
-                )
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
-            payload = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"current volume route","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":target_chapters,"max":target_chapters},"targetWordRange":{"preferred":target_chapters.saturating_mul(1000)}});
+            payload = crate::planning::compile_volume_intent_from_authority(
+                &scope_key,
+                metadata.volume_no,
+                metadata.chapter_start,
+                metadata.chapter_end,
+                metadata.target_words,
+                &book_plan_ref,
+                &book_plan,
+                &sources,
+                project_revision,
+            )?;
         }
-        crate::planning::validate_volume_intent(&payload)?;
+        notify_b03_volume_phase(
+            &handle,
+            project_id,
+            &job_id,
+            "BUILD_VOLUME_GOAL",
+            requested_at,
+            observer,
+        )?;
+        if !supplied_plan {
+            crate::planning::validate_volume_intent_semantics(&payload)
+                .map_err(|error| format!("VOLUME_INTENT_SEMANTIC:{error}"))?;
+        }
+        notify_b03_volume_phase(
+            &handle,
+            project_id,
+            &job_id,
+            "VALIDATE_VOLUME_GOAL",
+            requested_at,
+            observer,
+        )?;
+        book_plan_dependencies.push(book_plan_ref);
+        b03_volume_job = Some((job_id, worker_id));
     }
     if artifact_type == "BookPlan" {
         let seed_ref =
@@ -4822,22 +4925,171 @@ fn execute_planning_command_with_observer(
             &scope_key,
         )
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "VOLUME_INTENT_NOT_FOUND".to_string())?;
-        if payload.is_null() {
-            let intent_payload =
+        .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+        let intent_payload =
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, &intent,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+        let story_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle,
+                project_id,
+                "StoryConstitution",
+            )
+            .map_err(|e| e.to_string())?;
+        let main_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle,
+                project_id,
+                "MainContract",
+            )
+            .map_err(|e| e.to_string())?;
+        let book_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle, project_id, "BookPlan",
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+        let story_payload = story_ref
+            .as_ref()
+            .map(|reference| {
                 crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    &handle, project_id, &intent,
+                    &handle, project_id, reference,
                 )
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "VOLUME_INTENT_PAYLOAD_NOT_FOUND".to_string())?;
-            let target_chapters = intent_payload
-                .pointer("/targetChapterRange/max")
-                .and_then(Value::as_i64)
-                .unwrap_or(1);
-            payload = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":intent,"routeVersion":1,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":target_chapters,"maxChapters":target_chapters}});
+                .map_err(|e| e.to_string())
+            })
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(|| json!({}));
+        let main_payload = main_ref
+            .as_ref()
+            .map(|reference| {
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    &handle, project_id, reference,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .transpose()?
+            .flatten()
+            .unwrap_or_else(|| json!({}));
+        let book_payload =
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, &book_ref,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+        let project_revision =
+            crate::repositories::narrative::NarrativeRepository::project_revision(
+                &handle, project_id,
+            )
+            .map_err(|e| e.to_string())?;
+        let goal_contract = if !supplied_plan
+            || intent_payload.get("sourceBookPlanRef").is_some()
+            || intent_payload.get("compiledFromProjectRevision").is_some()
+        {
+            let story_ref = story_ref
+                .as_ref()
+                .ok_or_else(|| "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED".to_string())?;
+            let main_ref = main_ref
+                .as_ref()
+                .ok_or_else(|| "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED".to_string())?;
+            crate::planning::compile_goal_contract(
+                story_ref,
+                &story_payload,
+                main_ref,
+                &main_payload,
+                &book_ref,
+                &book_payload,
+                &intent,
+                &intent_payload,
+            )?
+        } else {
+            // B07 callers may submit an already-shaped legacy route. Keep its
+            // schema/reference checks while avoiding a second synthetic
+            // authority; the B03 auto-compiled path above remains strict.
+            crate::planning::validate_volume_intent(&intent_payload)?;
+            json!({
+                "contractType":"GoalContractR1",
+                "hard":true,
+                "refs":{"storyConstitution":story_ref,"mainContract":main_ref,"bookPlan":book_ref,"volumeIntent":intent},
+                "storyConstitution":story_payload,
+                "mainContract":main_payload,
+                "bookPlan":book_payload,
+                "volumeIntent":intent_payload
+            })
+        };
+        if !payload.is_null() {
+            crate::planning::validate_volume_route(&payload)?;
+            crate::planning::validate_volume_route_reference(&payload, &intent)?;
         }
-        crate::planning::validate_volume_route(&payload)?;
-        crate::planning::validate_volume_route_reference(&payload, &intent)?;
+        let job_id = StableIdentityFactory::from_command(
+            StableIdKind::Job,
+            &format!("{command_id}:volume-plan"),
+        )?;
+        let worker_id = "b03-volume-plan-worker".to_string();
+        DurableJobService::start_b03_phase_job(
+            &handle,
+            project_id,
+            &scope_key,
+            &job_id,
+            crate::runtime::B03_VOLUME_PLAN_KIND,
+            crate::runtime::B03_VOLUME_PLAN_PHASES,
+            &worker_id,
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+        DurableJobService::set_runtime_state(&handle, project_id, "ACTIVE", None, requested_at)
+            .map_err(|error| error.to_string())?;
+        DurableJobService::set_project_phase(
+            &handle,
+            project_id,
+            "VOLUME_PLAN_PLANNING",
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut plan_phases = crate::runtime::B03_VOLUME_PLAN_PHASES.iter();
+        if let Some(phase) = plan_phases.next() {
+            notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
+        }
+        if let Some(phase) = plan_phases.next() {
+            notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
+        }
+        payload = if payload.is_null() {
+            crate::planning::compile_volume_plan_from_authority(
+                &intent,
+                &intent_payload,
+                &goal_contract,
+                project_revision,
+            )?
+        } else {
+            crate::planning::normalize_volume_plan_candidate(
+                payload,
+                &intent,
+                &intent_payload,
+                &goal_contract,
+                project_revision,
+            )?
+        };
+        if let Some(phase) = plan_phases.next() {
+            notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
+        }
+        if let Some(phase) = plan_phases.next() {
+            notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
+        }
+        if let Some(phase) = plan_phases.next() {
+            notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
+        }
+        crate::planning::validate_volume_plan_semantics(&payload)?;
+        if let Some(reference) = story_ref {
+            book_plan_dependencies.push(reference);
+        }
+        if let Some(reference) = main_ref {
+            book_plan_dependencies.push(reference);
+        }
+        book_plan_dependencies.extend([book_ref, intent.clone()]);
+        b03_volume_job = Some((job_id, worker_id));
     }
     if artifact_type == "ChapterPlan" {
         let chapter_id = request
@@ -5075,6 +5327,21 @@ fn execute_planning_command_with_observer(
             observer,
         )?;
     }
+    if let Some((job_id, _)) = b03_volume_job.as_ref() {
+        let commit_phase = if artifact_type == "VolumeIntent" {
+            "COMMIT_VOLUME_INTENT"
+        } else {
+            "COMMIT_VOLUME_PLAN"
+        };
+        notify_b03_volume_phase(
+            &handle,
+            project_id,
+            job_id,
+            commit_phase,
+            requested_at,
+            observer,
+        )?;
+    }
     let receipt = if artifact_type == "BookPlan" {
         match CommitService::commit_with_post_apply(
             &handle,
@@ -5122,10 +5389,70 @@ fn execute_planning_command_with_observer(
                 return Err(error.to_string());
             }
         }
+    } else if let Some((job_id, worker_id)) = b03_volume_job.as_ref() {
+        match CommitService::commit_with_post_apply(
+            &handle,
+            &bundle,
+            requested_at,
+            |connection, _| {
+                DurableJobService::complete_b03_phase_job(
+                    connection,
+                    project_id,
+                    job_id,
+                    worker_id,
+                    requested_at,
+                )
+                .map_err(|error| {
+                    crate::commit::CommitError::ContractInvalid(format!("B03_RUNTIME_JOB:{error}"))
+                })?;
+                DurableJobService::set_project_phase(
+                    connection,
+                    project_id,
+                    if artifact_type == "VolumeIntent" {
+                        "VOLUME_INTENT_READY"
+                    } else {
+                        "VOLUME_PLAN_READY"
+                    },
+                    requested_at,
+                )
+                .map_err(|error| {
+                    crate::commit::CommitError::ContractInvalid(format!(
+                        "B03_RUNTIME_PROJECTION:{error}"
+                    ))
+                })?;
+                DurableJobService::set_runtime_state(
+                    connection,
+                    project_id,
+                    "COMPLETED",
+                    None,
+                    requested_at,
+                )
+                .map_err(|error| {
+                    crate::commit::CommitError::ContractInvalid(format!(
+                        "B03_RUNTIME_STATE:{error}"
+                    ))
+                })
+            },
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = DurableJobService::fail_b03_phase_job(
+                    &handle,
+                    project_id,
+                    job_id,
+                    "B03_PLAN_COMMIT_FAILED",
+                    requested_at,
+                );
+                return Err(error.to_string());
+            }
+        }
     } else {
         CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?
     };
     if b02_plan_job.is_some() {
+        observer("COMPLETED");
+    }
+    if b03_volume_job.is_some() {
         observer("COMPLETED");
     }
     Ok(
@@ -5142,6 +5469,36 @@ pub fn execute_book_plan_revise_with_observer(
     let command_type = required_string(request, "type")?;
     if command_type != "book_plan_revise" {
         return Err("B02_BOOK_PLAN_REVISE_COMMAND_REQUIRED".into());
+    }
+    let project_id = required_string(request, "projectId")?;
+    let command_id = required_string(request, "commandId")?;
+    let idempotency_key = required_string(request, "idempotencyKey")?;
+    let requested_at = required_string(request, "requestedAt")?;
+    execute_planning_command_with_observer(
+        state,
+        request,
+        command_type,
+        project_id,
+        command_id,
+        idempotency_key,
+        requested_at,
+        expected_revision(request)?,
+        observer,
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_volume_planning_with_observer(
+    state: &KernelState,
+    request: &Value,
+    observer: &mut dyn FnMut(&str),
+) -> Result<Value, String> {
+    let command_type = required_string(request, "type")?;
+    if !matches!(
+        command_type,
+        "planning_create_volume_intent" | "planning_create_volume_plan"
+    ) {
+        return Err("B03_VOLUME_PLANNING_COMMAND_REQUIRED".into());
     }
     let project_id = required_string(request, "projectId")?;
     let command_id = required_string(request, "commandId")?;

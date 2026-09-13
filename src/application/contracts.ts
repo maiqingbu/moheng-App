@@ -635,6 +635,15 @@ export interface VolumeDetailProjection {
   overdueForeshadows: number
   exitEligibility: { ready: boolean; blockers: string[] }
   nextVolumeEligibility: string
+  runtimeOperation?: {
+    jobId: string
+    kind: string
+    phase: string
+    status: string
+    errorCode?: string | null
+    active: boolean
+    steps?: Array<{ id: string; label: string; status: 'active' | 'done' | 'pending' | 'failed' }>
+  } | null
 }
 
 export interface PlanningRouteProjection {
@@ -647,6 +656,13 @@ export interface PlanningRouteProjection {
   tasks: Array<Record<string, unknown>>
   taskReality: Array<Record<string, unknown>>
   planningPressure: Record<string, unknown>
+  routeInvariants?: string[]
+  requiredExitConditions?: Array<Record<string, unknown>>
+  capacityBudget?: { minChapters?: number; preferredChapters?: number; maxChapters?: number }
+  goalContractRefs?: Array<{ artifactId: string; version: number; payloadHash: string }>
+  compiledFromProjectRevision?: number
+  sourceEvidenceRefs?: string[]
+  semanticDigest?: string
   continuityThreads?: Array<Record<string, unknown>>
   futureReservations?: Array<Record<string, unknown>>
   currentChapterPlan?: { artifactId: string; version: number; payloadHash: string } | null
