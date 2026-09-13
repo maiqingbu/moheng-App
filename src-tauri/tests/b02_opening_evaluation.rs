@@ -1,10 +1,12 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_production_center_impl, query_story_directions_impl, KernelState,
+    execute_book_plan_revise_with_observer, execute_command_impl, query_production_center_impl,
+    query_story_directions_impl, KernelState,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::signing::execute_opening_evaluation_with_observer;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -14,13 +16,15 @@ const NOW: &str = "2026-09-13T12:00:00Z";
 struct B02Gateway {
     audit_calls: AtomicUsize,
     emit_evidence: bool,
+    reality_variant: &'static str,
 }
 
 impl B02Gateway {
-    fn new(emit_evidence: bool) -> Self {
+    fn new(emit_evidence: bool, reality_variant: &'static str) -> Self {
         Self {
             audit_calls: AtomicUsize::new(0),
             emit_evidence,
+            reality_variant,
         }
     }
 }
@@ -76,27 +80,89 @@ impl ProductionModelGateway for B02Gateway {
                 ]
             }),
             "RENDER_CHAPTER" => json!({
-                "body":format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", self.audit_calls.load(Ordering::SeqCst) + 1)
+                "body": if self.reality_variant == "A" {
+                    format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", self.audit_calls.load(Ordering::SeqCst) + 1)
+                } else {
+                    format!("林舟在雨夜守住账本，发现第{}章留下的真实盟约。", self.audit_calls.load(Ordering::SeqCst) + 1)
+                }
             }),
             "AUDIT_EXTRACT" => {
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
-                let body = format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", chapter_no);
+                let body = if self.reality_variant == "A" {
+                    format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", chapter_no)
+                } else {
+                    format!("林舟在雨夜守住账本，发现第{}章留下的真实盟约。", chapter_no)
+                };
                 let canon_candidates = if self.emit_evidence {
-                    json!([{
+                    let mut candidates = vec![json!({
                         "factId":format!("fact:b02:opening:{}", chapter_no),
                         "subjectId":"entity:b02:linzhou",
                         "entityId":"entity:b02:linzhou",
                         "canonicalName":"林舟",
                         "entityType":"CHARACTER",
-                        "predicate":format!("found_evidence_{}", chapter_no),
-                        "objectJson":{"chapter":chapter_no},
+                        "predicate":if self.reality_variant == "A" { "found_evidence" } else { "protected_oath" },
+                        "objectJson":if self.reality_variant == "A" { json!({"state":"账本缺页"}) } else { json!({"state":"账本仍在手中"}) },
                         "authorityLevel":"C",
                         "evidence":{"start":0,"end":body.chars().count(),"quote":body}
-                    }])
+                    })];
+                    if chapter_no == 1 {
+                        candidates.push(json!({
+                            "factId":"fact:b02:guqing",
+                            "subjectId":"entity:b02:guqing",
+                            "entityId":"entity:b02:guqing",
+                            "canonicalName":"顾清",
+                            "entityType":"CHARACTER",
+                            "predicate":"appears_in_opening",
+                            "objectJson":{"role":"账本见证人"},
+                            "authorityLevel":"C",
+                            "evidence":{"start":0,"end":body.chars().count(),"quote":body}
+                        }));
+                        candidates.push(json!({
+                            "factId":"fact:b02:relation-anchor",
+                            "subjectId":"entity:b02:linzhou",
+                            "entityId":"entity:b02:linzhou",
+                            "relationId":"relation:b02:linzhou-guqing",
+                            "objectId":"entity:b02:guqing",
+                            "predicate":if self.reality_variant == "A" { "distrusts" } else { "allied_with" },
+                            "objectJson":{"objectId":"entity:b02:guqing","state":if self.reality_variant == "A" { "互不信任" } else { "结盟" }},
+                            "authorityLevel":"C",
+                            "evidence":{"start":0,"end":body.chars().count(),"quote":body}
+                        }));
+                    }
+                    if chapter_no == 3 {
+                        candidates.push(json!({
+                            "factId":"fact:b02:chapter-three-event",
+                            "subjectId":"entity:b02:linzhou",
+                            "entityId":"entity:b02:linzhou",
+                            "predicate":"opening_event",
+                            "objectJson":if self.reality_variant == "A" { json!({"event":"账本被顾清夺走"}) } else { json!({"event":"账本由林舟保管"}) },
+                            "authorityLevel":"C",
+                            "eventType":if self.reality_variant == "A" { "LEDGER_STOLEN" } else { "LEDGER_PROTECTED" },
+                            "storyTime":format!("2026-01-{:02}T00:00:00Z", chapter_no),
+                            "evidence":{"start":0,"end":body.chars().count(),"quote":body}
+                        }));
+                    }
+                    candidates
                 } else {
-                    json!([])
+                    Vec::new()
                 };
-                json!({"qualityFindings":[],"canonCandidates":canon_candidates,"knowledgeCandidates":[],"continuityCandidates":[],"taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[]})
+                let mut knowledge_candidates = Vec::new();
+                if self.emit_evidence && chapter_no == 2 {
+                    knowledge_candidates.push(json!({
+                        "knowledgeId":"knowledge:b02:linzhou-ledger",
+                        "knowerId":"entity:b02:linzhou",
+                        "factId":"fact:b02:opening:1",
+                        "epistemicState":"KNOWS",
+                        "visibilityScope":"CHARACTER:entity:b02:linzhou",
+                        "evidence":{"start":0,"end":body.chars().count(),"quote":body}
+                    }));
+                }
+                json!({
+                    "qualityFindings":[],
+                    "canonCandidates":canon_candidates,
+                    "knowledgeCandidates":knowledge_candidates,
+                    "continuityCandidates":[],"taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[]
+                })
             }
             other => return Err(format!("unexpected B02 capability: {other}")),
         };
@@ -105,10 +171,17 @@ impl ProductionModelGateway for B02Gateway {
 }
 
 fn state(emit_evidence: bool) -> (KernelState, tempfile::TempDir) {
+    state_with_variant(emit_evidence, "A")
+}
+
+fn state_with_variant(
+    emit_evidence: bool,
+    reality_variant: &'static str,
+) -> (KernelState, tempfile::TempDir) {
     let temp = tempfile::tempdir().expect("project directory");
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
-        Arc::new(B02Gateway::new(emit_evidence)),
+        Arc::new(B02Gateway::new(emit_evidence, reality_variant)),
     );
     (state, temp)
 }
@@ -140,6 +213,24 @@ fn command(
         }),
     )
     .unwrap_or_else(|error| panic!("{command_type} failed: {error}"))
+}
+
+fn raw_command_request(
+    state: &KernelState,
+    project_id: &str,
+    command_id: &str,
+    command_type: &str,
+    payload: Value,
+) -> Value {
+    json!({
+        "type":command_type,
+        "commandId":command_id,
+        "idempotencyKey":format!("{command_id}:key"),
+        "projectId":project_id,
+        "expectedRevision":revision(state, project_id),
+        "requestedAt":NOW,
+        "payload":payload
+    })
 }
 
 fn create_opening_project(state: &KernelState) -> String {
@@ -308,15 +399,17 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
         center["signing"]["openingCanonRefs"]
             .as_array()
             .unwrap()
-            .len(),
-        3
+            .len()
+            >= 3,
+        true
     );
     assert_eq!(
         center["signing"]["signingEvidenceRefs"]
             .as_array()
             .unwrap()
-            .len(),
-        3
+            .len()
+            >= 3,
+        true
     );
     assert_eq!(center["bookPlan"]["status"], "PENDING");
 
@@ -396,6 +489,32 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     ] {
         assert!(approved_payload.get(field).is_some(), "missing {field}");
     }
+    assert_eq!(
+        approved_payload["openingActualStateDigest"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert!(
+        approved_payload["openingCanonRefs"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3
+    );
+    assert!(
+        approved_payload["signingEvidenceRefs"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 3
+    );
+    let relationship_text = approved_payload["relationshipMacroDirections"].to_string();
+    let mystery_text = approved_payload["majorMysteryGoals"].to_string();
+    let achievement_text = approved_payload["mustAchieve"].to_string();
+    assert!(relationship_text.contains("互不信任"));
+    assert!(mystery_text.contains("账本被顾清夺走"));
+    assert!(achievement_text.contains("账本缺页"));
     drop(after);
 
     let final_center = query_production_center_impl(
@@ -407,6 +526,74 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     assert_eq!(final_center["bookPlan"]["seedPreserved"], true);
     assert_eq!(final_center["projectPhase"], "POST_SIGNING_PLANNING");
     println!("B02_RESULT opening_evaluation=PASS signing_receipt=PASS real_evidence=PASS approved_book_plan=PASS seed_preserved=PASS canon_unchanged=PASS status=PASS");
+}
+
+fn approved_payload_for_variant(variant: &'static str) -> Value {
+    let (state, _temp) = state_with_variant(true, variant);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "b02:opening-evaluate:variant",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "b02:book-plan-revise:variant",
+        "book_plan_revise",
+        json!({}),
+    );
+    let connection = state
+        .manager
+        .open(&project_id, "", NOW)
+        .expect("variant db");
+    let (artifact_id, version): (String, i64) = connection
+        .query_row(
+            "SELECT artifact_id,version FROM canonical_heads WHERE project_id=?1 AND artifact_type='BookPlan'",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("variant book plan head");
+    connection
+        .query_row(
+            "SELECT payload_json FROM artifact_payloads WHERE artifact_id=?1 AND version=?2",
+            libsql_rusqlite::params![artifact_id, version],
+            |row| {
+                let raw: String = row.get(0)?;
+                Ok(serde_json::from_str(&raw).unwrap())
+            },
+        )
+        .expect("variant payload")
+}
+
+#[test]
+fn b02_approved_book_plan_changes_when_opening_relationship_and_event_change() {
+    let variant_a = approved_payload_for_variant("A");
+    let variant_b = approved_payload_for_variant("B");
+    assert_ne!(
+        variant_a["relationshipMacroDirections"],
+        variant_b["relationshipMacroDirections"]
+    );
+    assert_ne!(
+        variant_a["majorMysteryGoals"],
+        variant_b["majorMysteryGoals"]
+    );
+    assert!(variant_a["relationshipMacroDirections"]
+        .to_string()
+        .contains("互不信任"));
+    assert!(variant_b["relationshipMacroDirections"]
+        .to_string()
+        .contains("结盟"));
+    assert!(variant_a["majorMysteryGoals"]
+        .to_string()
+        .contains("账本被顾清夺走"));
+    assert!(variant_b["majorMysteryGoals"]
+        .to_string()
+        .contains("账本由林舟保管"));
+    println!("B02_SEMANTIC_RESULT relation=PASS knowledge=PASS event=PASS variant_difference=PASS status=PASS");
 }
 
 #[test]
@@ -451,4 +638,110 @@ fn b02_opening_evaluation_persists_revise_when_real_evidence_is_incomplete() {
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
     println!("B02_REVISE_RESULT incomplete_evidence=PASS receipt_committed=PASS plan_blocked=PASS status=PASS");
+}
+
+#[test]
+fn b02_signing_runtime_phases_are_backend_projected_with_one_active_step() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let request = raw_command_request(
+        &state,
+        &project_id,
+        "b02:opening-evaluate:phases",
+        "opening_evaluate",
+        json!({}),
+    );
+    let mut observed = Vec::new();
+    let result = execute_opening_evaluation_with_observer(&state.manager, &request, &mut |phase| {
+        let projection = query_production_center_impl(
+            &state,
+            json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+        )
+        .expect("phase projection");
+        let active = projection["signing"]["evaluation"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["status"] == "active")
+            .count();
+        observed.push((phase.to_string(), active));
+    })
+    .expect("opening evaluation");
+    assert_eq!(result["result"]["status"], "PASS");
+    assert_eq!(
+        observed
+            .iter()
+            .map(|(phase, _)| phase.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "READ_OPENING_CANON",
+            "SUMMARIZE_OPENING",
+            "EVALUATE_SIGNING",
+            "COMMIT_RECEIPT",
+            "COMPLETED"
+        ]
+    );
+    assert!(observed[..4].iter().all(|(_, active)| *active == 1));
+    assert_eq!(observed.last().map(|(_, active)| *active), Some(0));
+    println!(
+        "B02_SIGNING_PHASE_RESULT ordered=PASS backend_active=PASS terminal_zero=PASS status=PASS"
+    );
+}
+
+#[test]
+fn b02_book_plan_runtime_phases_are_backend_projected_with_one_active_step() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    command(
+        &state,
+        &project_id,
+        "b02:opening-evaluate:before-plan",
+        "opening_evaluate",
+        json!({}),
+    );
+    let request = raw_command_request(
+        &state,
+        &project_id,
+        "b02:book-plan-revise:phases",
+        "book_plan_revise",
+        json!({}),
+    );
+    let mut observed = Vec::new();
+    let result = execute_book_plan_revise_with_observer(&state, &request, &mut |phase| {
+        let projection = query_production_center_impl(
+            &state,
+            json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+        )
+        .expect("plan phase projection");
+        let active = projection["bookPlan"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["status"] == "active")
+            .count();
+        observed.push((phase.to_string(), active));
+    })
+    .expect("book plan revision");
+    assert_eq!(result["result"]["planningMaturity"], "APPROVED");
+    assert_eq!(
+        observed
+            .iter()
+            .map(|(phase, _)| phase.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "READ_OPENING_CANON",
+            "SUMMARIZE_OPENING",
+            "GENERATE_BOOK_PLAN",
+            "VALIDATE_CONSTRAINTS",
+            "COMMIT_BOOK_PLAN",
+            "COMPLETED"
+        ]
+    );
+    assert!(observed[..5].iter().all(|(_, active)| *active == 1));
+    assert_eq!(observed.last().map(|(_, active)| *active), Some(0));
+    println!(
+        "B02_PLAN_PHASE_RESULT ordered=PASS backend_active=PASS terminal_zero=PASS status=PASS"
+    );
 }
