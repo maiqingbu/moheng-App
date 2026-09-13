@@ -317,6 +317,20 @@ pub fn opening_progress(
     })
 }
 
+pub fn next_opening_chapter_id(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Option<String>, ProjectEntryRepositoryError> {
+    connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND ?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status!='COMMITTED' ORDER BY chapter_no LIMIT 1",
+            libsql_rusqlite::params![project_id, OPENING_CHAPTER_COUNT],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 pub fn opening_topology(
     connection: &Connection,
     project_id: &str,

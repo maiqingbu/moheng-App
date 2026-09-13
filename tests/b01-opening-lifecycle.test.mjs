@@ -10,10 +10,13 @@ const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
 test('B01 production topology is bounded to the golden three and never a test SQL fixture', () => {
   const repository = read('src-tauri/src/repositories/project_entry.rs')
   const integration = read('src-tauri/tests/b01_opening_lifecycle.rs')
+  const realHarness = read('src-tauri/tests/real_provider_three_chapters.rs')
   assert.match(repository, /OPENING_CHAPTER_COUNT\s*:\s*i64\s*=\s*3/)
   assert.match(repository, /for chapter_no in 1\.\.=OPENING_CHAPTER_COUNT/)
   assert.doesNotMatch(integration, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapters/i)
   assert.doesNotMatch(integration, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapter_production_budgets/i)
+  assert.doesNotMatch(realHarness, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapters/i)
+  assert.doesNotMatch(realHarness, /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+chapter_production_budgets/i)
 })
 
 test('B01 UI exposes authoritative progress and a runtime phase animation without locking navigation', () => {

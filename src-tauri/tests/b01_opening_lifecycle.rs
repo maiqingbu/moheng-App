@@ -276,6 +276,35 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
     assert_eq!(volume_plan_count, 0);
     drop(connection);
 
+    let connection = state.manager.open(&project_id, "", NOW).expect("order db");
+    let chapter_two_id: String = connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=2",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .expect("chapter two id");
+    drop(connection);
+    let out_of_order = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start",
+            "commandId":"b01:production:out-of-order",
+            "idempotencyKey":"b01:production:out-of-order:key",
+            "projectId":project_id,
+            "requestedAt":NOW,
+            "payload":{
+                "chapterId":chapter_two_id,
+                "executionMode":"OPENING_BOOTSTRAP",
+                "entityIds":[],
+                "references":[],
+                "skillsEnabled":false
+            }
+        }),
+    )
+    .expect_err("opening chapters must be produced in order");
+    assert_eq!(out_of_order, "B08_OPENING_ORDER_REQUIRED");
+
     command(
         &state,
         &project_id,

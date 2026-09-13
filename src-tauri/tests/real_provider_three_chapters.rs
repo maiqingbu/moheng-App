@@ -7,7 +7,6 @@ use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
-use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -141,6 +140,7 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        drop(statement);
         assert_eq!(
             chapter_ids.len(),
             3,
@@ -233,34 +233,22 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         );
 
         let connection = state.manager.open(&project_id, "", NOW).unwrap();
-        let (volume_id, first_chapter_id): (String, String) = connection
-        .query_row(
-            "SELECT v.volume_id,c.chapter_id FROM volumes v JOIN chapters c ON c.project_id=v.project_id AND c.volume_id=v.volume_id WHERE v.project_id=?1 AND c.chapter_no=1",
-            [&project_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-        let mut chapter_ids = vec![first_chapter_id];
-        for chapter_no in 2..=3 {
-            let chapter_id = StableIdentityFactory::from_command(
-                StableIdKind::Chapter,
-                &format!("{prefix}:chapter:{chapter_no}"),
+        let mut statement = connection
+            .prepare(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3 ORDER BY chapter_no",
             )
             .unwrap();
-            connection
-            .execute(
-                "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'IMPORTANT','PLANNED',0,?6,?6)",
-                libsql_rusqlite::params![chapter_id, project_id, volume_id, chapter_no, format!("第{chapter_no}章"), NOW],
-            )
+        let chapter_ids = statement
+            .query_map([&project_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
-            connection
-            .execute(
-                "INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'IMPORTANT',12,500,?4)",
-                libsql_rusqlite::params![format!("budget:{project_id}:opening:{chapter_no}"), project_id, chapter_id, NOW],
-            )
-            .unwrap();
-            chapter_ids.push(chapter_id);
-        }
+        drop(statement);
+        assert_eq!(
+            chapter_ids.len(),
+            3,
+            "opening_ready must create the three chapter topology; the harness never bootstraps SQL"
+        );
         drop(connection);
         (project_id, chapter_ids)
     };

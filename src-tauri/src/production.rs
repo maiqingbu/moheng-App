@@ -912,6 +912,14 @@ pub fn run_chapter_production(
     if chapter_volume.is_none() {
         return Err("B08_CHAPTER_NOT_FOUND".into());
     }
+    if execution_mode == "OPENING_BOOTSTRAP" {
+        let next_opening_chapter =
+            crate::repositories::project_entry::next_opening_chapter_id(connection, &project_id)
+                .map_err(|error| error.to_string())?;
+        if next_opening_chapter.as_deref() != Some(chapter_id.as_str()) {
+            return Err("B08_OPENING_ORDER_REQUIRED".into());
+        }
+    }
     let provider_profile = gateway.resolve_profile()?;
     if let Some(previous_job_id) = &retry_of_job_id {
         DurableJobService::validate_retry_source(
