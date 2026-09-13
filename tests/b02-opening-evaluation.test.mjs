@@ -14,7 +14,7 @@ test('B02 formal opening evaluation reads committed reality and routes one signi
   const contracts = read('src/application/contracts.ts')
   const testSource = read('src-tauri/tests/b02_opening_evaluation.rs')
   assert.match(commands, /"opening_evaluate"\s*\|\s*"signing_retry"/)
-  assert.match(commands, /"book_plan_revise"/) 
+  assert.match(commands, /"book_plan_revise"/)
   assert.match(signing, /B02::OpeningEvaluationOwner/)
   assert.match(signing, /SimulatedSigningReceipt/)
   assert.match(narrative, /opening_evaluation_snapshot/)
