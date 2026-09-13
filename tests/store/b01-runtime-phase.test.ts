@@ -36,23 +36,39 @@ describe('B01 runtime phase synchronization', () => {
     let phaseIndex = 0
     const query = vi.fn(async () => {
       const productionStage = phases[phaseIndex++]
+      const currentIndex = phaseIndex - 1
       return {
         jobStatus: productionStage === 'COMPLETED' ? 'COMPLETED' : 'RUNNING',
         productionStage,
+        timeline: phases.map((stage, index) => ({
+          title: stage,
+          status: productionStage === 'COMPLETED'
+            ? 'done'
+            : index < currentIndex
+              ? 'done'
+              : index === currentIndex
+                ? 'active'
+                : 'pending',
+        })),
       } as unknown as ProductionCenterProjection
     })
-    const seen: string[] = []
+    const seen: Array<{ stage: string; activeMarkers: number }> = []
     const poller = createProductionRuntimePoller({
       intervalMs: 100,
       query,
-      onProjection: projection => seen.push(String(projection.productionStage)),
+      onProjection: projection => seen.push({
+        stage: String(projection.productionStage),
+        activeMarkers: projection.timeline.filter(item => item.status === 'active').length,
+      }),
     })
 
     poller.start()
     await vi.advanceTimersByTimeAsync(800)
 
     expect(query).toHaveBeenCalledTimes(8)
-    expect(seen).toEqual(phases)
+    expect(seen.map(item => item.stage)).toEqual(phases)
+    expect(seen.slice(0, -1).every(item => item.activeMarkers === 1)).toBe(true)
+    expect(seen.at(-1)?.activeMarkers).toBe(0)
     expect(poller.isRunning()).toBe(false)
     await vi.advanceTimersByTimeAsync(500)
     expect(query).toHaveBeenCalledTimes(8)
