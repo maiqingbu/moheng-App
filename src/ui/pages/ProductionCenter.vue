@@ -252,6 +252,12 @@ async function executeRepair() {
       <div class="task-row"><strong>评估依据摘要</strong><span>三章 {{ signing?.summary?.chapters ?? 0 }} · 事实 {{ signing?.summary?.canonRefs ?? 0 }} 条 · 证据 {{ signing?.summary?.evidenceRefs ?? 0 }} 条</span></div>
       <div class="task-row"><strong>正式签约回执</strong><span>{{ signing?.receipt?.id ? `${signing.receipt.id} · 已提交` : '尚未生成' }}</span></div>
       <div class="task-row"><strong>正式总纲</strong><span>{{ bookPlan?.status === 'APPROVED' ? '已完成' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
+      <div v-if="bookPlan?.steps?.length" class="evaluation-steps" aria-label="正式总纲运行步骤">
+        <div v-for="step in bookPlan.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
+          <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>
+          <span>{{ step.label }}</span>
+        </div>
+      </div>
       <div class="actions" style="margin-top:14px">
         <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">开始开篇评估</button>
         <span v-else-if="evaluationInFlight || signing?.evaluation?.status === 'IN_REVIEW'" class="muted">正在评估，请查看实时状态。</span>

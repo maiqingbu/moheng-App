@@ -381,7 +381,18 @@ impl ProductionRepository {
         let book_plan = json!({
             "status":book_plan_status,
             "ref":book_plan_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash})),
-            "seedPreserved":seed_count > 0
+            "seedPreserved":seed_count > 0,
+            "steps":if book_plan_status == "APPROVED" {
+                json!([
+                    {"id":"READ_OPENING_CANON","label":"读取三章事实","status":"done"},
+                    {"id":"SUMMARIZE_OPENING","label":"汇总开篇状态","status":"done"},
+                    {"id":"GENERATE_BOOK_PLAN","label":"生成正式总纲","status":"done"},
+                    {"id":"VALIDATE_CONSTRAINTS","label":"校验约束","status":"done"},
+                    {"id":"COMMIT_BOOK_PLAN","label":"提交正式版本","status":"done"}
+                ])
+            } else {
+                json!([])
+            }
         });
         let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()
         {

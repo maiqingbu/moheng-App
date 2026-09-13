@@ -4643,6 +4643,21 @@ fn execute_planning_command(
         if canon_refs.len() < 3 || !canon_reachable || !receipt_passes {
             return Err("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE".into());
         }
+        for reference in &evidence_refs {
+            if let Some(receipt_ref) =
+                crate::repositories::narrative::NarrativeRepository::committed_signing_receipt_ref(
+                    &handle, project_id, reference,
+                )
+                .map_err(|error| error.to_string())?
+            {
+                if !book_plan_dependencies
+                    .iter()
+                    .any(|existing| existing == &receipt_ref)
+                {
+                    book_plan_dependencies.push(receipt_ref);
+                }
+            }
+        }
         payload = crate::planning::approve_book_plan(&payload, true, &canon_refs, &evidence_refs)?;
     }
     if artifact_type == "VolumePlan" {

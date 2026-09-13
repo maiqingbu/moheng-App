@@ -1478,6 +1478,27 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn committed_signing_receipt_ref(
+        connection: &Connection,
+        project_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT artifact_id,version,payload_hash FROM artifacts WHERE project_id=?1 AND artifact_id=?2 AND artifact_type='SimulatedSigningReceipt' AND artifact_status='COMMITTED' ORDER BY version DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, artifact_id],
+                |row| {
+                    Ok(ArtifactRef {
+                        artifact_id: row.get(0)?,
+                        version: row.get(1)?,
+                        payload_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn signing_receipt_passes(
         connection: &Connection,
         project_id: &str,

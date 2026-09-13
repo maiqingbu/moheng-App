@@ -34,6 +34,7 @@ test('B02 UI consumes backend evaluation phases and exposes no demo signing acti
   assert.match(production, /评估完成/)
   assert.match(production, /评估依据摘要/)
   assert.match(production, /生成正式总纲/)
+  assert.match(production, /bookPlan\?\.steps/)
   assert.match(production, /opening_evaluate/)
   assert.match(production, /book_plan_revise/)
   assert.match(contracts, /opening_evaluate/)
