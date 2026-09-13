@@ -689,6 +689,12 @@ pub struct BookPlanR1 {
     pub future_reservations: Option<Vec<FutureReservation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume_intent_seeds: Option<Vec<VolumeIntentSeed>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_canon_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_evidence_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_actual_state_digest: Option<String>,
     pub opening_hypotheses: Vec<String>,
     pub global_length_budget: BookPlanR1GlobalLengthBudget,
 }

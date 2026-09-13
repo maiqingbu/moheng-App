@@ -12,6 +12,8 @@ export interface ProductionRuntimePollerOptions {
   onProjection: (projection: ProductionCenterProjection) => void
   onError?: (error: unknown) => void
   intervalMs?: number
+  isActiveProjection?: (projection: ProductionCenterProjection) => boolean
+  isTerminalProjection?: (projection: ProductionCenterProjection) => boolean
 }
 
 export interface ProductionRuntimePoller {
@@ -50,8 +52,12 @@ export function createProductionRuntimePoller(
       const projection = await options.query()
       if (!running) return
       options.onProjection(projection)
-      if (projection.jobStatus === 'RUNNING' || projection.jobStatus === 'WAITING_MODEL') sawActiveRuntime = true
-      if ((!waitForActive || sawActiveRuntime) && isProductionJobTerminal(projection.jobStatus)) stop()
+      const active = options.isActiveProjection?.(projection)
+        ?? (projection.jobStatus === 'RUNNING' || projection.jobStatus === 'WAITING_MODEL')
+      if (active) sawActiveRuntime = true
+      const terminal = options.isTerminalProjection?.(projection)
+        ?? isProductionJobTerminal(projection.jobStatus)
+      if ((!waitForActive || sawActiveRuntime) && terminal) stop()
     } catch (error) {
       if (running) options.onError?.(error)
     } finally {

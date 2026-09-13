@@ -112,6 +112,9 @@ export interface BookPlanR1 {
   "majorMysteryGoals"?: Array<MacroDirection>
   "futureReservations"?: Array<FutureReservation>
   "volumeIntentSeeds"?: Array<VolumeIntentSeed>
+  "openingCanonRefs"?: Array<string>
+  "signingEvidenceRefs"?: Array<string>
+  "openingActualStateDigest"?: string
   "openingHypotheses": Array<string>
   "globalLengthBudget": { "minWords"?: number | null; "preferredWords": number; "maxWords"?: number | null }
 }

@@ -16,6 +16,9 @@
     "majorMysteryGoals":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/MacroDirection"}},
     "futureReservations":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/FutureReservation"}},
     "volumeIntentSeeds":{"type":"array","items":{"$ref":"narrative-definitions.schema.json#/$defs/VolumeIntentSeed"}},
+    "openingCanonRefs":{"type":"array","items":{"type":"string","minLength":1}},
+    "signingEvidenceRefs":{"type":"array","items":{"type":"string","minLength":1}},
+    "openingActualStateDigest":{"type":"string","pattern":"^[a-f0-9]{64}$"},
     "openingHypotheses":{"type":"array","items":{"type":"string"}},
     "globalLengthBudget":{"type":"object","properties":{"minWords":{"type":["integer","null"],"minimum":1},"preferredWords":{"type":"integer","minimum":1},"maxWords":{"type":["integer","null"],"minimum":1}},"required":["preferredWords"],"additionalProperties":false}
   },

@@ -4490,6 +4490,20 @@ fn execute_runtime_command(
     Ok(project_command_response(&outcome_receipt(outcome)))
 }
 
+fn notify_b02_planning_phase(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    job_id: &str,
+    phase: &str,
+    now: &str,
+    observer: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    DurableJobService::update_b02_phase(connection, project_id, job_id, phase, now)
+        .map_err(|error| error.to_string())?;
+    observer(phase);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_planning_command(
     state: &KernelState,
@@ -4501,11 +4515,37 @@ fn execute_planning_command(
     requested_at: &str,
     expected_revision: Option<i64>,
 ) -> Result<Value, String> {
+    execute_planning_command_with_observer(
+        state,
+        request,
+        command_type,
+        project_id,
+        command_id,
+        idempotency_key,
+        requested_at,
+        expected_revision,
+        &mut |_| {},
+    )
+}
+
+fn execute_planning_command_with_observer(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    observer: &mut dyn FnMut(&str),
+) -> Result<Value, String> {
     let mut payload = request
         .pointer("/payload/plan")
         .cloned()
         .unwrap_or(Value::Null);
     let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
+    let mut b02_plan_job: Option<String> = None;
+    let b02_plan_worker = "b02-book-plan-worker";
     let (artifact_type, scope, scope_key) = match command_type {
         "planning_finalize_book_plan" | "book_plan_revise" => (
             "BookPlan",
@@ -4616,6 +4656,7 @@ fn execute_planning_command(
                 if canon_refs.is_empty() {
                     canon_refs = string_array(signing_payload.get("openingCanonRefs"));
                 }
+                evidence_refs.extend(string_array(signing_payload.get("signingEvidenceRefs")));
             }
             if !evidence_refs
                 .iter()
@@ -4624,6 +4665,29 @@ fn execute_planning_command(
                 evidence_refs.push(signing_ref.artifact_id.clone());
             }
             book_plan_dependencies.push(signing_ref);
+        }
+        if let Some(signing_ref) = signing_head.as_ref() {
+            if evidence_refs
+                .iter()
+                .any(|reference| reference == &signing_ref.artifact_id)
+            {
+                if let Some(signing_payload) =
+                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                        &handle,
+                        project_id,
+                        signing_ref,
+                    )
+                    .map_err(|error| error.to_string())?
+                {
+                    let actual_evidence_refs =
+                        string_array(signing_payload.get("signingEvidenceRefs"));
+                    for reference in actual_evidence_refs {
+                        if !evidence_refs.iter().any(|existing| existing == &reference) {
+                            evidence_refs.push(reference);
+                        }
+                    }
+                }
+            }
         }
         let canon_reachable = canon_refs.iter().try_fold(true, |reachable, reference| {
             Ok::<_, String>(reachable && crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(&handle, project_id, reference).map_err(|e| e.to_string())?)
@@ -4658,7 +4722,96 @@ fn execute_planning_command(
                 }
             }
         }
-        payload = crate::planning::approve_book_plan(&payload, true, &canon_refs, &evidence_refs)?;
+        let plan_job_id = StableIdentityFactory::from_command(
+            StableIdKind::Job,
+            &format!("{command_id}:book-plan"),
+        )?;
+        DurableJobService::start_b02_phase_job(
+            &handle,
+            project_id,
+            &plan_job_id,
+            crate::repositories::runtime::B02_BOOK_PLAN_KIND,
+            crate::repositories::runtime::B02_BOOK_PLAN_PHASES,
+            b02_plan_worker,
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+        DurableJobService::set_runtime_state(&handle, project_id, "ACTIVE", None, requested_at)
+            .map_err(|error| error.to_string())?;
+        DurableJobService::set_project_phase(
+            &handle,
+            project_id,
+            "POST_SIGNING_PLANNING",
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Err(error) = notify_b02_planning_phase(
+            &handle,
+            project_id,
+            &plan_job_id,
+            "READ_OPENING_CANON",
+            requested_at,
+            observer,
+        ) {
+            let _ = DurableJobService::fail_b02_phase_job(
+                &handle,
+                project_id,
+                &plan_job_id,
+                "B02_PLAN_PHASE_FAILED",
+                requested_at,
+            );
+            return Err(error);
+        }
+        b02_plan_job = Some(plan_job_id);
+        let opening_snapshot =
+            crate::repositories::narrative::NarrativeRepository::opening_evaluation_snapshot(
+                &handle, project_id,
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(job_id) = b02_plan_job.as_deref() {
+            notify_b02_planning_phase(
+                &handle,
+                project_id,
+                job_id,
+                "SUMMARIZE_OPENING",
+                requested_at,
+                observer,
+            )?;
+        }
+        let opening_actual_state =
+            crate::repositories::narrative::NarrativeRepository::opening_actual_state(
+                &handle,
+                project_id,
+                &opening_snapshot,
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(job_id) = b02_plan_job.as_deref() {
+            notify_b02_planning_phase(
+                &handle,
+                project_id,
+                job_id,
+                "GENERATE_BOOK_PLAN",
+                requested_at,
+                observer,
+            )?;
+        }
+        payload = crate::planning::approve_book_plan(
+            &payload,
+            true,
+            &canon_refs,
+            &evidence_refs,
+            &opening_actual_state,
+        )?;
+        if let Some(job_id) = b02_plan_job.as_deref() {
+            notify_b02_planning_phase(
+                &handle,
+                project_id,
+                job_id,
+                "VALIDATE_CONSTRAINTS",
+                requested_at,
+                observer,
+            )?;
+        }
     }
     if artifact_type == "VolumePlan" {
         let intent = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
@@ -4911,26 +5064,98 @@ fn execute_planning_command(
         .map(ToOwned::to_owned);
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
     let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
+    if let Some(job_id) = b02_plan_job.as_deref() {
+        notify_b02_planning_phase(
+            &handle,
+            project_id,
+            job_id,
+            "COMMIT_BOOK_PLAN",
+            requested_at,
+            observer,
+        )?;
+    }
     let receipt = if artifact_type == "BookPlan" {
-        CommitService::commit_with_post_apply(&handle, &bundle, requested_at, |connection, _| {
-            crate::repositories::runtime::DurableJobService::set_project_phase(
-                connection,
-                project_id,
-                "POST_SIGNING_PLANNING",
-                requested_at,
-            )
-            .map_err(|error| {
-                crate::commit::CommitError::ContractInvalid(format!(
-                    "B02_RUNTIME_PROJECTION:{error}"
-                ))
-            })
-        })
-        .map_err(|error| error.to_string())?
+        match CommitService::commit_with_post_apply(
+            &handle,
+            &bundle,
+            requested_at,
+            |connection, _| {
+                if let Some(job_id) = b02_plan_job.as_deref() {
+                    crate::repositories::runtime::DurableJobService::complete_b02_phase_job(
+                        connection,
+                        project_id,
+                        job_id,
+                        b02_plan_worker,
+                        requested_at,
+                    )
+                    .map_err(|error| {
+                        crate::commit::CommitError::ContractInvalid(format!(
+                            "B02_RUNTIME_JOB:{error}"
+                        ))
+                    })?;
+                }
+                crate::repositories::runtime::DurableJobService::set_project_phase(
+                    connection,
+                    project_id,
+                    "POST_SIGNING_PLANNING",
+                    requested_at,
+                )
+                .map_err(|error| {
+                    crate::commit::CommitError::ContractInvalid(format!(
+                        "B02_RUNTIME_PROJECTION:{error}"
+                    ))
+                })
+            },
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Some(job_id) = b02_plan_job.as_deref() {
+                    let _ = DurableJobService::fail_b02_phase_job(
+                        &handle,
+                        project_id,
+                        job_id,
+                        "B02_PLAN_COMMIT_FAILED",
+                        requested_at,
+                    );
+                }
+                return Err(error.to_string());
+            }
+        }
     } else {
         CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?
     };
+    if b02_plan_job.is_some() {
+        observer("COMPLETED");
+    }
     Ok(
         json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner","result":result_payload}),
+    )
+}
+
+#[doc(hidden)]
+pub fn execute_book_plan_revise_with_observer(
+    state: &KernelState,
+    request: &Value,
+    observer: &mut dyn FnMut(&str),
+) -> Result<Value, String> {
+    let command_type = required_string(request, "type")?;
+    if command_type != "book_plan_revise" {
+        return Err("B02_BOOK_PLAN_REVISE_COMMAND_REQUIRED".into());
+    }
+    let project_id = required_string(request, "projectId")?;
+    let command_id = required_string(request, "commandId")?;
+    let idempotency_key = required_string(request, "idempotencyKey")?;
+    let requested_at = required_string(request, "requestedAt")?;
+    execute_planning_command_with_observer(
+        state,
+        request,
+        command_type,
+        project_id,
+        command_id,
+        idempotency_key,
+        requested_at,
+        expected_revision(request)?,
+        observer,
     )
 }
 
@@ -5191,9 +5416,14 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             )
         }
         "opening_evaluate" | "signing_retry" => {
+            // `signing_retry` is an INTERNAL_COMPAT alias only.  The
+            // product FrontendPort exposes `opening_evaluate` as the single
+            // formal mutation; legacy IPC callers may still be routed here.
             project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             crate::signing::execute_opening_evaluation(&state.manager, &request)
         }
+        // `planning_finalize_book_plan` is an INTERNAL_COMPAT alias;
+        // `book_plan_revise` is the only product command for this operation.
         "planning_finalize_book_plan"
         | "book_plan_revise"
         | "planning_create_volume_intent"

@@ -66,12 +66,9 @@ const evaluationInFlight = computed(() => ['submitting', 'accepted', 'processing
 const bookPlanInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(bookPlanCommandState.value.status))
 const canEvaluateOpening = computed(() => openingProgress.value?.completed === openingProgress.value?.total
   && openingProgress.value?.total === 3
-  && signing.value?.status !== 'PASS'
-  && signing.value?.evaluation?.status !== 'IN_REVIEW'
-  && !evaluationInFlight.value)
+  && signing.value?.status !== 'PASS')
 const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
-  && bookPlan.value?.status !== 'APPROVED'
-  && !bookPlanInFlight.value)
+  && bookPlan.value?.status !== 'APPROVED')
 const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
 const authoritativeRunState = computed<RunState>(() => {
   switch (production.value?.jobStatus) {
@@ -94,12 +91,17 @@ const runtimePoller = createProductionRuntimePoller({
     return value
   },
   onProjection: projection => { store.production = projection },
+  isActiveProjection: projection => projection.runtimeOperation?.active === true || projection.isActive === true,
+  isTerminalProjection: projection => {
+    if (projection.runtimeOperation) return ['COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'].includes(projection.runtimeOperation.status)
+    return isProductionJobTerminal(projection.jobStatus)
+  },
 })
 
 onMounted(() => {
   void store.loadProduction(true)
     .then(value => {
-      if (value?.jobStatus && !isProductionJobTerminal(value.jobStatus)) runtimePoller.start()
+      if (value?.runtimeOperation?.active || (value?.jobStatus && !isProductionJobTerminal(value.jobStatus))) runtimePoller.start()
     })
     .catch(() => undefined)
 })
@@ -108,6 +110,10 @@ onUnmounted(() => runtimePoller.stop())
 
 function focusProductionProgress() {
   document.querySelector<HTMLElement>('[data-production-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+function focusOpeningEvaluationProgress() {
+  document.querySelector<HTMLElement>('[data-opening-evaluation-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
 async function startProduction() {
@@ -157,23 +163,49 @@ function evaluationStepClass(status: unknown) {
   return status === 'active' ? 'active' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'pending'
 }
 
+function evaluationActionLabel() {
+  return evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW'
+    ? '查看开篇评估进度'
+    : '开始开篇评估'
+}
+
+function bookPlanActionLabel() {
+  return bookPlanInFlight.value || production.value?.runtimeOperation?.kind === 'B02::BOOK_PLAN'
+    ? '查看正式总纲进度'
+    : '生成正式总纲'
+}
+
 async function evaluateOpening() {
   if (!canEvaluateOpening.value) return
+  if (evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW') {
+    focusOpeningEvaluationProgress()
+    return
+  }
   lastCommand.value = 'opening-evaluate'
+  runtimePoller.start({ waitForActive: true })
   try {
     await store.runCommand(lastCommand.value, { type: 'opening_evaluate', payload: {} })
   } catch {
     // Store-owned command feedback keeps the typed failure visible.
+  } finally {
+    if (!store.production?.runtimeOperation?.active) runtimePoller.stop()
   }
 }
 
 async function finalizeBookPlan() {
   if (!canFinalizeBookPlan.value) return
+  if (bookPlanInFlight.value || production.value?.runtimeOperation?.kind === 'B02::BOOK_PLAN' && production.value.runtimeOperation.active) {
+    focusOpeningEvaluationProgress()
+    return
+  }
   lastCommand.value = 'book-plan-revise'
+  runtimePoller.start({ waitForActive: true })
   try {
     await store.runCommand(lastCommand.value, { type: 'book_plan_revise', payload: {} })
   } catch {
     // Store-owned command feedback keeps the typed failure visible.
+  } finally {
+    if (!store.production?.runtimeOperation?.active) runtimePoller.stop()
   }
 }
 
@@ -242,7 +274,7 @@ async function executeRepair() {
       </div>
       <CommandFeedback :state="evaluationCommandState" />
       <CommandFeedback :state="bookPlanCommandState" />
-      <div class="evaluation-steps" v-if="signing?.evaluation?.steps?.length">
+      <div class="evaluation-steps" v-if="signing?.evaluation?.steps?.length" data-opening-evaluation-progress>
         <div v-for="step in signing.evaluation.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
           <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>
           <span>{{ step.label }}</span>
@@ -259,9 +291,8 @@ async function executeRepair() {
         </div>
       </div>
       <div class="actions" style="margin-top:14px">
-        <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">开始开篇评估</button>
-        <span v-else-if="evaluationInFlight || signing?.evaluation?.status === 'IN_REVIEW'" class="muted">正在评估，请查看实时状态。</span>
-        <button v-if="canFinalizeBookPlan" class="btn primary" @click="finalizeBookPlan">生成正式总纲</button>
+        <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">{{ evaluationActionLabel() }}</button>
+        <button v-if="canFinalizeBookPlan" class="btn primary" @click="finalizeBookPlan">{{ bookPlanActionLabel() }}</button>
       </div>
     </section>
 

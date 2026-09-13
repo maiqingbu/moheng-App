@@ -17,6 +17,61 @@ pub struct ProductionRepository;
 
 type ProductionJobRow = (String, String, Option<String>, String, Option<String>);
 
+fn b02_phase_steps(phases: &[&str], current: Option<&str>, status: &str) -> Vec<Value> {
+    let current_index = current.and_then(|phase| phases.iter().position(|item| *item == phase));
+    phases
+        .iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            let step_status = if status == "COMPLETED" {
+                "done"
+            } else if let Some(current_index) = current_index {
+                if index < current_index {
+                    "done"
+                } else if index == current_index {
+                    match status {
+                        "FAILED" => "failed",
+                        "RUNNING" | "WAITING_MODEL" => "active",
+                        "PAUSED" | "WAITING_DECISION" | "WAITING_BUDGET" => "waiting",
+                        _ => "pending",
+                    }
+                } else {
+                    "pending"
+                }
+            } else {
+                "pending"
+            };
+            json!({"id":phase,"label":phase,"status":step_status})
+        })
+        .collect()
+}
+
+fn b02_phase_label(phase: &str) -> &'static str {
+    match phase {
+        "READ_OPENING_CANON" => "读取三章事实",
+        "SUMMARIZE_OPENING" => "汇总开篇状态",
+        "EVALUATE_SIGNING" => "校验开篇评估",
+        "COMMIT_RECEIPT" => "提交正式签约回执",
+        "GENERATE_BOOK_PLAN" => "生成正式总纲",
+        "VALIDATE_CONSTRAINTS" => "校验约束",
+        "COMMIT_BOOK_PLAN" => "提交正式版本",
+        "COMPLETED" => "已完成",
+        _ => "处理中",
+    }
+}
+
+fn b02_phase_steps_with_labels(phases: &[&str], current: Option<&str>, status: &str) -> Vec<Value> {
+    b02_phase_steps(phases, current, status)
+        .into_iter()
+        .map(|mut step| {
+            if let Some(id) = step.get("id").and_then(Value::as_str) {
+                step["label"] = json!(b02_phase_label(id));
+            }
+            step
+        })
+        .collect()
+}
+
 impl ProductionRepository {
     pub fn center_projection(
         connection: &Connection,
@@ -38,6 +93,17 @@ impl ProductionRepository {
             .query_row(
                 "SELECT job_id, COALESCE(current_stage,'IDLE'), chapter_id, status, error_code FROM jobs WHERE project_id=?1 ORDER BY CASE WHEN job_type='CHAPTER' THEN 0 ELSE 1 END, updated_at DESC, job_id DESC LIMIT 1",
                 [project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let b02_operation: Option<(String, String, String, String, Option<String>)> = connection
+            .query_row(
+                "SELECT job_id,book_id,current_stage,status,error_code FROM jobs WHERE project_id=?1 AND book_id IN (?2,?3) ORDER BY updated_at DESC,job_id DESC LIMIT 1",
+                libsql_rusqlite::params![
+                    project_id,
+                    crate::repositories::runtime::B02_OPENING_EVALUATION_KIND,
+                    crate::repositories::runtime::B02_BOOK_PLAN_KIND
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()?;
@@ -312,11 +378,28 @@ impl ProductionRepository {
             .ok()
             .flatten()
         });
-        let signing_status = signing_payload
-            .as_ref()
-            .and_then(|payload| payload.get("status").and_then(Value::as_str))
-            .unwrap_or(runtime.4.as_str());
-        let signing_evaluation = signing_payload
+        let signing_operation = b02_operation.as_ref().filter(|(_, kind, _, _, _)| {
+            kind == crate::repositories::runtime::B02_OPENING_EVALUATION_KIND
+        });
+        let signing_status = signing_operation
+            .filter(|(_, _, _, status, _)| status == "RUNNING" || status == "WAITING_MODEL")
+            .map(|_| "IN_REVIEW")
+            .or_else(|| {
+                signing_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("status").and_then(Value::as_str))
+                    .or(Some(runtime.4.as_str()))
+            })
+            .unwrap_or("NOT_STARTED");
+        let signing_evaluation = if let Some((_, _, phase, status, _)) = signing_operation {
+            json!({
+                "status": if status == "FAILED" { "FAILED" } else if status == "COMPLETED" { "COMPLETED" } else { "IN_REVIEW" },
+                "phase": phase,
+                "steps": b02_phase_steps_with_labels(crate::repositories::runtime::B02_SIGNING_PHASES, Some(phase.as_str()), status),
+                "summary": "后端正在按阶段读取并核验黄金三章。"
+            })
+        } else {
+            signing_payload
             .as_ref()
             .and_then(|payload| payload.get("evaluation").cloned())
             .unwrap_or_else(|| {
@@ -326,7 +409,8 @@ impl ProductionRepository {
                     "steps": [],
                     "summary": "等待三章正式提交后开始开篇评估。"
                 })
-            });
+            })
+        };
         let signing_receipt = signing_ref.as_ref().map(|reference| {
             let payload = signing_payload.as_ref();
             json!({
@@ -378,21 +462,29 @@ impl ProductionRepository {
                 }
             })
             .unwrap_or("PENDING");
+        let book_plan_operation = b02_operation
+            .as_ref()
+            .filter(|(_, kind, _, _, _)| kind == crate::repositories::runtime::B02_BOOK_PLAN_KIND);
+        let book_plan_steps = if let Some((_, _, phase, status, _)) = book_plan_operation {
+            b02_phase_steps_with_labels(
+                crate::repositories::runtime::B02_BOOK_PLAN_PHASES,
+                Some(phase.as_str()),
+                status,
+            )
+        } else if book_plan_status == "APPROVED" {
+            b02_phase_steps_with_labels(
+                crate::repositories::runtime::B02_BOOK_PLAN_PHASES,
+                Some("COMPLETED"),
+                "COMPLETED",
+            )
+        } else {
+            Vec::new()
+        };
         let book_plan = json!({
             "status":book_plan_status,
             "ref":book_plan_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash})),
             "seedPreserved":seed_count > 0,
-            "steps":if book_plan_status == "APPROVED" {
-                json!([
-                    {"id":"READ_OPENING_CANON","label":"读取三章事实","status":"done"},
-                    {"id":"SUMMARIZE_OPENING","label":"汇总开篇状态","status":"done"},
-                    {"id":"GENERATE_BOOK_PLAN","label":"生成正式总纲","status":"done"},
-                    {"id":"VALIDATE_CONSTRAINTS","label":"校验约束","status":"done"},
-                    {"id":"COMMIT_BOOK_PLAN","label":"提交正式版本","status":"done"}
-                ])
-            } else {
-                json!([])
-            }
+            "steps":book_plan_steps
         });
         let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()
         {
@@ -434,6 +526,7 @@ impl ProductionRepository {
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
             "signing":signing,"bookPlan":book_plan,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
+            "runtimeOperation":b02_operation.as_ref().map(|(job_id,kind,phase,status,error_code)| json!({"jobId":job_id,"kind":kind,"phase":phase,"status":status,"errorCode":error_code,"active":matches!(status.as_str(),"RUNNING"|"WAITING_MODEL")})),
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},

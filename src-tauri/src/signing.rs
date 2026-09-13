@@ -9,8 +9,13 @@ use crate::commit::CommitService;
 use crate::generated::types::{ArtifactEnvelope, ArtifactRef, CommitBundle};
 use crate::hash::sha256_canonical;
 use crate::project_db::ProjectManager;
-use crate::repositories::narrative::{NarrativeRepository, OpeningEvaluationSnapshot};
-use crate::repositories::runtime::DurableJobService;
+use crate::repositories::narrative::{
+    NarrativeRepository, OpeningActualState, OpeningEvaluationSnapshot,
+};
+use crate::repositories::runtime::{
+    DurableJobService, B02_OPENING_EVALUATION_KIND, B02_SIGNING_PHASES,
+};
+use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -88,6 +93,20 @@ fn evaluation_steps() -> Value {
     )
 }
 
+fn notify_phase(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    job_id: &str,
+    phase: &str,
+    now: &str,
+    observer: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    DurableJobService::update_b02_phase(connection, project_id, job_id, phase, now)
+        .map_err(|error| error.to_string())?;
+    observer(phase);
+    Ok(())
+}
+
 fn result_from_payload(payload: &Value, receipt_ref: &ArtifactRef) -> Value {
     json!({
         "status": payload.get("status").cloned().unwrap_or_else(|| json!("REVISE")),
@@ -97,6 +116,8 @@ fn result_from_payload(payload: &Value, receipt_ref: &ArtifactRef) -> Value {
         "openingChapterRefs": payload.get("openingChapterRefs").cloned().unwrap_or_else(|| json!([])),
         "openingCanonRefs": payload.get("openingCanonRefs").cloned().unwrap_or_else(|| json!([])),
         "signingEvidenceRefs": payload.get("signingEvidenceRefs").cloned().unwrap_or_else(|| json!([])),
+        "openingActualState": payload.get("openingActualState").cloned().unwrap_or_else(|| json!({})),
+        "openingActualStateDigest": payload.get("openingActualStateDigest").cloned().unwrap_or(Value::Null),
         "evaluation": payload.get("evaluation").cloned().unwrap_or_else(|| json!({}))
     })
 }
@@ -134,6 +155,7 @@ fn snapshot_payload(
     status: &str,
     verdict: &str,
     snapshot: &OpeningEvaluationSnapshot,
+    actual_state: &OpeningActualState,
     source_refs: &[(String, ArtifactRef)],
 ) -> Result<Value, String> {
     let opening_chapter_refs = snapshot
@@ -165,6 +187,8 @@ fn snapshot_payload(
         "finalChapterRefs":final_chapter_refs,
         "openingCanonRefs":snapshot.opening_canon_refs,
         "signingEvidenceRefs":snapshot.signing_evidence_refs,
+        "openingActualState":actual_state,
+        "openingActualStateDigest":actual_state.semantic_digest,
         "sourceRefs":source_refs.iter().map(|(kind, reference)| json!({"kind":kind,"ref":ref_value(reference)})).collect::<Vec<_>>()
     }))
     .map_err(|error| error.to_string())?;
@@ -194,6 +218,14 @@ fn snapshot_payload(
 pub fn execute_opening_evaluation(
     manager: &ProjectManager,
     request: &Value,
+) -> Result<Value, String> {
+    execute_opening_evaluation_with_observer(manager, request, &mut |_| {})
+}
+
+pub fn execute_opening_evaluation_with_observer(
+    manager: &ProjectManager,
+    request: &Value,
+    observer: &mut dyn FnMut(&str),
 ) -> Result<Value, String> {
     let project_id = required(request, "/projectId")?;
     let command_id = required(request, "/commandId")?;
@@ -244,8 +276,67 @@ pub fn execute_opening_evaluation(
                 .ok_or_else(|| format!("B02_OPENING_AUTHORITY_REQUIRED:{artifact_type}"))?;
         source_refs.push((kind.to_string(), reference));
     }
+    let job_id = StableIdentityFactory::from_command(
+        StableIdKind::Job,
+        &format!("{command_id}:opening-evaluation"),
+    )?;
+    let worker_id = "b02-opening-evaluation-worker";
+    DurableJobService::start_b02_phase_job(
+        &handle,
+        &project_id,
+        &job_id,
+        B02_OPENING_EVALUATION_KIND,
+        B02_SIGNING_PHASES,
+        worker_id,
+        &now,
+    )
+    .map_err(|error| error.to_string())?;
+    DurableJobService::set_signing_projection(
+        &handle,
+        &project_id,
+        "SIGNING",
+        "IN_REVIEW",
+        "ACTIVE",
+        None,
+        &now,
+    )
+    .map_err(|error| error.to_string())?;
+    notify_phase(
+        &handle,
+        &project_id,
+        &job_id,
+        "READ_OPENING_CANON",
+        &now,
+        observer,
+    )?;
+    let actual_state = NarrativeRepository::opening_actual_state(&handle, &project_id, &snapshot)
+        .map_err(|error| error.to_string())?;
+    notify_phase(
+        &handle,
+        &project_id,
+        &job_id,
+        "SUMMARIZE_OPENING",
+        &now,
+        observer,
+    )?;
     let (status, verdict) = status_from_snapshot(&snapshot);
-    let payload = snapshot_payload(&project_id, &now, status, verdict, &snapshot, &source_refs)?;
+    notify_phase(
+        &handle,
+        &project_id,
+        &job_id,
+        "EVALUATE_SIGNING",
+        &now,
+        observer,
+    )?;
+    let payload = snapshot_payload(
+        &project_id,
+        &now,
+        status,
+        verdict,
+        &snapshot,
+        &actual_state,
+        &source_refs,
+    )?;
     let artifact_id = format!("signing-receipt:{project_id}");
     let version = NarrativeRepository::next_artifact_version(&handle, &project_id, &artifact_id)
         .map_err(|error| error.to_string())?;
@@ -294,23 +385,56 @@ pub fn execute_opening_evaluation(
         "receiptDraft":{"domain":"B02_OPENING_EVALUATION","artifactRefs":[receipt_ref.clone()],"payload":{"status":status,"openingChapterRefs":snapshot.chapters.iter().map(|chapter| chapter.chapter_id.clone()).collect::<Vec<_>>(),"openingCanonRefs":snapshot.opening_canon_refs,"signingEvidenceRefs":snapshot.signing_evidence_refs}}
     }))
     .map_err(|error| format!("B02_SIGNING_BUNDLE_INVALID:{error}"))?;
+    notify_phase(
+        &handle,
+        &project_id,
+        &job_id,
+        "COMMIT_RECEIPT",
+        &now,
+        observer,
+    )?;
     let phase = "SIGNING";
     let run_state = if status == "PASS" { "IDLE" } else { "BLOCKED" };
     let block_reason = (status != "PASS").then_some("SIGNING_REQUIRED");
-    let receipt = CommitService::commit_with_post_apply(&handle, &bundle, &now, |connection, _| {
-        DurableJobService::set_signing_projection(
-            connection,
-            &project_id,
-            phase,
-            status,
-            run_state,
-            block_reason,
-            &now,
-        )
-        .map_err(|error| {
-            crate::commit::CommitError::ContractInvalid(format!("B02_RUNTIME_PROJECTION:{error}"))
-        })
-    })
-    .map_err(|error| error.to_string())?;
+    let receipt =
+        match CommitService::commit_with_post_apply(&handle, &bundle, &now, |connection, _| {
+            DurableJobService::complete_b02_phase_job(
+                connection,
+                &project_id,
+                &job_id,
+                worker_id,
+                &now,
+            )
+            .map_err(|error| {
+                crate::commit::CommitError::ContractInvalid(format!("B02_RUNTIME_JOB:{error}"))
+            })?;
+            DurableJobService::set_signing_projection(
+                connection,
+                &project_id,
+                phase,
+                status,
+                run_state,
+                block_reason,
+                &now,
+            )
+            .map_err(|error| {
+                crate::commit::CommitError::ContractInvalid(format!(
+                    "B02_RUNTIME_PROJECTION:{error}"
+                ))
+            })
+        }) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = DurableJobService::fail_b02_phase_job(
+                    &handle,
+                    &project_id,
+                    &job_id,
+                    "B02_COMMIT_FAILED",
+                    &now,
+                );
+                return Err(error.to_string());
+            }
+        };
+    observer("COMPLETED");
     command_response(&command_id, &project_id, &receipt, &payload, &receipt_ref)
 }

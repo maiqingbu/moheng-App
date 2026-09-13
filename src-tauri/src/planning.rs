@@ -8,6 +8,7 @@ use crate::generated::validators::{
     validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
 };
 use crate::hash::sha256_canonical;
+use crate::repositories::narrative::OpeningActualState;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -104,6 +105,7 @@ pub fn approve_book_plan(
     signing_pass: bool,
     opening_canon_refs: &[String],
     signing_evidence_refs: &[String],
+    actual_state: &OpeningActualState,
 ) -> Result<Value, String> {
     if !signing_pass || opening_canon_refs.len() < 3 || signing_evidence_refs.is_empty() {
         return Err("BOOK_PLAN_SIGNING_REQUIRED".into());
@@ -118,7 +120,12 @@ pub fn approve_book_plan(
     // while retaining the historical SEED artifact unchanged.
     object.remove("createdAt");
     object.insert("planningMaturity".into(), json!("APPROVED"));
-    enrich_book_plan_from_opening(object, opening_canon_refs)?;
+    enrich_book_plan_from_opening(
+        object,
+        opening_canon_refs,
+        signing_evidence_refs,
+        actual_state,
+    )?;
     for key in [
         "mustAchieve",
         "relationshipMacroDirections",
@@ -142,84 +149,199 @@ pub fn approve_book_plan(
 /// continuations of observed Canon, not a new commercial scoring product or a
 /// fabricated chapter outline.  The deterministic digest keeps generated IDs
 /// stable for the same real opening evidence.
-fn book_plan_array_is_empty(object: &serde_json::Map<String, Value>, key: &str) -> bool {
-    object
-        .get(key)
-        .and_then(Value::as_array)
-        .is_none_or(|items| items.is_empty())
+fn append_book_plan_item(object: &mut serde_json::Map<String, Value>, key: &str, item: Value) {
+    let items = object
+        .entry(key.to_string())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("book plan array field");
+    items.push(item);
 }
 
 fn enrich_book_plan_from_opening(
     object: &mut serde_json::Map<String, Value>,
     opening_canon_refs: &[String],
+    signing_evidence_refs: &[String],
+    actual_state: &OpeningActualState,
 ) -> Result<(), String> {
-    if opening_canon_refs.is_empty() {
+    if opening_canon_refs.is_empty() || actual_state.evidence.is_empty() {
         return Err("BOOK_PLAN_OPENING_CANON_REQUIRED".into());
     }
-    let digest = sha256_canonical(&json!(opening_canon_refs))
-        .map_err(|error| format!("BOOK_PLAN_OPENING_DIGEST:{error}"))?;
+    let digest = actual_state.semantic_digest.as_str();
+    if digest.len() != 64 {
+        return Err("BOOK_PLAN_OPENING_STATE_DIGEST_REQUIRED".into());
+    }
     let short_digest = &digest[..16];
-    let refs_text = opening_canon_refs.join(", ");
-    if book_plan_array_is_empty(object, "mustAchieve") {
-        object.insert(
-            "mustAchieve".into(),
-            json!([{
-                "id":format!("goal:opening:{short_digest}"),
-                "description":format!("承接黄金三章已验证的开篇事实（{refs_text}），让故事承诺继续产生可核对的后果。")
-            }]),
+    let fact_text = actual_state
+        .facts
+        .iter()
+        .take(8)
+        .map(|fact| {
+            format!(
+                "{}{}={}({})",
+                fact.subject_name.as_deref().unwrap_or(&fact.subject_id),
+                fact.predicate,
+                fact.object_json,
+                fact.fact_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let relation_text = actual_state
+        .relations
+        .iter()
+        .take(8)
+        .map(|relation| {
+            format!(
+                "{}{}{}({})",
+                relation
+                    .subject_name
+                    .as_deref()
+                    .unwrap_or(&relation.subject_id),
+                relation.predicate,
+                relation
+                    .object_name
+                    .as_deref()
+                    .unwrap_or(&relation.object_id),
+                relation.relation_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let knowledge_text = actual_state
+        .knowledge
+        .iter()
+        .take(8)
+        .map(|knowledge| {
+            format!(
+                "{}对{}的认知为{}({})",
+                knowledge.knower_id,
+                knowledge.fact_id.as_deref().unwrap_or("未知事实"),
+                knowledge.epistemic_state,
+                knowledge.knowledge_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let event_text = actual_state
+        .events
+        .iter()
+        .take(8)
+        .map(|event| {
+            format!(
+                "{}:{}({})",
+                event.event_type, event.object_json, event.event_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let evidence_text = actual_state
+        .evidence
+        .iter()
+        .take(8)
+        .filter_map(|evidence| evidence.quote.as_deref())
+        .collect::<Vec<_>>()
+        .join("；");
+    let facts = if fact_text.is_empty() {
+        "无".into()
+    } else {
+        fact_text.join("；")
+    };
+    let relations = if relation_text.is_empty() {
+        "无".into()
+    } else {
+        relation_text.join("；")
+    };
+    let knowledge = if knowledge_text.is_empty() {
+        "无".into()
+    } else {
+        knowledge_text.join("；")
+    };
+    let events = if event_text.is_empty() {
+        "无".into()
+    } else {
+        event_text.join("；")
+    };
+    let evidence = if evidence_text.is_empty() {
+        "无".into()
+    } else {
+        evidence_text
+    };
+    let actual_refs = opening_canon_refs.join(", ");
+    let semantic_evidence_refs = actual_state
+        .evidence
+        .iter()
+        .map(|item| item.evidence_id.clone())
+        .collect::<Vec<_>>();
+    object.insert("openingCanonRefs".into(), json!(opening_canon_refs));
+    object.insert("signingEvidenceRefs".into(), json!(semantic_evidence_refs));
+    object.insert(
+        "openingActualStateDigest".into(),
+        json!(actual_state.semantic_digest),
+    );
+    append_book_plan_item(
+        object,
+        "mustAchieve",
+        json!({
+            "id":format!("goal:opening-reality:{short_digest}"),
+            "description":format!("基于开篇事实 {facts} 与事件 {events}，继续让真实选择产生可核对后果；来源 {actual_refs}。")
+        }),
+    );
+    append_book_plan_item(
+        object,
+        "mustNotBreak",
+        json!({
+            "id":format!("rule:opening-reality:{short_digest}"),
+            "description":format!("不得违背开篇事实 {facts}、关系 {relations}、知识边界 {knowledge}；逐章证据：{evidence}。")
+        }),
+    );
+    if actual_state.relations.is_empty() {
+        append_book_plan_item(
+            object,
+            "relationshipMacroDirections",
+            json!({
+                "id":format!("relationship:opening-facts:{short_digest}"),
+                "description":format!("根据开篇事实中的人物变化继续保持关系可追溯：{facts}。")
+            }),
         );
+    } else {
+        for relation in actual_state.relations.iter().take(8) {
+            append_book_plan_item(
+                object,
+                "relationshipMacroDirections",
+                json!({
+                    "id":format!("relationship:opening:{}", relation.relation_id),
+                    "description":format!("{}与{}的关系“{}”必须沿真实开篇变化继续可追溯。", relation.subject_name.as_deref().unwrap_or(&relation.subject_id), relation.object_name.as_deref().unwrap_or(&relation.object_id), relation.predicate)
+                }),
+            );
+        }
     }
-    if book_plan_array_is_empty(object, "mustNotBreak") {
-        object.insert(
-            "mustNotBreak".into(),
-            json!([{
-                "id":format!("rule:opening-continuity:{short_digest}"),
-                "description":format!("不得与黄金三章已提交 Canon（{refs_text}）相矛盾。")
-            }]),
-        );
-    }
-    if book_plan_array_is_empty(object, "relationshipMacroDirections") {
-        object.insert(
-            "relationshipMacroDirections".into(),
-            json!([{
-                "id":format!("relationship:opening:{short_digest}"),
-                "description":format!("保持开篇 Canon（{refs_text}）中的关系变化可追溯。")
-            }]),
-        );
-    }
-    if book_plan_array_is_empty(object, "majorMysteryGoals") {
-        object.insert(
-            "majorMysteryGoals".into(),
-            json!([{
-                "id":format!("mystery:opening:{short_digest}"),
-                "description":format!("围绕黄金三章留下的真实问题（{refs_text}）继续推进并延后未经证实的揭示。")
-            }]),
-        );
-    }
-    if book_plan_array_is_empty(object, "futureReservations") {
-        object.insert(
-            "futureReservations".into(),
-            json!([{
-                "reservationId":format!("reservation:opening:{short_digest}"),
-                "description":format!("保留由开篇 Canon（{refs_text}）提出的后续问题，等待后续卷验证。"),
-                "reservedForVolumeNo":2,
-                "notBeforeVolumeNo":2,
-                "prerequisites":opening_canon_refs,
-                "mayForeshadow":true,
-                "mayReveal":true,
-                "authorityLevel":"B"
-            }]),
-        );
-    }
-    if book_plan_array_is_empty(object, "volumeIntentSeeds") {
-        object.insert(
-            "volumeIntentSeeds".into(),
-            json!([{
-                "seedId":format!("volume-intent:opening:{short_digest}"),
-                "description":format!("承接黄金三章真实 Canon（{refs_text}），推进已验证的故事承诺。")
-            }]),
-        );
-    }
+    append_book_plan_item(
+        object,
+        "majorMysteryGoals",
+        json!({
+            "id":format!("mystery:opening-reality:{short_digest}"),
+            "description":format!("围绕开篇实际事件 {events} 与知识边界 {knowledge} 推进未解问题，证据线索为 {evidence}。")
+        }),
+    );
+    append_book_plan_item(
+        object,
+        "futureReservations",
+        json!({
+            "reservationId":format!("reservation:opening-reality:{short_digest}"),
+            "description":format!("保留由开篇事实 {facts}、关系 {relations} 与事件 {events} 提出的后续责任。"),
+            "reservedForVolumeNo":2,
+            "notBeforeVolumeNo":2,
+            "prerequisites":opening_canon_refs.iter().cloned().chain(signing_evidence_refs.iter().cloned()).collect::<Vec<_>>(),
+            "mayForeshadow":true,
+            "mayReveal":true,
+            "authorityLevel":"B"
+        }),
+    );
+    append_book_plan_item(
+        object,
+        "volumeIntentSeeds",
+        json!({
+            "seedId":format!("volume-intent:opening-reality:{short_digest}"),
+            "description":format!("下一卷承接事实 {facts}、关系 {relations}、知识 {knowledge} 和事件 {events}，并以证据 {evidence} 校验推进。")
+        }),
+    );
     Ok(())
 }
 
@@ -1226,7 +1348,7 @@ mod tests {
     fn book_approval_and_volume_route_fail_closed_on_static_truth() {
         let seed = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
         assert_eq!(
-            approve_book_plan(&seed, false, &[], &[]),
+            approve_book_plan(&seed, false, &[], &[], &OpeningActualState::default()),
             Err("BOOK_PLAN_SIGNING_REQUIRED".into())
         );
         let route = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":"intent:1","version":1,"payloadHash":"a".repeat(64)},"routeVersion":1,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":2,"maxChapters":3},"chapters":[]});

@@ -380,10 +380,10 @@ export interface SigningProjection {
   signingEvidenceRefs?: string[]
   receiptRef?: { artifactId: string; version: number; payloadHash: string }
   evaluation?: {
-    status: 'NOT_STARTED' | 'IN_REVIEW' | 'COMPLETED'
+    status: 'NOT_STARTED' | 'IN_REVIEW' | 'COMPLETED' | 'FAILED'
     phase: string
     summary?: string
-    steps: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' }>
+    steps: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' | 'waiting' }>
   }
   receipt?: {
     id: string
@@ -457,8 +457,16 @@ export interface ProductionCenterProjection {
     status: 'PENDING' | 'APPROVED'
     ref?: { artifactId: string; version: number; payloadHash: string } | null
     seedPreserved?: boolean
-    steps?: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' }>
+    steps?: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' | 'waiting' }>
   }
+  runtimeOperation?: {
+    jobId: string
+    kind: 'B02::OPENING_EVALUATION' | 'B02::BOOK_PLAN'
+    phase: string
+    status: string
+    errorCode?: string | null
+    active: boolean
+  } | null
   activeWork: {
     label: string
     detail: string
@@ -750,7 +758,6 @@ export type CommandType =
   | 'opening_start_creating'
   | 'book_plan_create'
   | 'book_plan_revise'
-  | 'planning_finalize_book_plan'
   | 'planning_create_volume_intent'
   | 'planning_create_volume_plan'
   | 'planning_compile_chapter_plan'
@@ -781,7 +788,6 @@ export type CommandType =
   | 'retcon_apply'
   | 'dependency_summary_bootstrap'
   | 'opening_evaluate'
-  | 'signing_retry'
   | 'export_create'
   | 'backup_create'
   | 'integrity_check_run'

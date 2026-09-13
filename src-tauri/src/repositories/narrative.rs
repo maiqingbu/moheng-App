@@ -166,6 +166,56 @@ pub struct OpeningEvaluationSnapshot {
     pub signing_evidence_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningActualFact {
+    pub fact_id: String,
+    pub subject_id: String,
+    pub subject_name: Option<String>,
+    pub predicate: String,
+    pub object_json: Value,
+    pub source_chapter_id: Option<String>,
+    pub source_artifact_id: Option<String>,
+    pub source_version: Option<i64>,
+    pub evidence_range: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningActualRelation {
+    pub relation_id: String,
+    pub subject_id: String,
+    pub subject_name: Option<String>,
+    pub predicate: String,
+    pub object_id: String,
+    pub object_name: Option<String>,
+    pub source_chapter_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningActualEvent {
+    pub event_id: String,
+    pub chapter_id: String,
+    pub event_type: String,
+    pub subject_id: Option<String>,
+    pub object_json: Value,
+    pub story_time: Option<String>,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningActualState {
+    pub chapters: Vec<OpeningEvaluationChapter>,
+    pub facts: Vec<OpeningActualFact>,
+    pub relations: Vec<OpeningActualRelation>,
+    pub knowledge: Vec<KnowledgeRecord>,
+    pub events: Vec<OpeningActualEvent>,
+    pub evidence: Vec<EvidenceRecord>,
+    pub semantic_digest: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CanonEventRecord {
@@ -1326,6 +1376,138 @@ impl NarrativeRepository {
             opening_canon_refs: opening_canon_refs.into_iter().collect(),
             signing_evidence_refs,
         })
+    }
+
+    /// Compiles the bounded, semantic opening reality used by B02.  IDs select
+    /// rows, but the returned state always contains the row content and its
+    /// provenance so planning cannot mistake an ID digest for narrative
+    /// absorption.
+    pub fn opening_actual_state(
+        connection: &Connection,
+        project_id: &str,
+        snapshot: &OpeningEvaluationSnapshot,
+    ) -> Result<OpeningActualState, NarrativeRepositoryError> {
+        let chapter_ids = snapshot
+            .chapters
+            .iter()
+            .map(|chapter| chapter.chapter_id.as_str())
+            .collect::<Vec<_>>();
+        let chapter_json = Self::ids_json(&chapter_ids)?;
+        let canon_json = Self::ids_json(
+            &snapshot
+                .opening_canon_refs
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )?;
+        let mut facts_statement = connection.prepare(
+            "SELECT f.fact_id,f.subject_id,e.canonical_name,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,f.evidence_range_json FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND (f.fact_id IN (SELECT value FROM json_each(?2)) OR f.source_chapter_id IN (SELECT value FROM json_each(?3))) ORDER BY f.fact_id LIMIT 100",
+        )?;
+        let facts = facts_statement
+            .query_map(
+                libsql_rusqlite::params![project_id, canon_json, chapter_json],
+                |row| {
+                    let object_json: String = row.get(4)?;
+                    let evidence_range: Option<String> = row.get(8)?;
+                    Ok(OpeningActualFact {
+                        fact_id: row.get(0)?,
+                        subject_id: row.get(1)?,
+                        subject_name: row.get(2)?,
+                        predicate: row.get(3)?,
+                        object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                        source_chapter_id: row.get(5)?,
+                        source_artifact_id: row.get(6)?,
+                        source_version: row.get(7)?,
+                        evidence_range: evidence_range
+                            .and_then(|value| serde_json::from_str(&value).ok()),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut relations_statement = connection.prepare(
+            "SELECT r.relation_id,r.subject_id,se.canonical_name,r.predicate,r.object_id,oe.canonical_name,r.valid_from_chapter_id FROM canon_relations r LEFT JOIN canon_entities se ON se.project_id=r.project_id AND se.entity_id=r.subject_id LEFT JOIN canon_entities oe ON oe.project_id=r.project_id AND oe.entity_id=r.object_id WHERE r.project_id=?1 AND (r.relation_id IN (SELECT value FROM json_each(?2)) OR r.valid_from_chapter_id IN (SELECT value FROM json_each(?3))) ORDER BY r.relation_id LIMIT 100",
+        )?;
+        let relations = relations_statement
+            .query_map(
+                libsql_rusqlite::params![project_id, canon_json, chapter_json],
+                |row| {
+                    Ok(OpeningActualRelation {
+                        relation_id: row.get(0)?,
+                        subject_id: row.get(1)?,
+                        subject_name: row.get(2)?,
+                        predicate: row.get(3)?,
+                        object_id: row.get(4)?,
+                        object_name: row.get(5)?,
+                        source_chapter_id: row.get(6)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let fact_ids = Self::ids_json(
+            &facts
+                .iter()
+                .map(|fact| fact.fact_id.as_str())
+                .collect::<Vec<_>>(),
+        )?;
+        let mut knowledge_statement = connection.prepare(
+            "SELECT knowledge_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id FROM canon_knowledge WHERE project_id=?1 AND (fact_id IN (SELECT value FROM json_each(?2)) OR from_chapter_id IN (SELECT value FROM json_each(?3))) ORDER BY knowledge_id LIMIT 100",
+        )?;
+        let knowledge = knowledge_statement
+            .query_map(
+                libsql_rusqlite::params![project_id, fact_ids, chapter_json],
+                |row| {
+                    Ok(KnowledgeRecord {
+                        knowledge_id: row.get(0)?,
+                        knower_id: row.get(1)?,
+                        fact_id: row.get(2)?,
+                        epistemic_state: row.get(3)?,
+                        visibility_scope: row.get(4)?,
+                        from_chapter_id: row.get(5)?,
+                        from_story_time: None,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut events_statement = connection.prepare(
+            "SELECT event_id,chapter_id,event_type,subject_id,object_json,story_time,payload_json FROM canon_events WHERE project_id=?1 AND chapter_id IN (SELECT value FROM json_each(?2)) ORDER BY event_ordinal,event_id LIMIT 100",
+        )?;
+        let events = events_statement
+            .query_map(libsql_rusqlite::params![project_id, chapter_json], |row| {
+                let object_json: String = row.get(4)?;
+                let payload_json: String = row.get(6)?;
+                Ok(OpeningActualEvent {
+                    event_id: row.get(0)?,
+                    chapter_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    subject_id: row.get(3)?,
+                    object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                    story_time: row.get(5)?,
+                    payload_json: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = snapshot
+            .chapters
+            .iter()
+            .flat_map(|chapter| chapter.evidence.clone())
+            .collect::<Vec<_>>();
+        let mut state = OpeningActualState {
+            chapters: snapshot.chapters.clone(),
+            facts,
+            relations,
+            knowledge,
+            events,
+            evidence,
+            semantic_digest: String::new(),
+        };
+        let digest_value = serde_json::to_value(&state)?;
+        state.semantic_digest = crate::hash::sha256_canonical(&digest_value).map_err(|error| {
+            NarrativeRepositoryError::Json(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error,
+            )))
+        })?;
+        Ok(state)
     }
 
     pub fn chapter_id_for_number(

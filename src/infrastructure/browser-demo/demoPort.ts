@@ -38,7 +38,7 @@ import type {
 } from '../../application/contracts'
 
 type BrowserDemoCommandRequest = Omit<CommandRequest, 'type'> & {
-  type: CommandRequest['type'] | 'signing_demo_pass' | 'signing_demo_revise' | 'signing_demo_reject'
+  type: CommandRequest['type'] | 'signing_retry' | 'signing_demo_pass' | 'signing_demo_revise' | 'signing_demo_reject'
 }
 import { demoBundle, demoProjectRecords, starterMarket, type DemoProjectRecord } from './fixtures'
 

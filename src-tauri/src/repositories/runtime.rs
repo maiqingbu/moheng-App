@@ -62,6 +62,23 @@ pub struct JobSpec {
 
 pub const DEPENDENCY_SUMMARY_BOOTSTRAP_STAGE: &str = "DEPENDENCY_SUMMARY_BOOTSTRAP";
 pub const DEPENDENCY_SUMMARY_WORKER: &str = "b12-dependency-summary-worker";
+pub const B02_OPENING_EVALUATION_KIND: &str = "B02::OPENING_EVALUATION";
+pub const B02_BOOK_PLAN_KIND: &str = "B02::BOOK_PLAN";
+pub const B02_SIGNING_PHASES: &[&str] = &[
+    "READ_OPENING_CANON",
+    "SUMMARIZE_OPENING",
+    "EVALUATE_SIGNING",
+    "COMMIT_RECEIPT",
+    "COMPLETED",
+];
+pub const B02_BOOK_PLAN_PHASES: &[&str] = &[
+    "READ_OPENING_CANON",
+    "SUMMARIZE_OPENING",
+    "GENERATE_BOOK_PLAN",
+    "VALIDATE_CONSTRAINTS",
+    "COMMIT_BOOK_PLAN",
+    "COMPLETED",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct RecoverySummary {
@@ -189,6 +206,77 @@ fn days_in_month(year: i32, month: i32) -> i32 {
 }
 
 impl DurableJobService {
+    pub fn start_b02_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        kind: &str,
+        phases: &[&str],
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        if phases.is_empty() || !matches!(kind, B02_OPENING_EVALUATION_KIND | B02_BOOK_PLAN_KIND) {
+            return Err(RuntimeError::InvalidTransition(
+                "B02".into(),
+                "phase_job".into(),
+            ));
+        }
+        Self::start_job(
+            connection,
+            &JobSpec {
+                job_id: job_id.into(),
+                job_type: "BOOK".into(),
+                parent_job_id: None,
+                book_id: Some(kind.into()),
+                volume_id: None,
+                chapter_id: None,
+                stages: phases.iter().map(|phase| (*phase).into()).collect(),
+            },
+            now,
+        )?;
+        Self::acquire_lease(
+            connection,
+            project_id,
+            job_id,
+            worker_id,
+            &lease_expiry(now),
+            now,
+        )?;
+        Self::transition_for_worker(connection, project_id, job_id, "RUNNING", worker_id, now)
+    }
+
+    pub fn update_b02_phase(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        phase: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::update_stage(connection, project_id, job_id, phase, now)
+    }
+
+    pub fn complete_b02_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::update_stage(connection, project_id, job_id, "COMPLETED", now)?;
+        Self::transition_for_worker(connection, project_id, job_id, "COMPLETED", worker_id, now)?;
+        Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
+    }
+
+    pub fn fail_b02_phase_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        error_code: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        Self::fail_job(connection, project_id, job_id, error_code, now)
+    }
+
     pub fn dependency_summary_job_id(project_id: &str) -> Result<String, RuntimeError> {
         StableIdentityFactory::from_command(
             StableIdKind::Job,
