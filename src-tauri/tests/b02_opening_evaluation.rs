@@ -395,21 +395,19 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
             .len(),
         3
     );
-    assert_eq!(
+    assert!(
         center["signing"]["openingCanonRefs"]
             .as_array()
             .unwrap()
             .len()
             >= 3,
-        true
     );
-    assert_eq!(
+    assert!(
         center["signing"]["signingEvidenceRefs"]
             .as_array()
             .unwrap()
             .len()
             >= 3,
-        true
     );
     assert_eq!(center["bookPlan"]["status"], "PENDING");
 
