@@ -113,7 +113,12 @@ pub fn approve_book_plan(
     }
     let mut approved = seed.clone();
     let object = approved.as_object_mut().ok_or("BOOK_PLAN_INVALID")?;
+    // Older entry payloads carried a timestamp for display.  It is not part
+    // of the frozen BookPlan R1 schema, so strip it from the new authority
+    // while retaining the historical SEED artifact unchanged.
+    object.remove("createdAt");
     object.insert("planningMaturity".into(), json!("APPROVED"));
+    enrich_book_plan_from_opening(object, opening_canon_refs)?;
     for key in [
         "mustAchieve",
         "relationshipMacroDirections",
@@ -130,6 +135,92 @@ pub fn approve_book_plan(
     }
     validate_book_plan_r1(&approved).map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
     Ok(approved)
+}
+
+/// Seeds the post-signing goal fields from actual opening references when the
+/// pre-signing seed did not provide them.  These are deliberately structural
+/// continuations of observed Canon, not a new commercial scoring product or a
+/// fabricated chapter outline.  The deterministic digest keeps generated IDs
+/// stable for the same real opening evidence.
+fn book_plan_array_is_empty(object: &serde_json::Map<String, Value>, key: &str) -> bool {
+    object
+        .get(key)
+        .and_then(Value::as_array)
+        .is_none_or(|items| items.is_empty())
+}
+
+fn enrich_book_plan_from_opening(
+    object: &mut serde_json::Map<String, Value>,
+    opening_canon_refs: &[String],
+) -> Result<(), String> {
+    if opening_canon_refs.is_empty() {
+        return Err("BOOK_PLAN_OPENING_CANON_REQUIRED".into());
+    }
+    let digest = sha256_canonical(&json!(opening_canon_refs))
+        .map_err(|error| format!("BOOK_PLAN_OPENING_DIGEST:{error}"))?;
+    let short_digest = &digest[..16];
+    let refs_text = opening_canon_refs.join(", ");
+    if book_plan_array_is_empty(object, "mustAchieve") {
+        object.insert(
+            "mustAchieve".into(),
+            json!([{
+                "id":format!("goal:opening:{short_digest}"),
+                "description":format!("承接黄金三章已验证的开篇事实（{refs_text}），让故事承诺继续产生可核对的后果。")
+            }]),
+        );
+    }
+    if book_plan_array_is_empty(object, "mustNotBreak") {
+        object.insert(
+            "mustNotBreak".into(),
+            json!([{
+                "id":format!("rule:opening-continuity:{short_digest}"),
+                "description":format!("不得与黄金三章已提交 Canon（{refs_text}）相矛盾。")
+            }]),
+        );
+    }
+    if book_plan_array_is_empty(object, "relationshipMacroDirections") {
+        object.insert(
+            "relationshipMacroDirections".into(),
+            json!([{
+                "id":format!("relationship:opening:{short_digest}"),
+                "description":format!("保持开篇 Canon（{refs_text}）中的关系变化可追溯。")
+            }]),
+        );
+    }
+    if book_plan_array_is_empty(object, "majorMysteryGoals") {
+        object.insert(
+            "majorMysteryGoals".into(),
+            json!([{
+                "id":format!("mystery:opening:{short_digest}"),
+                "description":format!("围绕黄金三章留下的真实问题（{refs_text}）继续推进并延后未经证实的揭示。")
+            }]),
+        );
+    }
+    if book_plan_array_is_empty(object, "futureReservations") {
+        object.insert(
+            "futureReservations".into(),
+            json!([{
+                "reservationId":format!("reservation:opening:{short_digest}"),
+                "description":format!("保留由开篇 Canon（{refs_text}）提出的后续问题，等待后续卷验证。"),
+                "reservedForVolumeNo":2,
+                "notBeforeVolumeNo":2,
+                "prerequisites":opening_canon_refs,
+                "mayForeshadow":true,
+                "mayReveal":true,
+                "authorityLevel":"B"
+            }]),
+        );
+    }
+    if book_plan_array_is_empty(object, "volumeIntentSeeds") {
+        object.insert(
+            "volumeIntentSeeds".into(),
+            json!([{
+                "seedId":format!("volume-intent:opening:{short_digest}"),
+                "description":format!("承接黄金三章真实 Canon（{refs_text}），推进已验证的故事承诺。")
+            }]),
+        );
+    }
+    Ok(())
 }
 
 pub fn validate_volume_route(plan: &Value) -> Result<(), String> {

@@ -22,13 +22,13 @@ impl ProductionRepository {
         connection: &Connection,
         project_id: &str,
     ) -> Result<Value, ProductionRepositoryError> {
-        let runtime: (String, i64, i64, i64) = connection
+        let runtime: (String, i64, i64, i64, String, String) = connection
             .query_row(
-                "SELECT COALESCE(run_state,'IDLE'), COALESCE(committed_chapters,0), COALESCE(total_cost_cents,0), COALESCE(candidate_chapters,0) FROM project_runtime_state WHERE project_id=?1",
+                "SELECT COALESCE(run_state,'IDLE'), COALESCE(committed_chapters,0), COALESCE(total_cost_cents,0), COALESCE(candidate_chapters,0), COALESCE(signing_status,'NOT_STARTED'), COALESCE(current_phase,'SETUP') FROM project_runtime_state WHERE project_id=?1",
                 [project_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
-            .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0));
+            .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0, "NOT_STARTED".into(), "SETUP".into()));
         let opening_progress =
             crate::repositories::project_entry::opening_progress(connection, project_id)
                 .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
@@ -298,6 +298,91 @@ impl ProductionRepository {
                 Ok(json!({"repairPlanId":row.get::<_,String>(0)?,"basedOnProjectRevision":row.get::<_,i64>(1)?,"diagnosis":serde_json::from_str::<Value>(&row.get::<_,String>(2)?).unwrap_or(Value::Null),"findingRefs":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or_else(|_| json!([])),"targetAuthorityOwner":row.get::<_,String>(4)?,"proposedOperations":serde_json::from_str::<Value>(&row.get::<_,String>(5)?).unwrap_or_else(|_| json!([])),"affectedArtifacts":serde_json::from_str::<Value>(&row.get::<_,String>(6)?).unwrap_or_else(|_| json!([])),"affectedScopes":serde_json::from_str::<Value>(&row.get::<_,String>(7)?).unwrap_or_else(|_| json!([])),"riskLevel":row.get::<_,String>(8)?,"requiresBackup":row.get::<_,i64>(9)? != 0,"expectedPostconditions":serde_json::from_str::<Value>(&row.get::<_,String>(10)?).unwrap_or_else(|_| json!([])),"operationDigest":row.get::<_,String>(11)?,"status":row.get::<_,String>(12)?,"authorizationId":row.get::<_,Option<String>>(13)?,"consumedAt":row.get::<_,Option<String>>(14)?,"executionReceipt":execution_receipt}))
             },
         ).optional()?;
+        let signing_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                connection,
+                project_id,
+                "SimulatedSigningReceipt",
+            )
+            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+        let signing_payload = signing_ref.as_ref().and_then(|reference| {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection, project_id, reference,
+            )
+            .ok()
+            .flatten()
+        });
+        let signing_status = signing_payload
+            .as_ref()
+            .and_then(|payload| payload.get("status").and_then(Value::as_str))
+            .unwrap_or(runtime.4.as_str());
+        let signing_evaluation = signing_payload
+            .as_ref()
+            .and_then(|payload| payload.get("evaluation").cloned())
+            .unwrap_or_else(|| {
+                json!({
+                    "status": if signing_status == "IN_REVIEW" { "IN_REVIEW" } else { "NOT_STARTED" },
+                    "phase": "IDLE",
+                    "steps": [],
+                    "summary": "等待三章正式提交后开始开篇评估。"
+                })
+            });
+        let signing_receipt = signing_ref.as_ref().map(|reference| {
+            let payload = signing_payload.as_ref();
+            json!({
+                "id":reference.artifact_id,
+                "signedAt":payload.and_then(|value| value.get("evaluatedAt")).cloned().unwrap_or(Value::Null),
+                "chapterHashes":payload.and_then(|value| value.get("chapterEvidence")).and_then(Value::as_array).map(|items| items.iter().filter_map(|item| item.pointer("/finalChapterRef/payloadHash").cloned()).collect::<Vec<_>>()).unwrap_or_default(),
+                "reviewReportId":payload.and_then(|value| value.get("reviewReportRef")).cloned().unwrap_or(Value::Null),
+                "receiptHash":payload.and_then(|value| value.get("receiptHash")).cloned().unwrap_or_else(|| json!(reference.payload_hash))
+            })
+        });
+        let signing = json!({
+            "status":signing_status,
+            "verdict":signing_payload.as_ref().and_then(|payload| payload.get("verdict")).cloned().unwrap_or_else(|| json!("等待三章正式提交后开始开篇评估。")),
+            "summary":signing_payload.as_ref().and_then(|payload| payload.get("summary")).cloned().unwrap_or_else(|| json!({})),
+            "evaluation":signing_evaluation,
+            "openingChapterRefs":signing_payload.as_ref().and_then(|payload| payload.get("openingChapterRefs")).cloned().unwrap_or_else(|| json!([])),
+            "openingCanonRefs":signing_payload.as_ref().and_then(|payload| payload.get("openingCanonRefs")).cloned().unwrap_or_else(|| json!([])),
+            "signingEvidenceRefs":signing_payload.as_ref().and_then(|payload| payload.get("signingEvidenceRefs")).cloned().unwrap_or_else(|| json!([])),
+            "receipt":signing_receipt,
+            "receiptRef":signing_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash}))
+        });
+        let book_plan_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                connection, project_id, "BookPlan",
+            )
+            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+        let book_plan_payload = book_plan_ref.as_ref().and_then(|reference| {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection, project_id, reference,
+            )
+            .ok()
+            .flatten()
+        });
+        let seed_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(p.payload_json,'$.planningMaturity')='SEED'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let book_plan_status = book_plan_payload
+            .as_ref()
+            .and_then(|payload| payload.get("planningMaturity").and_then(Value::as_str))
+            .map(|maturity| {
+                if maturity == "APPROVED" {
+                    "APPROVED"
+                } else {
+                    "PENDING"
+                }
+            })
+            .unwrap_or("PENDING");
+        let book_plan = json!({
+            "status":book_plan_status,
+            "ref":book_plan_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash})),
+            "seedPreserved":seed_count > 0
+        });
         let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()
         {
             crate::repositories::narrative::NarrativeRepository::volume_plan_route(
@@ -337,7 +422,7 @@ impl ProductionRepository {
         };
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
-            "signing":{"status":"NOT_STARTED","verdict":"B08 production gate is authoritative"},"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
+            "signing":signing,"bookPlan":book_plan,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
             "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},

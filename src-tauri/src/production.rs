@@ -1894,6 +1894,18 @@ pub fn run_chapter_production(
         .map_err(|error| error.to_string())?;
     DurableJobService::set_runtime_state(connection, &project_id, "COMPLETED", None, &now)
         .map_err(|error| error.to_string())?;
+    if execution_mode == "OPENING_BOOTSTRAP" {
+        let opening_progress =
+            crate::repositories::project_entry::opening_progress(connection, &project_id)
+                .map_err(|error| error.to_string())?;
+        let phase = if opening_progress.completed >= opening_progress.total {
+            "SIGNING"
+        } else {
+            "OPENING_PRODUCTION"
+        };
+        DurableJobService::set_project_phase(connection, &project_id, phase, &now)
+            .map_err(|error| error.to_string())?;
+    }
     update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(
         json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"receipt":receipt}),

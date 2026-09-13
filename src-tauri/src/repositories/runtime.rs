@@ -724,6 +724,41 @@ impl DurableJobService {
         Ok(())
     }
 
+    /// Updates the rebuildable phase projection without touching any
+    /// narrative authority.  Fresh projects are inserted with conservative
+    /// defaults; existing counters and receipts remain untouched.
+    pub fn set_project_phase(
+        connection: &Connection,
+        project_id: &str,
+        phase: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "INSERT INTO project_runtime_state(project_id,current_phase,updated_at) VALUES (?1,?2,?3) ON CONFLICT(project_id) DO UPDATE SET current_phase=excluded.current_phase,updated_at=excluded.updated_at",
+            libsql_rusqlite::params![project_id, phase, now],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically updates the signing/phase projection from a formal B02
+    /// command.  The SimulatedSigningReceipt remains the artifact authority;
+    /// this row is only the bounded UI/library projection of that artifact.
+    pub fn set_signing_projection(
+        connection: &Connection,
+        project_id: &str,
+        phase: &str,
+        signing_status: &str,
+        run_state: &str,
+        block_reason: Option<&str>,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "INSERT INTO project_runtime_state(project_id,current_phase,signing_status,run_state,block_reason,updated_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(project_id) DO UPDATE SET current_phase=excluded.current_phase,signing_status=excluded.signing_status,run_state=excluded.run_state,block_reason=excluded.block_reason,updated_at=excluded.updated_at",
+            libsql_rusqlite::params![project_id, phase, signing_status, run_state, block_reason, now],
+        )?;
+        Ok(())
+    }
+
     /// Recompute the rebuildable project runtime projection from the latest
     /// relevant chapter Job. The Job is the authority; this helper exists so
     /// terminal transport failures cannot leave a stale ACTIVE projection.

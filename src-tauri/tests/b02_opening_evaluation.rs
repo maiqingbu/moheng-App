@@ -13,12 +13,14 @@ const NOW: &str = "2026-09-13T12:00:00Z";
 
 struct B02Gateway {
     audit_calls: AtomicUsize,
+    emit_evidence: bool,
 }
 
 impl B02Gateway {
-    fn new() -> Self {
+    fn new(emit_evidence: bool) -> Self {
         Self {
             audit_calls: AtomicUsize::new(0),
+            emit_evidence,
         }
     }
 }
@@ -79,9 +81,8 @@ impl ProductionModelGateway for B02Gateway {
             "AUDIT_EXTRACT" => {
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
                 let body = format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", chapter_no);
-                json!({
-                    "qualityFindings":[],
-                    "canonCandidates":[{
+                let canon_candidates = if self.emit_evidence {
+                    json!([{
                         "factId":format!("fact:b02:opening:{}", chapter_no),
                         "subjectId":"entity:b02:linzhou",
                         "entityId":"entity:b02:linzhou",
@@ -91,13 +92,11 @@ impl ProductionModelGateway for B02Gateway {
                         "objectJson":{"chapter":chapter_no},
                         "authorityLevel":"C",
                         "evidence":{"start":0,"end":body.chars().count(),"quote":body}
-                    }],
-                    "knowledgeCandidates":[],
-                    "continuityCandidates":[],
-                    "taskProgressCandidates":[],
-                    "revealedReservationRefs":[],
-                    "evidenceRanges":[]
-                })
+                    }])
+                } else {
+                    json!([])
+                };
+                json!({"qualityFindings":[],"canonCandidates":canon_candidates,"knowledgeCandidates":[],"continuityCandidates":[],"taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[]})
             }
             other => return Err(format!("unexpected B02 capability: {other}")),
         };
@@ -105,17 +104,20 @@ impl ProductionModelGateway for B02Gateway {
     }
 }
 
-fn state() -> (KernelState, tempfile::TempDir) {
+fn state(emit_evidence: bool) -> (KernelState, tempfile::TempDir) {
     let temp = tempfile::tempdir().expect("project directory");
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
-        Arc::new(B02Gateway::new()),
+        Arc::new(B02Gateway::new(emit_evidence)),
     );
     (state, temp)
 }
 
 fn revision(state: &KernelState, project_id: &str) -> i64 {
-    state.manager.project_revision(project_id).expect("revision")
+    state
+        .manager
+        .project_revision(project_id)
+        .expect("revision")
 }
 
 fn command(
@@ -159,8 +161,17 @@ fn create_opening_project(state: &KernelState) -> String {
         }),
     )
     .expect("create project");
-    let project_id = created["projectId"].as_str().expect("project id").to_owned();
-    command(state, &project_id, "b02:directions", "story_directions_generate", json!({}));
+    let project_id = created["projectId"]
+        .as_str()
+        .expect("project id")
+        .to_owned();
+    command(
+        state,
+        &project_id,
+        "b02:directions",
+        "story_directions_generate",
+        json!({}),
+    );
     let directions = query_story_directions_impl(
         state,
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":10}),
@@ -232,13 +243,17 @@ fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
 
 #[test]
 fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
-    let (state, _temp) = state();
+    let (state, _temp) = state(true);
     let project_id = create_opening_project(&state);
     commit_three_opening_chapters(&state, &project_id);
 
     let before = state.manager.open(&project_id, "", NOW).expect("open db");
     let canon_before: i64 = before
-        .query_row("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [&project_id], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
         .expect("canon count");
     let seed_ref: (String, i64) = before
         .query_row(
@@ -250,12 +265,29 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     assert_eq!(seed_ref.1, 1);
     drop(before);
 
-    let evaluation = command(&state, &project_id, "b02:opening-evaluate", "opening_evaluate", json!({}));
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b02:opening-evaluate",
+        "opening_evaluate",
+        json!({}),
+    );
     assert_eq!(evaluation["finalStatus"], "committed");
     assert_eq!(evaluation["result"]["status"], "PASS");
     let signing_receipt_id = evaluation["result"]["receiptRef"]["artifactId"]
         .as_str()
         .expect("signing receipt ref");
+    let replay = command(
+        &state,
+        &project_id,
+        "b02:opening-evaluate",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(
+        replay["result"]["receiptRef"], evaluation["result"]["receiptRef"],
+        "idempotent evaluation must replay the original receipt ref"
+    );
 
     let center = query_production_center_impl(
         &state,
@@ -264,20 +296,68 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     .expect("production center after evaluation");
     assert_eq!(center["signing"]["status"], "PASS");
     assert_eq!(center["signing"]["receipt"]["id"], signing_receipt_id);
-    assert_eq!(center["signing"]["openingChapterRefs"].as_array().unwrap().len(), 3);
-    assert_eq!(center["signing"]["openingCanonRefs"].as_array().unwrap().len(), 3);
-    assert_eq!(center["signing"]["signingEvidenceRefs"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        center["signing"]["openingChapterRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        center["signing"]["openingCanonRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        center["signing"]["signingEvidenceRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
     assert_eq!(center["bookPlan"]["status"], "PENDING");
 
-    let approved = command(&state, &project_id, "b02:book-plan-revise", "book_plan_revise", json!({}));
+    let explicit_wrong_receipt = execute_command_impl(
+        &state,
+        json!({
+            "type":"book_plan_revise",
+            "commandId":"b02:book-plan-revise:wrong-receipt",
+            "idempotencyKey":"b02:book-plan-revise:wrong-receipt:key",
+            "projectId":project_id,
+            "expectedRevision":revision(&state, &project_id),
+            "requestedAt":NOW,
+            "payload":{"openingCanonRefs":center["signing"]["openingCanonRefs"],"signingEvidenceRefs":["artifact:fake-signing"]}
+        }),
+    );
+    assert_eq!(
+        explicit_wrong_receipt.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+
+    let approved = command(
+        &state,
+        &project_id,
+        "b02:book-plan-revise",
+        "book_plan_revise",
+        json!({}),
+    );
     assert_eq!(approved["finalStatus"], "committed");
     assert_eq!(approved["result"]["planningMaturity"], "APPROVED");
 
     let after = state.manager.open(&project_id, "", NOW).expect("reopen db");
     let canon_after: i64 = after
-        .query_row("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [&project_id], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
         .expect("canon count after plan");
-    assert_eq!(canon_after, canon_before, "plan commit must not mutate Canon");
+    assert_eq!(
+        canon_after, canon_before,
+        "plan commit must not mutate Canon"
+    );
     let seed_exists: i64 = after
         .query_row(
             "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='BookPlan' AND artifact_id=?2 AND version=1",
@@ -325,4 +405,48 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     assert_eq!(final_center["bookPlan"]["status"], "APPROVED");
     assert_eq!(final_center["bookPlan"]["seedPreserved"], true);
     println!("B02_RESULT opening_evaluation=PASS signing_receipt=PASS real_evidence=PASS approved_book_plan=PASS seed_preserved=PASS canon_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn b02_opening_evaluation_persists_revise_when_real_evidence_is_incomplete() {
+    let (state, _temp) = state(false);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b02:opening-evaluate:revise",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["finalStatus"], "committed");
+    assert_eq!(evaluation["result"]["status"], "REVISE");
+    assert!(evaluation["result"]["receiptRef"]["artifactId"].is_string());
+
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("production center after revise evaluation");
+    assert_eq!(center["signing"]["status"], "REVISE");
+    assert_eq!(center["signing"]["evaluation"]["status"], "COMPLETED");
+    assert_eq!(center["bookPlan"]["status"], "PENDING");
+    let finalize = execute_command_impl(
+        &state,
+        json!({
+            "type":"book_plan_revise",
+            "commandId":"b02:book-plan-revise:blocked",
+            "idempotencyKey":"b02:book-plan-revise:blocked:key",
+            "projectId":project_id,
+            "expectedRevision":revision(&state, &project_id),
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    );
+    assert_eq!(
+        finalize.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    println!("B02_REVISE_RESULT incomplete_evidence=PASS receipt_committed=PASS plan_blocked=PASS status=PASS");
 }

@@ -17,9 +17,13 @@ const production = computed(() => store.production)
 const lastCommand = ref('none')
 const commandState = computed(() => store.commandState(lastCommand.value))
 const productionStartState = computed(() => store.commandState('production-start'))
+const evaluationCommandState = computed(() => store.commandState('opening-evaluate'))
+const bookPlanCommandState = computed(() => store.commandState('book-plan-revise'))
 const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
 const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
 const openingProgress = computed(() => production.value?.openingProgress)
+const signing = computed(() => production.value?.signing)
+const bookPlan = computed(() => production.value?.bookPlan)
 const stageLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成', OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
@@ -58,6 +62,16 @@ const productionStatus = computed(() => production.value?.jobStatus ?? null)
 const productionIsActive = computed(() => production.value?.isActive === true)
 const canRetryProduction = computed(() => production.value?.canRetry === true)
 const productionStartInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(productionStartState.value.status))
+const evaluationInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(evaluationCommandState.value.status))
+const bookPlanInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(bookPlanCommandState.value.status))
+const canEvaluateOpening = computed(() => openingProgress.value?.completed === openingProgress.value?.total
+  && openingProgress.value?.total === 3
+  && signing.value?.status !== 'PASS'
+  && signing.value?.evaluation?.status !== 'IN_REVIEW'
+  && !evaluationInFlight.value)
+const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
+  && bookPlan.value?.status !== 'APPROVED'
+  && !bookPlanInFlight.value)
 const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
 const authoritativeRunState = computed<RunState>(() => {
   switch (production.value?.jobStatus) {
@@ -127,6 +141,42 @@ async function startProduction() {
   }
 }
 
+function evaluationStatusLabel() {
+  if (evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW') return '正在评估'
+  if (signing.value?.status === 'PASS' || signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '评估完成'
+  return '等待三章完成'
+}
+
+function signingVerdictLabel() {
+  if (signing.value?.status === 'PASS') return 'PASS'
+  if (signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '需要修订'
+  return '尚未评估'
+}
+
+function evaluationStepClass(status: unknown) {
+  return status === 'active' ? 'active' : status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'pending'
+}
+
+async function evaluateOpening() {
+  if (!canEvaluateOpening.value) return
+  lastCommand.value = 'opening-evaluate'
+  try {
+    await store.runCommand(lastCommand.value, { type: 'opening_evaluate', payload: {} })
+  } catch {
+    // Store-owned command feedback keeps the typed failure visible.
+  }
+}
+
+async function finalizeBookPlan() {
+  if (!canFinalizeBookPlan.value) return
+  lastCommand.value = 'book-plan-revise'
+  try {
+    await store.runCommand(lastCommand.value, { type: 'book_plan_revise', payload: {} })
+  } catch {
+    // Store-owned command feedback keeps the typed failure visible.
+  }
+}
+
 async function controlProduction(type: 'production_pause' | 'production_resume' | 'production_cancel') {
   lastCommand.value = type
   try {
@@ -180,6 +230,34 @@ async function executeRepair() {
     </PageHeader>
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
     <CommandFeedback :state="commandState" />
+
+    <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
+      <div class="card-head">
+        <div>
+          <span class="eyebrow">B02 · Opening Evaluation / 模拟签约</span>
+          <h2 class="card-title" style="margin-top:6px">开篇评估</h2>
+          <p class="card-subtitle">只读取三章已正式提交的正文、事实与证据；评估结果和签约回执来自后端正式记录。</p>
+        </div>
+        <span class="badge" :class="signing?.status === 'PASS' ? 'success' : signing?.status === 'REVISE' || signing?.status === 'REJECTED' ? 'warning' : 'info'">{{ evaluationStatusLabel() }}</span>
+      </div>
+      <CommandFeedback :state="evaluationCommandState" />
+      <CommandFeedback :state="bookPlanCommandState" />
+      <div class="evaluation-steps" v-if="signing?.evaluation?.steps?.length">
+        <div v-for="step in signing.evaluation.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
+          <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>
+          <span>{{ step.label }}</span>
+        </div>
+      </div>
+      <div class="task-row" aria-live="polite"><strong>评估结果</strong><span>{{ signingVerdictLabel() }} · {{ signing?.verdict || '等待三章正式提交后开始评估。' }}</span></div>
+      <div class="task-row"><strong>评估依据摘要</strong><span>三章 {{ signing?.summary?.chapters ?? 0 }} · 事实 {{ signing?.summary?.canonRefs ?? 0 }} 条 · 证据 {{ signing?.summary?.evidenceRefs ?? 0 }} 条</span></div>
+      <div class="task-row"><strong>正式签约回执</strong><span>{{ signing?.receipt?.id ? `${signing.receipt.id} · 已提交` : '尚未生成' }}</span></div>
+      <div class="task-row"><strong>正式总纲</strong><span>{{ bookPlan?.status === 'APPROVED' ? '已完成' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
+      <div class="actions" style="margin-top:14px">
+        <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">开始开篇评估</button>
+        <span v-else-if="evaluationInFlight || signing?.evaluation?.status === 'IN_REVIEW'" class="muted">正在评估，请查看实时状态。</span>
+        <button v-if="canFinalizeBookPlan" class="btn primary" @click="finalizeBookPlan">生成正式总纲</button>
+      </div>
+    </section>
 
     <section v-if="productUxEvidenceMode === 'm13'" class="card pad section" data-product-ux-state="receipt">
       <div class="card-head"><div><h2 class="card-title">修复执行回执</h2><p class="card-subtitle">{{ productUxReceipt.title }}</p></div><span class="badge success">{{ productUxReceipt.title }}</span></div>

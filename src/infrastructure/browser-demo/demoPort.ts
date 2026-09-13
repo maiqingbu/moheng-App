@@ -36,6 +36,10 @@ import type {
   EndgameMappingWorkflowProjection,
   SoftCreativeAdviceProjection
 } from '../../application/contracts'
+
+type BrowserDemoCommandRequest = Omit<CommandRequest, 'type'> & {
+  type: CommandRequest['type'] | 'signing_demo_pass' | 'signing_demo_revise' | 'signing_demo_reject'
+}
 import { demoBundle, demoProjectRecords, starterMarket, type DemoProjectRecord } from './fixtures'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -118,11 +122,11 @@ function emptySigning(): ProjectBundle['signing'] {
     status: 'NOT_STARTED',
     score: 0,
     verdict: '尚未进入开篇评估。',
-    dimensions: demoBundle.signing.dimensions.map(item => ({ ...item, score: 0, note: '等待评估' }))
+    dimensions: (demoBundle.signing.dimensions ?? []).map(item => ({ ...item, score: 0, note: '等待评估' }))
   }
 }
 
-function newProjectBundle(request: CommandRequest, id: string): ProjectBundle {
+function newProjectBundle(request: BrowserDemoCommandRequest, id: string): ProjectBundle {
   const payload = request.payload ?? {}
   const bundle = clone(demoBundle)
   const idea = String(payload.idea ?? '新的小说计划')
@@ -640,7 +644,7 @@ export class BrowserDemoPort implements FrontendPort {
   }
   async supportCheckpointResume(): Promise<never> { throw new Error('IPC_UNSUPPORTED:support_checkpoint_resume') }
 
-  async executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
+  async executeCommand(request: BrowserDemoCommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     const commandId = request.commandId ?? `CMD-${Date.now()}-${Math.floor(Math.random() * 1000)}`
     const prior = this.receipts.get(commandId)
     if (prior) return clone(prior)
@@ -739,7 +743,7 @@ export class BrowserDemoPort implements FrontendPort {
           case 'repair_execute': message='修改已执行，并已重新核对结果。'; break
           case 'signing_retry': bundle.signing.status='IN_REVIEW';bundle.project.signingStatus='IN_REVIEW';bundle.signing.verdict='正在重新执行完整开篇评估。';bundle.project.runState='ACTIVE';bundle.project.blockReason=null;message='开篇评估已重新启动。';break
           case 'signing_demo_pass':
-            bundle.signing={status:'PASS',score:87,verdict:'开篇评估通过：平台匹配、连续升级和原创差异均达到当前门槛，后续生产已解锁。',dimensions:demoBundle.signing.dimensions.map((d,i)=>({...d,score:82+(i%7)*2,note:'演示评估已通过。'})),receipt:{id:'SIGN-RCP-0001',signedAt:nowLabel(),platformPolicyVersion:'FQ-2026.08',pitchVersion:'pitch-b@v1',constitutionVersion:'constitution@v3',namingVersion:'naming@v2',openingContractVersion:'opening@v2',chapterHashes:['sha256:ch1…','sha256:ch2…','sha256:ch3…'],reviewReportId:'SIGN-REPORT-001',receiptHash:'sha256:sign…a71'}}
+            bundle.signing={status:'PASS',score:87,verdict:'开篇评估通过：平台匹配、连续升级和原创差异均达到当前门槛，后续生产已解锁。',dimensions:(demoBundle.signing.dimensions ?? []).map((d,i)=>({...d,score:82+(i%7)*2,note:'演示评估已通过。'})),receipt:{id:'SIGN-RCP-0001',signedAt:nowLabel(),platformPolicyVersion:'FQ-2026.08',pitchVersion:'pitch-b@v1',constitutionVersion:'constitution@v3',namingVersion:'naming@v2',openingContractVersion:'opening@v2',chapterHashes:['sha256:ch1…','sha256:ch2…','sha256:ch3…'],reviewReportId:'SIGN-REPORT-001',receiptHash:'sha256:sign…a71'}}
             bundle.project.phase='POST_SIGNING_PLANNING';bundle.project.signingStatus='PASS';bundle.project.runState='ACTIVE';bundle.project.blockReason=null;message='开篇评估已通过，并生成正式签约回执。';break
           case 'signing_demo_revise': bundle.signing.status='REVISE';bundle.signing.score=74;bundle.signing.verdict='需要修订：第三章主角主动性未达到门槛。';bundle.project.phase='OPENING_PRODUCTION';bundle.project.signingStatus='REVISE';bundle.project.runState='BLOCKED';bundle.project.blockReason='SIGNING_REQUIRED';message='评估要求修订，第四章仍保持锁定。';break
           case 'signing_demo_reject': bundle.signing.status='REJECTED';bundle.signing.score=51;bundle.signing.verdict='未通过：核心故事承诺与目标平台不匹配。';bundle.project.signingStatus='REJECTED';bundle.project.runState='BLOCKED';bundle.project.blockReason='SIGNING_REQUIRED';message='评估未通过，需要重新调整故事方向。';break

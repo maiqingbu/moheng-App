@@ -447,6 +447,7 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
         .block_reason
         .map(Value::String)
         .unwrap_or(Value::Null);
+    project["signingStatus"] = json!(runtime.signing_status);
     project["committedChapters"] = json!(runtime.committed_chapters);
     project["candidateChapters"] = json!(runtime.candidate_chapters);
     project["totalCost"] = json!(runtime.total_cost_cents as f64 / 100.0);
@@ -4504,8 +4505,9 @@ fn execute_planning_command(
         .pointer("/payload/plan")
         .cloned()
         .unwrap_or(Value::Null);
+    let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
     let (artifact_type, scope, scope_key) = match command_type {
-        "planning_finalize_book_plan" => (
+        "planning_finalize_book_plan" | "book_plan_revise" => (
             "BookPlan",
             json!({"level":"PROJECT"}),
             project_id.to_string(),
@@ -4538,12 +4540,6 @@ fn execute_planning_command(
         }
         _ => return Err("IPC_UNSUPPORTED_PLANNING_COMMAND".into()),
     };
-    match artifact_type {
-        "BookPlan" => {}
-        "VolumeIntent" | "VolumePlan" => {}
-        "ChapterPlan" => {}
-        _ => {}
-    }
     let handle = state
         .manager
         .open(project_id, "", requested_at)
@@ -4575,8 +4571,60 @@ fn execute_planning_command(
         crate::planning::validate_volume_intent(&payload)?;
     }
     if artifact_type == "BookPlan" {
-        let canon_refs = string_array(request.pointer("/payload/openingCanonRefs"));
-        let evidence_refs = string_array(request.pointer("/payload/signingEvidenceRefs"));
+        let seed_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle, project_id, "BookPlan",
+            )
+            .map_err(|error| error.to_string())?;
+        if payload.is_null() {
+            let reference = seed_ref
+                .clone()
+                .ok_or_else(|| "BOOK_PLAN_SEED_REQUIRED".to_string())?;
+            payload = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, &reference,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "BOOK_PLAN_SEED_PAYLOAD_NOT_FOUND".to_string())?;
+        }
+        if payload.get("planningMaturity").and_then(Value::as_str) != Some("SEED") {
+            return Err("BOOK_PLAN_SEED_REQUIRED".into());
+        }
+        if let Some(reference) = seed_ref {
+            book_plan_dependencies.push(reference);
+        }
+        let mut canon_refs = string_array(request.pointer("/payload/openingCanonRefs"));
+        let mut evidence_refs = string_array(request.pointer("/payload/signingEvidenceRefs"));
+        let signing_head =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle,
+                project_id,
+                "SimulatedSigningReceipt",
+            )
+            .map_err(|error| error.to_string())?;
+        if canon_refs.is_empty() && evidence_refs.is_empty() {
+            let signing_ref = signing_head
+                .clone()
+                .ok_or_else(|| "BOOK_PLAN_SIGNING_RECEIPT_REQUIRED".to_string())?;
+            if let Some(signing_payload) =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    &handle,
+                    project_id,
+                    &signing_ref,
+                )
+                .map_err(|error| error.to_string())?
+            {
+                if canon_refs.is_empty() {
+                    canon_refs = string_array(signing_payload.get("openingCanonRefs"));
+                }
+            }
+            if !evidence_refs
+                .iter()
+                .any(|reference| reference == &signing_ref.artifact_id)
+            {
+                evidence_refs.push(signing_ref.artifact_id.clone());
+            }
+            book_plan_dependencies.push(signing_ref);
+        }
         let canon_reachable = canon_refs.iter().try_fold(true, |reachable, reference| {
             Ok::<_, String>(reachable && crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(&handle, project_id, reference).map_err(|e| e.to_string())?)
         })?;
@@ -4841,15 +4889,34 @@ fn execute_planning_command(
     )
     .map_err(|e| e.to_string())?;
     let hash = sha256_canonical(&payload).map_err(|e| e.to_string())?;
+    let result_payload = payload.clone();
     let model_run_id = request
         .pointer("/payload/modelRunId")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
     let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
-    let receipt =
-        CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;
-    Ok(json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner"}))
+    let receipt = if artifact_type == "BookPlan" {
+        CommitService::commit_with_post_apply(&handle, &bundle, requested_at, |connection, _| {
+            crate::repositories::runtime::DurableJobService::set_project_phase(
+                connection,
+                project_id,
+                "POST_SIGNING_PLANNING",
+                requested_at,
+            )
+            .map_err(|error| {
+                crate::commit::CommitError::ContractInvalid(format!(
+                    "B02_RUNTIME_PROJECTION:{error}"
+                ))
+            })
+        })
+        .map_err(|error| error.to_string())?
+    } else {
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?
+    };
+    Ok(
+        json!({"finalStatus":"committed","receipt":receipt,"owner":"B07::PlanningOwner","result":result_payload}),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5108,7 +5175,12 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "opening_evaluate" | "signing_retry" => {
+            project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::signing::execute_opening_evaluation(&state.manager, &request)
+        }
         "planning_finalize_book_plan"
+        | "book_plan_revise"
         | "planning_create_volume_intent"
         | "planning_create_volume_plan"
         | "planning_compile_chapter_plan" => {

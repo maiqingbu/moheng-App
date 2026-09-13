@@ -60,6 +60,14 @@
 .artifact-list { display:grid; gap:8px; }
 .artifact-row { padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--surface); display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; }
 .signing-dimensions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.evaluation-steps { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:14px 0; }
+.evaluation-step { display:flex; align-items:center; gap:7px; padding:9px 10px; border:1px solid var(--line); border-radius:9px; color:var(--muted); font-size:12px; background:var(--surface); }
+.evaluation-step.done { color:var(--pine-700); border-color:var(--pine-200); background:var(--pine-50); }
+.evaluation-step.active { color:var(--pine-700); border-color:var(--pine-300); animation:opening-evaluation-pulse 1.4s ease-in-out infinite; }
+.evaluation-step.failed { color:var(--danger-700); border-color:var(--danger-200); }
+.evaluation-step-marker { display:inline-grid; place-items:center; width:20px; height:20px; border-radius:50%; background:currentColor; color:var(--surface); font-weight:700; }
+@keyframes opening-evaluation-pulse { 0%,100% { box-shadow:0 0 0 0 color-mix(in srgb, var(--pine-400) 0%, transparent); } 50% { box-shadow:0 0 0 4px color-mix(in srgb, var(--pine-400) 18%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .evaluation-step.active { animation:none; } }
 .dimension { padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--surface); }
 .dimension b { font-size:18px; }
 

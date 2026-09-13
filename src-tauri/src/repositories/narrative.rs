@@ -144,6 +144,28 @@ pub struct TaskStateRecord {
     pub chapter_id: Option<String>,
 }
 
+/// B02's bounded opening snapshot.  It is a read projection assembled from
+/// committed chapter/artifact/evidence rows; it is never persisted as a second
+/// authority.  The signing owner uses this exact snapshot for both the verdict
+/// and the evidence carried by the SimulatedSigningReceipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningEvaluationChapter {
+    pub chapter_id: String,
+    pub chapter_no: i64,
+    pub final_ref: Option<ArtifactRef>,
+    pub evidence: Vec<EvidenceRecord>,
+    pub canon_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpeningEvaluationSnapshot {
+    pub chapters: Vec<OpeningEvaluationChapter>,
+    pub opening_canon_refs: Vec<String>,
+    pub signing_evidence_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CanonEventRecord {
@@ -1221,6 +1243,89 @@ impl NarrativeRepository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Reads only the committed golden-three boundary and its materialized
+    /// evidence.  The query deliberately excludes candidates and chapters
+    /// outside numbers 1..=3 so an evaluation can never be satisfied by a
+    /// later fixture or by planned text.
+    pub fn opening_evaluation_snapshot(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<OpeningEvaluationSnapshot, NarrativeRepositoryError> {
+        let mut chapters_statement = connection.prepare(
+            "SELECT c.chapter_id,c.chapter_no,c.final_artifact_id,c.final_version,a.payload_hash FROM chapters c LEFT JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE c.project_id=?1 AND c.chapter_no BETWEEN 1 AND 3 AND c.status='COMMITTED' ORDER BY c.chapter_no,c.chapter_id",
+        )?;
+        let mut chapters = Vec::new();
+        let mut opening_canon_refs = BTreeSet::new();
+        let mut signing_evidence_refs = Vec::new();
+        for row in chapters_statement.query_map([project_id], |row| {
+            let chapter_id: String = row.get(0)?;
+            let chapter_no: i64 = row.get(1)?;
+            let final_artifact_id: Option<String> = row.get(2)?;
+            let final_version: Option<i64> = row.get(3)?;
+            let payload_hash: Option<String> = row.get(4)?;
+            Ok((
+                chapter_id,
+                chapter_no,
+                final_artifact_id,
+                final_version,
+                payload_hash,
+            ))
+        })? {
+            let (chapter_id, chapter_no, final_artifact_id, final_version, payload_hash) = row?;
+            let final_ref = match (final_artifact_id, final_version, payload_hash) {
+                (Some(artifact_id), Some(version), Some(payload_hash)) => Some(ArtifactRef {
+                    artifact_id,
+                    version,
+                    payload_hash,
+                }),
+                _ => None,
+            };
+            let mut evidence_statement = connection.prepare(
+                "SELECT evidence_id,fact_id,relation_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end FROM canon_evidence WHERE project_id=?1 AND final_chapter_id=?2 ORDER BY evidence_id LIMIT 100",
+            )?;
+            let evidence = evidence_statement
+                .query_map(libsql_rusqlite::params![project_id, chapter_id], |row| {
+                    Ok(EvidenceRecord {
+                        evidence_id: row.get(0)?,
+                        fact_id: row.get(1)?,
+                        relation_id: row.get(2)?,
+                        event_id: row.get(3)?,
+                        final_chapter_id: row.get(4)?,
+                        source_artifact_id: row.get(5)?,
+                        version: row.get(6)?,
+                        evidence_type: row.get(7)?,
+                        quote: row.get(8)?,
+                        range_start: row.get(9)?,
+                        range_end: row.get(10)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut canon_refs = BTreeSet::new();
+            for item in &evidence {
+                for reference in [&item.fact_id, &item.relation_id, &item.event_id]
+                    .into_iter()
+                    .flatten()
+                {
+                    canon_refs.insert(reference.clone());
+                    opening_canon_refs.insert(reference.clone());
+                }
+                signing_evidence_refs.push(item.evidence_id.clone());
+            }
+            chapters.push(OpeningEvaluationChapter {
+                chapter_id,
+                chapter_no,
+                final_ref,
+                evidence,
+                canon_refs: canon_refs.into_iter().collect(),
+            });
+        }
+        Ok(OpeningEvaluationSnapshot {
+            chapters,
+            opening_canon_refs: opening_canon_refs.into_iter().collect(),
+            signing_evidence_refs,
+        })
     }
 
     pub fn chapter_id_for_number(

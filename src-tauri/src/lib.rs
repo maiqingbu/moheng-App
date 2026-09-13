@@ -16,6 +16,7 @@ pub mod project_entry_semantic;
 pub mod provider;
 pub mod repair;
 pub mod repositories;
+pub mod signing;
 pub mod stable_id;
 pub mod volume_lifecycle;
 

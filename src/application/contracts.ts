@@ -371,20 +371,31 @@ export interface VersionProjection {
 
 export interface SigningProjection {
   status: SigningStatus
-  score: number
+  score?: number
   verdict: string
-  dimensions: { label: string; score: number; note: string }[]
+  dimensions?: { label: string; score: number; note: string }[]
+  summary?: { chapters?: number; canonRefs?: number; evidenceRefs?: number }
+  openingChapterRefs?: string[]
+  openingCanonRefs?: string[]
+  signingEvidenceRefs?: string[]
+  receiptRef?: { artifactId: string; version: number; payloadHash: string }
+  evaluation?: {
+    status: 'NOT_STARTED' | 'IN_REVIEW' | 'COMPLETED'
+    phase: string
+    summary?: string
+    steps: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' }>
+  }
   receipt?: {
     id: string
-    signedAt: string
-    platformPolicyVersion: string
-    pitchVersion: string
-    constitutionVersion: string
-    namingVersion: string
-    openingContractVersion: string
+    signedAt?: string | null
+    platformPolicyVersion?: string
+    pitchVersion?: string
+    constitutionVersion?: string
+    namingVersion?: string
+    openingContractVersion?: string
     chapterHashes: string[]
-    reviewReportId: string
-    receiptHash: string
+    reviewReportId?: string | null
+    receiptHash?: string
   }
 }
 
@@ -442,6 +453,11 @@ export interface ProductionCenterProjection {
   tasks: ProductionTask[]
   artifacts: PageResult<ArtifactSummary>
   signing: SigningProjection
+  bookPlan?: {
+    status: 'PENDING' | 'APPROVED'
+    ref?: { artifactId: string; version: number; payloadHash: string } | null
+    seedPreserved?: boolean
+  }
   activeWork: {
     label: string
     detail: string
@@ -763,6 +779,7 @@ export type CommandType =
   | 'retcon_plan_create'
   | 'retcon_apply'
   | 'dependency_summary_bootstrap'
+  | 'opening_evaluate'
   | 'signing_retry'
   | 'export_create'
   | 'backup_create'
@@ -771,9 +788,6 @@ export type CommandType =
   | 'complete_book'
   | 'settings_save'
   | 'global_settings_save'
-  | 'signing_demo_pass'
-  | 'signing_demo_revise'
-  | 'signing_demo_reject'
 
 export interface CommandRequest {
   type: CommandType
