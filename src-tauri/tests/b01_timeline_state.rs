@@ -59,6 +59,47 @@ fn b01_timeline_state_machine_keeps_idle_and_completed_truthful() {
         .expect("reopen project");
     connection
         .execute(
+            "UPDATE jobs SET status='FAILED',current_stage='AUDIT',updated_at=?1 WHERE job_id=?2",
+            params![NOW, "job:b01:timeline"],
+        )
+        .expect("fail job");
+    drop(connection);
+    let failed = query_production_center_impl(&state, json!({"projectId":"b01-timeline"}))
+        .expect("failed projection");
+    let failed_statuses = timeline_statuses(&failed);
+    assert_eq!(&failed_statuses[..4], &["done", "done", "done", "done"]);
+    assert_eq!(failed_statuses[4], "failed");
+    assert!(failed_statuses[5..]
+        .iter()
+        .all(|status| status == "pending"));
+    assert!(failed_statuses.iter().all(|status| status != "active"));
+
+    let connection = state
+        .manager
+        .open("b01-timeline", "", NOW)
+        .expect("reopen project");
+    connection
+        .execute(
+            "UPDATE jobs SET status='CANCELLED',current_stage='RENDER',updated_at=?1 WHERE job_id=?2",
+            params![NOW, "job:b01:timeline"],
+        )
+        .expect("cancel job");
+    drop(connection);
+    let cancelled = query_production_center_impl(&state, json!({"projectId":"b01-timeline"}))
+        .expect("cancelled projection");
+    let cancelled_statuses = timeline_statuses(&cancelled);
+    assert_eq!(cancelled_statuses[2], "blocked");
+    assert!(cancelled_statuses.iter().all(|status| status != "active"));
+    assert!(cancelled_statuses[3..]
+        .iter()
+        .all(|status| status == "pending"));
+
+    let connection = state
+        .manager
+        .open("b01-timeline", "", NOW)
+        .expect("reopen project");
+    connection
+        .execute(
             "UPDATE jobs SET status='COMPLETED',current_stage='COMPLETED',updated_at=?1 WHERE job_id=?2",
             params![NOW, "job:b01:timeline"],
         )

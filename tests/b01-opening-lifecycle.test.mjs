@@ -36,5 +36,6 @@ test('B01 UI exposes authoritative progress and a runtime phase animation withou
   assert.match(production, /RECONCILE: '状态回写与后续判断'/)
   assert.match(styles, /opening-phase-pulse/)
   assert.doesNotMatch(`${opening}\n${production}`, /pointer-events\s*:\s*none/i)
+  assert.doesNotMatch(`${opening}\n${production}`, /cursor\s*:\s*(?:wait|progress)/i)
   assert.doesNotMatch(`${opening}\n${production}`, /document\.(body|documentElement)\.style/i)
 })
