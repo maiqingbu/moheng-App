@@ -58,6 +58,22 @@ describe('B01 runtime phase synchronization', () => {
     expect(query).toHaveBeenCalledTimes(8)
   })
 
+  it('does not stop on a stale terminal snapshot before the new job becomes active', async () => {
+    const snapshots = [
+      { jobStatus: 'COMPLETED', productionStage: 'COMPLETED' },
+      { jobStatus: 'RUNNING', productionStage: 'CONTEXT' },
+      { jobStatus: 'COMPLETED', productionStage: 'COMPLETED' },
+    ] as unknown as ProductionCenterProjection[]
+    const query = vi.fn(async () => snapshots.shift() ?? snapshots.at(-1)!)
+    const poller = createProductionRuntimePoller({ query, intervalMs: 100, onProjection: () => undefined })
+
+    poller.start()
+    await vi.advanceTimersByTimeAsync(200)
+
+    expect(query).toHaveBeenCalledTimes(3)
+    expect(poller.isRunning()).toBe(false)
+  })
+
   it('deduplicates a production_start mutation while the first command is in flight', async () => {
     let resolveCommand!: (value: CommandReceipt) => void
     const port = {
