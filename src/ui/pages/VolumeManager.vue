@@ -6,6 +6,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { createVolumePlanningRuntimePoller } from '../runtime/volumePlanningRuntimeSync'
 import { executeVolumePlanningSequence } from '../runtime/volumePlanningOrchestration'
+import VolumePlanningProgress from '../components/VolumePlanningProgress.vue'
 import type { VolumeDetailProjection } from '../../application/contracts'
 
 const store = useProjectStore()
@@ -20,11 +21,6 @@ const buildInFlight = ref(false)
 const planningActive = computed(() => buildInFlight.value || planningInFlight.value || runtimeOperation.value?.active === true)
 const actionLabel = computed(() => planningActive.value ? '查看当前卷规划进度' : '建立当前卷目标')
 const actionDisabled = computed(() => !signingPassed.value && !planningActive.value)
-const runtimeBadgeLabel = computed(() => {
-  if (buildInFlight.value && !runtimeOperation.value?.active) return '正在等待规划阶段…'
-  if (!runtimeOperation.value?.active) return '规划已完成'
-  return runtimeOperation.value.kind === 'B03::VOLUME_PLAN' ? '正在规划本卷任务路线' : '正在建立当前卷目标'
-})
 const signingLabel = (value: boolean) => value ? '已通过' : '尚未通过'
 const volumeStatusLabel = (value: string) => ({ LOCKED: '待解锁', CLOSED: '已关闭', PRODUCING: '生产中', PAUSED: '已暂停', PLANNING: '规划中' } as Record<string, string>)[value] ?? '待确认'
 const runtimePollerOptions = {
@@ -94,16 +90,7 @@ async function build() {
     </PageHeader>
     <CommandFeedback :state="state" />
 
-    <section v-if="planningActive || runtimeOperation" class="card pad section" data-volume-planning-progress>
-      <div class="card-head"><div><h2 class="card-title">当前卷规划进度</h2><p class="card-subtitle">阶段来自后端持久化运行回执，页面只轮询投影。</p></div><span class="badge" :class="runtimeOperation?.active ? 'warning' : 'success'">{{ runtimeBadgeLabel }}</span></div>
-      <div v-if="runtimeOperation" class="timeline">
-        <div v-for="step in runtimeOperation.steps ?? []" :key="step.id" class="timeline-item" :class="step.status">
-          <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : step.status === 'active' ? '…' : '·' }}</div>
-          <div><strong>{{ step.label }}</strong><div class="muted" style="font-size:12px">{{ step.status === 'active' ? '正在处理' : step.status === 'done' ? '已完成' : step.status === 'failed' ? '处理失败' : '等待处理' }}</div></div>
-        </div>
-      </div>
-      <div v-else class="muted">正在建立当前卷目标…</div>
-    </section>
+    <VolumePlanningProgress :operation="runtimeOperation" :in-flight="buildInFlight" />
 
     <div v-if="!signingPassed" class="banner warning section">
       <div><div class="banner-title">卷级生产尚未解锁</div><div class="banner-copy">开篇评估通过并生成正式回执后，才能建立详细卷计划和启动后续长篇生产。</div></div>

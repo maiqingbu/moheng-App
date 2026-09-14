@@ -5,13 +5,14 @@ import test from 'node:test'
 const read = relative => readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8')
 const manager = read('src/ui/pages/VolumeManager.vue')
 const workspace = read('src/ui/pages/VolumeWorkspace.vue')
+const progress = read('src/ui/components/VolumePlanningProgress.vue')
 const styles = read('src/ui/styles/pages.css')
 
 test('B03-R2 VolumeManager and VolumeWorkspace bind backend step status to DOM classes', () => {
-  assert.match(manager, /class="timeline-item"\s+:class="step\.status"/)
-  assert.match(workspace, /class="timeline-item"\s+:class="step\.status"/)
-  assert.match(manager, /step\.status === 'active' \? '…'/)
-  assert.match(workspace, /step\.status === 'active' \? '…'/)
+  assert.match(manager, /VolumePlanningProgress/)
+  assert.match(workspace, /VolumePlanningProgress/)
+  assert.match(progress, /class="timeline-item"\s+:class="step\.status"/)
+  assert.match(progress, /stepMarker\(step\.status\)/)
 })
 
 test('B03-R2 active pulse selector is reachable and terminal steps have no active class', () => {
@@ -27,7 +28,8 @@ test('B03-R2 active pulse selector is reachable and terminal steps have no activ
 })
 
 test('B03-R2 Intent-to-Plan waiting badge never reports completed planning', () => {
-  assert.match(manager, /buildInFlight\.value && !runtimeOperation\.value\?\.active\) return '正在等待规划阶段…'/)
-  assert.match(manager, /runtimeOperation\.value\.kind === 'B03::VOLUME_PLAN' \? '正在规划本卷任务路线'/)
-  assert.match(manager, /if \(!runtimeOperation\.value\?\.active\) return '规划已完成'/)
+  assert.match(progress, /props\.inFlight && operation\?\.kind === 'B03::VOLUME_PLAN' && !operation\.active && operation\.status === 'COMPLETED'/)
+  assert.match(progress, /return '正在同步规划结果…'/)
+  assert.match(progress, /return '正在等待规划阶段…'/)
+  assert.match(progress, /return '规划已完成'/)
 })

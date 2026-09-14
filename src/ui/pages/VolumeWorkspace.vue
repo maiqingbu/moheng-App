@@ -6,6 +6,7 @@ import MetricCard from '../components/MetricCard.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { sanitizeProductText, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import VolumePlanningProgress from '../components/VolumePlanningProgress.vue'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -26,8 +27,6 @@ const remainingTasks = computed(() => Array.isArray(planningState.value.remainin
 const responsibilities = computed(() => Array.isArray(planningState.value.unresolvedResponsibilities) ? planningState.value.unresolvedResponsibilities as Array<Record<string, unknown>> : [])
 const routeReplans = computed(() => lifecycle.value?.routeReplans ?? [])
 const runtimeOperation = computed(() => detail.value?.runtimeOperation ?? null)
-const planningSteps = computed(() => runtimeOperation.value?.steps ?? [])
-const runtimeOperationLabel = computed(() => runtimeOperation.value?.kind === 'B03::VOLUME_PLAN' ? '正在规划本卷任务路线' : '正在建立当前卷目标')
 const routeInvariants = computed(() => planRoute.value?.routeInvariants ?? [])
 const exitConditions = computed(() => planRoute.value?.requiredExitConditions ?? [])
 const capacityBudget = computed(() => planRoute.value?.capacityBudget ?? {})
@@ -75,15 +74,7 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
     <section class="card pad section"><span class="badge">PLAN</span><h2 class="card-title" style="margin-top:8px">本卷目标</h2><p class="card-subtitle">{{ detail.volume.goal }}</p></section>
     <CommandFeedback :state="state" />
 
-    <section v-if="runtimeOperation" class="card pad section" data-volume-planning-progress>
-      <div class="card-head"><div><h2 class="card-title">卷规划运行进度</h2><p class="card-subtitle">后端持久化阶段：{{ runtimeOperation.phase }}</p></div><span class="badge" :class="runtimeOperation.active ? 'warning' : 'success'">{{ runtimeOperation.active ? runtimeOperationLabel : statusLabel(runtimeOperation.status) }}</span></div>
-      <div class="timeline">
-        <div v-for="step in planningSteps" :key="step.id" class="timeline-item" :class="step.status">
-          <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : step.status === 'active' ? '…' : '·' }}</div>
-          <div><strong>{{ step.label }}</strong><div class="muted" style="font-size:12px">{{ step.status === 'active' ? '正在处理' : step.status === 'done' ? '已完成' : step.status === 'failed' ? '处理失败' : '等待处理' }}</div></div>
-        </div>
-      </div>
-    </section>
+    <VolumePlanningProgress :operation="runtimeOperation" />
 
     <section v-if="lifecycle" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">卷生命周期</h2><p class="card-subtitle">状态来自当前作品记录，关闭与下一卷安排会在同一流程中核对。</p></div><span class="badge" :class="closeReady ? 'success' : 'warning'">{{ closeReady ? '可关闭' : '待完成' }}</span></div>
