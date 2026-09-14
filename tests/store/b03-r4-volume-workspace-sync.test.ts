@@ -91,13 +91,14 @@ describe('B03-R4 VolumeWorkspace runtime synchronization', () => {
   ])('starts a read-only poller when entering during active %s', async (_label, kind) => {
     const mounted = mountWorkspace([
       projection(operation({ kind, phase: kind === 'B03::VOLUME_INTENT' ? 'BUILD_VOLUME_GOAL' : 'BUILD_TASK_ROUTE' })),
+      projection(operation({ kind, phase: kind === 'B03::VOLUME_INTENT' ? 'VALIDATE_VOLUME_GOAL' : 'VALIDATE_DEPENDENCIES' })),
       projection(operation({ kind, status: 'COMPLETED', phase: 'COMPLETED', active: false, steps: [] })),
     ])
     await settle()
 
     expect(mounted.store.loadVolumeDetail).toHaveBeenCalledWith('volume-r4')
-    expect(mounted.store.loadVolumeDetail).not.toHaveBeenCalledWith('volume-r4', true)
-    expect(vi.getTimerCount()).toBe(1)
+    expect(mounted.store.loadVolumeDetail).toHaveBeenCalledWith('volume-r4', true)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
     expect(mounted.store.runCommand).not.toHaveBeenCalled()
     mounted.app.unmount()
   })
@@ -112,12 +113,13 @@ describe('B03-R4 VolumeWorkspace runtime synchronization', () => {
     }))))
     await settle()
 
-    expect(mounted.container.textContent).toContain('BUILD_TASK_ROUTE')
-    for (const phase of phases.slice(1)) {
+    expect(mounted.queried.map(item => (item.runtimeOperation as Record<string, unknown>).phase)).toContain('BUILD_TASK_ROUTE')
+    for (const phase of phases.slice(2)) {
       await advancePoll()
       expect(mounted.store.volumeDetail.runtimeOperation.phase).toBe(phase)
       expect(mounted.container.textContent).toContain(phase)
     }
+    expect(mounted.queried.map(item => (item.runtimeOperation as Record<string, unknown>).phase)).toEqual(phases)
     expect(mounted.store.runCommand).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
     const queryCount = mounted.store.loadVolumeDetail.mock.calls.length

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
@@ -7,6 +7,8 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { sanitizeProductText, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 import VolumePlanningProgress from '../components/VolumePlanningProgress.vue'
+import { createVolumePlanningRuntimePoller } from '../runtime/volumePlanningRuntimeSync'
+import type { VolumeDetailProjection } from '../../application/contracts'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -36,6 +38,14 @@ const exitSnapshotKind = 'VolumeExitState'
 const unresolvedLabel = 'OPEN / SUSPENDED'
 const handoffFields = ['fromVolumeId', 'toVolumeId', 'handoffStatus']
 const frozenProjectionMarkers = ['PLAN', 'REALITY', 'PROJECTION']
+const workspaceRuntimePoller = createVolumePlanningRuntimePoller({
+  query: async () => {
+    const value = await store.loadVolumeDetail(volumeId.value, true)
+    if (!value) throw new Error('当前卷状态暂不可用。')
+    return value
+  },
+  onProjection: (projection: VolumeDetailProjection) => { store.volumeDetail = projection },
+})
 const statusLabel = (value: unknown) => productStatusLabel(value, '待确认')
 const taskClassLabel = (value: string) => ({ REQUIRED: '必须完成', OPTIONAL: '可选安排', FLEXIBLE: '弹性安排', CLIMAX: '高潮任务', RESERVED: '预留任务', BLOCKED: '当前阻塞' } as Record<string, string>)[value] ?? '任务'
 const taskDependencies = (task: Record<string, unknown>) => Array.isArray(task.dependsOnTaskIds) && task.dependsOnTaskIds.length ? task.dependsOnTaskIds.map(String).join('、') : '无'
@@ -64,7 +74,16 @@ async function closeVolume() {
   await store.loadVolumeLifecycle(volumeId.value, true)
 }
 
-onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPlanningRoute(volumeId.value); void store.loadVolumeLifecycle(volumeId.value) })
+onMounted(() => {
+  void (async () => {
+    const detailPromise = store.loadVolumeDetail(volumeId.value)
+    void store.loadPlanningRoute(volumeId.value)
+    void store.loadVolumeLifecycle(volumeId.value)
+    const initial = await detailPromise
+    if (initial?.runtimeOperation?.active === true) workspaceRuntimePoller.start()
+  })()
+})
+onUnmounted(() => workspaceRuntimePoller.stop())
 </script>
 
 <template>
