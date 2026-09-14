@@ -511,6 +511,13 @@ mod tests {
     }
 
     #[test]
+    fn renderer_prompt_requires_bounded_complete_chapter_json() {
+        let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
+        assert!(prompt.contains("body must not exceed targetChineseCharacters"));
+        assert!(prompt.contains("complete Chinese chapter prose"));
+    }
+
+    #[test]
     fn xiaomi_headers_use_the_documented_api_key_authentication() {
         let headers = OpenAiCompatibleProvider::request_headers(
             "https://api.xiaomimimo.com/v1",
