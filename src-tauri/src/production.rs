@@ -2226,10 +2226,15 @@ fn validate_actual_extraction(
             return Err("B08_RESERVATION_VIOLATION".into());
         }
     }
+    let pending_entities = audit
+        .canon_candidates
+        .iter()
+        .filter_map(|item| item.entity_id.clone())
+        .collect::<BTreeSet<_>>();
     let pending_facts = audit
         .canon_candidates
         .iter()
-        .map(|item| item.fact_id.as_str())
+        .map(|item| item.fact_id.clone())
         .collect::<BTreeSet<_>>();
     for candidate in &audit.knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
@@ -2246,7 +2251,14 @@ fn validate_actual_extraction(
             &candidate.fact_id,
         )
         .map_err(|error| error.to_string())?;
-        if !knower_exists || (!fact_exists && !pending_facts.contains(candidate.fact_id.as_str())) {
+        if !knowledge_authority_is_bound(
+            knower_exists,
+            fact_exists,
+            &candidate.knower_id,
+            &candidate.fact_id,
+            &pending_entities,
+            &pending_facts,
+        ) {
             return Err("B08_KNOWLEDGE_AUTHORITY_NOT_FOUND".into());
         }
         let fact_time = audit
@@ -2260,6 +2272,18 @@ fn validate_actual_extraction(
         }
     }
     Ok(())
+}
+
+fn knowledge_authority_is_bound(
+    knower_exists: bool,
+    fact_exists: bool,
+    knower_id: &str,
+    fact_id: &str,
+    pending_entities: &BTreeSet<String>,
+    pending_facts: &BTreeSet<String>,
+) -> bool {
+    (knower_exists || pending_entities.contains(knower_id))
+        && (fact_exists || pending_facts.contains(fact_id))
 }
 
 fn semantic_windows_overlap(
@@ -2302,6 +2326,28 @@ mod tests {
             parse_provider_model_payload(value).unwrap(),
             json!({"ok": true})
         );
+    }
+
+    #[test]
+    fn knowledge_candidate_can_bind_to_entity_and_fact_from_same_audit() {
+        let pending_entities = ["ent:new".to_string()].into_iter().collect();
+        let pending_facts = ["fact:new".to_string()].into_iter().collect();
+        assert!(knowledge_authority_is_bound(
+            false,
+            false,
+            "ent:new",
+            "fact:new",
+            &pending_entities,
+            &pending_facts,
+        ));
+        assert!(!knowledge_authority_is_bound(
+            false,
+            false,
+            "ent:missing",
+            "fact:new",
+            &pending_entities,
+            &pending_facts,
+        ));
     }
 
     #[test]
