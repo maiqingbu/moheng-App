@@ -18,6 +18,27 @@ pub fn normalize_chapter_plan_model_output(
     triggered_thread_refs: &[String],
     authoritative_bindings: &Value,
 ) -> Value {
+    if let Some(object) = plan.as_object_mut() {
+        object.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "payloadSchema"
+                    | "chapterId"
+                    | "compiledFromProjectRevision"
+                    | "compiledFromStateDigest"
+                    | "contextManifestRef"
+                    | "chapterGoal"
+                    | "activeTaskRefs"
+                    | "continuityActions"
+                    | "requiredStateOutcomes"
+                    | "forbiddenTransitions"
+                    | "knowledgeBoundaries"
+                    | "reservationRefs"
+                    | "sceneExecution"
+                    | "horizonPreview"
+            )
+        });
+    }
     plan["payloadSchema"] = json!("chapter-plan.r1");
     for field in [
         "chapterId",
