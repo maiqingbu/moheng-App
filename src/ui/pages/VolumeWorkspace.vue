@@ -46,6 +46,7 @@ const workspaceRuntimePoller = createVolumePlanningRuntimePoller({
   },
   onProjection: (projection: VolumeDetailProjection) => { store.volumeDetail = projection },
 })
+let workspaceMounted = false
 const statusLabel = (value: unknown) => productStatusLabel(value, '待确认')
 const taskClassLabel = (value: string) => ({ REQUIRED: '必须完成', OPTIONAL: '可选安排', FLEXIBLE: '弹性安排', CLIMAX: '高潮任务', RESERVED: '预留任务', BLOCKED: '当前阻塞' } as Record<string, string>)[value] ?? '任务'
 const taskDependencies = (task: Record<string, unknown>) => Array.isArray(task.dependsOnTaskIds) && task.dependsOnTaskIds.length ? task.dependsOnTaskIds.map(String).join('、') : '无'
@@ -75,15 +76,20 @@ async function closeVolume() {
 }
 
 onMounted(() => {
+  workspaceMounted = true
   void (async () => {
     const detailPromise = store.loadVolumeDetail(volumeId.value)
     void store.loadPlanningRoute(volumeId.value)
     void store.loadVolumeLifecycle(volumeId.value)
     const initial = await detailPromise
+    if (!workspaceMounted) return
     if (initial?.runtimeOperation?.active === true) workspaceRuntimePoller.start()
   })()
 })
-onUnmounted(() => workspaceRuntimePoller.stop())
+onUnmounted(() => {
+  workspaceMounted = false
+  workspaceRuntimePoller.stop()
+})
 </script>
 
 <template>
