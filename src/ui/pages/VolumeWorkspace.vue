@@ -27,6 +27,7 @@ const responsibilities = computed(() => Array.isArray(planningState.value.unreso
 const routeReplans = computed(() => lifecycle.value?.routeReplans ?? [])
 const runtimeOperation = computed(() => detail.value?.runtimeOperation ?? null)
 const planningSteps = computed(() => runtimeOperation.value?.steps ?? [])
+const runtimeOperationLabel = computed(() => runtimeOperation.value?.kind === 'B03::VOLUME_PLAN' ? '正在规划本卷任务路线' : '正在建立当前卷目标')
 const routeInvariants = computed(() => planRoute.value?.routeInvariants ?? [])
 const exitConditions = computed(() => planRoute.value?.requiredExitConditions ?? [])
 const capacityBudget = computed(() => planRoute.value?.capacityBudget ?? {})
@@ -50,6 +51,10 @@ const taskCost = (task: Record<string, unknown>) => {
   if (!cost || typeof cost !== 'object') return '—'
   return String((cost as Record<string, unknown>).preferred ?? '—')
 }
+const realityEvidence = (task: Record<string, unknown>) => {
+  const refs = task.evidenceRefs
+  return Array.isArray(refs) && refs.length ? refs.map(ref => String(ref)).join('、') : '尚无证据'
+}
 
 async function closeVolume() {
   await store.runCommand('volume-close', {
@@ -71,7 +76,7 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
     <CommandFeedback :state="state" />
 
     <section v-if="runtimeOperation" class="card pad section" data-volume-planning-progress>
-      <div class="card-head"><div><h2 class="card-title">卷规划运行进度</h2><p class="card-subtitle">后端持久化阶段：{{ runtimeOperation.phase }}</p></div><span class="badge" :class="runtimeOperation.active ? 'warning' : 'success'">{{ runtimeOperation.active ? '进行中' : statusLabel(runtimeOperation.status) }}</span></div>
+      <div class="card-head"><div><h2 class="card-title">卷规划运行进度</h2><p class="card-subtitle">后端持久化阶段：{{ runtimeOperation.phase }}</p></div><span class="badge" :class="runtimeOperation.active ? 'warning' : 'success'">{{ runtimeOperation.active ? runtimeOperationLabel : statusLabel(runtimeOperation.status) }}</span></div>
       <div class="timeline">
         <div v-for="step in planningSteps" :key="step.id" class="timeline-item">
           <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</div>
@@ -107,7 +112,7 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
 
     <section v-if="planRoute" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">任务实际进展</h2><p class="card-subtitle">这里显示已经发生的进展，不用计划内容代替实际状态。</p></div><span class="badge">REALITY · 实际进展</span></div>
-      <div v-for="taskClass in ['REQUIRED', 'OPTIONAL', 'FLEXIBLE', 'CLIMAX', 'RESERVED', 'BLOCKED']" :key="taskClass" class="section-subgroup"><strong>{{ taskClassLabel(taskClass) }}</strong><div class="timeline"><div v-for="task in tasksByClass(taskClass === 'BLOCKED' ? 'REQUIRED' : taskClass).filter(item => taskClass !== 'BLOCKED' || realityStatus(item.taskId) === 'BLOCKED')" :key="String(task.taskId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>当前任务</strong><div class="muted" style="font-size:12px">{{ statusLabel(realityStatus(task.taskId)) }}</div></div></div></div></div>
+      <div v-for="taskClass in ['REQUIRED', 'OPTIONAL', 'FLEXIBLE', 'CLIMAX', 'RESERVED', 'BLOCKED']" :key="taskClass" class="section-subgroup"><strong>{{ taskClassLabel(taskClass) }}</strong><div class="timeline"><div v-for="task in tasksByClass(taskClass === 'BLOCKED' ? 'REQUIRED' : taskClass).filter(item => taskClass !== 'BLOCKED' || realityStatus(item.taskId) === 'BLOCKED')" :key="String(task.taskId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>当前任务</strong><div class="muted" style="font-size:12px">{{ statusLabel(realityStatus(task.taskId)) }} · 证据：{{ realityEvidence(taskReality.find(item => String(item.stateId) === String(task.taskId)) ?? {}) }}</div></div></div></div></div>
     </section>
 
     <section v-if="planRoute" class="card pad section">

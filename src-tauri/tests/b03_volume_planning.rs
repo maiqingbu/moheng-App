@@ -4,7 +4,10 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use ai_novel_production_system_core::hash::sha256_canonical;
-use ai_novel_production_system_core::planning::validate_volume_plan_semantics;
+use ai_novel_production_system_core::planning::{
+    compile_volume_intent_from_authority, evaluate_b03_completion_predicate,
+    is_b03_completion_predicate_kind, validate_volume_plan_semantics,
+};
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
@@ -193,6 +196,29 @@ fn request(command_type: &str, command_id: &str, expected_revision: i64) -> Valu
     json!({"type":command_type,"commandId":command_id,"idempotencyKey":format!("{command_id}:key"),"projectId":PROJECT,"expectedRevision":expected_revision,"requestedAt":NOW,"payload":{"volumeId":VOLUME}})
 }
 
+fn request_with_plan(
+    command_type: &str,
+    command_id: &str,
+    expected_revision: i64,
+    plan: Value,
+) -> Value {
+    let mut request = request(command_type, command_id, expected_revision);
+    request["payload"]["plan"] = plan;
+    request
+}
+
+fn legacy_route() -> Value {
+    json!({
+        "payloadSchema":"volume-plan.r1",
+        "volumeIntentRef":{"artifactId":"legacy-intent","version":1,"payloadHash":"a".repeat(64)},
+        "routeVersion":1,
+        "tasks":[{"taskId":"task:legacy","class":"REQUIRED","objective":"legacy","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":"task:legacy","evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}},"estimatedChapterCost":{"preferred":1}}],
+        "routeInvariants":["legacy route remains bounded"],
+        "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:legacy"}],
+        "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
+    })
+}
+
 fn payload_for(state: &KernelState, artifact_type: &str) -> Value {
     let connection = state.manager.open(PROJECT, "", NOW).unwrap();
     let reference =
@@ -318,6 +344,128 @@ fn b03_goal_contract_rejects_book_plan_seed_maturity() {
 }
 
 #[test]
+fn b03_r1_supplied_route_cannot_bypass_missing_goal_contract_authorities() {
+    for (missing, expected) in [
+        (
+            "StoryConstitution",
+            "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED",
+        ),
+        ("MainContract", "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED"),
+    ] {
+        let (_temp, state) = seed_project();
+        setup_intent(&state);
+        let connection = state.manager.open(PROJECT, "", NOW).unwrap();
+        connection
+            .execute(
+                "DELETE FROM canonical_heads WHERE project_id=?1 AND artifact_type=?2",
+                libsql_rusqlite::params![PROJECT, missing],
+            )
+            .unwrap();
+        drop(connection);
+        let result = execute_command_impl(
+            &state,
+            request_with_plan(
+                "planning_create_volume_plan",
+                &format!("b03-r1-route-{missing}"),
+                1,
+                legacy_route(),
+            ),
+        );
+        assert_eq!(result.unwrap_err(), expected, "missing {missing}");
+    }
+}
+
+#[test]
+fn b03_r1_supplied_empty_volume_intent_is_rejected_before_commit() {
+    let (_temp, state) = seed_project();
+    let before = state.manager.open(PROJECT, "", NOW).unwrap();
+    let before_artifacts: i64 = before
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE artifact_type='VolumeIntent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(before);
+    let empty_intent = json!({
+        "payloadSchema":"volume-intent.r1",
+        "volumeFunction":"空壳",
+        "entryConditions":[],
+        "mustAchieve":[],
+        "mustNotBreak":[],
+        "requiredExitConditions":[],
+        "futureReservationRefs":[],
+        "crossVolumeResponsibilityRefs":[],
+        "targetChapterRange":{"min":1,"preferred":12,"max":12},
+        "targetWordRange":{"preferred":12000}
+    });
+    let result = execute_command_impl(
+        &state,
+        request_with_plan(
+            "planning_create_volume_intent",
+            "b03-r1-empty-intent",
+            0,
+            empty_intent,
+        ),
+    );
+    assert_eq!(result.unwrap_err(), "VOLUME_INTENT_MUST_ACHIEVE_REQUIRED");
+    let after = state.manager.open(PROJECT, "", NOW).unwrap();
+    let after_artifacts: i64 = after
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE artifact_type='VolumeIntent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before_artifacts, after_artifacts);
+    assert!(
+        NarrativeRepository::canonical_head_ref(&after, PROJECT, "VolumeIntent", VOLUME)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn b03_r1_supplied_intent_requires_book_plan_binding_and_revision() {
+    let cases = [
+        ("sourceBookPlanRef", "VOLUME_INTENT_BOOK_PLAN_REF_REQUIRED"),
+        (
+            "compiledFromProjectRevision",
+            "VOLUME_INTENT_COMPILED_REVISION_REQUIRED",
+        ),
+    ];
+    for (missing, expected) in cases {
+        let (_temp, state) = seed_project();
+        let mut intent = json!({
+            "payloadSchema":"volume-intent.r1",
+            "volumeFunction":"供给语义",
+            "entryConditions":[],
+            "mustAchieve":[{"id":"goal:supplied","description":"供给目标"}],
+            "mustNotBreak":[{"id":"rule:supplied","description":"供给约束"}],
+            "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:supplied"}],
+            "futureReservationRefs":[],
+            "crossVolumeResponsibilityRefs":[],
+            "targetChapterRange":{"min":1,"preferred":12,"max":12},
+            "targetWordRange":{"preferred":12000},
+            "sourceBookPlanRef":{"artifactId":"book-plan:b03","version":1,"payloadHash":"0".repeat(64)},
+            "compiledFromProjectRevision":0,
+            "sourceEvidenceRefs":["evidence:b03:event"]
+        });
+        intent.as_object_mut().unwrap().remove(missing);
+        let result = execute_command_impl(
+            &state,
+            request_with_plan(
+                "planning_create_volume_intent",
+                &format!("b03-r1-binding-{missing}"),
+                0,
+                intent,
+            ),
+        );
+        assert_eq!(result.unwrap_err(), expected, "missing {missing}");
+    }
+}
+
+#[test]
 fn b03_volume_plan_compiles_task_route_with_dependencies_predicates_and_capacity() {
     let (_temp, state) = seed_project();
     setup_intent(&state);
@@ -370,15 +518,20 @@ fn b03_volume_plan_compiles_task_route_with_dependencies_predicates_and_capacity
         assert!(task.get("status").is_none());
     }
     assert!(tasks.iter().any(|task| {
-        task["completionPredicate"]["kind"] == "CANON_EVIDENCE_PRESENT"
-            && ["fact:b03:ledger", "event:b03:stolen", "relation:b03:trust"]
-                .iter()
-                .any(|reference| task["completionPredicate"]["value"] == *reference)
+        task["completionPredicate"]["kind"] == "TASK_EVIDENCE_RECORDED"
+            && task["completionPredicate"]["value"]["requiresNewEvidence"] == true
     }));
     assert!(tasks.iter().any(|task| {
-        task["completionPredicate"]["kind"] == "MYSTERY_RESOLVED"
-            && task["completionPredicate"]["value"] == "mystery:ledger"
+        task["completionPredicate"]["kind"] == "CANON_EVENT_EXISTS"
+            && task["completionPredicate"]["value"]["afterPlanCommit"] == true
     }));
+    for task in tasks {
+        let predicate = &task["completionPredicate"];
+        assert_ne!(predicate["kind"], "TASK_SATISFIED");
+        assert!(is_b03_completion_predicate_kind(
+            predicate["kind"].as_str().unwrap()
+        ));
+    }
     let after = state.manager.open(PROJECT, "", NOW).unwrap();
     let canon_after: i64 = after
         .query_row("SELECT COUNT(*) FROM canon_facts", [], |row| row.get(0))
@@ -406,6 +559,158 @@ fn b03_volume_plan_rejects_dependency_cycles() {
         validate_volume_plan_semantics(&route).unwrap_err(),
         "VOLUME_PLAN_DEPENDENCY_CYCLE"
     );
+}
+
+#[test]
+fn b03_r1_unknown_completion_predicate_fails_closed() {
+    let (_temp, state) = seed_project();
+    setup_intent(&state);
+    let connection = state.manager.open(PROJECT, "", NOW).unwrap();
+    let intent_ref =
+        NarrativeRepository::canonical_head_ref(&connection, PROJECT, "VolumeIntent", VOLUME)
+            .unwrap()
+            .unwrap();
+    drop(connection);
+    let mut route = legacy_route();
+    route["volumeIntentRef"] = serde_json::to_value(intent_ref).unwrap();
+    route["tasks"][0]["completionPredicate"] =
+        json!({"kind":"UNKNOWN_PREDICATE","value":{"future":true}});
+    assert_eq!(
+        execute_command_impl(
+            &state,
+            request_with_plan(
+                "planning_create_volume_plan",
+                "b03-r1-unknown-predicate",
+                1,
+                route
+            ),
+        )
+        .unwrap_err(),
+        "VOLUME_PLAN_COMPLETION_PREDICATE_UNKNOWN"
+    );
+}
+
+#[test]
+fn b03_r1_self_referential_completion_predicate_fails_closed() {
+    let (_temp, state) = seed_project();
+    setup_intent(&state);
+    let connection = state.manager.open(PROJECT, "", NOW).unwrap();
+    let intent_ref =
+        NarrativeRepository::canonical_head_ref(&connection, PROJECT, "VolumeIntent", VOLUME)
+            .unwrap()
+            .unwrap();
+    drop(connection);
+    let mut route = legacy_route();
+    route["volumeIntentRef"] = serde_json::to_value(intent_ref).unwrap();
+    route["tasks"][0]["completionPredicate"] =
+        json!({"kind":"TASK_SATISFIED","value":"task:legacy"});
+    assert_eq!(
+        execute_command_impl(
+            &state,
+            request_with_plan(
+                "planning_create_volume_plan",
+                "b03-r1-self-predicate",
+                1,
+                route
+            ),
+        )
+        .unwrap_err(),
+        "VOLUME_PLAN_COMPLETION_PREDICATE_SELF_REFERENCE"
+    );
+}
+
+#[test]
+fn b03_r1_existing_canon_cannot_satisfy_a_new_task_without_reality_evidence() {
+    let predicate = json!({
+        "kind":"TASK_EVIDENCE_RECORDED",
+        "value":{"taskId":"task:future","goalId":"goal:future","evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+    });
+    let existing_canon_only = json!({"status":"NOT_STARTED"});
+    assert!(
+        !evaluate_b03_completion_predicate(&predicate, "task:future", &existing_canon_only)
+            .unwrap()
+    );
+    let satisfied_with_evidence = json!({
+        "status":"SATISFIED",
+        "evidenceRefs":[{"artifactId":"final:future","version":1}],
+        "lastAdvancedChapterId":"chapter:future:1"
+    });
+    assert!(
+        evaluate_b03_completion_predicate(&predicate, "task:future", &satisfied_with_evidence)
+            .unwrap()
+    );
+}
+
+#[test]
+fn b03_r1_volume_intents_are_scoped_by_volume_seeds() {
+    let ref_value = ArtifactRef {
+        artifact_id: "book-plan:scope".into(),
+        version: 1,
+        payload_hash: "b".repeat(64),
+    };
+    let book_plan = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"scope",
+        "protagonistMacroDirection":"scope",
+        "endingBoundary":"scope",
+        "mustAchieve":[{"id":"goal:global-a","description":"全书目标 A"},{"id":"goal:global-b","description":"全书目标 B"}],
+        "mustNotBreak":[{"id":"rule:global","description":"全书约束"}],
+        "relationshipMacroDirections":[],"majorMysteryGoals":[],
+        "futureReservations":[
+            {"reservationId":"reservation:volume-1","description":"第一卷预留","reservedForVolumeNo":1,"notBeforeVolumeNo":1,"prerequisites":[],"mayForeshadow":true,"mayReveal":false,"authorityLevel":"A"},
+            {"reservationId":"reservation:volume-2","description":"第二卷预留","reservedForVolumeNo":2,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":true,"mayReveal":false,"authorityLevel":"A"}
+        ],
+        "volumeIntentSeeds":[{"seedId":"seed:volume-1","description":"第一卷只追查 A"},{"seedId":"seed:volume-2","description":"第二卷转向 B"}],
+        "openingHypotheses":[],"globalLengthBudget":{"preferredWords":120000}
+    });
+    let sources = json!({
+        "facts":[{"factId":"fact:scope","predicate":"状态","objectJson":{"text":"可验证"}}],
+        "relations":[],"knowledge":[],"events":[],"evidence":[{"evidenceId":"evidence:scope"}],
+        "responsibilities":[{"obligationId":"obligation:scope","description":"卷内责任"}]
+    });
+    let first = compile_volume_intent_from_authority(
+        "vol:scope:1",
+        1,
+        1,
+        12,
+        12000,
+        &ref_value,
+        &book_plan,
+        &sources,
+        0,
+    )
+    .unwrap();
+    let second = compile_volume_intent_from_authority(
+        "vol:scope:2",
+        2,
+        13,
+        24,
+        12000,
+        &ref_value,
+        &book_plan,
+        &sources,
+        0,
+    )
+    .unwrap();
+    let first_text = first.to_string();
+    let second_text = second.to_string();
+    assert!(first_text.contains("第一卷只追查 A"));
+    assert!(second_text.contains("第二卷转向 B"));
+    assert!(!first_text.contains("第二卷转向 B"));
+    assert!(!second_text.contains("第一卷只追查 A"));
+    assert_ne!(first["semanticDigest"], second["semanticDigest"]);
+    assert!(first["futureReservationRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "reservation:volume-1"));
+    assert!(second["futureReservationRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "reservation:volume-2"));
+    assert!(first.to_string().contains("obligation:scope"));
 }
 
 #[test]

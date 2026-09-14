@@ -379,6 +379,133 @@ pub fn validate_volume_intent(plan: &Value) -> Result<(), String> {
         .map_err(|error| format!("VOLUME_INTENT_CONTRACT:{error}"))
 }
 
+/// Finite B03 predicate vocabulary.  The task route is a plan, so these
+/// predicates describe a future, inspectable condition; they never encode a
+/// task's own `SATISFIED` state as its completion rule.
+pub const B03_COMPLETION_PREDICATE_KINDS: &[&str] = &[
+    "TASK_EVIDENCE_RECORDED",
+    "CANON_FACT_MATCH",
+    "CANON_EVENT_EXISTS",
+    "RELATION_STATE_MATCH",
+    "KNOWLEDGE_STATE_MATCH",
+    "FUTURE_RESERVATION_STATUS",
+    "OBLIGATION_STATUS",
+];
+
+pub fn is_b03_completion_predicate_kind(kind: &str) -> bool {
+    B03_COMPLETION_PREDICATE_KINDS.contains(&kind)
+}
+
+fn predicate_object<'a>(predicate: &'a Value, key: &str) -> Result<&'a Value, String> {
+    predicate
+        .get("value")
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(key))
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| format!("VOLUME_PLAN_COMPLETION_PREDICATE_{key}_REQUIRED"))
+}
+
+pub fn validate_b03_completion_predicate(predicate: &Value, task_id: &str) -> Result<(), String> {
+    let kind = predicate
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+        .ok_or("VOLUME_PLAN_COMPLETION_PREDICATE_REQUIRED")?;
+    if kind == "TASK_SATISFIED" {
+        return Err("VOLUME_PLAN_COMPLETION_PREDICATE_SELF_REFERENCE".into());
+    }
+    if !is_b03_completion_predicate_kind(kind) {
+        return Err("VOLUME_PLAN_COMPLETION_PREDICATE_UNKNOWN".into());
+    }
+    if predicate.get("value").is_none_or(Value::is_null) {
+        return Err("VOLUME_PLAN_COMPLETION_PREDICATE_VALUE_REQUIRED".into());
+    }
+    match kind {
+        "TASK_EVIDENCE_RECORDED" => {
+            let value = predicate_object(predicate, "taskId")?.as_str();
+            if value != Some(task_id) {
+                return Err("VOLUME_PLAN_COMPLETION_PREDICATE_TASK_MISMATCH".into());
+            }
+            if predicate_object(predicate, "evidenceType")?
+                .as_str()
+                .is_none()
+            {
+                return Err("VOLUME_PLAN_COMPLETION_PREDICATE_EVIDENCE_TYPE_REQUIRED".into());
+            }
+            if predicate_object(predicate, "requiresNewEvidence")? != &Value::Bool(true) {
+                return Err("VOLUME_PLAN_COMPLETION_PREDICATE_FUTURE_EVIDENCE_REQUIRED".into());
+            }
+        }
+        "CANON_FACT_MATCH" => {
+            predicate_object(predicate, "factId")?;
+            predicate_object(predicate, "expected")?;
+        }
+        "CANON_EVENT_EXISTS" => {
+            if predicate_object(predicate, "eventId").is_err()
+                && predicate_object(predicate, "eventType").is_err()
+            {
+                return Err("VOLUME_PLAN_COMPLETION_PREDICATE_EVENT_REQUIRED".into());
+            }
+            if predicate_object(predicate, "afterPlanCommit")? != &Value::Bool(true) {
+                return Err("VOLUME_PLAN_COMPLETION_PREDICATE_FUTURE_EVENT_REQUIRED".into());
+            }
+        }
+        "RELATION_STATE_MATCH" => {
+            predicate_object(predicate, "relationId")?;
+            predicate_object(predicate, "expectedTransition")?;
+        }
+        "KNOWLEDGE_STATE_MATCH" => {
+            predicate_object(predicate, "knowledgeId")?;
+            predicate_object(predicate, "epistemicState")?;
+        }
+        "FUTURE_RESERVATION_STATUS" => {
+            predicate_object(predicate, "reservationId")?;
+            predicate_object(predicate, "requiredStatus")?;
+        }
+        "OBLIGATION_STATUS" => {
+            predicate_object(predicate, "obligationId")?;
+            predicate_object(predicate, "requiredStatus")?;
+        }
+        _ => unreachable!("predicate kind is checked above"),
+    }
+    Ok(())
+}
+
+/// Evaluates the part of a predicate that can be decided from Task Reality.
+/// Canon/Relation/Event/Knowledge/Reservation owners provide the referenced
+/// state; this function intentionally never infers completion from Plan data.
+pub fn evaluate_b03_completion_predicate(
+    predicate: &Value,
+    task_id: &str,
+    reality: &Value,
+) -> Result<bool, String> {
+    validate_b03_completion_predicate(predicate, task_id)?;
+    let status = reality.get("status").and_then(Value::as_str);
+    match predicate.get("kind").and_then(Value::as_str) {
+        Some("TASK_EVIDENCE_RECORDED") => Ok(status == Some("SATISFIED")
+            && reality
+                .get("evidenceRefs")
+                .and_then(Value::as_array)
+                .is_some_and(|refs| !refs.is_empty())
+            && reality
+                .get("lastAdvancedChapterId")
+                .and_then(Value::as_str)
+                .is_some_and(|chapter| !chapter.trim().is_empty())),
+        Some(
+            "CANON_FACT_MATCH"
+            | "CANON_EVENT_EXISTS"
+            | "RELATION_STATE_MATCH"
+            | "KNOWLEDGE_STATE_MATCH"
+            | "FUTURE_RESERVATION_STATUS"
+            | "OBLIGATION_STATUS",
+        ) => Ok(reality
+            .get("predicateSatisfied")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)),
+        Some(_) | None => unreachable!("predicate kind is checked above"),
+    }
+}
+
 fn non_empty_array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
     let items = value
         .get(key)
@@ -427,6 +554,39 @@ pub fn validate_volume_intent_semantics(intent: &Value) -> Result<(), String> {
     {
         return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
     }
+    if intent
+        .get("sourceEvidenceRefs")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err("VOLUME_INTENT_SOURCE_EVIDENCE_REQUIRED".into());
+    }
+    Ok(())
+}
+
+pub fn validate_volume_intent_binding(
+    intent: &Value,
+    book_plan_ref: &ArtifactRef,
+    project_revision: i64,
+) -> Result<(), String> {
+    validate_volume_intent_semantics(intent)?;
+    let supplied = serde_json::from_value::<ArtifactRef>(
+        intent
+            .get("sourceBookPlanRef")
+            .cloned()
+            .ok_or("VOLUME_INTENT_BOOK_PLAN_REF_REQUIRED")?,
+    )
+    .map_err(|error| format!("VOLUME_INTENT_BOOK_PLAN_REF_INVALID:{error}"))?;
+    if &supplied != book_plan_ref {
+        return Err("VOLUME_INTENT_BOOK_PLAN_REF_MISMATCH".into());
+    }
+    let compiled_revision = intent
+        .get("compiledFromProjectRevision")
+        .and_then(Value::as_i64)
+        .ok_or("VOLUME_INTENT_COMPILED_REVISION_REQUIRED")?;
+    if compiled_revision != project_revision {
+        return Err("VOLUME_INTENT_COMPILED_REVISION_MISMATCH".into());
+    }
     Ok(())
 }
 
@@ -453,6 +613,41 @@ fn source_strings(sources: &Value, key: &str, nested_key: &str) -> Vec<String> {
         .collect()
 }
 
+fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
+    let marker = format!("volume-{volume_no}");
+    seed_id == marker
+        || seed_id.ends_with(&format!(":{marker}"))
+        || seed_id.ends_with(&format!("/{marker}"))
+        || seed_id.ends_with(&format!("-{volume_no}"))
+}
+
+fn goal_matches_seed(goal: &Value, seed_description: &str) -> bool {
+    let Some(goal_description) = goal.get("description").and_then(Value::as_str) else {
+        return false;
+    };
+    let goal_tokens = goal_description
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<BTreeSet<_>>();
+    if seed_description
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| goal_tokens.contains(token))
+    {
+        return true;
+    }
+    let compact_seed = seed_description
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    (4..=8.min(compact_seed.len())).any(|size| {
+        compact_seed.windows(size).any(|window| {
+            let fragment = window.iter().collect::<String>();
+            fragment.len() >= 4 && goal_description.contains(&fragment)
+        })
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn compile_volume_intent_from_authority(
     volume_id: &str,
@@ -471,22 +666,41 @@ pub fn compile_volume_intent_from_authority(
     if project_revision < 0 {
         return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
     }
-    let mut must_achieve = book_plan
+    let scoped_seeds = book_plan
+        .get("volumeIntentSeeds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|seed| {
+            seed.get("seedId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| seed_matches_volume(id, volume_no))
+        })
+        .collect::<Vec<_>>();
+    let global_goals = book_plan
         .get("mustAchieve")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if let Some(seed) = book_plan
-        .get("volumeIntentSeeds")
-        .and_then(Value::as_array)
-        .and_then(|seeds| {
-            seeds.iter().find(|seed| {
-                seed.get("seedId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id.ends_with(&volume_no.to_string()))
+    let scoped_seed_descriptions = scoped_seeds
+        .iter()
+        .filter_map(|seed| seed.get("description").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let mut must_achieve = if scoped_seeds.is_empty() && volume_no == 1 {
+        global_goals
+    } else if !scoped_seed_descriptions.is_empty() {
+        global_goals
+            .into_iter()
+            .filter(|goal| {
+                scoped_seed_descriptions
+                    .iter()
+                    .any(|seed| goal_matches_seed(goal, seed))
             })
-        })
-    {
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for seed in &scoped_seeds {
         if let (Some(seed_id), Some(description)) = (
             seed.get("seedId").and_then(Value::as_str),
             seed.get("description").and_then(Value::as_str),
@@ -732,7 +946,13 @@ pub fn compile_volume_intent_from_authority(
     let seed_description = book_plan
         .get("volumeIntentSeeds")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("seedId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| seed_matches_volume(id, volume_no))
+            })
+        })
         .and_then(|item| item.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("承接全书战略并推进当前卷目标");
@@ -832,17 +1052,7 @@ pub fn validate_volume_plan_semantics(plan: &Value) -> Result<(), String> {
             .get("completionPredicate")
             .and_then(Value::as_object)
             .ok_or("VOLUME_PLAN_COMPLETION_PREDICATE_REQUIRED")?;
-        let kind = predicate
-            .get("kind")
-            .and_then(Value::as_str)
-            .filter(|kind| !kind.trim().is_empty())
-            .ok_or("VOLUME_PLAN_COMPLETION_PREDICATE_REQUIRED")?;
-        if matches!(kind, "VAGUE" | "PROGRESS" | "SUITABLE_PROGRESS") {
-            return Err("VOLUME_PLAN_COMPLETION_PREDICATE_UNDETERMINED".into());
-        }
-        if predicate.get("value").is_none_or(Value::is_null) {
-            return Err("VOLUME_PLAN_COMPLETION_PREDICATE_VALUE_REQUIRED".into());
-        }
+        validate_b03_completion_predicate(&Value::Object(predicate.clone()), id)?;
         for dependency in task
             .get("dependsOnTaskIds")
             .and_then(Value::as_array)
@@ -931,11 +1141,6 @@ pub fn compile_volume_plan_from_authority(
     if project_revision < 0 {
         return Err("VOLUME_PLAN_COMPILED_REVISION_REQUIRED".into());
     }
-    let source_canon_refs = volume_intent
-        .get("sourceCanonRefs")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let source_evidence_refs = volume_intent
         .get("sourceEvidenceRefs")
         .and_then(Value::as_array)
@@ -948,23 +1153,21 @@ pub fn compile_volume_plan_from_authority(
         .unwrap_or_default();
     let mut tasks = Vec::new();
     let mut previous_required: Option<String> = None;
-    for (index, goal) in volume_intent
+    for goal in volume_intent
         .get("mustAchieve")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .enumerate()
     {
         let goal_id = goal
             .get("id")
             .and_then(Value::as_str)
             .ok_or("VOLUME_PLAN_GOAL_ID_REQUIRED")?;
         let task_id = format!("task:required:{goal_id}");
-        let predicate = if index == 0 && !source_canon_refs.is_empty() {
-            json!({"kind":"CANON_EVIDENCE_PRESENT","value":source_canon_refs[0]})
-        } else {
-            json!({"kind":"TASK_SATISFIED","value":task_id})
-        };
+        let predicate = json!({
+            "kind":"TASK_EVIDENCE_RECORDED",
+            "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+        });
         let dependencies = previous_required
             .iter()
             .cloned()
@@ -998,7 +1201,7 @@ pub fn compile_volume_plan_from_authority(
                 "dependsOnTaskIds":[],
                 "continuityThreadRefs":continuity_refs,
                 "reservationRefs":[],
-                "completionPredicate":{"kind":"RELATION_STATE_ADVANCED","value":id},
+                "completionPredicate":{"kind":"RELATION_STATE_MATCH","value":{"relationId":id,"expectedTransition":"ADVANCED","requiresNewEvidence":true}},
                 "estimatedChapterCost":{"preferred":1}
             }));
         }
@@ -1015,7 +1218,7 @@ pub fn compile_volume_plan_from_authority(
                 "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
                 "continuityThreadRefs":continuity_refs,
                 "reservationRefs":[],
-                "completionPredicate":{"kind":"MYSTERY_RESOLVED","value":id},
+                "completionPredicate":{"kind":"CANON_EVENT_EXISTS","value":{"eventType":"MYSTERY_RESOLVED","mysteryId":id,"afterPlanCommit":true}},
                 "estimatedChapterCost":{"preferred":2}
             }));
             climax_task = Some(task_id);
@@ -1036,7 +1239,7 @@ pub fn compile_volume_plan_from_authority(
             "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
             "continuityThreadRefs":continuity_refs,
             "reservationRefs":[reservation],
-            "completionPredicate":{"kind":"FUTURE_RESERVATION_FULFILLED","value":reservation},
+            "completionPredicate":{"kind":"FUTURE_RESERVATION_STATUS","value":{"reservationId":reservation,"requiredStatus":"FULFILLED"}},
             "estimatedChapterCost":{"preferred":1}
         }));
     }
@@ -1135,13 +1338,16 @@ pub fn normalize_volume_plan_candidate(
             .ok_or("VOLUME_PLAN_TASKS_REQUIRED")?;
         for task in tasks.iter_mut() {
             let id = task_id(task)?.to_owned();
-            if task
+            let predicate_kind = task
                 .get("completionPredicate")
                 .and_then(Value::as_object)
-                .and_then(|predicate| predicate.get("value"))
-                .is_none()
-            {
-                task["completionPredicate"] = json!({"kind":"TASK_SATISFIED","value":id});
+                .and_then(|predicate| predicate.get("kind"))
+                .and_then(Value::as_str);
+            if predicate_kind == Some("DONE") || predicate_kind.is_none() {
+                task["completionPredicate"] = json!({
+                    "kind":"TASK_EVIDENCE_RECORDED",
+                    "value":{"taskId":id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+                });
             }
             if task.get("continuityThreadRefs").is_none() {
                 task["continuityThreadRefs"] = json!([]);

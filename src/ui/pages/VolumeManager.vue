@@ -5,6 +5,8 @@ import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { createVolumePlanningRuntimePoller } from '../runtime/volumePlanningRuntimeSync'
+import { executeVolumePlanningSequence } from '../runtime/volumePlanningOrchestration'
+import type { VolumeDetailProjection } from '../../application/contracts'
 
 const store = useProjectStore()
 const router = useRouter()
@@ -18,27 +20,36 @@ const buildInFlight = ref(false)
 const planningActive = computed(() => buildInFlight.value || planningInFlight.value || runtimeOperation.value?.active === true)
 const actionLabel = computed(() => planningActive.value ? '查看当前卷规划进度' : '建立当前卷目标')
 const actionDisabled = computed(() => !signingPassed.value && !planningActive.value)
+const runtimeBadgeLabel = computed(() => {
+  if (!runtimeOperation.value?.active) return '规划已完成'
+  return runtimeOperation.value.kind === 'B03::VOLUME_PLAN' ? '正在规划本卷任务路线' : '正在建立当前卷目标'
+})
 const signingLabel = (value: boolean) => value ? '已通过' : '尚未通过'
 const volumeStatusLabel = (value: string) => ({ LOCKED: '待解锁', CLOSED: '已关闭', PRODUCING: '生产中', PAUSED: '已暂停', PLANNING: '规划中' } as Record<string, string>)[value] ?? '待确认'
-const runtimePoller = createVolumePlanningRuntimePoller({
+const runtimePollerOptions = {
   query: async () => {
     if (!currentVolume.value) throw new Error('当前没有可规划的卷。')
     const value = await store.loadVolumeDetail(currentVolume.value.id, true)
     if (!value) throw new Error('当前卷状态暂不可用。')
     return value
   },
-  onProjection: projection => { store.volumeDetail = projection },
-})
+  onProjection: (projection: VolumeDetailProjection) => { store.volumeDetail = projection },
+}
+const intentRuntimePoller = createVolumePlanningRuntimePoller(runtimePollerOptions)
+const planRuntimePoller = createVolumePlanningRuntimePoller(runtimePollerOptions)
 
 onMounted(() => {
   void (async () => {
     const loaded = await store.loadVolumes()
     const current = loaded?.items.find(volume => volume.status !== 'CLOSED') ?? loaded?.items[0]
     if (current) await store.loadVolumeDetail(current.id)
-    if (store.volumeDetail?.runtimeOperation?.active) runtimePoller.start()
+    if (store.volumeDetail?.runtimeOperation?.active) {
+      const poller = store.volumeDetail.runtimeOperation.kind === 'B03::VOLUME_PLAN' ? planRuntimePoller : intentRuntimePoller
+      poller.start()
+    }
   })()
 })
-onUnmounted(() => runtimePoller.stop())
+onUnmounted(() => { intentRuntimePoller.stop(); planRuntimePoller.stop() })
 
 function focusPlanningProgress() {
   document.querySelector<HTMLElement>('[data-volume-planning-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -52,17 +63,25 @@ async function build() {
     return
   }
   buildInFlight.value = true
-  runtimePoller.start({ waitForActive: true })
   try {
-    await store.runCommand('volume-build', { type: 'planning_create_volume_intent', payload: { volumeId: current.id } })
-    await store.runCommand('volume-build', { type: 'planning_create_volume_plan', payload: { volumeId: current.id } })
+    await executeVolumePlanningSequence({
+      startIntent: options => intentRuntimePoller.start(options),
+      stopIntent: () => intentRuntimePoller.stop(),
+      startPlan: options => planRuntimePoller.start(options),
+      stopPlan: () => planRuntimePoller.stop(),
+      runIntent: () => store.runCommand('volume-build', { type: 'planning_create_volume_intent', payload: { volumeId: current.id } }),
+      runPlan: () => store.runCommand('volume-build', { type: 'planning_create_volume_plan', payload: { volumeId: current.id } }),
+    })
     await store.loadVolumes(true)
     await store.loadVolumeDetail(current.id, true)
   } catch {
     // Store-owned feedback keeps the typed failure visible.
   } finally {
     buildInFlight.value = false
-    if (!store.volumeDetail?.runtimeOperation?.active) runtimePoller.stop()
+    if (!store.volumeDetail?.runtimeOperation?.active) {
+      intentRuntimePoller.stop()
+      planRuntimePoller.stop()
+    }
   }
 }
 </script>
@@ -75,7 +94,7 @@ async function build() {
     <CommandFeedback :state="state" />
 
     <section v-if="planningActive || runtimeOperation" class="card pad section" data-volume-planning-progress>
-      <div class="card-head"><div><h2 class="card-title">当前卷规划进度</h2><p class="card-subtitle">阶段来自后端持久化运行回执，页面只轮询投影。</p></div><span class="badge" :class="runtimeOperation?.active ? 'warning' : 'success'">{{ runtimeOperation?.active ? '正在建立当前卷目标' : '规划已完成' }}</span></div>
+      <div class="card-head"><div><h2 class="card-title">当前卷规划进度</h2><p class="card-subtitle">阶段来自后端持久化运行回执，页面只轮询投影。</p></div><span class="badge" :class="runtimeOperation?.active ? 'warning' : 'success'">{{ runtimeBadgeLabel }}</span></div>
       <div v-if="runtimeOperation" class="timeline">
         <div v-for="step in runtimeOperation.steps ?? []" :key="step.id" class="timeline-item">
           <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</div>

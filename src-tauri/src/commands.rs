@@ -4558,7 +4558,6 @@ fn execute_planning_command_with_observer(
         .pointer("/payload/plan")
         .cloned()
         .unwrap_or(Value::Null);
-    let supplied_plan = !payload.is_null();
     let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
     let mut b02_plan_job: Option<String> = None;
     let mut b03_volume_job: Option<(String, String)> = None;
@@ -4625,9 +4624,6 @@ fn execute_planning_command_with_observer(
         if book_plan.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED") {
             return Err("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".into());
         }
-        if !payload.is_null() {
-            crate::planning::validate_volume_intent(&payload)?;
-        }
         let project_revision =
             crate::repositories::narrative::NarrativeRepository::project_revision(
                 &handle, project_id,
@@ -4637,6 +4633,26 @@ fn execute_planning_command_with_observer(
             &handle, project_id, &scope_key, 100,
         )
         .map_err(|e| e.to_string())?;
+        let candidate_payload = if payload.is_null() {
+            crate::planning::compile_volume_intent_from_authority(
+                &scope_key,
+                metadata.volume_no,
+                metadata.chapter_start,
+                metadata.chapter_end,
+                metadata.target_words,
+                &book_plan_ref,
+                &book_plan,
+                &sources,
+                project_revision,
+            )?
+        } else {
+            payload.clone()
+        };
+        crate::planning::validate_volume_intent_binding(
+            &candidate_payload,
+            &book_plan_ref,
+            project_revision,
+        )?;
         let job_id = StableIdentityFactory::from_command(
             StableIdKind::Job,
             &format!("{command_id}:volume-intent"),
@@ -4670,6 +4686,7 @@ fn execute_planning_command_with_observer(
             requested_at,
             observer,
         )?;
+        payload = candidate_payload;
         notify_b03_volume_phase(
             &handle,
             project_id,
@@ -4678,19 +4695,6 @@ fn execute_planning_command_with_observer(
             requested_at,
             observer,
         )?;
-        if payload.is_null() {
-            payload = crate::planning::compile_volume_intent_from_authority(
-                &scope_key,
-                metadata.volume_no,
-                metadata.chapter_start,
-                metadata.chapter_end,
-                metadata.target_words,
-                &book_plan_ref,
-                &book_plan,
-                &sources,
-                project_revision,
-            )?;
-        }
         notify_b03_volume_phase(
             &handle,
             project_id,
@@ -4699,10 +4703,6 @@ fn execute_planning_command_with_observer(
             requested_at,
             observer,
         )?;
-        if !supplied_plan {
-            crate::planning::validate_volume_intent_semantics(&payload)
-                .map_err(|error| format!("VOLUME_INTENT_SEMANTIC:{error}"))?;
-        }
         notify_b03_volume_phase(
             &handle,
             project_id,
@@ -4938,42 +4938,34 @@ fn execute_planning_command_with_observer(
                 project_id,
                 "StoryConstitution",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED".to_string())?;
         let main_ref =
             crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
                 &handle,
                 project_id,
                 "MainContract",
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED".to_string())?;
         let book_ref =
             crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
                 &handle, project_id, "BookPlan",
             )
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
-        let story_payload = story_ref
-            .as_ref()
-            .map(|reference| {
-                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    &handle, project_id, reference,
-                )
-                .map_err(|e| e.to_string())
-            })
-            .transpose()?
-            .flatten()
-            .unwrap_or_else(|| json!({}));
-        let main_payload = main_ref
-            .as_ref()
-            .map(|reference| {
-                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    &handle, project_id, reference,
-                )
-                .map_err(|e| e.to_string())
-            })
-            .transpose()?
-            .flatten()
-            .unwrap_or_else(|| json!({}));
+        let story_payload =
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, &story_ref,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED".to_string())?;
+        let main_payload =
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, &main_ref,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED".to_string())?;
         let book_payload =
             crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
                 &handle, project_id, &book_ref,
@@ -4985,44 +4977,37 @@ fn execute_planning_command_with_observer(
                 &handle, project_id,
             )
             .map_err(|e| e.to_string())?;
-        let goal_contract = if !supplied_plan
-            || intent_payload.get("sourceBookPlanRef").is_some()
-            || intent_payload.get("compiledFromProjectRevision").is_some()
-        {
-            let story_ref = story_ref
-                .as_ref()
-                .ok_or_else(|| "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED".to_string())?;
-            let main_ref = main_ref
-                .as_ref()
-                .ok_or_else(|| "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED".to_string())?;
-            crate::planning::compile_goal_contract(
-                story_ref,
-                &story_payload,
-                main_ref,
-                &main_payload,
-                &book_ref,
-                &book_payload,
+        let goal_contract = crate::planning::compile_goal_contract(
+            &story_ref,
+            &story_payload,
+            &main_ref,
+            &main_payload,
+            &book_ref,
+            &book_payload,
+            &intent,
+            &intent_payload,
+        )?;
+        let candidate_payload = if payload.is_null() {
+            crate::planning::compile_volume_plan_from_authority(
                 &intent,
                 &intent_payload,
+                &goal_contract,
+                project_revision,
             )?
         } else {
-            // B07 callers may submit an already-shaped legacy route. Keep its
-            // schema/reference checks while avoiding a second synthetic
-            // authority; the B03 auto-compiled path above remains strict.
-            crate::planning::validate_volume_intent(&intent_payload)?;
-            json!({
-                "contractType":"GoalContractR1",
-                "hard":true,
-                "refs":{"storyConstitution":story_ref,"mainContract":main_ref,"bookPlan":book_ref,"volumeIntent":intent},
-                "storyConstitution":story_payload,
-                "mainContract":main_payload,
-                "bookPlan":book_payload,
-                "volumeIntent":intent_payload
-            })
-        };
-        if !payload.is_null() {
             crate::planning::validate_volume_route(&payload)?;
             crate::planning::validate_volume_route_reference(&payload, &intent)?;
+            crate::planning::normalize_volume_plan_candidate(
+                payload.clone(),
+                &intent,
+                &intent_payload,
+                &goal_contract,
+                project_revision,
+            )?
+        };
+        crate::planning::validate_volume_plan_semantics(&candidate_payload)?;
+        if !payload.is_null() {
+            crate::planning::validate_volume_route_reference(&candidate_payload, &intent)?;
         }
         let job_id = StableIdentityFactory::from_command(
             StableIdKind::Job,
@@ -5056,22 +5041,7 @@ fn execute_planning_command_with_observer(
         if let Some(phase) = plan_phases.next() {
             notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
         }
-        payload = if payload.is_null() {
-            crate::planning::compile_volume_plan_from_authority(
-                &intent,
-                &intent_payload,
-                &goal_contract,
-                project_revision,
-            )?
-        } else {
-            crate::planning::normalize_volume_plan_candidate(
-                payload,
-                &intent,
-                &intent_payload,
-                &goal_contract,
-                project_revision,
-            )?
-        };
+        payload = candidate_payload;
         if let Some(phase) = plan_phases.next() {
             notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
         }
@@ -5081,14 +5051,7 @@ fn execute_planning_command_with_observer(
         if let Some(phase) = plan_phases.next() {
             notify_b03_volume_phase(&handle, project_id, &job_id, phase, requested_at, observer)?;
         }
-        crate::planning::validate_volume_plan_semantics(&payload)?;
-        if let Some(reference) = story_ref {
-            book_plan_dependencies.push(reference);
-        }
-        if let Some(reference) = main_ref {
-            book_plan_dependencies.push(reference);
-        }
-        book_plan_dependencies.extend([book_ref, intent.clone()]);
+        book_plan_dependencies.extend([story_ref, main_ref, book_ref, intent.clone()]);
         b03_volume_job = Some((job_id, worker_id));
     }
     if artifact_type == "ChapterPlan" {

@@ -540,11 +540,14 @@ impl NarrativeRepository {
             rows
         };
         let responsibilities = {
+            let volume_scope = Self::volume_scope_key(volume_id)?;
             let mut statement = connection.prepare(
-                "SELECT obligation_id,obligation_type,scope,authority_level,lifecycle,description,must_resolve_before_chapter,prerequisites_json,source_event_id,resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND scope IN ('BOOK','VOLUME') AND lifecycle IN ('APPROVED','PLANTED','PROGRESSING') ORDER BY authority_level,obligation_id LIMIT ?2",
+                "SELECT o.obligation_id,o.obligation_type,o.scope,o.authority_level,o.lifecycle,o.description,o.must_resolve_before_chapter,o.prerequisites_json,o.source_event_id,o.resume_condition_json,o.source_artifact_id,o.source_version FROM narrative_obligations o WHERE o.project_id=?1 AND o.scope IN ('BOOK','VOLUME') AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.scope='BOOK' OR EXISTS (SELECT 1 FROM artifacts a WHERE a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version AND a.scope_level='VOLUME' AND a.scope_key IN (?3,?4))) ORDER BY o.authority_level,o.obligation_id LIMIT ?2",
             )?;
             let rows = statement
-                .query_map(libsql_rusqlite::params![project_id, bound], |row| {
+                .query_map(
+                    libsql_rusqlite::params![project_id, bound, volume_scope, volume_id],
+                    |row| {
                     let prerequisites: String = row.get(7)?;
                     let resume_condition: String = row.get(9)?;
                     Ok(json!({
@@ -558,8 +561,11 @@ impl NarrativeRepository {
                         "prerequisites": serde_json::from_str::<Value>(&prerequisites).unwrap_or_else(|_| json!([])),
                         "sourceEventId": row.get::<_, Option<String>>(8)?,
                         "resumeCondition": serde_json::from_str::<Value>(&resume_condition).unwrap_or_else(|_| json!({})),
+                        "sourceArtifactId": row.get::<_, String>(10)?,
+                        "sourceVersion": row.get::<_, i64>(11)?,
                     }))
-                })?
+                    }
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             rows
         };

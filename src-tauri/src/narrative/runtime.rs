@@ -333,6 +333,8 @@ pub struct ContextCompilerInput {
 }
 
 pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, String> {
+    let mut goal_contract_refs = input.goal_contract_refs.clone();
+    goal_contract_refs.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
     let mut facts = input.state.facts.clone();
     facts.sort_by(|a, b| a.fact_id.cmp(&b.fact_id));
     let mut relations = input.state.relations.clone();
@@ -345,7 +347,7 @@ pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, Str
     threads.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     let mut task_refs = input.active_task_refs.clone();
     task_refs.sort();
-    sha256_canonical(&json!({"facts":facts,"relations":relations,"knowledge":knowledge,"events":events,"threads":threads,"activeTaskRefs":task_refs,"goalContractRefs":input.goal_contract_refs,"futureReservationRefs":input.future_reservation_refs})).map_err(|error| error.to_string())
+    sha256_canonical(&json!({"facts":facts,"relations":relations,"knowledge":knowledge,"events":events,"threads":threads,"activeTaskRefs":task_refs,"goalContractRefs":goal_contract_refs,"futureReservationRefs":input.future_reservation_refs})).map_err(|error| error.to_string())
 }
 
 pub fn compile_context_manifest(

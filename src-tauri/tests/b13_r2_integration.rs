@@ -227,7 +227,7 @@ fn b13_r2_formal_owner_path_rebuilds_projection_without_compatibility_fields() {
         .unwrap();
     let book_scope = json!({"level":"PROJECT"}).to_string();
     let book_plan = json!({"planningMaturity":"APPROVED"});
-    let _book_plan_hash = insert_committed_artifact(
+    let book_plan_hash = insert_committed_artifact(
         &connection,
         &project_id,
         "book-plan:b13:r2:owner",
@@ -236,19 +236,41 @@ fn b13_r2_formal_owner_path_rebuilds_projection_without_compatibility_fields() {
         &book_scope,
         &book_plan,
     );
+    insert_committed_artifact(
+        &connection,
+        &project_id,
+        "story-constitution:b13:r2:owner",
+        "StoryConstitution",
+        "PROJECT",
+        &book_scope,
+        &json!({"storyCore":{"protagonist":"Owner"}}),
+    );
+    insert_committed_artifact(
+        &connection,
+        &project_id,
+        "main-contract:b13:r2:owner",
+        "MainContract",
+        "PROJECT",
+        &book_scope,
+        &json!({"hardRules":["keep evidence"]}),
+    );
     drop(connection);
 
     let intent = json!({
         "payloadSchema":"volume-intent.r1",
         "volumeFunction":"Owner 正式规划",
         "entryConditions":[],
-        "mustAchieve":[],
-        "mustNotBreak":[],
-        "requiredExitConditions":[],
+        "mustAchieve":[{"id":"goal:b13:r2:owner","description":"完成 Owner 证据任务"}],
+        "mustNotBreak":[{"id":"rule:b13:r2:owner","description":"不得改变当前事实"}],
+        "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b13:r2:owner"}],
         "futureReservationRefs":[],
         "crossVolumeResponsibilityRefs":[],
         "targetChapterRange":{"min":1,"preferred":1,"max":1},
-        "targetWordRange":{"preferred":1000}
+        "targetWordRange":{"preferred":1000},
+        "sourceBookPlanRef":{"artifactId":"book-plan:b13:r2:owner","version":1,"payloadHash":book_plan_hash},
+        "compiledFromProjectRevision":0,
+        "sourceEvidenceRefs":["evidence:b13:r2:owner"],
+        "semanticDigest":"0".repeat(64)
     });
     let intent_result = execute_command_impl(
         &state,
@@ -269,7 +291,7 @@ fn b13_r2_formal_owner_path_rebuilds_projection_without_compatibility_fields() {
         "payloadSchema":"volume-plan.r1",
         "volumeIntentRef":intent_ref,
         "routeVersion":1,
-        "tasks":[{"taskId":"task:b13:r2:owner:required","class":"REQUIRED","objective":"Owner 必需任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:b13:r2:owner:required"},"estimatedChapterCost":{"preferred":1}}],
+        "tasks":[{"taskId":"task:b13:r2:owner:required","class":"REQUIRED","objective":"Owner 必需任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":"task:b13:r2:owner:required","evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}},"estimatedChapterCost":{"preferred":1}}],
         "routeInvariants":[],
         "requiredExitConditions":[],
         "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
