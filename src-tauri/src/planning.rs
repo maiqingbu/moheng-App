@@ -93,6 +93,7 @@ pub fn normalize_chapter_plan_model_output(
                             .or_else(|| object.get("stateKey"))
                             .or_else(|| object.get("outcomeId"))
                             .or_else(|| object.get("transitionId"))
+                            .or_else(|| object.get("type"))
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|value| !value.is_empty())?;
