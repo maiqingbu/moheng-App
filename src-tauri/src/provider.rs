@@ -513,6 +513,12 @@ mod tests {
     }
 
     #[test]
+    fn planner_prompt_forbids_unknown_top_level_fields() {
+        let prompt = OpenAiCompatibleProvider::structured_prompt("PLAN_STRATEGY");
+        assert!(prompt.contains("No other top-level keys are allowed"));
+    }
+
+    #[test]
     fn renderer_prompt_requires_bounded_complete_chapter_json() {
         let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
         assert!(prompt.contains("body must not exceed targetChineseCharacters"));
