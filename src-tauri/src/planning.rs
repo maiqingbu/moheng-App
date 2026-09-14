@@ -2290,6 +2290,32 @@ mod tests {
     }
 
     #[test]
+    fn model_plan_normalization_strips_contract_extras() {
+        let normalized = normalize_chapter_plan_model_output(
+            json!({
+                "chapterGoal":"推进",
+                "activeTaskRefs":[],
+                "continuityActions":[],
+                "requiredStateOutcomes":[],
+                "forbiddenTransitions":[],
+                "knowledgeBoundaries":[],
+                "reservationRefs":[],
+                "sceneExecution":[],
+                "horizonPreview":[],
+                "from":"hallucinated"
+            }),
+            &[],
+            &json!({
+                "chapterId":"chapter:bound",
+                "compiledFromProjectRevision":7,
+                "compiledFromStateDigest":"a".repeat(64),
+                "contextManifestRef":{"artifactId":"context:bound","version":1,"payloadHash":"b".repeat(64)}
+            }),
+        );
+        assert!(normalized.get("from").is_none());
+    }
+
+    #[test]
     fn model_plan_normalization_repairs_only_typed_container_shapes() {
         let plan = json!({
             "requiredStateOutcomes":["完成首次委托"],
