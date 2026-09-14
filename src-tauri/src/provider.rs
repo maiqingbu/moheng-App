@@ -493,6 +493,19 @@ mod tests {
     }
 
     #[test]
+    fn audit_prompt_binds_authority_fields_and_exact_evidence_ranges() {
+        let prompt = OpenAiCompatibleProvider::structured_prompt("AUDIT_EXTRACT");
+        for field in [
+            "factId", "subjectId", "entityId", "predicate", "objectJson",
+            "authorityLevel", "knowledgeId", "knowerId", "threadRef", "taskId",
+            "start", "end", "quote",
+        ] {
+            assert!(prompt.contains(field), "audit prompt must specify {field}");
+        }
+        assert!(prompt.contains("Do not invent authority refs"));
+    }
+
+    #[test]
     fn xiaomi_headers_use_the_documented_api_key_authentication() {
         let headers = OpenAiCompatibleProvider::request_headers(
             "https://api.xiaomimimo.com/v1",
