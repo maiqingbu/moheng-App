@@ -503,6 +503,8 @@ mod tests {
             assert!(prompt.contains(field), "audit prompt must specify {field}");
         }
         assert!(prompt.contains("do not invent authority refs"));
+        assert!(prompt.contains("If activeTaskRefs is empty, taskProgressCandidates must be []"));
+        assert!(prompt.contains("knowledge factId must match a canonCandidates factId"));
     }
 
     #[test]
