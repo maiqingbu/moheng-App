@@ -50,6 +50,33 @@ pub fn normalize_chapter_plan_model_output(
             plan[field] = value.clone();
         }
     }
+    if let Some(items) = plan
+        .get_mut("knowledgeBoundaries")
+        .and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if item.is_string() {
+                continue;
+            }
+            if let Some(object) = item.as_object() {
+                let mut parts = Vec::new();
+                for key in ["entityId", "factId", "state", "constraint", "description"] {
+                    if let Some(value) = object.get(key).and_then(Value::as_str) {
+                        if !value.trim().is_empty() {
+                            parts.push(format!("{key}={value}"));
+                        }
+                    }
+                }
+                *item = Value::String(if parts.is_empty() {
+                    Value::Object(object.clone()).to_string()
+                } else {
+                    parts.join(" · ")
+                });
+            } else {
+                *item = Value::String(item.to_string());
+            }
+        }
+    }
     for field in ["requiredStateOutcomes", "forbiddenTransitions"] {
         if let Some(items) = plan.get_mut(field).and_then(Value::as_array_mut) {
             for item in items {
@@ -2396,6 +2423,13 @@ mod tests {
             &[],
             &bindings,
         );
+        let typed = normalize_chapter_plan_model_output(
+            json!({"requiredStateOutcomes":[{"type":"FACT_VERIFICATION","description":"必须有新证据"}]}),
+            &[],
+            &bindings,
+        );
+        assert_eq!(typed["requiredStateOutcomes"][0]["kind"], "FACT_VERIFICATION");
+        assert_eq!(typed["requiredStateOutcomes"][0]["value"], "必须有新证据");
         assert_eq!(
             aliased["requiredStateOutcomes"][0],
             json!({"kind":"case.status","value":"DONE"})
