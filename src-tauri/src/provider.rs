@@ -505,6 +505,7 @@ mod tests {
         assert!(prompt.contains("do not invent authority refs"));
         assert!(prompt.contains("If activeTaskRefs is empty, taskProgressCandidates must be []"));
         assert!(prompt.contains("knowledge factId must match a canonCandidates factId"));
+        assert!(prompt.contains("MUST output [] when the corresponding input list is empty"));
     }
 
     #[test]
