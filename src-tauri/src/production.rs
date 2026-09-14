@@ -1594,7 +1594,7 @@ pub fn run_chapter_production(
         .parsed
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
     let audit_payload = normalize_audit_model_output(audit_payload, &effective_body);
-    let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
+    let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_CONTRACT:{error}"))?;
     validate_actual_extraction(
         connection,
@@ -1602,7 +1602,7 @@ pub fn run_chapter_production(
         &chapter_id,
         &effective_body,
         &plan_payload,
-        &extraction,
+        &mut extraction,
     )?;
     let mut audit = artifact(
         &project_id,
@@ -2113,7 +2113,7 @@ fn validate_actual_extraction(
     chapter_id: &str,
     body: &str,
     plan: &Value,
-    audit: &AuditExtraction,
+    audit: &mut AuditExtraction,
 ) -> Result<(), String> {
     for evidence in &audit.evidence_ranges {
         exact_quote(body, evidence)?;
@@ -2236,7 +2236,9 @@ fn validate_actual_extraction(
         .iter()
         .map(|item| item.fact_id.clone())
         .collect::<BTreeSet<_>>();
-    for candidate in &audit.knowledge_candidates {
+    let knowledge_candidates = std::mem::take(&mut audit.knowledge_candidates);
+    let mut bound_knowledge_candidates = Vec::new();
+    for candidate in knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
         let knower_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
@@ -2259,7 +2261,7 @@ fn validate_actual_extraction(
             &pending_entities,
             &pending_facts,
         ) {
-            return Err("B08_KNOWLEDGE_AUTHORITY_NOT_FOUND".into());
+            continue;
         }
         let fact_time = audit
             .canon_candidates
@@ -2270,7 +2272,9 @@ fn validate_actual_extraction(
         {
             return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
         }
+        bound_knowledge_candidates.push(candidate);
     }
+    audit.knowledge_candidates = bound_knowledge_candidates;
     Ok(())
 }
 
@@ -2377,5 +2381,40 @@ mod tests {
             normalized["normalization"]["policy"],
             "DROP_UNBOUND_AUTHORITY_CANDIDATES"
         );
+    }
+
+    #[test]
+    fn production_model_input_carries_bounded_authority_context() {
+        let input = crate::narrative::ContextCompilerInput {
+            execution_mode: "LONG_FORM".into(),
+            project_revision: 7,
+            goal_contract_refs: Vec::new(),
+            state: crate::narrative::CurrentNarrativeStateView::from_records(
+                crate::narrative::RuntimeBounds {
+                    project_id: "project".into(),
+                    entity_ids: Vec::new(),
+                    volume_id: Some("volume".into()),
+                    chapter_id: Some("chapter".into()),
+                    limit: 100,
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            ),
+            continuity_threads: Vec::new(),
+            active_task_refs: vec!["task:current".into()],
+            future_reservation_refs: Vec::new(),
+            selected_evidence: Vec::new(),
+            omitted_soft_sources: Vec::new(),
+            hard_tokens: 1024,
+            soft_tokens: 0,
+        };
+        let payload = authority_context_payload(&input).expect("authority context serializes");
+        assert_eq!(payload["projectRevision"], 7);
+        assert_eq!(payload["activeTaskRefs"][0], "task:current");
+        assert!(payload.get("state").is_some());
     }
 }
