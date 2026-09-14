@@ -507,6 +507,7 @@ mod tests {
         assert!(prompt.contains("knowledge factId must match a canonCandidates factId"));
         assert!(prompt.contains("MUST output [] when the corresponding input list is empty"));
         assert!(prompt.contains("epistemicState must be one of KNOWS|BELIEVES_TRUE|BELIEVES_FALSE|SUSPECTS|CONCEALS|UNKNOWN"));
+        assert!(prompt.contains("For every new canon candidate, entityId MUST equal subjectId"));
     }
 
     #[test]
