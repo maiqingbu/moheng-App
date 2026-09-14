@@ -78,8 +78,8 @@ onMounted(() => { void store.loadVolumeDetail(volumeId.value); void store.loadPl
     <section v-if="runtimeOperation" class="card pad section" data-volume-planning-progress>
       <div class="card-head"><div><h2 class="card-title">卷规划运行进度</h2><p class="card-subtitle">后端持久化阶段：{{ runtimeOperation.phase }}</p></div><span class="badge" :class="runtimeOperation.active ? 'warning' : 'success'">{{ runtimeOperation.active ? runtimeOperationLabel : statusLabel(runtimeOperation.status) }}</span></div>
       <div class="timeline">
-        <div v-for="step in planningSteps" :key="step.id" class="timeline-item">
-          <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : '·' }}</div>
+        <div v-for="step in planningSteps" :key="step.id" class="timeline-item" :class="step.status">
+          <div class="timeline-marker">{{ step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : step.status === 'active' ? '…' : '·' }}</div>
           <div><strong>{{ step.label }}</strong><div class="muted" style="font-size:12px">{{ step.status === 'active' ? '正在处理' : step.status === 'done' ? '已完成' : step.status === 'failed' ? '处理失败' : '等待处理' }}</div></div>
         </div>
       </div>
