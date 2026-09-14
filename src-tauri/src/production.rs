@@ -695,6 +695,12 @@ fn authority_request(
     })
 }
 
+fn authority_context_payload(
+    input: &crate::narrative::ContextCompilerInput,
+) -> Result<Value, String> {
+    serde_json::to_value(input).map_err(|error| format!("B06_CONTEXT_SERIALIZATION:{error}"))
+}
+
 fn current_authority_digest(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
@@ -1037,7 +1043,7 @@ pub fn run_chapter_production(
         &format!("{command_id}:audit"),
     )?;
 
-    let (context_ref, context_payload, plan_ref, plan_payload) = if execution_mode
+    let (context_ref, context_payload, plan_ref, plan_payload, authority_context) = if execution_mode
         == "OPENING_BOOTSTRAP"
     {
         let bootstrap_command_id = format!("{command_id}:bootstrap");
@@ -1053,6 +1059,7 @@ pub fn run_chapter_production(
             &project_id,
             current_revision,
         )?;
+        let authority_context = authority_context_payload(&compiler_input)?;
         let manifest = crate::narrative::compile_context_manifest(compiler_input.clone())?;
         let context_payload = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
         let mut context = artifact(
@@ -1109,6 +1116,7 @@ pub fn run_chapter_production(
             "compiledFromProjectRevision":current_revision + 1,
             "compiledFromStateDigest":manifest.compiled_from_state_digest,
             "contextManifestRef":context_ref,
+            "authorityContext":authority_context.clone(),
             "activeTaskRefs":compiler_input.active_task_refs,
             "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
             "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
@@ -1174,7 +1182,7 @@ pub fn run_chapter_production(
             .cloned()
             .ok_or_else(|| "B08_PLANNING_OWNER_NO_RECEIPT".to_string())?;
         current_revision = planning_receipt.after_revision;
-        (context_ref, context_payload, plan_ref, plan_payload)
+        (context_ref, context_payload, plan_ref, plan_payload, authority_context)
     } else {
         let plan_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
             connection,
@@ -1193,7 +1201,20 @@ pub fn run_chapter_production(
         )
         .map_err(|e| format!("B08_PLAN_CONTEXT_REF_INVALID:{e}"))?;
         let context_payload = load_artifact_payload(connection, &project_id, &context_ref)?;
-        (context_ref, context_payload, plan_ref, plan_payload)
+        let authority_input = crate::commands::context_input_from_authority(
+            connection,
+            &authority_request(
+                request,
+                &project_id,
+                &chapter_id,
+                &volume_id,
+                execution_mode,
+            ),
+            &project_id,
+            current_revision,
+        )?;
+        let authority_context = authority_context_payload(&authority_input)?;
+        (context_ref, context_payload, plan_ref, plan_payload, authority_context)
     };
     if let Err(error) = validate_plan_is_current(
         connection,
@@ -1310,7 +1331,7 @@ pub fn run_chapter_production(
         .and_then(Value::as_i64)
         .unwrap_or(1_800)
         .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"targetChineseCharacters":target_chinese_characters});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"targetChineseCharacters":target_chinese_characters});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
@@ -1587,7 +1608,7 @@ pub fn run_chapter_production(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result

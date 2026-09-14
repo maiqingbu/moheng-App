@@ -509,6 +509,7 @@ mod tests {
         assert!(prompt.contains("epistemicState must be one of KNOWS|BELIEVES_TRUE|BELIEVES_FALSE|SUSPECTS|CONCEALS|UNKNOWN"));
         assert!(prompt.contains("For every new canon candidate, entityId MUST equal subjectId"));
         assert!(prompt.contains("knowerId MUST exactly match an existing or canonCandidates entityId"));
+        assert!(prompt.contains("authorityContext is the source of truth"));
     }
 
     #[test]
@@ -516,6 +517,7 @@ mod tests {
         let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
         assert!(prompt.contains("body must not exceed targetChineseCharacters"));
         assert!(prompt.contains("complete Chinese chapter prose"));
+        assert!(prompt.contains("authorityContext is the source of truth"));
     }
 
     #[test]
