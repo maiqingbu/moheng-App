@@ -42,9 +42,10 @@ const operation = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-const mountWorkspace = (frames: Array<Record<string, unknown>>) => {
+const mountWorkspace = (frames: Array<Record<string, unknown>>, options: { deferInitial?: boolean } = {}) => {
   const queried: Array<Record<string, unknown>> = []
   let pollIndex = 1
+  let releaseInitial: ((value: Record<string, unknown>) => void) | undefined
   const store = reactive({
     currentProjectId: 'project-r4',
     volumeDetail: null as any,
@@ -56,6 +57,9 @@ const mountWorkspace = (frames: Array<Record<string, unknown>>) => {
     loadPlanningRoute: vi.fn(async () => null),
     loadVolumeLifecycle: vi.fn(async () => null),
     loadVolumeDetail: vi.fn(async (_volumeId: string, force = false) => {
+      if (!force && options.deferInitial) {
+        return await new Promise<Record<string, unknown>>(resolve => { releaseInitial = resolve })
+      }
       const next = frames[force ? Math.min(pollIndex++, frames.length - 1) : 0]
       queried.push(next)
       store.volumeDetail = next
@@ -67,7 +71,7 @@ const mountWorkspace = (frames: Array<Record<string, unknown>>) => {
   document.body.appendChild(container)
   const app = createApp(VolumeWorkspace)
   app.mount(container)
-  return { app, container, store, queried }
+  return { app, container, store, queried, releaseInitial: (value: Record<string, unknown>) => releaseInitial?.(value) }
 }
 
 const advancePoll = async () => {
@@ -171,5 +175,18 @@ describe('B03-R4 VolumeWorkspace runtime synchronization', () => {
     expect(vi.getTimerCount()).toBe(0)
     await advancePoll()
     expect(mounted.store.loadVolumeDetail).toHaveBeenCalledTimes(queryCount)
+  })
+
+  it('does not start a poller when the initial query resolves after unmount', async () => {
+    const mounted = mountWorkspace([projection(operation())], { deferInitial: true })
+    await settle()
+    expect(mounted.store.loadVolumeDetail).toHaveBeenCalledWith('volume-r4')
+
+    mounted.app.unmount()
+    mounted.releaseInitial(projection(operation()))
+    await settle()
+
+    expect(mounted.store.loadVolumeDetail).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
