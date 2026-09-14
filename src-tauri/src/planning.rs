@@ -2366,6 +2366,17 @@ mod tests {
         assert_eq!(normalized["horizonPreview"][0]["slotNo"], 1);
         assert_eq!(normalized["horizonPreview"][0]["tentative"], true);
 
+        let knowledge_boundary = normalize_chapter_plan_model_output(
+            json!({"knowledgeBoundaries":[{"entityId":"entity:hero","factId":"fact:secret","state":"BELIEVES_TRUE","constraint":"不得越权知晓"}]}),
+            &[],
+            &bindings,
+        );
+        assert!(knowledge_boundary["knowledgeBoundaries"][0].is_string());
+        assert!(knowledge_boundary["knowledgeBoundaries"][0]
+            .as_str()
+            .unwrap()
+            .contains("fact:secret"));
+
         let with_required_thread = normalize_chapter_plan_model_output(
             json!({"continuityActions":["不能推断对应线程"]}),
             &["thread:required".into()],
