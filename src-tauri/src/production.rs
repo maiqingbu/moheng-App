@@ -1726,7 +1726,7 @@ pub fn run_chapter_production(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":execution_mode == "LONG_FORM","candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -1743,6 +1743,14 @@ pub fn run_chapter_production(
         &plan_payload,
         &mut extraction,
     )?;
+    if execution_mode == "LONG_FORM"
+        && extraction.canon_candidates.is_empty()
+        && extraction.knowledge_candidates.is_empty()
+        && extraction.continuity_candidates.is_empty()
+        && extraction.task_progress_candidates.is_empty()
+    {
+        return Err("B08_REALITY_DELTA_REQUIRED".into());
+    }
     let mut audit = artifact(
         &project_id,
         audit_id,
