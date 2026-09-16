@@ -546,6 +546,35 @@ fn recover_truncated_audit_payload(value: &Value) -> Option<Value> {
     Some(payload)
 }
 
+fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
+    let normalized = quote.replace("……", "...").replace('…', "...");
+    let segments = normalized
+        .split("...")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let mut first = None;
+    let mut last = None;
+    for segment in segments {
+        let byte_start = body.get(cursor..)?.find(segment)? + cursor;
+        let byte_end = byte_start + segment.len();
+        if let Some(previous_end) = last {
+            if body[previous_end..byte_start].chars().count() > 512 {
+                return None;
+            }
+        } else {
+            first = Some(body[..byte_start].chars().count());
+        }
+        last = Some(byte_end);
+        cursor = byte_end;
+    }
+    Some((first?, body[..last?].chars().count()))
+}
+
 fn parse_provider_model_payload_for_capability(
     value: Value,
     capability: &str,
@@ -2163,12 +2192,24 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             .get("quote")
             .and_then(Value::as_str)
             .filter(|quote| !quote.is_empty())?;
-        let byte_start = body.find(quote)?;
-        let char_start = body[..byte_start].chars().count();
+        if let Some(byte_start) = body.find(quote) {
+            let char_start = body[..byte_start].chars().count();
+            return Some(json!({
+                "start":char_start,
+                "end":char_start + quote.chars().count(),
+                "quote":quote
+            }));
+        }
+        let (char_start, char_end) = ellipsis_quote_span(body, quote)?;
+        let actual_quote = body
+            .chars()
+            .skip(char_start)
+            .take(char_end - char_start)
+            .collect::<String>();
         Some(json!({
             "start":char_start,
-            "end":char_start + quote.chars().count(),
-            "quote":quote
+            "end":char_end,
+            "quote":actual_quote
         }))
     };
     let candidate_requirements = [
@@ -2590,6 +2631,40 @@ mod tests {
             normalized["canonCandidates"][0]["evidence"]["quote"],
             "关键证据"
         );
+    }
+
+    #[test]
+    fn audit_normalization_rebinds_ellipsis_quote_only_when_segments_are_present() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates": [{
+                    "factId":"fact:ellipsis",
+                    "subjectId":"entity:ellipsis",
+                    "predicate":"OBSERVED",
+                    "objectJson":{},
+                    "authorityLevel":"C",
+                    "evidence":{"start":800,"end":900,"quote":"第一处证据...第二处证据"}
+                }]
+            }),
+            "前文。第一处证据，中间过程。第二处证据。后文。",
+        );
+        assert_eq!(normalized["canonCandidates"].as_array().unwrap().len(), 1);
+        let evidence = &normalized["canonCandidates"][0]["evidence"];
+        assert_eq!(evidence["quote"], "第一处证据，中间过程。第二处证据");
+        let missing = normalize_audit_model_output(
+            json!({
+                "canonCandidates": [{
+                    "factId":"fact:missing",
+                    "subjectId":"entity:missing",
+                    "predicate":"OBSERVED",
+                    "objectJson":{},
+                    "authorityLevel":"C",
+                    "evidence":{"start":800,"end":900,"quote":"第一处证据...不存在"}
+                }]
+            }),
+            "前文。第一处证据，中间过程。第二处证据。后文。",
+        );
+        assert_eq!(missing["canonCandidates"], json!([]));
     }
 
     #[test]
