@@ -814,7 +814,25 @@ impl ProjectManager {
                 )
                 .optional()
                 .map_err(ManagerError::Sqlite)?;
-            Ok(LibraryProjection { revision, runtime })
+            let actual: (i64, i64, i64) = connection
+                .query_row(
+                    "SELECT COALESCE(SUM(CASE WHEN status='COMMITTED' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status='COMMITTED' THEN word_count ELSE 0 END),0), COALESCE((SELECT SUM(target_words) FROM volumes WHERE project_id=?1),0) FROM chapters WHERE project_id=?1",
+                    [project_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(ManagerError::Sqlite)?;
+            let mut runtime = runtime.unwrap_or_default();
+            runtime.committed_chapters = actual.0;
+            runtime.total_words = actual.1;
+            runtime.progress = if actual.2 > 0 {
+                (actual.1 as f64 / actual.2 as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            Ok(LibraryProjection {
+                revision,
+                runtime: Some(runtime),
+            })
         })
     }
 

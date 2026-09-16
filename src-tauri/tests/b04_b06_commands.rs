@@ -5,7 +5,9 @@
 //! that the planning command has one model boundary after the deterministic
 //! ContextManifest compiler.
 
-use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_project_overview_impl, KernelState,
+};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse,
@@ -228,4 +230,20 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
         .unwrap();
     let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ContextManifest'", ["p-b04-b06-plan"], |row| row.get(0)).unwrap();
     assert_eq!(source_count, 1);
+}
+
+#[test]
+fn b04_b06_overview_rebuilds_chapter_counts_from_authoritative_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("p-b04-b06-overview", "B04/B06 overview", NOW)
+        .unwrap();
+    let (_volume_id, _chapter_id) = seed_authority(&connection, "p-b04-b06-overview");
+    drop(connection);
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let overview =
+        query_project_overview_impl(&state, json!({"projectId":"p-b04-b06-overview"})).unwrap();
+    assert_eq!(overview["project"]["committedChapters"], 1);
+    assert_eq!(overview["recentChapters"].as_array().unwrap().len(), 1);
 }

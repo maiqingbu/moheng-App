@@ -84,6 +84,21 @@ impl ProductionRepository {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .unwrap_or_else(|_| ("IDLE".into(), 0, 0, 0, "NOT_STARTED".into(), "SETUP".into()));
+        let actual_committed: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND status='COMMITTED'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(runtime.1);
+        let runtime = (
+            runtime.0,
+            actual_committed,
+            runtime.2,
+            runtime.3,
+            runtime.4,
+            runtime.5,
+        );
         let opening_progress =
             crate::repositories::project_entry::opening_progress(connection, project_id)
                 .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
