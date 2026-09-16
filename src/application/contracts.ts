@@ -776,6 +776,7 @@ export type CommandType =
   | 'book_plan_revise'
   | 'planning_create_volume_intent'
   | 'planning_create_volume_plan'
+  | 'planning_prepare_next_chapter'
   | 'planning_compile_chapter_plan'
   | 'production_start'
   | 'production_pause'

@@ -2429,7 +2429,10 @@ mod tests {
             &[],
             &bindings,
         );
-        assert_eq!(typed["requiredStateOutcomes"][0]["kind"], "FACT_VERIFICATION");
+        assert_eq!(
+            typed["requiredStateOutcomes"][0]["kind"],
+            "FACT_VERIFICATION"
+        );
         assert_eq!(typed["requiredStateOutcomes"][0]["value"], "必须有新证据");
         assert_eq!(
             aliased["requiredStateOutcomes"][0],

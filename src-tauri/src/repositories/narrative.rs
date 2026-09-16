@@ -18,6 +18,8 @@ pub enum NarrativeRepositoryError {
     Json(#[from] serde_json::Error),
     #[error("continuity projection: {0}")]
     ContinuityProjection(String),
+    #[error("narrative invariant: {0}")]
+    Invariant(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -622,6 +624,49 @@ impl NarrativeRepository {
         let truncated = records.len() as i64 > bound;
         records.truncate(bound as usize);
         Ok((records, truncated))
+    }
+
+    /// Returns the bounded entity set needed to continue from the most recent
+    /// committed chapters in a volume.  LONG_FORM callers may omit an
+    /// explicit entity selection, but they must still receive real scoped
+    /// authority instead of an empty context.
+    pub fn recent_chapter_entity_ids(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_id: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
+        let chapter_ids = Self::ids_json(
+            &Self::previous_committed_chapter_ids(connection, project_id, chapter_id, 2)?
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT entity_id FROM (SELECT subject_id AS entity_id FROM canon_facts WHERE project_id=?1 AND (source_chapter_id IN (SELECT value FROM json_each(?2)) OR valid_from_chapter_id IN (SELECT value FROM json_each(?2))) UNION SELECT subject_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT object_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT knower_id AS entity_id FROM canon_knowledge WHERE project_id=?1 AND from_chapter_id IN (SELECT value FROM json_each(?2))) WHERE entity_id IS NOT NULL ORDER BY entity_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, chapter_ids, bound],
+            |row| row.get(0),
+        )?;
+        let ids = rows.collect::<Result<Vec<_>, _>>()?;
+        // The volume argument is part of the authority boundary: a chapter
+        // from another volume must never widen the continuation context.
+        if ids.is_empty() {
+            let chapter_exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_id=?3)",
+                libsql_rusqlite::params![project_id, volume_id, chapter_id],
+                |row| row.get(0),
+            )?;
+            if !chapter_exists {
+                return Err(NarrativeRepositoryError::Invariant(
+                    "CHAPTER_VOLUME_MISMATCH".into(),
+                ));
+            }
+        }
+        Ok(ids)
     }
 
     /// Returns only already committed chapters immediately preceding the
@@ -1695,6 +1740,73 @@ impl NarrativeRepository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn next_chapter_number(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<i64>, NarrativeRepositoryError> {
+        let (chapter_start, chapter_end): (i64, i64) = connection
+            .query_row(
+                "SELECT chapter_start,chapter_end FROM volumes WHERE project_id=?1 AND volume_id=?2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| NarrativeRepositoryError::Invariant("VOLUME_NOT_FOUND".into()))?;
+        let max_chapter: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(chapter_no),?3-1) FROM chapters WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id, chapter_start],
+            |row| row.get(0),
+        )?;
+        let next = max_chapter.max(chapter_start - 1) + 1;
+        Ok((next <= chapter_end).then_some(next))
+    }
+
+    pub fn ensure_planned_chapter(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_id: &str,
+        chapter_no: i64,
+        title: &str,
+        budget_id: &str,
+        now: &str,
+    ) -> Result<(), NarrativeRepositoryError> {
+        let valid: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM volumes WHERE project_id=?1 AND volume_id=?2 AND chapter_start<=?3 AND chapter_end>=?3)",
+            libsql_rusqlite::params![project_id, volume_id, chapter_no],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            return Err(NarrativeRepositoryError::Invariant(
+                "CHAPTER_NUMBER_OUTSIDE_VOLUME".into(),
+            ));
+        }
+        connection.execute(
+            "INSERT OR IGNORE INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','PLANNED',0,?6,?6)",
+            libsql_rusqlite::params![chapter_id, project_id, volume_id, chapter_no, title, now],
+        )?;
+        let actual: Option<(String, i64)> = connection
+            .query_row(
+                "SELECT chapter_id,chapter_no FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=?3",
+                libsql_rusqlite::params![project_id, volume_id, chapter_no],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if actual.as_ref().map(|row| row.0.as_str()) != Some(chapter_id)
+            || actual.as_ref().map(|row| row.1) != Some(chapter_no)
+        {
+            return Err(NarrativeRepositoryError::Invariant(
+                "CHAPTER_NUMBER_ALREADY_BOUND".into(),
+            ));
+        }
+        connection.execute(
+            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',12,500,?4)",
+            libsql_rusqlite::params![budget_id, project_id, chapter_id, now],
+        )?;
+        Ok(())
     }
 
     pub fn chapter_number(

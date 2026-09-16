@@ -8,6 +8,7 @@ use crate::repositories::narrative::{
     CanonEventRecord, CanonFactRecord, EvidenceRecord, ForeshadowRecord, KnowledgeRecord,
     MysteryRecord, ObligationRecord, RelationRecord, TaskStateRecord,
 };
+use libsql_rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -460,6 +461,79 @@ pub fn commit_opening_context_owner(
         "createdAt":now,
         "artifacts":[artifact],
         "receiptDraft":{"domain":"B06_OPENING_CONTEXT","artifactRefs":[reference.clone()],"payload":{"owner":"B06::ContextCompilerOwner","executionMode":"OPENING_BOOTSTRAP","compiledFromStateDigest":context.compiled_from_state_digest}}
+    }))
+    .map_err(|error| format!("B06_CONTEXT_BUNDLE_INVALID:{error}"))?;
+    let receipt =
+        CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())?;
+    Ok((receipt, reference))
+}
+
+/// B06 context owner for an ordinary LONG_FORM chapter. The compiler reads
+/// the same bounded authority input as the opening path, but the caller may
+/// select the execution mode explicitly. Persistence still goes through the
+/// existing ContextManifest artifact and CommitService boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_context_manifest_owner(
+    connection: &Connection,
+    project_id: &str,
+    authority_request: &Value,
+    expected_revision: i64,
+    command_id: &str,
+    idempotency_key: &str,
+    execution_mode: &str,
+    now: &str,
+) -> Result<(CommitReceipt, ArtifactRef), String> {
+    if !matches!(execution_mode, "OPENING_BOOTSTRAP" | "LONG_FORM") {
+        return Err("B06_CONTEXT_MODE_REQUIRED".into());
+    }
+    let mut authority = authority_request.clone();
+    authority["executionMode"] = json!(execution_mode);
+    let input = crate::commands::context_input_from_authority(
+        connection,
+        &authority,
+        project_id,
+        expected_revision,
+    )?;
+    let context = compile_context_manifest(input)?;
+    let payload = serde_json::to_value(&context).map_err(|error| error.to_string())?;
+    let payload_hash =
+        crate::hash::sha256_canonical(&payload).map_err(|error| error.to_string())?;
+    let chapter_id = authority
+        .get("chapterId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "B06_CHAPTER_REQUIRED".to_string())?;
+    let artifact_id = format!("context:{project_id}:{command_id}");
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,
+        "projectId":project_id,
+        "artifactType":"ContextManifest",
+        "scope":{"level":"CHAPTER","chapterId":chapter_id},
+        "version":1,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"APPROVED_PLAN",
+        "payload":payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":context.goal_contract_refs,
+        "provenance":{"createdBy":"B06::ContextCompilerOwner","commandId":command_id,"stepId":"B06::ContextCompilerOwner"},
+        "createdAt":now
+    }))
+    .map_err(|error| format!("B06_CONTEXT_ARTIFACT_INVALID:{error}"))?;
+    let reference = ArtifactRef {
+        artifact_id: artifact.artifact_id.clone(),
+        version: artifact.version,
+        payload_hash: artifact.payload_hash.clone(),
+    };
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":idempotency_key,
+        "expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":now,
+        "artifacts":[artifact],
+        "receiptDraft":{"domain":"B06_CONTEXT_MANIFEST","artifactRefs":[reference.clone()],"payload":{"owner":"B06::ContextCompilerOwner","executionMode":execution_mode,"compiledFromStateDigest":context.compiled_from_state_digest}}
     }))
     .map_err(|error| format!("B06_CONTEXT_BUNDLE_INVALID:{error}"))?;
     let receipt =

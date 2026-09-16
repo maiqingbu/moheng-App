@@ -38,6 +38,13 @@ const exitSnapshotKind = 'VolumeExitState'
 const unresolvedLabel = 'OPEN / SUSPENDED'
 const handoffFields = ['fromVolumeId', 'toVolumeId', 'handoffStatus']
 const frozenProjectionMarkers = ['PLAN', 'REALITY', 'PROJECTION']
+const chapterPrepareState = computed(() => store.commandState('chapter-prepare'))
+const chapterPlanState = computed(() => store.commandState('chapter-plan-compile'))
+const nextChapter = computed(() => detail.value?.chapters.items
+  .filter(chapter => chapter.status !== 'official')
+  .sort((left, right) => left.number - right.number)[0] ?? null)
+const currentChapterPlan = computed(() => planRoute.value?.currentChapterPlan ?? null)
+const chapterPlanningBusy = (status: string) => status === 'submitting' || status === 'processing'
 const workspaceRuntimePoller = createVolumePlanningRuntimePoller({
   query: async () => {
     const value = await store.loadVolumeDetail(volumeId.value, true)
@@ -75,6 +82,33 @@ async function closeVolume() {
   await store.loadVolumeLifecycle(volumeId.value, true)
 }
 
+async function prepareNextChapter() {
+  await store.runCommand('chapter-prepare', {
+    type: 'planning_prepare_next_chapter',
+    projectId: store.currentProjectId ?? undefined,
+    payload: { volumeId: volumeId.value },
+  })
+  const refreshed = await store.loadVolumeDetail(volumeId.value, true)
+  const chapter = refreshed?.chapters.items
+    .filter(item => item.status !== 'official')
+    .sort((left, right) => left.number - right.number)[0]
+  if (chapter) await store.loadPlanningRoute(volumeId.value, true, chapter.number)
+}
+
+async function compileNextChapterPlan() {
+  const chapter = nextChapter.value
+  if (!chapter) return
+  await store.runCommand('chapter-plan-compile', {
+    type: 'planning_compile_chapter_plan',
+    projectId: store.currentProjectId ?? undefined,
+    payload: {
+      chapterId: chapter.id,
+      chapterGoalHint: '推进当前卷任务，并让真实选择产生可核对后果。',
+    },
+  })
+  await store.loadPlanningRoute(volumeId.value, true, chapter.number)
+}
+
 onMounted(() => {
   workspaceMounted = true
   void (async () => {
@@ -100,6 +134,15 @@ onUnmounted(() => {
     <CommandFeedback :state="state" />
 
     <VolumePlanningProgress :operation="runtimeOperation" />
+
+    <section class="card pad section" data-next-chapter-actions>
+      <div class="card-head"><div><h2 class="card-title">下一章正式生产</h2><p class="card-subtitle">章节准备、ContextManifest 与 ChapterPlan 均通过正式项目命令落库；计划确认后再到“创作”页启动真实模型。</p></div><span class="badge">B04 · B05 · B06</span></div>
+      <CommandFeedback :state="chapterPrepareState" />
+      <CommandFeedback :state="chapterPlanState" />
+      <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="prepareNextChapter">准备下一章</button><span class="muted" style="font-size:12px">从本卷当前 Reality 之后分配下一个章节号与预算。</span></div>
+      <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成可执行 ChapterPlan。</div></div><button class="btn primary" data-action="compile" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="compileNextChapterPlan">生成当前章节计划</button></div>
+      <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">{{ currentChapterPlan.artifactId }} · v{{ currentChapterPlan.version }}</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>
+    </section>
 
     <section v-if="lifecycle" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">卷生命周期</h2><p class="card-subtitle">状态来自当前作品记录，关闭与下一卷安排会在同一流程中核对。</p></div><span class="badge" :class="closeReady ? 'success' : 'warning'">{{ closeReady ? '可关闭' : '待完成' }}</span></div>

@@ -17,7 +17,9 @@ use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
 use crate::provider::ProviderAdapter;
 use crate::repositories::ops::{chapter_page, single_chapter, volume_page, SearchService};
-use crate::runtime::{pending_decision_count, DurableJobService, JobSpec, SecretStore};
+use crate::runtime::{
+    pending_decision_count, DurableJobService, DurableModelRunner, JobSpec, SecretStore,
+};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -1228,6 +1230,35 @@ pub(crate) fn context_input_from_authority(
     project_id: &str,
     revision: i64,
 ) -> Result<crate::narrative::ContextCompilerInput, String> {
+    // A normal LONG_FORM UI request does not need to hand-maintain an
+    // entity allow-list.  Derive a bounded set from the immediately previous
+    // committed chapters so the compiler cannot silently produce an empty
+    // authority context after Reality changes.
+    let request_with_scope;
+    let request = if request.get("executionMode").and_then(Value::as_str) == Some("LONG_FORM")
+        && request_strings(request, "entityIds").is_empty()
+    {
+        if let (Some(volume_id), Some(chapter_id)) = (
+            request.get("volumeId").and_then(Value::as_str),
+            request.get("chapterId").and_then(Value::as_str),
+        ) {
+            let entity_ids =
+                crate::repositories::narrative::NarrativeRepository::recent_chapter_entity_ids(
+                    connection, project_id, volume_id, chapter_id, 100,
+                )
+                .map_err(|error| error.to_string())?;
+            request_with_scope = {
+                let mut value = request.clone();
+                value["entityIds"] = json!(entity_ids);
+                value
+            };
+            &request_with_scope
+        } else {
+            request
+        }
+    } else {
+        request
+    };
     if let Some(context_ref) = request.get("contextManifestRef").and_then(Value::as_str) {
         if crate::repositories::change_retcon::has_pending_stale_target(
             connection,
@@ -4529,6 +4560,18 @@ fn execute_planning_command(
     requested_at: &str,
     expected_revision: Option<i64>,
 ) -> Result<Value, String> {
+    if command_type == "planning_compile_chapter_plan" && request.pointer("/payload/plan").is_none()
+    {
+        return compile_current_chapter_plan(
+            state,
+            request,
+            project_id,
+            command_id,
+            idempotency_key,
+            requested_at,
+            expected_revision,
+        );
+    }
     execute_planning_command_with_observer(
         state,
         request,
@@ -4540,6 +4583,284 @@ fn execute_planning_command(
         expected_revision,
         &mut |_| {},
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_current_chapter_plan(
+    state: &KernelState,
+    request: &Value,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+) -> Result<Value, String> {
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for chapter planning".to_string())?;
+    let chapter_id = required_string(request.get("payload").unwrap_or(&Value::Null), "chapterId")?;
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        &handle, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let budget_id = DurableModelRunner::chapter_budget_id(&handle, project_id, chapter_id)
+        .map_err(|error| error.to_string())?;
+    let authority = {
+        let mut value = request.clone();
+        value["projectId"] = json!(project_id);
+        value["chapterId"] = json!(chapter_id);
+        value["volumeId"] = json!(&volume_id);
+        value["executionMode"] = json!("LONG_FORM");
+        value
+    };
+    let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+        &handle, project_id, &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
+    let route_payload =
+        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            &handle, project_id, &route_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+    crate::planning::validate_volume_route(&route_payload)?;
+    let context_input =
+        context_input_from_authority(&handle, &authority, project_id, expected_revision)?;
+    let mandatory_authority = [
+        (
+            "StoryConstitution",
+            "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED",
+        ),
+        ("MainContract", "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED"),
+        ("BookPlan", "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"),
+    ];
+    for (artifact_type, missing_code) in mandatory_authority {
+        let reference =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle,
+                project_id,
+                artifact_type,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| missing_code.to_string())?;
+        let payload = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            &handle, project_id, &reference,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| missing_code.to_string())?;
+        if artifact_type == "BookPlan"
+            && payload.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED")
+        {
+            return Err(missing_code.into());
+        }
+    }
+    let intent_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+        &handle,
+        project_id,
+        "VolumeIntent",
+        &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+    let intent_payload =
+        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            &handle,
+            project_id,
+            &intent_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
+    if crate::planning::validate_volume_intent_semantics(&intent_payload).is_err() {
+        return Err("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".into());
+    }
+    if context_input.state.source_refs.is_empty() {
+        return Err("B04_RUNTIME_STATE_REQUIRED".into());
+    }
+    let context_command_id = format!("{command_id}:context");
+    let (context_receipt, context_ref) = crate::narrative::commit_context_manifest_owner(
+        &handle,
+        project_id,
+        &authority,
+        expected_revision,
+        &context_command_id,
+        &format!("{idempotency_key}:context"),
+        "LONG_FORM",
+        requested_at,
+    )?;
+    let planning_revision = context_receipt.after_revision;
+    let profile = state.production_gateway.resolve_profile()?;
+    let planning_run_id =
+        StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("{command_id}:plan"))?;
+    let state_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let planning_spec = crate::repositories::runtime::ModelRunSpec {
+        model_run_id: planning_run_id.clone(),
+        job_id: None,
+        step_id: None,
+        provider: profile.provider.clone(),
+        model: profile.model.clone(),
+        idempotency_key: format!("{idempotency_key}:plan"),
+        capability: "PLAN_STRATEGY".into(),
+        prompt_ref: None,
+        context_manifest_ref: Some(context_ref.artifact_id.clone()),
+        budget_id: Some(budget_id),
+        predicted_cost_cents: state
+            .production_gateway
+            .predicted_cost_cents("PLAN_STRATEGY")
+            .max(1),
+        attempt_no: 1,
+        repair_round: 0,
+    };
+    let planning_input = json!({
+        "projectId":project_id,
+        "chapterId":chapter_id,
+        "volumeId":volume_id,
+        "executionMode":"LONG_FORM",
+        "compiledFromProjectRevision":planning_revision,
+        "compiledFromStateDigest":state_digest,
+        "contextManifestRef":context_ref,
+        "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
+        "volumePlanRoute":route_payload,
+        "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
+    });
+    let planning_result = crate::production::execute_production_model_with_profile(
+        &handle,
+        state.production_gateway.as_ref(),
+        &profile,
+        &planning_spec,
+        "PLAN_STRATEGY",
+        planning_input.clone(),
+        requested_at,
+    )?;
+    let raw_plan = planning_result
+        .parsed
+        .ok_or_else(|| "B05_PLANNING_OUTPUT_INVALID".to_string())?;
+    let bindings = json!({
+        "chapterId":chapter_id,
+        "compiledFromProjectRevision":planning_revision,
+        "compiledFromStateDigest":state_digest,
+        "contextManifestRef":context_ref
+    });
+    let mut plan = crate::planning::normalize_chapter_plan_model_output(
+        raw_plan,
+        &context_input
+            .continuity_threads
+            .iter()
+            .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        &bindings,
+    );
+    plan["compiledFromProjectRevision"] = json!(planning_revision);
+    plan["compiledFromStateDigest"] = json!(state_digest);
+    plan["contextManifestRef"] =
+        serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+    let receipt = crate::planning::recompile_chapter_plan_owner(
+        &handle,
+        project_id,
+        chapter_id,
+        &plan,
+        &authority,
+        "LONG_FORM",
+        command_id,
+        idempotency_key,
+        planning_revision,
+        requested_at,
+        Some(&planning_run_id),
+    )?;
+    let plan_ref = receipt
+        .committed_artifact_refs
+        .first()
+        .cloned()
+        .ok_or_else(|| "B05_PLANNING_OWNER_NO_RECEIPT".to_string())?;
+    Ok(json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "finalStatus":"committed",
+        "message":"当前章节规划已生成，已绑定真实上下文。",
+        "owner":"B07::PlanningOwner",
+        "contextManifestRef":context_ref,
+        "chapterPlanRef":plan_ref,
+        "modelRunId":planning_run_id,
+        "receipt":receipt
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_next_chapter(
+    state: &KernelState,
+    request: &Value,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    expected_revision: Option<i64>,
+    digest: &str,
+) -> Result<Value, String> {
+    let volume_id = required_string(request.get("payload").unwrap_or(&Value::Null), "volumeId")?;
+    let expected_revision = expected_revision.ok_or_else(|| {
+        "IPC_INVALID:expectedRevision required for chapter preparation".to_string()
+    })?;
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let spec = project_command_spec(
+        project_id,
+        project_id,
+        command_id,
+        idempotency_key,
+        "planning_prepare_next_chapter",
+        digest,
+        Some(expected_revision),
+        requested_at,
+        true,
+    );
+    let outcome = CommitService::commit_project_command(&handle, spec, |connection| {
+        let chapter_no = crate::repositories::narrative::NarrativeRepository::next_chapter_number(
+            connection,
+            project_id,
+            volume_id,
+        )
+        .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?
+        .ok_or_else(|| {
+            crate::commit::CommitError::ProjectCommandApply("VOLUME_CHAPTER_RANGE_EXHAUSTED".into())
+        })?;
+        let chapter_id = StableIdentityFactory::from_command(
+            StableIdKind::Chapter,
+            &format!("{project_id}:{volume_id}:chapter:{chapter_no}"),
+        )
+        .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+        let budget_id = format!("budget:{chapter_id}");
+        let title = format!("第{chapter_no}章 · 当前卷推进");
+        crate::repositories::narrative::NarrativeRepository::ensure_planned_chapter(
+            connection,
+            project_id,
+            volume_id,
+            &chapter_id,
+            chapter_no,
+            &title,
+            &budget_id,
+            requested_at,
+        )
+        .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+        Ok(json!({"volumeId":volume_id,"chapterId":chapter_id,"chapterNo":chapter_no,"title":title,"budgetId":budget_id}))
+    })
+    .map_err(|error| error.to_string())?;
+    let (receipt, chapter) = match outcome {
+        ProjectCommandOutcome::Replayed(receipt) => (receipt, None),
+        ProjectCommandOutcome::Committed { value, receipt } => (receipt, Some(value)),
+    };
+    let mut response = project_command_response(&receipt);
+    response["message"] = json!("下一章已准备，等待生成当前章节规划。");
+    if let Some(chapter) = chapter {
+        response["chapter"] = chapter;
+    }
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5760,6 +6081,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 idempotency_key,
                 requested_at,
                 expected_revision,
+            )
+        }
+        "planning_prepare_next_chapter" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            prepare_next_chapter(
+                state,
+                &request,
+                id,
+                command_id,
+                idempotency_key,
+                requested_at,
+                expected_revision,
+                &digest,
             )
         }
         "production_start" | "production_pause" | "production_resume" | "production_cancel" => {

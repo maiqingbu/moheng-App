@@ -1043,179 +1043,190 @@ pub fn run_chapter_production(
         &format!("{command_id}:audit"),
     )?;
 
-    let (context_ref, context_payload, plan_ref, plan_payload, authority_context) = if execution_mode
-        == "OPENING_BOOTSTRAP"
-    {
-        let bootstrap_command_id = format!("{command_id}:bootstrap");
-        let compiler_input = crate::commands::context_input_from_authority(
-            connection,
-            &authority_request(
-                request,
+    let (context_ref, context_payload, plan_ref, plan_payload, authority_context) =
+        if execution_mode == "OPENING_BOOTSTRAP" {
+            let bootstrap_command_id = format!("{command_id}:bootstrap");
+            let compiler_input = crate::commands::context_input_from_authority(
+                connection,
+                &authority_request(
+                    request,
+                    &project_id,
+                    &chapter_id,
+                    &volume_id,
+                    execution_mode,
+                ),
                 &project_id,
+                current_revision,
+            )?;
+            let authority_context = authority_context_payload(&compiler_input)?;
+            let manifest = crate::narrative::compile_context_manifest(compiler_input.clone())?;
+            let context_payload = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
+            let mut context = artifact(
+                &project_id,
+                context_id,
+                ArtifactType::ContextManifest,
                 &chapter_id,
-                &volume_id,
-                execution_mode,
-            ),
-            &project_id,
-            current_revision,
-        )?;
-        let authority_context = authority_context_payload(&compiler_input)?;
-        let manifest = crate::narrative::compile_context_manifest(compiler_input.clone())?;
-        let context_payload = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
-        let mut context = artifact(
-            &project_id,
-            context_id,
-            ArtifactType::ContextManifest,
-            &chapter_id,
-            context_payload.clone(),
-            &bootstrap_command_id,
-            &job_id,
-            None,
-            &now,
-            vec![],
-        )?;
-        context.provenance.created_by = "B06::ContextCompilerOwner".into();
-        let context_ref = reference(&context);
-        let context_command_id = format!("{bootstrap_command_id}:context");
-        context.provenance.command_id = context_command_id.clone();
-        let context_bundle: CommitBundle = serde_json::from_value(json!({
+                context_payload.clone(),
+                &bootstrap_command_id,
+                &job_id,
+                None,
+                &now,
+                vec![],
+            )?;
+            context.provenance.created_by = "B06::ContextCompilerOwner".into();
+            let context_ref = reference(&context);
+            let context_command_id = format!("{bootstrap_command_id}:context");
+            context.provenance.command_id = context_command_id.clone();
+            let context_bundle: CommitBundle = serde_json::from_value(json!({
             "commitId":format!("commit:{context_command_id}"),"projectId":project_id,
             "commandId":context_command_id,"idempotencyKey":format!("{idempotency_key}:context"),
             "expectedProjectRevision":current_revision,"contractVersion":"m0a.v1","createdAt":now,
             "artifacts":[context],"headUpdates":[{"artifactType":"ContextManifest","scope":chapter_scope(&chapter_id),
                 "artifactId":context_ref.artifact_id,"version":context_ref.version,"payloadHash":context_ref.payload_hash}]
         })).map_err(|error| format!("B08_CONTEXT_BUNDLE_INVALID:{error}"))?;
-        let context_receipt = CommitService::commit(connection, &context_bundle, &now)
-            .map_err(|error| error.to_string())?;
-        current_revision = context_receipt.after_revision;
+            let context_receipt = CommitService::commit(connection, &context_bundle, &now)
+                .map_err(|error| error.to_string())?;
+            current_revision = context_receipt.after_revision;
 
-        update_stage(connection, &project_id, &job_id, "PLAN", &now)?;
-        let planning_run_id = StableIdentityFactory::from_command(
-            StableIdKind::ModelRun,
-            &format!("{command_id}:plan"),
-        )?;
-        let planning_spec = ModelRunSpec {
-            model_run_id: planning_run_id.clone(),
-            job_id: Some(job_id.clone()),
-            step_id: None,
-            provider: provider_profile.provider.clone(),
-            model: provider_profile.model.clone(),
-            idempotency_key: format!("{idempotency_key}:plan"),
-            capability: "PLAN_STRATEGY".into(),
-            prompt_ref: None,
-            context_manifest_ref: Some(context_ref.artifact_id.clone()),
-            budget_id: Some(production_budget_id.clone()),
-            predicted_cost_cents: gateway.predicted_cost_cents("PLAN_STRATEGY").max(1),
-            attempt_no: 1,
-            repair_round: 0,
-        };
-        let planning_input = json!({
-            "projectId":project_id,
-            "chapterId":chapter_id,
-            "executionMode":execution_mode,
-            "compiledFromProjectRevision":current_revision + 1,
-            "compiledFromStateDigest":manifest.compiled_from_state_digest,
-            "contextManifestRef":context_ref,
-            "authorityContext":authority_context.clone(),
-            "activeTaskRefs":compiler_input.active_task_refs,
-            "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
-            "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
-        });
-        let planning_result = execute_production_model_with_profile(
-            connection,
-            gateway,
-            &provider_profile,
-            &planning_spec,
-            "PLAN_STRATEGY",
-            planning_input.clone(),
-            &now,
-        )?;
-        let plan_payload = planning_result
-            .parsed
-            .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
-        let plan_payload = crate::planning::normalize_chapter_plan_model_output(
-            plan_payload,
-            &compiler_input
-                .continuity_threads
-                .iter()
-                .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                .map(|thread| thread.thread_id.clone())
-                .collect::<Vec<_>>(),
-            &planning_input,
-        );
-        crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
-            .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
-        crate::planning::validate_current_chapter_plan(
-            &plan_payload,
-            &chapter_id,
-            &compiler_input.active_task_refs,
-            &compiler_input
-                .continuity_threads
-                .iter()
-                .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                .map(|thread| thread.thread_id.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
-        let planning_receipt = crate::planning::recompile_chapter_plan_owner(
-            connection,
-            &project_id,
-            &chapter_id,
-            &plan_payload,
-            &authority_request(
-                request,
+            update_stage(connection, &project_id, &job_id, "PLAN", &now)?;
+            let planning_run_id = StableIdentityFactory::from_command(
+                StableIdKind::ModelRun,
+                &format!("{command_id}:plan"),
+            )?;
+            let planning_spec = ModelRunSpec {
+                model_run_id: planning_run_id.clone(),
+                job_id: Some(job_id.clone()),
+                step_id: None,
+                provider: provider_profile.provider.clone(),
+                model: provider_profile.model.clone(),
+                idempotency_key: format!("{idempotency_key}:plan"),
+                capability: "PLAN_STRATEGY".into(),
+                prompt_ref: None,
+                context_manifest_ref: Some(context_ref.artifact_id.clone()),
+                budget_id: Some(production_budget_id.clone()),
+                predicted_cost_cents: gateway.predicted_cost_cents("PLAN_STRATEGY").max(1),
+                attempt_no: 1,
+                repair_round: 0,
+            };
+            let planning_input = json!({
+                "projectId":project_id,
+                "chapterId":chapter_id,
+                "executionMode":execution_mode,
+                "compiledFromProjectRevision":current_revision + 1,
+                "compiledFromStateDigest":manifest.compiled_from_state_digest,
+                "contextManifestRef":context_ref,
+                "authorityContext":authority_context.clone(),
+                "activeTaskRefs":compiler_input.active_task_refs,
+                "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
+                "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
+            });
+            let planning_result = execute_production_model_with_profile(
+                connection,
+                gateway,
+                &provider_profile,
+                &planning_spec,
+                "PLAN_STRATEGY",
+                planning_input.clone(),
+                &now,
+            )?;
+            let plan_payload = planning_result
+                .parsed
+                .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
+            let plan_payload = crate::planning::normalize_chapter_plan_model_output(
+                plan_payload,
+                &compiler_input
+                    .continuity_threads
+                    .iter()
+                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+                    .map(|thread| thread.thread_id.clone())
+                    .collect::<Vec<_>>(),
+                &planning_input,
+            );
+            crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
+                .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
+            crate::planning::validate_current_chapter_plan(
+                &plan_payload,
+                &chapter_id,
+                &compiler_input.active_task_refs,
+                &compiler_input
+                    .continuity_threads
+                    .iter()
+                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+                    .map(|thread| thread.thread_id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+            let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
+            let planning_receipt = crate::planning::recompile_chapter_plan_owner(
+                connection,
                 &project_id,
                 &chapter_id,
-                &volume_id,
+                &plan_payload,
+                &authority_request(
+                    request,
+                    &project_id,
+                    &chapter_id,
+                    &volume_id,
+                    execution_mode,
+                ),
                 execution_mode,
-            ),
-            execution_mode,
-            &planning_command_id,
-            &format!("{idempotency_key}:planning-owner"),
-            current_revision,
-            &now,
-            Some(&planning_run_id),
-        )?;
-        let plan_ref = planning_receipt
-            .committed_artifact_refs
-            .first()
-            .cloned()
-            .ok_or_else(|| "B08_PLANNING_OWNER_NO_RECEIPT".to_string())?;
-        current_revision = planning_receipt.after_revision;
-        (context_ref, context_payload, plan_ref, plan_payload, authority_context)
-    } else {
-        let plan_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
-            connection,
-            &project_id,
-            "ChapterPlan",
-            &chapter_id,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "B08_LONG_FORM_CHAPTER_PLAN_REQUIRED".to_string())?;
-        let plan_payload = load_artifact_payload(connection, &project_id, &plan_ref)?;
-        let context_ref: ArtifactRef = serde_json::from_value(
-            plan_payload
-                .get("contextManifestRef")
+                &planning_command_id,
+                &format!("{idempotency_key}:planning-owner"),
+                current_revision,
+                &now,
+                Some(&planning_run_id),
+            )?;
+            let plan_ref = planning_receipt
+                .committed_artifact_refs
+                .first()
                 .cloned()
-                .ok_or_else(|| "B08_PLAN_CONTEXT_REF_REQUIRED".to_string())?,
-        )
-        .map_err(|e| format!("B08_PLAN_CONTEXT_REF_INVALID:{e}"))?;
-        let context_payload = load_artifact_payload(connection, &project_id, &context_ref)?;
-        let authority_input = crate::commands::context_input_from_authority(
-            connection,
-            &authority_request(
-                request,
+                .ok_or_else(|| "B08_PLANNING_OWNER_NO_RECEIPT".to_string())?;
+            current_revision = planning_receipt.after_revision;
+            (
+                context_ref,
+                context_payload,
+                plan_ref,
+                plan_payload,
+                authority_context,
+            )
+        } else {
+            let plan_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+                connection,
                 &project_id,
+                "ChapterPlan",
                 &chapter_id,
-                &volume_id,
-                execution_mode,
-            ),
-            &project_id,
-            current_revision,
-        )?;
-        let authority_context = authority_context_payload(&authority_input)?;
-        (context_ref, context_payload, plan_ref, plan_payload, authority_context)
-    };
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "B08_LONG_FORM_CHAPTER_PLAN_REQUIRED".to_string())?;
+            let plan_payload = load_artifact_payload(connection, &project_id, &plan_ref)?;
+            let context_ref: ArtifactRef = serde_json::from_value(
+                plan_payload
+                    .get("contextManifestRef")
+                    .cloned()
+                    .ok_or_else(|| "B08_PLAN_CONTEXT_REF_REQUIRED".to_string())?,
+            )
+            .map_err(|e| format!("B08_PLAN_CONTEXT_REF_INVALID:{e}"))?;
+            let context_payload = load_artifact_payload(connection, &project_id, &context_ref)?;
+            let authority_input = crate::commands::context_input_from_authority(
+                connection,
+                &authority_request(
+                    request,
+                    &project_id,
+                    &chapter_id,
+                    &volume_id,
+                    execution_mode,
+                ),
+                &project_id,
+                current_revision,
+            )?;
+            let authority_context = authority_context_payload(&authority_input)?;
+            (
+                context_ref,
+                context_payload,
+                plan_ref,
+                plan_payload,
+                authority_context,
+            )
+        };
     if let Err(error) = validate_plan_is_current(
         connection,
         request,
@@ -1774,7 +1785,7 @@ pub fn run_chapter_production(
         extraction.capacity_exhausted,
         extraction.change_requested,
     );
-    let reality = extraction
+    let mut reality = extraction
         .task_progress_candidates
         .iter()
         .map(|item| {
@@ -1792,6 +1803,38 @@ pub fn run_chapter_production(
             json!({"taskId":item.task_id,"plannedExpected":expected,"actualObserved":item.status,"evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}})
         })
         .collect::<Vec<_>>();
+    // Reality is the post-audit observation ledger, not only task status.  A
+    // chapter can advance Canon/Knowledge/Event state even when the model did
+    // not emit a valid task-evidence span; those committed observations must
+    // remain visible to reconciliation and the next planning context.
+    reality.extend(extraction.canon_candidates.iter().map(|item| {
+        json!({
+            "kind":"CANON_FACT",
+            "factId":item.fact_id,
+            "subjectId":item.subject_id,
+            "predicate":item.predicate,
+            "actualObserved":"COMMITTED",
+            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+        })
+    }));
+    reality.extend(extraction.knowledge_candidates.iter().map(|item| {
+        json!({
+            "kind":"KNOWLEDGE",
+            "knowledgeId":item.knowledge_id,
+            "factId":item.fact_id,
+            "knowerId":item.knower_id,
+            "actualObserved":item.epistemic_state,
+            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+        })
+    }));
+    reality.extend(extraction.continuity_candidates.iter().map(|item| {
+        json!({
+            "kind":"CONTINUITY",
+            "threadRef":item.thread_ref,
+            "actualObserved":item.disposition,
+            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+        })
+    }));
     let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
     let receipt_artifact = artifact(
         &project_id,

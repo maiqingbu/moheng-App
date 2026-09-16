@@ -207,9 +207,9 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (volumeDetail.value?.volume.id === volumeId && !force) return volumeDetail.value
     return withWorkspace('volume-detail', () => frontendPort.queryVolumeDetail({ ...queryBase(`volume:${volumeId}`, 30), volumeId }), v => { volumeDetail.value=v })
   }
-  async function loadPlanningRoute(volumeId:string, force=false) {
+  async function loadPlanningRoute(volumeId:string, force=false, currentChapter?: number) {
     if (planningRoute.value?.volumeId === volumeId && !force) return planningRoute.value
-    return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId }), route => { planningRoute.value = route })
+    return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId, ...(currentChapter == null ? {} : { currentChapter }) }), route => { planningRoute.value = route })
   }
   async function loadVolumeLifecycle(volumeId:string, force=false) {
     if (volumeLifecycle.value?.volumeId === volumeId && !force) return volumeLifecycle.value
@@ -418,14 +418,16 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   function inFlightCommandKey(request: CommandRequest): string | null {
-    if (!['opening_ready', 'opening_start_creating', 'production_start', 'opening_evaluate', 'book_plan_revise', 'planning_create_volume_intent', 'planning_create_volume_plan'].includes(request.type)) return null
+    if (!['opening_ready', 'opening_start_creating', 'production_start', 'opening_evaluate', 'book_plan_revise', 'planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter', 'planning_compile_chapter_plan'].includes(request.type)) return null
     const projectId = request.projectId ?? currentProjectId.value
     if (!projectId) return null
     const chapterId = request.type === 'production_start' ? request.payload?.chapterId : undefined
-    const volumeId = request.type === 'planning_create_volume_intent' || request.type === 'planning_create_volume_plan' ? request.payload?.volumeId : undefined
+    const volumeId = ['planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter'].includes(request.type) ? request.payload?.volumeId : undefined
+    const chapterIdForPlan = request.type === 'planning_compile_chapter_plan' ? request.payload?.chapterId : undefined
     if (request.type === 'production_start' && typeof chapterId !== 'string') return null
-    if ((request.type === 'planning_create_volume_intent' || request.type === 'planning_create_volume_plan') && typeof volumeId !== 'string') return null
-    return [projectId, request.type, chapterId ?? volumeId ?? ''].join('|')
+    if (['planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter'].includes(request.type) && typeof volumeId !== 'string') return null
+    if (request.type === 'planning_compile_chapter_plan' && typeof chapterIdForPlan !== 'string') return null
+    return [projectId, request.type, chapterId ?? chapterIdForPlan ?? volumeId ?? ''].join('|')
   }
 
   async function runCommand(key: string, request: CommandRequest) {

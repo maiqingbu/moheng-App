@@ -48,6 +48,21 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
     );
     let root = required_app_data_root();
     let paths = AppPaths::new(&root);
+    if !paths.root().join("provider-settings.json").is_file() {
+        ProviderSettingsRepository::write_global(
+            &paths,
+            &json!({
+                "provider":"OpenAI Compatible",
+                "providerId":"openai-compatible",
+                "model":"qwen3.8-flash",
+                "modelId":"qwen3.8-flash",
+                "endpoint":EXPECTED_ENDPOINT,
+                "enabled":true,
+                "timeoutMs":300000
+            }),
+        )
+        .unwrap();
+    }
     let settings = ProviderSettingsRepository::read_global(&paths).unwrap();
     assert_eq!(settings["endpoint"], EXPECTED_ENDPOINT);
     assert_eq!(settings["modelId"], EXPECTED_MODEL);
@@ -280,6 +295,174 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         assert_eq!(receipt["stage"], "COMPLETED");
         assert!(receipt["finalChapterRef"]["artifactId"].as_str().is_some());
     }
+
+    if std::env::var("MOHENG_RUN_REAL_CLOSED_LOOP").as_deref() == Ok("1") {
+        // B02/B03 continue from the same three real FinalChapter rows.
+        execute(
+            &state,
+            json!({
+                "type":"opening_evaluate","commandId":format!("{prefix}:opening-evaluate"),
+                "idempotencyKey":format!("{prefix}:opening-evaluate:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{}
+            }),
+        );
+        execute(
+            &state,
+            json!({
+                "type":"book_plan_revise","commandId":format!("{prefix}:book-plan"),
+                "idempotencyKey":format!("{prefix}:book-plan:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{}
+            }),
+        );
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let volume_id: String = connection
+            .query_row(
+                "SELECT volume_id FROM volumes WHERE project_id=?1 ORDER BY volume_no LIMIT 1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        execute(
+            &state,
+            json!({
+                "type":"planning_create_volume_intent","commandId":format!("{prefix}:volume-intent"),
+                "idempotencyKey":format!("{prefix}:volume-intent:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"volumeId":volume_id}
+            }),
+        );
+        execute(
+            &state,
+            json!({
+                "type":"planning_create_volume_plan","commandId":format!("{prefix}:volume-plan"),
+                "idempotencyKey":format!("{prefix}:volume-plan:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"volumeId":volume_id}
+            }),
+        );
+
+        let prepared = execute(
+            &state,
+            json!({
+                "type":"planning_prepare_next_chapter","commandId":format!("{prefix}:chapter-4"),
+                "idempotencyKey":format!("{prefix}:chapter-4:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"volumeId":volume_id}
+            }),
+        );
+        let chapter4 = prepared["chapter"]["chapterId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let plan4 = execute(
+            &state,
+            json!({
+                "type":"planning_compile_chapter_plan","commandId":format!("{prefix}:plan-4"),
+                "idempotencyKey":format!("{prefix}:plan-4:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"chapterId":chapter4,"chapterGoalHint":"用上一阶段的真实事实推进下一项调查。"}
+            }),
+        );
+        let before = {
+            let connection = state.manager.open(&project_id, "", NOW).unwrap();
+            (
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+            )
+        };
+        let production4 = execute(
+            &state,
+            json!({
+                "type":"production_start","commandId":format!("{prefix}:production-4"),
+                "idempotencyKey":format!("{prefix}:production-4:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
+                "payload":{"chapterId":chapter4,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":[],"references":[],"skillsEnabled":false,"targetChineseCharacters":1800,"chapterGoalHint":"推进调查并让真实选择产生可验证后果。"}
+            }),
+        );
+        assert_eq!(production4["stage"], "COMPLETED");
+        let after = {
+            let connection = state.manager.open(&project_id, "", NOW).unwrap();
+            (
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+            )
+        };
+        assert!(
+            after.0 > before.0 || after.1 > before.1,
+            "Reality must change after the real chapter commit"
+        );
+        let prepared5 = execute(
+            &state,
+            json!({
+                "type":"planning_prepare_next_chapter","commandId":format!("{prefix}:chapter-5"),
+                "idempotencyKey":format!("{prefix}:chapter-5:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"volumeId":volume_id}
+            }),
+        );
+        let chapter5 = prepared5["chapter"]["chapterId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let plan5 = execute(
+            &state,
+            json!({
+                "type":"planning_compile_chapter_plan","commandId":format!("{prefix}:plan-5"),
+                "idempotencyKey":format!("{prefix}:plan-5:key"),"projectId":project_id,
+                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"chapterId":chapter5,"chapterGoalHint":"使用上一章 Reality 的新证据推进下一项调查。"}
+            }),
+        );
+        assert!(plan4["contextManifestRef"]["artifactId"].as_str().is_some());
+        assert!(plan5["contextManifestRef"]["artifactId"].as_str().is_some());
+
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let context4: String = connection.query_row(
+            "SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' AND json_extract(p.payload_json,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter4], |row| row.get(0),
+        ).unwrap();
+        let context5: String = connection.query_row(
+            "SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' AND json_extract(p.payload_json,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter5], |row| row.get(0),
+        ).unwrap();
+        let digest4: String = connection.query_row(
+            "SELECT json_extract(p.payload_json,'$.compiledFromStateDigest') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' AND json_extract(p.payload_json,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter4], |row| row.get(0),
+        ).unwrap();
+        let digest5: String = connection.query_row(
+            "SELECT json_extract(p.payload_json,'$.compiledFromStateDigest') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' AND json_extract(p.payload_json,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter5], |row| row.get(0),
+        ).unwrap();
+        let context_sources: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM artifact_payloads WHERE artifact_id IN (?1,?2) AND json_extract(payload_json,'$.hardSourceCount')>0",
+            libsql_rusqlite::params![context4, context5], |row| row.get(0),
+        ).unwrap();
+        assert_ne!(
+            digest4, digest5,
+            "next ChapterPlan must use Reality t+1 digest"
+        );
+        assert_eq!(context_sources, 2);
+        println!("REAL_LLM_PRODUCT_CLOSED_LOOP_RESULT projectId={} openingChapters=3 longFormChapter=4 nextChapterPlan=5 realityDeltaFacts={} realityDeltaKnowledge={} contextManifests=2 digestChanged=true provider={} model={} finalStatus=PASS", project_id, after.0 - before.0, after.1 - before.1, EXPECTED_ENDPOINT, EXPECTED_MODEL);
+    }
     drop(state);
 
     let reloaded = ProjectManager::new(paths);
@@ -315,10 +498,15 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(committed, 3);
-    assert_eq!(receipts, 3);
-    assert!(completed_runs >= 9);
-    assert_eq!(word_counts.len(), 3);
+    let expected_chapters = if std::env::var("MOHENG_RUN_REAL_CLOSED_LOOP").as_deref() == Ok("1") {
+        4
+    } else {
+        3
+    };
+    assert!(committed >= expected_chapters);
+    assert!(receipts >= expected_chapters);
+    assert!(completed_runs >= if expected_chapters == 4 { 13 } else { 9 });
+    assert!(word_counts.len() >= expected_chapters as usize);
     assert!(word_counts.iter().all(|count| *count >= 800));
     println!(
         "REAL_THREE_CHAPTER_RESULT projectId={} finalChapters={} productionReceipts={} completedModelRuns={} wordCounts={:?} status=PASS",

@@ -83,6 +83,50 @@ fn b06_current_state_is_populated_bounded_and_keeps_narrative_time_separate() {
 }
 
 #[test]
+fn b06_long_form_empty_entity_selection_recalls_recent_reality() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create("p-recall", "Recall", "2026-08-29T00:00:00Z")
+        .unwrap();
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:recall','p-recall',1,'Recall','ACTIVE',?1,?1)",
+        ["2026-08-29T00:00:00Z"],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:recall','p-recall','book:recall',1,'Recall','READY',1,3,1000,?1,?1)",
+        ["2026-08-29T00:00:00Z"],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:recall:1','p-recall','volume:recall',1,'Chapter 1','NORMAL','COMMITTED',100,?1,?1),('chapter:recall:2','p-recall','volume:recall',2,'Chapter 2','NORMAL','PLANNED',0,?1,?1)",
+        ["2026-08-29T00:00:00Z"],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:recall','p-recall','Recall','CHARACTER',?1,?1)",
+        ["2026-08-29T00:00:00Z"],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES ('fact:recall','p-recall','entity:recall','DISCOVERED','{\"value\":true}','A','chapter:recall:1','chapter:recall:1',?1,?1)",
+        ["2026-08-29T00:00:00Z"],
+    ).unwrap();
+    drop(connection);
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":"p-recall","volumeId":"volume:recall","chapterId":"chapter:recall:2",
+            "executionMode":"LONG_FORM","entityIds":[],"references":[]
+        }),
+    )
+    .unwrap();
+    let sources = context["narrativeStateSources"].as_array().unwrap();
+    assert!(sources.iter().any(|source| source["ref"] == "fact:recall"));
+    assert!(context["compiledFromStateDigest"].as_str().unwrap().len() == 64);
+    println!("B06_LONG_FORM_RECALL_RESULT recent_reality=PASS bounded_scope=PASS digest=PASS status=PASS");
+}
+
+#[test]
 fn b06_resume_conditions_are_typed_and_fail_closed() {
     let mut context = ResumeContext {
         current_chapter: 12,
