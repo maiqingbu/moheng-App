@@ -111,8 +111,40 @@ pub fn normalize_chapter_plan_model_output(
             }
         }
     }
+    if triggered_thread_refs.is_empty() {
+        if let Some(items) = plan
+            .get_mut("continuityActions")
+            .and_then(Value::as_array_mut)
+        {
+            items.retain_mut(|item| {
+                let Some(object) = item.as_object_mut() else {
+                    return false;
+                };
+                let thread_ref = object
+                    .get("threadRef")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let disposition = object
+                    .get("disposition")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| {
+                        matches!(
+                            *value,
+                            "ADVANCE"
+                                | "RESOLVE"
+                                | "DEFER_WITH_BRIDGE"
+                                | "NO_LONGER_APPLICABLE_CHANGE_REQUEST"
+                        )
+                    });
+                thread_ref.is_some() && disposition.is_some()
+            });
+        }
+    }
     if let Some(items) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
-        for (index, item) in items.iter_mut().enumerate() {
+        let mut normalized_items = Vec::new();
+        for item in items.drain(..) {
             let objective = item
                 .as_str()
                 .or_else(|| item.get("objective").and_then(Value::as_str))
@@ -120,9 +152,10 @@ pub fn normalize_chapter_plan_model_output(
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             if let Some(objective) = objective {
-                *item = json!({"slotNo":index + 1,"objective":objective,"tentative":true});
+                normalized_items.push(json!({"slotNo":normalized_items.len() + 1,"objective":objective,"tentative":true}));
             }
         }
+        *items = normalized_items;
         items.truncate(8);
         let fallbacks = [
             "根据本章结果重新评估下一步行动。",
@@ -2452,6 +2485,30 @@ mod tests {
             .unwrap()
             .iter()
             .all(|slot| slot["tentative"] == true));
+    }
+
+    #[test]
+    fn model_plan_normalization_drops_unbound_continuity_and_horizon_items_without_threads() {
+        let normalized = normalize_chapter_plan_model_output(
+            json!({
+                "continuityActions":[{"type":"STATE_INHERITANCE","description":"继承状态"}],
+                "horizonPreview":[{"type":"LOCATION_SHIFT","target":"未知地点"}]
+            }),
+            &[],
+            &json!({
+                "chapterId":"chapter:bound",
+                "compiledFromProjectRevision":7,
+                "compiledFromStateDigest":"a".repeat(64),
+                "contextManifestRef":{"artifactId":"context:bound","version":1,"payloadHash":"b".repeat(64)}
+            }),
+        );
+        assert_eq!(normalized["continuityActions"], json!([]));
+        assert_eq!(normalized["horizonPreview"].as_array().unwrap().len(), 3);
+        assert!(normalized["horizonPreview"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["tentative"] == true && item["objective"].is_string()));
     }
 
     #[test]
