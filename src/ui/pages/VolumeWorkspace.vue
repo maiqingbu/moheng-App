@@ -113,9 +113,13 @@ onMounted(() => {
   workspaceMounted = true
   void (async () => {
     const detailPromise = store.loadVolumeDetail(volumeId.value)
-    void store.loadPlanningRoute(volumeId.value)
     void store.loadVolumeLifecycle(volumeId.value)
     const initial = await detailPromise
+    if (!workspaceMounted) return
+    const planned = initial?.chapters.items
+      .filter(item => item.status !== 'official')
+      .sort((left, right) => left.number - right.number)[0]
+    await store.loadPlanningRoute(volumeId.value, true, planned?.number)
     if (!workspaceMounted) return
     if (initial?.runtimeOperation?.active === true) workspaceRuntimePoller.start()
   })()
