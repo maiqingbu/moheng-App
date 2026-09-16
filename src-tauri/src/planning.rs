@@ -96,13 +96,16 @@ pub fn normalize_chapter_plan_model_output(
                             .or_else(|| object.get("type"))
                             .and_then(Value::as_str)
                             .map(str::trim)
-                            .filter(|value| !value.is_empty())?;
+                            .filter(|value| !value.is_empty());
                         let value = object
                             .get("value")
                             .cloned()
                             .or_else(|| object.get("description").cloned())
-                            .unwrap_or(Value::Null);
-                        Some(json!({"kind":kind,"value":value}))
+                            .unwrap_or_else(|| Value::Object(object.clone()));
+                        Some(json!({
+                            "kind":kind.unwrap_or("MODEL_STATED"),
+                            "value":value
+                        }))
                     })
                 };
                 if let Some(normalized) = normalized {
@@ -2509,6 +2512,33 @@ mod tests {
             .unwrap()
             .iter()
             .all(|item| item["tentative"] == true && item["objective"].is_string()));
+    }
+
+    #[test]
+    fn model_plan_normalization_wraps_untyped_outcome_objects_as_model_stated() {
+        let normalized = normalize_chapter_plan_model_output(
+            json!({
+                "requiredStateOutcomes":[{"factId":"fact:new","predicate":"OBSERVED","objectJson":{"ok":true}}],
+                "forbiddenTransitions":[{"target":"entity:unknown","reason":"不得越权"}]
+            }),
+            &[],
+            &json!({
+                "chapterId":"chapter:bound",
+                "compiledFromProjectRevision":7,
+                "compiledFromStateDigest":"a".repeat(64),
+                "contextManifestRef":{"artifactId":"context:bound","version":1,"payloadHash":"b".repeat(64)}
+            }),
+        );
+        assert_eq!(
+            normalized["requiredStateOutcomes"][0]["kind"],
+            "MODEL_STATED"
+        );
+        assert!(normalized["requiredStateOutcomes"][0]["value"]["factId"].is_string());
+        assert_eq!(
+            normalized["forbiddenTransitions"][0]["kind"],
+            "MODEL_STATED"
+        );
+        assert!(normalized["forbiddenTransitions"][0]["value"]["reason"].is_string());
     }
 
     #[test]
