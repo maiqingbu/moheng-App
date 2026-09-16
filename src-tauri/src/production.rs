@@ -2303,6 +2303,20 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                 return false;
             };
             object.insert("evidence".into(), evidence);
+            if field == "knowledgeCandidates" {
+                let Some(state) = object.get("epistemicState").and_then(Value::as_str) else {
+                    return false;
+                };
+                let normalized_state = match state {
+                    "KNOWS" | "KNOWS_WITH_CONTEXT" | "KNOWS_WITH_EVIDENCE" | "KNOWS_FACT" => {
+                        "KNOWS"
+                    }
+                    "BELIEVES_TRUE" | "BELIEVES" => "BELIEVES_TRUE",
+                    "BELIEVES_FALSE" | "SUSPECTS" | "CONCEALS" | "UNKNOWN" => state,
+                    _ => return false,
+                };
+                object.insert("epistemicState".into(), json!(normalized_state));
+            }
             true
         });
         dropped.insert(field.into(), json!(before - items.len()));
@@ -2720,6 +2734,39 @@ mod tests {
             "前文。第一处证据，中间过程。第二处证据。后文。",
         );
         assert_eq!(missing["canonCandidates"], json!([]));
+    }
+
+    #[test]
+    fn audit_normalization_maps_typed_knowledge_state_aliases() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "knowledgeCandidates":[{
+                    "knowledgeId":"know:alias",
+                    "knowerId":"entity:hero",
+                    "factId":"fact:hero",
+                    "epistemicState":"KNOWS_WITH_CONTEXT",
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(
+            normalized["knowledgeCandidates"][0]["epistemicState"],
+            "KNOWS"
+        );
+        let unknown = normalize_audit_model_output(
+            json!({
+                "knowledgeCandidates":[{
+                    "knowledgeId":"know:bad",
+                    "knowerId":"entity:hero",
+                    "factId":"fact:hero",
+                    "epistemicState":"INVENTED",
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(unknown["knowledgeCandidates"], json!([]));
     }
 
     #[test]
