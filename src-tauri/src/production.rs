@@ -1770,7 +1770,10 @@ pub fn run_chapter_production(
         &plan_payload,
         &mut extraction,
     )?;
-    if execution_mode == "LONG_FORM"
+    if request
+        .pointer("/payload/requireRealityDelta")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
         && extraction.canon_candidates.is_empty()
         && extraction.knowledge_candidates.is_empty()
         && extraction.continuity_candidates.is_empty()

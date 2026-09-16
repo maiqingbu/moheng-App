@@ -135,6 +135,7 @@ async function startProduction() {
         entityIds: [],
         references: [],
         skillsEnabled: true,
+        requireRealityDelta: true,
         ...(canRetryProduction.value && production.value?.tasks[0]?.id
           ? { retryOfJobId: production.value.tasks[0].id }
           : {}),

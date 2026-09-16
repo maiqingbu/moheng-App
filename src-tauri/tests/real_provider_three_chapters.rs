@@ -7,6 +7,7 @@ use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
+use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +37,75 @@ fn execute(state: &KernelState, request: serde_json::Value) -> serde_json::Value
     let response = execute_command_impl(state, request).unwrap();
     assert_eq!(response["finalStatus"], "committed");
     response
+}
+
+fn retryable_real_production_error(error: &str) -> bool {
+    [
+        "B08_REALITY_DELTA_REQUIRED",
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
+        "P01_MODEL_JSON_INVALID",
+        "B08_PLANNING_CONTRACT",
+        "B08_AUDIT_CONTRACT",
+        "B08_RENDER_OUTPUT_INVALID",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+}
+
+fn execute_real_production(
+    state: &KernelState,
+    project_id: &str,
+    chapter_id: &str,
+    volume_id: Option<&str>,
+    execution_mode: &str,
+    command_prefix: &str,
+    chapter_goal: &str,
+) -> serde_json::Value {
+    let mut retry_of_job_id = None;
+    for attempt in 0..4 {
+        let command_id = if attempt == 0 {
+            command_prefix.to_string()
+        } else {
+            format!("{command_prefix}:retry-{attempt}")
+        };
+        let mut payload = json!({
+            "chapterId":chapter_id,
+            "executionMode":execution_mode,
+            "skillsEnabled":false,
+            "requireRealityDelta":true,
+            "targetChineseCharacters":1800,
+            "chapterGoalHint":chapter_goal
+        });
+        if let Some(volume_id) = volume_id {
+            payload["volumeId"] = json!(volume_id);
+        }
+        if let Some(previous) = retry_of_job_id.as_deref() {
+            payload["retryOfJobId"] = json!(previous);
+        }
+        let request = json!({
+            "type":"production_start",
+            "commandId":command_id,
+            "idempotencyKey":format!("{command_id}:key"),
+            "projectId":project_id,
+            "expectedRevision":current_revision(state, project_id),
+            "requestedAt":NOW,
+            "payload":payload
+        });
+        match execute_command_impl(state, request) {
+            Ok(response) => {
+                assert_eq!(response["finalStatus"], "committed");
+                assert_eq!(response["stage"], "COMPLETED");
+                return response;
+            }
+            Err(error) if retryable_real_production_error(&error) && attempt < 3 => {
+                retry_of_job_id = Some(
+                    StableIdentityFactory::from_command(StableIdKind::Job, &command_id).unwrap(),
+                );
+            }
+            Err(error) => panic!("real production failed: {error}"),
+        }
+    }
+    unreachable!("retry loop returns or panics")
 }
 
 #[test]
@@ -274,25 +344,15 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             "让沈砚在停止调查与继续追查之间作出主动选择，并找到篡改并非事故的证据。",
             "让沈砚追踪第一条幕后线索，兑现前三章的局部谜题回报，同时保留姐姐去向悬念。",
         ][index];
-        let receipt = execute(
+        let receipt = execute_real_production(
             &state,
-            json!({
-                "type":"production_start",
-                "commandId":format!("{prefix}:produce:{}", index + 1),
-                "idempotencyKey":format!("{prefix}:produce:{}:key", index + 1),
-                "projectId":project_id,
-                "expectedRevision":current_revision(&state, &project_id),
-                "requestedAt":NOW,
-                "payload":{
-                    "chapterId":chapter_id,
-                    "executionMode":"OPENING_BOOTSTRAP",
-                    "skillsEnabled":false,
-                    "targetChineseCharacters":1800,
-                    "chapterGoalHint":chapter_goal
-                }
-            }),
+            &project_id,
+            chapter_id,
+            None,
+            "OPENING_BOOTSTRAP",
+            &format!("{prefix}:produce:{}", index + 1),
+            chapter_goal,
         );
-        assert_eq!(receipt["stage"], "COMPLETED");
         assert!(receipt["finalChapterRef"]["artifactId"].as_str().is_some());
     }
 
@@ -379,14 +439,14 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
                     .unwrap(),
             )
         };
-        let production4 = execute(
+        let production4 = execute_real_production(
             &state,
-            json!({
-                "type":"production_start","commandId":format!("{prefix}:production-4"),
-                "idempotencyKey":format!("{prefix}:production-4:key"),"projectId":project_id,
-                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
-                "payload":{"chapterId":chapter4,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":[],"references":[],"skillsEnabled":false,"targetChineseCharacters":1800,"chapterGoalHint":"推进调查并让真实选择产生可验证后果。"}
-            }),
+            &project_id,
+            &chapter4,
+            Some(&volume_id),
+            "LONG_FORM",
+            &format!("{prefix}:production-4"),
+            "推进调查并让真实选择产生可验证后果。",
         );
         assert_eq!(production4["stage"], "COMPLETED");
         let after = {
