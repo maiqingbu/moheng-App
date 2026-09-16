@@ -217,13 +217,10 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     let compiled = execute_command_impl(&state, json!({"type":"planning_compile_chapter_plan","commandId":"compile-plan","idempotencyKey":"compile-plan-key","projectId":"p-b04-b06-plan","expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id}})).unwrap();
     assert_eq!(compiled["finalStatus"], "committed");
     assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        compiled["contextManifestRef"]["artifactId"]
-            .as_str()
-            .unwrap()
-            .contains("compile-plan:context"),
-        true
-    );
+    assert!(compiled["contextManifestRef"]["artifactId"]
+        .as_str()
+        .unwrap()
+        .contains("compile-plan:context"));
     let connection = state
         .manager
         .open("p-b04-b06-plan", "B04/B06 plan", NOW)
