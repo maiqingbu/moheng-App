@@ -2134,11 +2134,24 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     let normalize_evidence = |value: &Value| -> Option<Value> {
         let start = value.get("start")?.as_u64()? as usize;
         let end = value.get("end")?.as_u64()? as usize;
-        if start >= end || end > body_chars.len() {
-            return None;
+        if start < end && end <= body_chars.len() {
+            let quote = body_chars[start..end].iter().collect::<String>();
+            return Some(json!({"start":start,"end":end,"quote":quote}));
         }
-        let quote = body_chars[start..end].iter().collect::<String>();
-        Some(json!({"start":start,"end":end,"quote":quote}))
+        // Providers occasionally count tokens/bytes rather than Unicode
+        // characters. If the supplied span is outside the body, bind only an
+        // exact quote that is actually present; otherwise drop the candidate.
+        let quote = value
+            .get("quote")
+            .and_then(Value::as_str)
+            .filter(|quote| !quote.is_empty())?;
+        let byte_start = body.find(quote)?;
+        let char_start = body[..byte_start].chars().count();
+        Some(json!({
+            "start":char_start,
+            "end":char_start + quote.chars().count(),
+            "quote":quote
+        }))
     };
     let candidate_requirements = [
         (
@@ -2507,6 +2520,29 @@ mod tests {
         assert_eq!(
             normalized["normalization"]["policy"],
             "DROP_UNBOUND_AUTHORITY_CANDIDATES"
+        );
+    }
+
+    #[test]
+    fn audit_normalization_rebinds_out_of_range_provider_spans_by_exact_quote() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates": [{
+                    "factId":"fact:quote",
+                    "subjectId":"entity:quote",
+                    "predicate":"OBSERVED",
+                    "objectJson":{},
+                    "authorityLevel":"C",
+                    "evidence":{"start":900,"end":1200,"quote":"关键证据"}
+                }]
+            }),
+            "正文中的关键证据已经出现。",
+        );
+        assert_eq!(normalized["canonCandidates"][0]["evidence"]["start"], 4);
+        assert_eq!(normalized["canonCandidates"][0]["evidence"]["end"], 8);
+        assert_eq!(
+            normalized["canonCandidates"][0]["evidence"]["quote"],
+            "关键证据"
         );
     }
 
