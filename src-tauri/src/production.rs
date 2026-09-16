@@ -531,6 +531,21 @@ fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
     Some(payload)
 }
 
+/// A compatible endpoint may stop an audit object immediately after a
+/// complete candidate array. Accept only that narrow missing outer delimiter;
+/// any truncation inside a candidate remains a hard parse failure.
+fn recover_truncated_audit_payload(value: &Value) -> Option<Value> {
+    let content = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| content.starts_with('{') && content.ends_with(']'))?;
+    let repaired = format!("{content}}}");
+    let payload = serde_json::from_str::<Value>(&repaired).ok()?;
+    payload.as_object()?;
+    Some(payload)
+}
+
 fn parse_provider_model_payload_for_capability(
     value: Value,
     capability: &str,
@@ -539,6 +554,9 @@ fn parse_provider_model_payload_for_capability(
         Ok(payload) => Ok(payload),
         Err(error) if capability == "RENDER_CHAPTER" => {
             recover_truncated_renderer_payload(&value).ok_or(error)
+        }
+        Err(error) if capability == "AUDIT_EXTRACT" => {
+            recover_truncated_audit_payload(&value).ok_or(error)
         }
         Err(error) => Err(error),
     }
@@ -2470,6 +2488,34 @@ mod tests {
             }]
         });
         assert!(parse_provider_model_payload_for_capability(value, "PLAN_STRATEGY").is_err());
+    }
+
+    #[test]
+    fn audit_payload_recovery_only_closes_a_complete_outer_candidate_array() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"canonCandidates\":[]"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(value, "AUDIT_EXTRACT").unwrap(),
+            json!({"canonCandidates":[]})
+        );
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"canonCandidates\":[]]"}
+            }]
+        });
+        assert!(parse_provider_model_payload_for_capability(value, "AUDIT_EXTRACT").is_err());
+        assert!(parse_provider_model_payload_for_capability(
+            json!({
+                "choices": [{
+                    "message": {"content": "{\"canonCandidates\":[]"}
+                }]
+            }),
+            "PLAN_STRATEGY"
+        )
+        .is_err());
     }
 
     #[test]
