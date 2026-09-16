@@ -807,6 +807,32 @@ fn existing_canon_semantic_keys(authority_context: &Value) -> Value {
         .unwrap_or_else(|| json!([]))
 }
 
+fn reality_delta_template(authority_context: &Value) -> Value {
+    let subject_id = authority_context
+        .pointer("/state/facts")
+        .and_then(Value::as_array)
+        .and_then(|facts| facts.first())
+        .and_then(|fact| fact.get("subjectId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("entity:current-protagonist");
+    let existing = authority_context
+        .pointer("/state/facts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fact| fact.get("subjectId").and_then(Value::as_str) == Some(subject_id))
+        .filter_map(|fact| fact.get("predicate").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut predicate = "OBSERVED_NEW_EVENT".to_string();
+    let mut suffix = 2;
+    while existing.contains(predicate.as_str()) {
+        predicate = format!("OBSERVED_NEW_EVENT_{suffix}");
+        suffix += 1;
+    }
+    json!({"subjectId":subject_id,"predicate":predicate})
+}
+
 fn current_authority_digest(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
@@ -1358,6 +1384,7 @@ pub fn run_chapter_production(
         current_revision,
     )?;
     let existing_canon_semantic_keys = existing_canon_semantic_keys(&authority_context);
+    let reality_delta_template = reality_delta_template(&authority_context);
 
     // B10 is an enrichment/quality layer on the existing B08 composition
     // root. Disabling it is an explicit compatibility path and still uses the
@@ -1449,7 +1476,7 @@ pub fn run_chapter_production(
         .and_then(Value::as_i64)
         .unwrap_or(1_800)
         .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys.clone(),"targetChineseCharacters":target_chinese_characters});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys.clone(),"realityDeltaTemplate":reality_delta_template.clone(),"targetChineseCharacters":target_chinese_characters});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
@@ -1726,7 +1753,7 @@ pub fn run_chapter_production(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":execution_mode == "LONG_FORM","candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":execution_mode == "LONG_FORM","realityDeltaTemplate":reality_delta_template,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -2728,5 +2755,21 @@ mod tests {
         assert_eq!(payload["projectRevision"], 7);
         assert_eq!(payload["activeTaskRefs"][0], "task:current");
         assert!(payload.get("state").is_some());
+    }
+
+    #[test]
+    fn reality_delta_template_avoids_existing_subject_predicate_keys() {
+        let context = json!({
+            "state": {
+                "facts": [
+                    {"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT"},
+                    {"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT_2"}
+                ]
+            }
+        });
+        assert_eq!(
+            reality_delta_template(&context),
+            json!({"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT_3"})
+        );
     }
 }
