@@ -993,10 +993,42 @@ fn b10_repair_target(body: &str, repairable_dimensions: &[String]) -> Option<(St
     None
 }
 
-/// Execute one formal B08 chapter production run.  The function returns a
-/// blocked result when no committed GatePolicy is available; it never silently
-/// commits a candidate as final content.
+/// Execute one formal B08 chapter production run. Any error after a durable
+/// job has been created is reflected in that job's FAILED state so a caller
+/// may safely submit a retry with explicit lineage.
 pub fn run_chapter_production(
+    manager: &ProjectManager,
+    gateway: &dyn ProductionModelGateway,
+    request: &Value,
+) -> Result<Value, String> {
+    let result = run_chapter_production_inner(manager, gateway, request);
+    if let Err(error) = &result {
+        let project_id = request.pointer("/projectId").and_then(Value::as_str);
+        let command_id = request.pointer("/commandId").and_then(Value::as_str);
+        let now = request.pointer("/requestedAt").and_then(Value::as_str);
+        if let (Some(project_id), Some(command_id), Some(now)) = (project_id, command_id, now) {
+            if let Ok(job_id) = StableIdentityFactory::from_command(StableIdKind::Job, command_id) {
+                if let Ok(connection) = manager.open(project_id, "", now) {
+                    let failure_code = error
+                        .split(':')
+                        .next()
+                        .filter(|code| !code.trim().is_empty())
+                        .unwrap_or("B08_PRODUCTION_FAILED");
+                    let _ = DurableJobService::fail_active_job(
+                        &connection,
+                        project_id,
+                        &job_id,
+                        failure_code,
+                        now,
+                    );
+                }
+            }
+        }
+    }
+    result
+}
+
+fn run_chapter_production_inner(
     manager: &ProjectManager,
     gateway: &dyn ProductionModelGateway,
     request: &Value,

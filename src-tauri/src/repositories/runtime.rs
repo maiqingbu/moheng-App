@@ -721,6 +721,37 @@ impl DurableJobService {
         Ok(())
     }
 
+    pub fn fail_active_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        error_code: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        let status: Option<String> = connection
+            .query_row(
+                "SELECT status FROM jobs WHERE project_id=?1 AND job_id=?2",
+                libsql_rusqlite::params![project_id, job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if matches!(
+            status.as_deref(),
+            Some(
+                "QUEUED"
+                    | "RUNNING"
+                    | "PAUSING"
+                    | "PAUSED"
+                    | "WAITING_MODEL"
+                    | "WAITING_DECISION"
+                    | "WAITING_BUDGET"
+            )
+        ) {
+            Self::fail_job(connection, project_id, job_id, error_code, now)?;
+        }
+        Ok(())
+    }
+
     pub fn transition(
         connection: &Connection,
         project_id: &str,
