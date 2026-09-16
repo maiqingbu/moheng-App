@@ -87,7 +87,7 @@ pub fn normalize_chapter_plan_model_output(
                 {
                     Some(json!({"kind":"MODEL_STATED","value":statement}))
                 } else {
-                    item.as_object().and_then(|object| {
+                    item.as_object().map(|object| {
                         let kind = object
                             .get("kind")
                             .or_else(|| object.get("stateKey"))
@@ -102,10 +102,10 @@ pub fn normalize_chapter_plan_model_output(
                             .cloned()
                             .or_else(|| object.get("description").cloned())
                             .unwrap_or_else(|| Value::Object(object.clone()));
-                        Some(json!({
+                        json!({
                             "kind":kind.unwrap_or("MODEL_STATED"),
                             "value":value
-                        }))
+                        })
                     })
                 };
                 if let Some(normalized) = normalized {

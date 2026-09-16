@@ -1764,6 +1764,7 @@ impl NarrativeRepository {
         Ok((next <= chapter_end).then_some(next))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn ensure_planned_chapter(
         connection: &Connection,
         project_id: &str,
