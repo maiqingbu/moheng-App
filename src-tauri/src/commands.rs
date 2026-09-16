@@ -445,27 +445,29 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
     let recent_chapters = state
         .manager
         .with_read_connection(project_id, &updated_at, |connection| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT chapter_id,volume_id,chapter_no,title,word_count,final_version,updated_at FROM chapters WHERE project_id=?1 AND status='COMMITTED' ORDER BY chapter_no DESC,chapter_id DESC LIMIT 3",
-                )
-                .map_err(ManagerError::Sqlite)?;
-            let rows = statement
-                .query_map([project_id], |row| {
-                    Ok(json!({
-                        "id":row.get::<_,String>(0)?,
-                        "volumeId":row.get::<_,String>(1)?,
-                        "number":row.get::<_,i64>(2)?,
-                        "title":row.get::<_,String>(3)?,
-                        "status":"official",
-                        "version":row.get::<_,Option<i64>>(5)?.map(|version| format!("v{version}")).unwrap_or_default(),
-                        "wordCount":row.get::<_,i64>(4)?,
-                        "updatedAt":row.get::<_,String>(6)?
-                    }))
-                })
-                .map_err(ManagerError::Sqlite)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(ManagerError::Sqlite)
+            crate::repositories::narrative::NarrativeRepository::recent_committed_chapters(
+                connection,
+                project_id,
+                3,
+            )
+            .map(|chapters| {
+                chapters
+                    .into_iter()
+                    .map(|chapter| {
+                        json!({
+                            "id": chapter.chapter_id,
+                            "volumeId": chapter.volume_id,
+                            "number": chapter.chapter_no,
+                            "title": chapter.title,
+                            "status": "official",
+                            "version": chapter.final_version.map(|version| format!("v{version}")).unwrap_or_default(),
+                            "wordCount": chapter.word_count,
+                            "updatedAt": chapter.updated_at
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
         .map_err(|error| error.to_string())?;
     let mut project = project_snapshot(project_id, &title, revision, &updated_at);

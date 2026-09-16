@@ -146,6 +146,18 @@ pub struct TaskStateRecord {
     pub chapter_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentCommittedChapter {
+    pub chapter_id: String,
+    pub volume_id: String,
+    pub chapter_no: i64,
+    pub title: String,
+    pub word_count: i64,
+    pub final_version: Option<i64>,
+    pub updated_at: String,
+}
+
 /// B02's bounded opening snapshot.  It is a read projection assembled from
 /// committed chapter/artifact/evidence rows; it is never persisted as a second
 /// authority.  The signing owner uses this exact snapshot for both the verdict
@@ -231,6 +243,31 @@ pub struct CanonEventRecord {
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
+    pub fn recent_committed_chapters(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentCommittedChapter>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT chapter_id,volume_id,chapter_no,title,word_count,final_version,updated_at FROM chapters WHERE project_id=?1 AND status='COMMITTED' ORDER BY chapter_no DESC,chapter_id DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, Self::limit(limit)],
+            |row| {
+                Ok(RecentCommittedChapter {
+                    chapter_id: row.get(0)?,
+                    volume_id: row.get(1)?,
+                    chapter_no: row.get(2)?,
+                    title: row.get(3)?,
+                    word_count: row.get(4)?,
+                    final_version: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Builds the complete, formal B06 continuity projection for a project.
     /// Consumers such as B14 receive thread state, not a second obligation
     /// count, so current logical status remains owned by the narrative layer.
