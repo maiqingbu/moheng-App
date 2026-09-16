@@ -512,6 +512,38 @@ fn parse_provider_model_payload(value: Value) -> Result<Value, String> {
     serde_json::from_str(content).map_err(|error| format!("P01_MODEL_JSON_INVALID:{error}"))
 }
 
+/// Some compatible endpoints have returned a complete body value but omitted
+/// only the final JSON string/object delimiters. Recover that narrow renderer
+/// shape without relaxing planner/audit contracts or accepting trailing
+/// content; the original raw response remains durably recorded.
+fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
+    let content = value
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| content.starts_with("{\"body\":\""))?;
+    let repaired = format!("{content}\"}}");
+    let payload = serde_json::from_str::<Value>(&repaired).ok()?;
+    payload
+        .get("body")
+        .and_then(Value::as_str)
+        .filter(|body| !body.trim().is_empty())?;
+    Some(payload)
+}
+
+fn parse_provider_model_payload_for_capability(
+    value: Value,
+    capability: &str,
+) -> Result<Value, String> {
+    match parse_provider_model_payload(value.clone()) {
+        Ok(payload) => Ok(payload),
+        Err(error) if capability == "RENDER_CHAPTER" => {
+            recover_truncated_renderer_payload(&value).ok_or(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn classify_provider_body(raw: &str) -> Option<&'static str> {
     if raw.trim().is_empty() {
         return Some("P01_PROVIDER_EMPTY_BODY");
@@ -547,14 +579,18 @@ pub fn execute_production_model(
         }
     };
     if let Some(parsed) = outcome.parsed.take() {
-        outcome.parsed = Some(match parse_provider_model_payload(parsed) {
-            Ok(payload) => payload,
-            Err(error) => {
-                DurableModelRunner::mark_model_payload_parse_failure(connection, spec, &error, now)
+        outcome.parsed = Some(
+            match parse_provider_model_payload_for_capability(parsed, capability) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    DurableModelRunner::mark_model_payload_parse_failure(
+                        connection, spec, &error, now,
+                    )
                     .map_err(|runtime_error| runtime_error.to_string())?;
-                return Err(error);
-            }
-        });
+                    return Err(error);
+                }
+            },
+        );
     }
     Ok(outcome)
 }
@@ -582,14 +618,18 @@ pub fn execute_production_model_with_profile(
         }
     };
     if let Some(parsed) = outcome.parsed.take() {
-        outcome.parsed = Some(match parse_provider_model_payload(parsed) {
-            Ok(payload) => payload,
-            Err(error) => {
-                DurableModelRunner::mark_model_payload_parse_failure(connection, spec, &error, now)
+        outcome.parsed = Some(
+            match parse_provider_model_payload_for_capability(parsed, capability) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    DurableModelRunner::mark_model_payload_parse_failure(
+                        connection, spec, &error, now,
+                    )
                     .map_err(|runtime_error| runtime_error.to_string())?;
-                return Err(error);
-            }
-        });
+                    return Err(error);
+                }
+            },
+        );
     }
     Ok(outcome)
 }
@@ -2394,6 +2434,29 @@ mod tests {
             parse_provider_model_payload(value).unwrap(),
             json!({"ok": true})
         );
+    }
+
+    #[test]
+    fn renderer_payload_recovery_only_closes_a_truncated_body_object() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"完整正文"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(value, "RENDER_CHAPTER").unwrap(),
+            json!({"body":"完整正文"})
+        );
+    }
+
+    #[test]
+    fn planner_payload_never_uses_renderer_recovery() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"不应作为规划\""}
+            }]
+        });
+        assert!(parse_provider_model_payload_for_capability(value, "PLAN_STRATEGY").is_err());
     }
 
     #[test]
