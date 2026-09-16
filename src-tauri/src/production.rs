@@ -788,6 +788,25 @@ fn authority_context_payload(
     serde_json::to_value(input).map_err(|error| format!("B06_CONTEXT_SERIALIZATION:{error}"))
 }
 
+fn existing_canon_semantic_keys(authority_context: &Value) -> Value {
+    authority_context
+        .pointer("/state/facts")
+        .and_then(Value::as_array)
+        .map(|facts| {
+            facts
+                .iter()
+                .filter_map(|fact| {
+                    Some(json!({
+                        "subjectId":fact.get("subjectId")?.clone(),
+                        "predicate":fact.get("predicate")?.clone()
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .map(Value::Array)
+        .unwrap_or_else(|| json!([]))
+}
+
 fn current_authority_digest(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
@@ -1338,6 +1357,7 @@ pub fn run_chapter_production(
         execution_mode,
         current_revision,
     )?;
+    let existing_canon_semantic_keys = existing_canon_semantic_keys(&authority_context);
 
     // B10 is an enrichment/quality layer on the existing B08 composition
     // root. Disabling it is an explicit compatibility path and still uses the
@@ -1429,7 +1449,7 @@ pub fn run_chapter_production(
         .and_then(Value::as_i64)
         .unwrap_or(1_800)
         .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"targetChineseCharacters":target_chinese_characters});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys.clone(),"targetChineseCharacters":target_chinese_characters});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
@@ -1706,7 +1726,7 @@ pub fn run_chapter_production(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
