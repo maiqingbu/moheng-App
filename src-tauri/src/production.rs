@@ -2296,17 +2296,21 @@ fn run_chapter_production_inner(
     update_stage(connection, &project_id, &job_id, "COMMIT", &now)?;
     let receipt =
         CommitService::commit(connection, &bundle, &now).map_err(|error| error.to_string())?;
-    let reconciliation_execution = match execute_reconciliation_action(
-        &handle,
-        &project_id,
-        &volume_id,
-        &chapter_id,
-        reconciliation,
-        &command_id,
-        &now,
-    ) {
-        Ok(value) => value,
-        Err(error) => json!({"status":"FAILED","error":error}),
+    let reconciliation_execution = if execution_mode == "LONG_FORM" {
+        match execute_reconciliation_action(
+            &handle,
+            &project_id,
+            &volume_id,
+            &chapter_id,
+            reconciliation,
+            &command_id,
+            &now,
+        ) {
+            Ok(value) => value,
+            Err(error) => json!({"status":"FAILED","error":error}),
+        }
+    } else {
+        json!({"status":"SKIPPED","reason":"OPENING_BOOTSTRAP"})
     };
     // B09 owns the rebuildable volume planning projection. Refresh it only
     // after B08's authoritative chapter CommitBundle succeeds; a projection
