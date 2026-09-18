@@ -28,6 +28,7 @@ onMounted(async () => {
 })
 
 async function saveAndContinue() {
+  if (!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.value.status)) return
   const receipt = await store.runCommand('story-setup-save', {
     type: 'story_setup_save',
     payload: {
@@ -68,7 +69,7 @@ async function saveAndContinue() {
       </div>
       <div class="banner info" style="margin-top:16px"><div><div class="banner-title">下一步只准备开篇</div><div class="banner-copy">系统会为第一章建立最小的正式规划，后续卷章仍按既有规划链路逐步创建。</div></div></div>
       <CommandFeedback :state="state" />
-      <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn primary" :disabled="!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.status)" @click="saveAndContinue">保存故事核心并继续</button></div>
+      <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn primary" :aria-disabled="!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.status)" @click="saveAndContinue">保存故事核心并继续</button></div>
     </section>
   </div>
 </template>

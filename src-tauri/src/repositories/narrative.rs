@@ -128,6 +128,20 @@ pub struct ObligationAuthorityRecord {
     pub decision_ref: Option<String>,
 }
 
+/// The authoritative timing fields used by Planning Pressure. The plan is a
+/// consumer of this projection, never a second source for thread age or
+/// deadlines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuityPressureRecord {
+    pub thread_id: String,
+    pub lifecycle: String,
+    pub authority_level: String,
+    pub must_resolve_before_chapter: Option<i64>,
+    pub last_touched_chapter_no: Option<i64>,
+    pub resume_condition: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeshadowAuthorityRecord {
@@ -2202,6 +2216,38 @@ impl NarrativeRepository {
                 })
             },
         ).optional().map_err(Into::into)
+    }
+
+    /// Read timing data from the continuity authority for the planning
+    /// projection. Only explicit deadlines count as overdue; missing timing
+    /// data remains unknown rather than being treated as overdue.
+    pub fn continuity_pressure_records(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<ContinuityPressureRecord>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT o.obligation_id,o.lifecycle,o.authority_level,o.must_resolve_before_chapter,o.resume_condition_json,c.chapter_no FROM narrative_obligations o LEFT JOIN chapters c ON c.project_id=o.project_id AND c.chapter_id=o.last_touched_chapter_id WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') ORDER BY o.obligation_id",
+        )?;
+        let rows = statement.query_map([project_id], |row| {
+            let resume_condition: String = row.get(4)?;
+            let deadline: Option<String> = row.get(3)?;
+            Ok(ContinuityPressureRecord {
+                thread_id: format!("thread:{}", row.get::<_, String>(0)?),
+                lifecycle: row.get(1)?,
+                authority_level: row.get(2)?,
+                must_resolve_before_chapter: deadline.and_then(|value| {
+                    value
+                        .strip_prefix("chapter:")
+                        .unwrap_or(&value)
+                        .parse::<i64>()
+                        .ok()
+                }),
+                last_touched_chapter_no: row.get(5)?,
+                resume_condition: serde_json::from_str(&resume_condition)
+                    .unwrap_or_else(|_| Value::Object(Default::default())),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn foreshadow_authority(

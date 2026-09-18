@@ -38,9 +38,13 @@ const bookPlanState = computed(()=>store.commandState('book-plan-revise'))
 
 function choose(id:string){ selected.value=[id] }
 function toggleCombine(id:string){ selected.value = selected.value.includes(id) ? selected.value.filter(x=>x!==id) : [...selected.value,id].slice(0,2) }
-async function regenerate(){ await store.runCommand(regenerateKey,{type:'pitch_regenerate',projectId:store.project?.id,payload:{adjustment:newConstraint.value,regeneratePitches:true}}); constraintsOpen.value=false }
+async function regenerate(){
+  if (['submitting','accepted','processing'].includes(regenerateState.value.status)) return
+  await store.runCommand(regenerateKey,{type:'pitch_regenerate',projectId:store.project?.id,payload:{adjustment:newConstraint.value,regeneratePitches:true}}); constraintsOpen.value=false
+}
 async function reviseBookPlan(){ await store.runCommand('book-plan-revise',{type:'book_plan_revise',payload:{reason:'用户从故事方向页请求重新审视书级战略'}}) }
 async function confirm(){
+  if (!selected.value.length || ['submitting','accepted','processing'].includes(commandState.value.status)) return
   await store.runCommand(commandKey,{type:'pitch_select',projectId:store.project?.id,payload:{pitchIds:selected.value,mode:selected.value.length>1?'combine':'single'}})
   setTimeout(()=>router.push(`/projects/${store.currentProjectId ?? ''}/setup`),350)
 }
@@ -54,7 +58,7 @@ async function confirm(){
 
     <div class="pitch-toolbar">
       <div><strong>当前选择：{{ selected.length ? pitches.filter(p=>selected.includes(p.id)).map(p=>p.name).join(' + ') : '尚未选择' }}</strong><div class="muted" style="font-size:11px">组合方案最多选择两份，系统会重新检查故事承诺、主角欲望、核心机制和主要冲突是否一致。</div></div>
-      <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :disabled="!selected.length || ['submitting','accepted','processing'].includes(commandState.status)" @click="confirm">确认故事方向</button></div>
+      <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :aria-disabled="!selected.length || ['submitting','accepted','processing'].includes(commandState.status)" @click="confirm">确认故事方向</button></div>
     </div>
     <CommandFeedback :state="commandState" /><CommandFeedback :state="initialGenerationState" /><CommandFeedback :state="regenerateState" /><div v-if="persistedGenerationFailure && regenerateState.status === 'idle' && initialGenerationState.status === 'idle'" class="command-feedback failed" role="status"> <strong>未完成</strong><span> · 上次生成未完成，可以重试故事方向。</span></div>
 
@@ -111,7 +115,7 @@ async function confirm(){
 
     <BaseModal :open="constraintsOpen" title="修改约束后重新生成" subtitle="只改你关心的部分，其他已经确认的意图保持不变。" @close="constraintsOpen=false">
       <label class="field"><span class="field-label">补充或修改约束</span><textarea v-model="newConstraint" class="textarea" /></label>
-      <CommandFeedback :state="regenerateState" /><template #footer><button class="btn" @click="constraintsOpen=false">取消</button><button class="btn primary" :disabled="['submitting','accepted','processing'].includes(regenerateState.status)" @click="regenerate">重新生成三份方向</button></template>
+      <CommandFeedback :state="regenerateState" /><template #footer><button class="btn" @click="constraintsOpen=false">取消</button><button class="btn primary" :aria-disabled="['submitting','accepted','processing'].includes(regenerateState.status)" @click="regenerate">重新生成三份方向</button></template>
     </BaseModal>
   </div>
 </template>

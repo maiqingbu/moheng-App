@@ -1992,6 +1992,13 @@ fn run_chapter_production_inner(
             })
         })
         .collect::<Vec<_>>();
+    let promotion_decision_for = |thread_ref: &str| {
+        thread_promotion_decisions
+            .iter()
+            .find(|item| item.get("threadRef").and_then(Value::as_str) == Some(thread_ref))
+            .and_then(|item| item.get("decision").and_then(Value::as_str))
+            .unwrap_or("DO_NOT_PROMOTE")
+    };
     let mut audit = artifact(
         &project_id,
         audit_id,
@@ -2025,6 +2032,7 @@ fn run_chapter_production_inner(
     let mut foreshadow_delta = Vec::new();
     let mut obligation_evidence_records = Vec::new();
     for (index, item) in extraction.continuity_candidates.iter().enumerate() {
+        let promotion_decision = promotion_decision_for(&item.thread_ref);
         let authority_id = item
             .thread_ref
             .strip_prefix("thread:")
@@ -2047,7 +2055,7 @@ fn run_chapter_production_inner(
                 "mustResolveBeforeChapter":obligation.must_resolve_before_chapter,
                 "prerequisites":obligation.prerequisites,
                 "decisionRef":obligation.decision_ref,
-                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1}
+                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE"}
             }));
             obligation_evidence_records.push(json!({
                 "evidenceId":format!("obligation-evidence:{}:{}",final_id,index+1),
@@ -2069,12 +2077,28 @@ fn run_chapter_production_inner(
                 "status":if matches!(item.disposition.as_str(),"RESOLVE"|"RESOLVED") {"RECOVERED"} else {"REINFORCED"},
                 "plantChapterId":foreshadow.plant_chapter_id,"recoverWindowEndChapter":foreshadow.recover_window_end_chapter,
                 "secretPayloadRef":foreshadow.secret_payload_ref,
-                "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,
+                "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE",
                     "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}}
             }));
             continue;
         }
-        return Err("B08_THREAD_AUTHORITY_NOT_FOUND".into());
+        if promotion_decision != "PROMOTE" {
+            // Audit evidence is retained, but a non-promoted ordinary action
+            // must not mutate Continuity Reality.
+            continue;
+        }
+        obligation_delta.push(json!({
+            "obligationId":authority_id,
+            "scope":"CHAPTER",
+            "obligationType":"PROMOTED_CONTINUITY",
+            "authorityLevel":"C",
+            "lifecycle":"PROGRESSING",
+            "description":format!("由本章审计确认的跨章责任：{}", item.thread_ref),
+            "mustResolveBeforeChapter":Value::Null,
+            "prerequisites":[],
+            "decisionRef":format!("thread-promotion:{}:{}", final_id, index + 1),
+            "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":"PROMOTE","deltaMode":"NEW_CONTINUITY"}
+        }));
     }
     let evidence_records = extraction
         .canon_candidates

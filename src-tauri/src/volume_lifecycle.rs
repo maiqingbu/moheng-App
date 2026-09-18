@@ -1064,6 +1064,28 @@ fn build_planning_state(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let continuity_pressure_records =
+        NarrativeRepository::continuity_pressure_records(connection, project_id)
+            .map_err(|error| error.to_string())?;
+    let continuity_pressure = continuity_pressure_records
+        .iter()
+        .filter(|record| {
+            unresolved_thread_refs
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|reference| reference == record.thread_id)
+        })
+        .map(|record| {
+            json!({
+                "threadId": record.thread_id,
+                "lifecycle": record.lifecycle,
+                "authorityLevel": record.authority_level,
+                "mustResolveBeforeChapter": record.must_resolve_before_chapter,
+                "lastTouchedChapterNo": record.last_touched_chapter_no,
+                "resumeCondition": record.resume_condition,
+            })
+        })
+        .collect::<Vec<_>>();
     let unresolved_responsibilities = unresolved_thread_refs
         .iter()
         .filter_map(Value::as_str)
@@ -1085,21 +1107,20 @@ fn build_planning_state(
             })
         })
         .collect::<Vec<_>>();
-    let reservation_pressure = future_reservation_refs.len() as i64
-        + tasks
-            .iter()
-            .filter_map(|task| task.get("reservationRefs").and_then(Value::as_array))
-            .map(Vec::len)
-            .sum::<usize>() as i64;
-    let planning_pressure = planning::planning_pressure(
-        committed_chapters,
-        max_chapters,
-        required_tasks_remaining,
-        blocked_required_tasks,
-        exit_condition_gap,
-        unresolved_thread_refs.len() as i64,
-        reservation_pressure,
-    );
+    let planning_pressure =
+        planning::planning_pressure_from_authority(planning::PlanningPressureInput {
+            current_chapter: committed_chapters,
+            max_chapters,
+            route_tasks: &tasks,
+            task_reality: &task_reality,
+            continuity_threads: &continuity_pressure,
+            reservations: &future_reservation_refs,
+            exit_conditions: route
+                .get("requiredExitConditions")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        });
     let state_input = json!({
         "projectId": project_id,
         "volumeId": volume_id,

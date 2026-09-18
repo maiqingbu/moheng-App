@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { onMounted, watch } from 'vue'
-import { RouterView, useRoute, useRouter } from 'vue-router'
+import { RouterView, useRoute } from 'vue-router'
 import AppShell from './ui/components/AppShell.vue'
 import { useProjectStore } from './ui/stores/projectStore'
 import { useProjectLibraryStore } from './ui/stores/projectLibraryStore'
 
 const route = useRoute()
-const router = useRouter()
 const projectStore = useProjectStore()
 const libraryStore = useProjectLibraryStore()
 
@@ -20,9 +19,6 @@ async function syncRouteProject() {
 }
 
 onMounted(async () => {
-  if (import.meta.env.VITE_REAL_LLM_UI_GATE === 'true' && route.name !== 'real-llm-gate') {
-    await router.replace('/real-llm-gate')
-  }
   await libraryStore.bootstrap()
   await syncRouteProject()
 })

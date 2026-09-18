@@ -74,6 +74,7 @@ const realityEvidence = (task: Record<string, unknown>) => {
 }
 
 async function closeVolume() {
+  if (!closeReady.value || detail.value?.volume.status === 'CLOSED') return
   await store.runCommand('volume-close', {
     type: 'volume_close',
     projectId: store.currentProjectId ?? undefined,
@@ -83,6 +84,7 @@ async function closeVolume() {
 }
 
 async function prepareNextChapter() {
+  if (chapterPlanningBusy(chapterPrepareState.value.status)) return
   await store.runCommand('chapter-prepare', {
     type: 'planning_prepare_next_chapter',
     projectId: store.currentProjectId ?? undefined,
@@ -97,7 +99,7 @@ async function prepareNextChapter() {
 
 async function compileNextChapterPlan() {
   const chapter = nextChapter.value
-  if (!chapter) return
+  if (!chapter || chapterPlanningBusy(chapterPlanState.value.status)) return
   await store.runCommand('chapter-plan-compile', {
     type: 'planning_compile_chapter_plan',
     projectId: store.currentProjectId ?? undefined,
@@ -143,8 +145,8 @@ onUnmounted(() => {
       <div class="card-head"><div><h2 class="card-title">下一章正式生产</h2><p class="card-subtitle">章节准备、ContextManifest 与 ChapterPlan 均通过正式项目命令落库；计划确认后再到“创作”页启动真实模型。</p></div><span class="badge">B04 · B05 · B06</span></div>
       <CommandFeedback :state="chapterPrepareState" />
       <CommandFeedback :state="chapterPlanState" />
-      <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="prepareNextChapter">准备下一章</button><span class="muted" style="font-size:12px">从本卷当前 Reality 之后分配下一个章节号与预算。</span></div>
-      <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成可执行 ChapterPlan。</div></div><button class="btn primary" data-action="compile" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="compileNextChapterPlan">生成当前章节计划</button></div>
+      <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :aria-disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="prepareNextChapter">准备下一章</button><span class="muted" style="font-size:12px">从本卷当前 Reality 之后分配下一个章节号与预算。</span></div>
+      <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成可执行 ChapterPlan。</div></div><button class="btn primary" data-action="compile" :aria-disabled="chapterPlanningBusy(chapterPlanState.status)" @click="compileNextChapterPlan">生成当前章节计划</button></div>
       <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">{{ currentChapterPlan.artifactId }} · v{{ currentChapterPlan.version }}</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>
     </section>
 
@@ -161,7 +163,7 @@ onUnmounted(() => {
       <div v-if="routeReplans.length" class="section-subgroup" style="margin-top:14px"><strong>规划调整记录</strong><div class="timeline"><div v-for="item in routeReplans" :key="String(item.replanId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>第 {{ String(item.newVersion) }} 次调整 · {{ statusLabel(item.validationStatus ?? 'UNKNOWN') }}</strong><div class="muted" style="font-size:12px">{{ sanitizeProductText(item.reason, '调整原因已记录。') }}</div></div></div></div></div>
       <div class="section-subgroup" style="margin-top:14px"><strong>下一卷交接</strong><div v-if="lifecycle.latestHandoff" class="muted">{{ statusLabel(lifecycle.latestHandoff.handoffStatus ?? 'UNKNOWN') }} · 下一卷安排已记录</div><div v-else class="muted">当前卷尚无交接记录；关闭并满足条件后才可创建。</div></div>
       <CommandFeedback :state="closeState" />
-      <div class="actions" style="margin-top:14px"><button class="btn primary" :disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成本卷退出记录并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出记录会在同一流程中提交；失败会完整回滚。</span></div>
+      <div class="actions" style="margin-top:14px"><button class="btn primary" :aria-disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成本卷退出记录并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出记录会在同一流程中提交；失败会完整回滚。</span></div>
     </section>
 
     <div v-if="locked" class="banner warning section"><div><div class="banner-title">当前卷仍处于准入锁定</div><div class="banner-copy">开篇评估通过前可以查看全书战略中的卷意图，但不能创建详细卷计划或启动后续正文生产。</div></div></div>

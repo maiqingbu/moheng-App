@@ -26,6 +26,7 @@ onMounted(() => store.loadMarket())
 const platforms = ['待判断','番茄小说','起点中文网','晋江文学城','其他']
 const tags = ['武侠','悬疑','成长','志怪','群像','复仇','轻喜','慢热']
 const createState = computed(()=>store.commandState(createKey))
+const createInFlight = computed(() => ['submitting','accepted','processing'].includes(createState.value.status))
 const inference = computed(() => [
   ['目标平台', platform.value],
   ['题材方向', selectedTags.value.join(' · ') || '待判断'],
@@ -39,6 +40,7 @@ function toggleTag(tag:string){
 }
 
 async function createFromIdea(){
+  if (createInFlight.value || !idea.value.trim()) return
   try {
     const receipt = await store.runCommand(createKey,{type:'project_create_from_idea',payload:{title:projectTitle.value,idea:idea.value,mode:mode.value,platform:platform.value,length:length.value,forbidden:forbidden.value,tags:selectedTags.value}})
     if (receipt.finalStatus==='committed' && receipt.projectId) router.push(`/projects/${receipt.projectId}/directions?generate=1`)
@@ -47,6 +49,7 @@ async function createFromIdea(){
   }
 }
 async function createFromMarket(){
+  if (createInFlight.value || !marketSource.value.trim() || !marketMaterial.value.trim()) return
   try {
     const receipt = await store.runCommand(createKey,{type:'project_create_from_market',payload:{title:projectTitle.value,marketSource:marketSource.value,marketMaterial:marketMaterial.value,mode:mode.value,forbidden:forbidden.value}})
     if (receipt.finalStatus==='committed' && receipt.projectId) { showMarket.value=false; router.push(`/projects/${receipt.projectId}/directions?generate=1`) }
@@ -72,12 +75,12 @@ async function createFromMarket(){
             <button class="btn soft" @click="showMarket=true">从市场机会开始</button>
             <span class="muted" style="font-size:11px">支持一句话、梗概、人物设想、旧稿片段</span>
           </div>
-          <button class="btn primary large" :disabled="!idea.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromIdea">生成三份故事方向</button>
+          <button class="btn primary large" :aria-disabled="!idea.trim() || createInFlight" @click="createFromIdea">生成三份故事方向</button>
         </div>
       </div>
       <CommandFeedback :state="createState" />
       <div class="entry-paths" style="display:flex;gap:12px;margin-top:14px;flex-wrap:wrap">
-        <button class="btn primary" :disabled="!idea.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromIdea">我已经有故事想法</button>
+        <button class="btn primary" :aria-disabled="!idea.trim() || createInFlight" @click="createFromIdea">我已经有故事想法</button>
         <button class="btn soft" @click="showMarket=true">帮我找值得写的方向</button>
       </div>
     </section>
@@ -134,7 +137,7 @@ async function createFromMarket(){
           <div class="chip-row"><span v-for="e in item.evidence" :key="e" class="badge">{{ e }}</span></div>
         </article>
       </div>
-      <CommandFeedback :state="createState" /><template #footer><button class="btn" @click="showMarket=false">关闭</button><button class="btn primary" :disabled="!marketSource.trim() || !marketMaterial.trim() || ['submitting','accepted','processing'].includes(createState.status)" @click="createFromMarket">分析这份市场资料</button></template>
+      <CommandFeedback :state="createState" /><template #footer><button class="btn" @click="showMarket=false">关闭</button><button class="btn primary" :aria-disabled="!marketSource.trim() || !marketMaterial.trim() || createInFlight" @click="createFromMarket">分析这份市场资料</button></template>
     </BaseModal>
   </div>
 </template>

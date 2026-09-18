@@ -55,6 +55,7 @@ function focusPlanningProgress() {
 async function build() {
   const current = currentVolume.value
   if (!current) return
+  if (!signingPassed.value && !planningActive.value) return
   if (planningActive.value) {
     focusPlanningProgress()
     return
@@ -86,7 +87,7 @@ async function build() {
 <template>
   <div class="page">
     <PageHeader title="当前卷" subtitle="区分规划、实际进展、系统推算与暂定安排，不把计划当成已经发生的事实。">
-      <button class="btn primary" :disabled="actionDisabled" @click="build">{{ actionLabel }}</button>
+      <button class="btn primary" :aria-disabled="actionDisabled" @click="build">{{ actionLabel }}</button>
     </PageHeader>
     <CommandFeedback :state="state" />
 

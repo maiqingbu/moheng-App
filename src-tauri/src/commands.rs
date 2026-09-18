@@ -1405,7 +1405,7 @@ pub(crate) fn context_input_from_authority(
         .iter()
         .map(|item| item.ref_.as_str())
         .collect::<Vec<_>>();
-    let (evidence, evidence_truncated) =
+    let (mut evidence, mut evidence_truncated) =
         crate::repositories::narrative::NarrativeRepository::evidence_for_refs_bounded(
             connection,
             project_id,
@@ -1413,6 +1413,18 @@ pub(crate) fn context_input_from_authority(
             100,
         )
         .map_err(|e| e.to_string())?;
+    // A newly committed Reality fact may not yet be reachable through the
+    // bounded source-ref projection (for example when the current plan has
+    // no entity allow-list). Select the latest authoritative evidence instead
+    // of persisting an empty ContextManifest evidence set.
+    if evidence.is_empty() {
+        let all = crate::repositories::narrative::NarrativeRepository::recent_evidence_complete(
+            connection, project_id,
+        )
+        .map_err(|e| e.to_string())?;
+        evidence_truncated = all.len() > 100;
+        evidence = all.into_iter().take(100).collect();
+    }
     let selected_evidence = evidence
         .into_iter()
         .map(|item| crate::generated::types::EvidenceRef {
@@ -1545,74 +1557,80 @@ pub fn volume_progress_from_authority(
     .map_err(|e| e.to_string())?;
     result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
     result["tasks"] = serde_json::to_value(&tasks).map_err(|e| e.to_string())?;
-    let required_remaining = plan
-        .get("tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|task| {
-            matches!(
-                task.get("class").and_then(Value::as_str),
-                Some("REQUIRED" | "CLIMAX" | "RESERVED")
-            )
-        })
-        .filter(|task| {
-            let task_id = task
-                .get("taskId")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            !tasks.iter().any(|state| {
-                state.state_id == task_id
-                    && matches!(
-                        state.value.get("status").and_then(Value::as_str),
-                        Some("SATISFIED")
-                    )
-            })
-        })
-        .count() as i64;
-    let blocked_required = tasks
-        .iter()
-        .filter(|state| state.value.get("status").and_then(Value::as_str) == Some("BLOCKED"))
-        .count() as i64;
-    let exit_gap = plan
-        .get("requiredExitConditions")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len) as i64;
-    let reservation_pressure = plan
-        .get("tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|task| {
-            task.get("reservationRefs")
-                .and_then(Value::as_array)
-                .is_some_and(|refs| !refs.is_empty())
-        })
-        .count() as i64;
-    let overdue_thread_pressure = plan
+    let continuity_refs = plan
         .get("crossVolumeResponsibilityRefs")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or_default() as i64
-        + plan
-            .get("tasks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|task| {
-                task.get("threadRef").and_then(Value::as_str).is_some()
-                    && task.get("status").and_then(Value::as_str) != Some("SATISFIED")
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .chain(
+            plan.get("tasks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|task| {
+                    task.get("continuityThreadRefs")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                }),
+        )
+        .collect::<BTreeSet<_>>();
+    let continuity_pressure =
+        crate::repositories::narrative::NarrativeRepository::continuity_pressure_records(
+            connection, project_id,
+        )
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|record| continuity_refs.contains(&record.thread_id))
+        .map(|record| {
+            json!({
+                "threadId": record.thread_id,
+                "lifecycle": record.lifecycle,
+                "authorityLevel": record.authority_level,
+                "mustResolveBeforeChapter": record.must_resolve_before_chapter,
+                "lastTouchedChapterNo": record.last_touched_chapter_no,
+                "resumeCondition": record.resume_condition,
             })
-            .count() as i64;
-    result["planningPressure"] = crate::planning::planning_pressure(
-        current_chapter,
-        target_chapters,
-        required_remaining,
-        blocked_required,
-        exit_gap,
-        overdue_thread_pressure,
-        reservation_pressure,
-    );
+        })
+        .collect::<Vec<_>>();
+    let route_tasks = plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let reservations = route_tasks
+        .iter()
+        .flat_map(|task| {
+            task.get("reservationRefs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    let task_reality_values = serde_json::to_value(&tasks)
+        .map_err(|e| e.to_string())?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    result["planningPressure"] =
+        crate::planning::planning_pressure_from_authority(crate::planning::PlanningPressureInput {
+            current_chapter,
+            max_chapters: target_chapters,
+            route_tasks: &route_tasks,
+            task_reality: &task_reality_values,
+            continuity_threads: &continuity_pressure,
+            reservations: &reservations,
+            exit_conditions: plan
+                .get("requiredExitConditions")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        });
     result["truncated"] = json!(false);
     Ok(result)
 }

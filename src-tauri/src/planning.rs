@@ -11,7 +11,7 @@ use crate::hash::sha256_canonical;
 use crate::repositories::narrative::OpeningActualState;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub fn normalize_chapter_plan_model_output(
     mut plan: Value,
@@ -2017,6 +2017,189 @@ pub fn planning_pressure(
     })
 }
 
+/// Inputs for the production planning pressure projection. Every field is
+/// sourced from the authoritative route/reality/continuity readers; no plan
+/// task status or shorthand `threadRef` is accepted as a substitute.
+pub struct PlanningPressureInput<'a> {
+    pub current_chapter: i64,
+    pub max_chapters: i64,
+    pub route_tasks: &'a [Value],
+    pub task_reality: &'a [Value],
+    pub continuity_threads: &'a [Value],
+    pub reservations: &'a [Value],
+    pub exit_conditions: &'a [Value],
+}
+
+/// Calculate pressure from the actual B07/B06 authority inputs. The legacy
+/// `planning_pressure` helper remains for frozen compatibility tests, while
+/// product projections call this function so CLIMAX readiness, thread age,
+/// deadlines, and task status all have explicit sources.
+pub fn planning_pressure_from_authority(input: PlanningPressureInput<'_>) -> Value {
+    let remaining_capacity = (input.max_chapters - input.current_chapter).max(0);
+    let status_by_task = input
+        .task_reality
+        .iter()
+        .filter_map(|state| {
+            let id = state
+                .get("taskId")
+                .or_else(|| state.get("stateId"))
+                .and_then(Value::as_str)?;
+            let status = state
+                .get("status")
+                .or_else(|| state.pointer("/value/status"))
+                .and_then(Value::as_str)
+                .unwrap_or("NOT_STARTED");
+            Some((id.to_string(), status.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let task_status = |task_id: &str| {
+        status_by_task
+            .get(task_id)
+            .map(String::as_str)
+            .unwrap_or("NOT_STARTED")
+    };
+    let is_required = |task: &Value| {
+        matches!(
+            task.get("class").and_then(Value::as_str),
+            Some("REQUIRED" | "CLIMAX" | "RESERVED")
+        )
+    };
+    let required_remaining = input
+        .route_tasks
+        .iter()
+        .filter(|task| is_required(task))
+        .filter(|task| {
+            task.get("taskId")
+                .and_then(Value::as_str)
+                .is_none_or(|id| task_status(id) != "SATISFIED")
+        })
+        .count() as i64;
+    let blocked_required = input
+        .route_tasks
+        .iter()
+        .filter(|task| is_required(task))
+        .filter(|task| {
+            task.get("taskId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| task_status(id) == "BLOCKED")
+        })
+        .count() as i64;
+    let exit_gap = input
+        .exit_conditions
+        .iter()
+        .filter(|condition| {
+            if condition.get("kind").and_then(Value::as_str) == Some("TASK_SATISFIED") {
+                return condition
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .is_none_or(|task_id| task_status(task_id) != "SATISFIED");
+            }
+            true
+        })
+        .count() as i64;
+
+    let climax_tasks = input
+        .route_tasks
+        .iter()
+        .filter(|task| task.get("class").and_then(Value::as_str) == Some("CLIMAX"))
+        .collect::<Vec<_>>();
+    let climax_blocked_prerequisites = climax_tasks
+        .iter()
+        .map(|task| {
+            task.get("dependsOnTaskIds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|task_id| task_status(task_id) != "SATISFIED")
+                .count() as i64
+        })
+        .sum::<i64>();
+    let climax_remaining_cost = climax_tasks
+        .iter()
+        .filter(|task| {
+            task.get("taskId")
+                .and_then(Value::as_str)
+                .is_none_or(|id| task_status(id) != "SATISFIED")
+        })
+        .map(|task| {
+            task.pointer("/estimatedChapterCost/preferred")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+        })
+        .sum::<i64>();
+    let climax_readiness = if climax_tasks.is_empty() {
+        Value::Null
+    } else if climax_blocked_prerequisites > 0 || climax_remaining_cost > remaining_capacity {
+        json!(0)
+    } else if climax_remaining_cost == 0 {
+        json!(100)
+    } else {
+        json!(75)
+    };
+
+    let mut overdue_threads = 0_i64;
+    let mut continuity_aging = 0_i64;
+    let mut aged_threads = 0_i64;
+    for thread in input.continuity_threads {
+        let status = thread
+            .get("logicalStatus")
+            .or_else(|| thread.get("status"))
+            .or_else(|| thread.get("lifecycle"))
+            .and_then(Value::as_str)
+            .unwrap_or("OPEN");
+        if matches!(status, "RESOLVED" | "ABANDONED" | "SUPERSEDED") {
+            continue;
+        }
+        let deadline = thread
+            .get("mustResolveBeforeChapter")
+            .or_else(|| thread.get("deadline"))
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
+        if deadline.is_some_and(|value| value < input.current_chapter) {
+            overdue_threads += 1;
+        }
+        if let Some(last_touched) = thread
+            .get("lastTouchedChapter")
+            .or_else(|| thread.get("lastTouchedChapterNo"))
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
+        {
+            continuity_aging += (input.current_chapter - last_touched).max(0);
+            aged_threads += 1;
+        }
+    }
+    let reservation_pressure = input
+        .reservations
+        .iter()
+        .filter(|reservation| {
+            reservation
+                .get("status")
+                .and_then(Value::as_str)
+                .is_none_or(|status| !matches!(status, "RESOLVED" | "SATISFIED" | "ABANDONED"))
+        })
+        .count() as i64;
+    let priority_score = required_remaining.saturating_mul(4)
+        + blocked_required.saturating_mul(6)
+        + exit_gap.saturating_mul(5)
+        + overdue_threads.saturating_mul(3)
+        + reservation_pressure.saturating_mul(2)
+        + if remaining_capacity <= 8 { 8 } else { 0 };
+    json!({
+        "remainingChapterCapacity": remaining_capacity,
+        "requiredTasksRemaining": required_remaining,
+        "blockedRequiredTasks": blocked_required,
+        "exitConditionGap": exit_gap,
+        "overdueThreadPressure": overdue_threads,
+        "continuityAging": continuity_aging,
+        "continuityAgedThreads": aged_threads,
+        "climaxReadiness": climax_readiness,
+        "climaxTaskCount": climax_tasks.len() as i64,
+        "climaxBlockedPrerequisites": climax_blocked_prerequisites,
+        "climaxRemainingChapterCost": climax_remaining_cost,
+        "reservationPressure": reservation_pressure,
+        "priorityScore": priority_score
+    })
+}
+
 pub fn validate_current_chapter_plan(
     plan: &Value,
     current_chapter_id: &str,
@@ -2630,6 +2813,52 @@ mod tests {
         assert_eq!(pressured["remainingChapterCapacity"], 5);
         assert_eq!(calm["climaxReadiness"], 60);
         assert_eq!(calm["continuityAging"], 0);
+    }
+
+    #[test]
+    fn authority_pressure_reads_climax_reality_and_thread_timing() {
+        let tasks = vec![
+            json!({"taskId":"task:climax","class":"CLIMAX","dependsOnTaskIds":["task:prereq"],"estimatedChapterCost":{"preferred":2}}),
+            json!({"taskId":"task:prereq","class":"REQUIRED","dependsOnTaskIds":[],"estimatedChapterCost":{"preferred":1}}),
+        ];
+        let reality = vec![
+            json!({"stateId":"task:climax","value":{"status":"NOT_STARTED"}}),
+            json!({"stateId":"task:prereq","value":{"status":"BLOCKED"}}),
+        ];
+        let threads = vec![json!({
+            "threadId":"thread:promise",
+            "lifecycle":"PROGRESSING",
+            "mustResolveBeforeChapter":3,
+            "lastTouchedChapterNo":1
+        })];
+        let pressure = planning_pressure_from_authority(PlanningPressureInput {
+            current_chapter: 4,
+            max_chapters: 8,
+            route_tasks: &tasks,
+            task_reality: &reality,
+            continuity_threads: &threads,
+            reservations: &[],
+            exit_conditions: &[],
+        });
+        assert_eq!(pressure["climaxReadiness"], 0);
+        assert_eq!(pressure["climaxBlockedPrerequisites"], 1);
+        assert_eq!(pressure["overdueThreadPressure"], 1);
+        assert_eq!(pressure["continuityAging"], 3);
+    }
+
+    #[test]
+    fn authority_pressure_without_climax_is_schema_neutral() {
+        let pressure = planning_pressure_from_authority(PlanningPressureInput {
+            current_chapter: 1,
+            max_chapters: 10,
+            route_tasks: &[],
+            task_reality: &[],
+            continuity_threads: &[],
+            reservations: &[],
+            exit_conditions: &[],
+        });
+        assert!(pressure["climaxReadiness"].is_null());
+        assert_eq!(pressure["climaxTaskCount"], 0);
     }
 
     #[test]
