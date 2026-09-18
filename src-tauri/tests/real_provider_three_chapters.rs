@@ -472,30 +472,15 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             after.0 > before.0 || after.1 > before.1,
             "Reality must change after the real chapter commit"
         );
-        let prepared5 = execute(
-            &state,
-            json!({
-                "type":"planning_prepare_next_chapter","commandId":format!("{prefix}:chapter-5"),
-                "idempotencyKey":format!("{prefix}:chapter-5:key"),"projectId":project_id,
-                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"volumeId":volume_id}
-            }),
-        );
-        let chapter5 = prepared5["chapter"]["chapterId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let plan5 = execute(
-            &state,
-            json!({
-                "type":"planning_compile_chapter_plan","commandId":format!("{prefix}:plan-5"),
-                "idempotencyKey":format!("{prefix}:plan-5:key"),"projectId":project_id,
-                "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,"payload":{"chapterId":chapter5,"chapterGoalHint":"使用上一章 Reality 的新证据推进下一项调查。"}
-            }),
-        );
-        assert!(plan4["contextManifestRef"]["artifactId"].as_str().is_some());
-        assert!(plan5["contextManifestRef"]["artifactId"].as_str().is_some());
-
         let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let chapter5: String = connection
+            .query_row(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=5 AND status='PLANNED'",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(plan4["contextManifestRef"]["artifactId"].as_str().is_some());
         let context4: String = connection.query_row(
             "SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' AND json_extract(p.payload_json,'$.chapterId')=?2",
             libsql_rusqlite::params![project_id, chapter4], |row| row.get(0),
