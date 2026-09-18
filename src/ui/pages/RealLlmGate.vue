@@ -48,6 +48,17 @@ async function run() {
   events.value = []
   trace.value = { rootTraceId, sourceCommit: import.meta.env.VITE_SOURCE_COMMIT ?? 'runtime', nodes: [] }
   try {
+    await command('global_settings_save', {
+      settings: {
+        provider: 'OpenAI Compatible',
+        providerId: 'openai-compatible',
+        model: 'qwen3.8-flash',
+        modelId: 'qwen3.8-flash',
+        endpoint: 'https://ws-a4ht0p7fdc83x4x4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        enabled: true,
+        timeoutMs: 120000,
+      },
+    })
     const created = await command('project_create_from_idea', {
       title: `真实 UI 闭环验收 ${Date.now()}`,
       idea: '城市记忆档案调查员发现每次修复记忆都会失去自身现实痕迹，必须追查被抹除的姐姐线索。',
