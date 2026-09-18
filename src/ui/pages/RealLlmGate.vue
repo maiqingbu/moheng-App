@@ -41,6 +41,21 @@ async function command(type: string, payload: Record<string, unknown> = {}) {
   return receipt
 }
 
+async function productionWithRetry(payload: Record<string, unknown>) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await command('production_start', payload)
+    } catch (cause) {
+      lastError = cause
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (!/B08_REALITY_DELTA_REQUIRED|B08_PLANNING_CONTRACT|B08_AUDIT_CONTRACT|B08_RENDER_OUTPUT_INVALID|P01_MODEL_JSON_INVALID/.test(message) || attempt === 2) throw cause
+      record(`真实生产第 ${attempt + 1} 次失败，正在用正式事务重试`)
+    }
+  }
+  throw lastError ?? new Error('B08_PRODUCTION_RETRY_FAILED')
+}
+
 async function run() {
   if (running.value) return
   running.value = true
@@ -80,7 +95,7 @@ async function run() {
     const chapters = await frontendPort!.queryChapterList({ projectId: projectId.value, volumeId, scope: 'chapters', pageSize: 10 } as never) as unknown as Record<string, unknown>
     const openingChapters = ((chapters.items as Array<Record<string, unknown>> | undefined) ?? []).filter(chapter => Number(chapter.number) <= 3).sort((a, b) => Number(a.number) - Number(b.number))
     for (const chapter of openingChapters) {
-      await command('production_start', { chapterId: chapter.id, volumeId, executionMode: 'OPENING_BOOTSTRAP', skillsEnabled: false, requireRealityDelta: true, targetChineseCharacters: 1800, chapterGoalHint: `完成第${chapter.number}章并产生可验证 Reality。` })
+      await productionWithRetry({ chapterId: chapter.id, volumeId, executionMode: 'OPENING_BOOTSTRAP', skillsEnabled: false, requireRealityDelta: true, targetChineseCharacters: 1800, chapterGoalHint: `完成第${chapter.number}章并产生可验证 Reality。` })
     }
     await command('opening_evaluate')
     await command('book_plan_revise')
@@ -91,7 +106,7 @@ async function run() {
     const chapter4 = ((afterPrepare.items as Array<Record<string, unknown>> | undefined) ?? []).find(chapter => Number(chapter.number) === 4)
     if (!chapter4?.id) throw new Error('UI_GATE_CHAPTER4_NOT_FOUND')
     await command('planning_compile_chapter_plan', { chapterId: chapter4.id, chapterGoalHint: '用上一阶段 Reality 的真实事实推进下一项调查。' })
-    const production4 = await command('production_start', { chapterId: chapter4.id, volumeId, executionMode: 'LONG_FORM', skillsEnabled: false, requireRealityDelta: true, targetChineseCharacters: 1800, chapterGoalHint: '推进调查并让真实选择产生可验证后果。' })
+    const production4 = await productionWithRetry({ chapterId: chapter4.id, volumeId, executionMode: 'LONG_FORM', skillsEnabled: false, requireRealityDelta: true, targetChineseCharacters: 1800, chapterGoalHint: '推进调查并让真实选择产生可验证后果。' })
     const after = await frontendPort!.queryChapterList({ projectId: projectId.value, volumeId, scope: 'chapters', pageSize: 20 } as never) as unknown as Record<string, unknown>
     const chapter5 = ((after.items as Array<Record<string, unknown>> | undefined) ?? []).find(chapter => Number(chapter.number) === 5)
     trace.value = { rootTraceId, projectId: projectId.value, finalSourceCommit: import.meta.env.VITE_SOURCE_COMMIT ?? 'runtime', uiPath: 'TauriFrontendPort', directExecuteCommandImpl: 0, provider: 'formal app composition root', openingChapters: openingChapters.map(chapter => chapter.id), chapter4: chapter4.id, chapter5: chapter5?.id ?? null, production4, events: events.value, status: 'PASS' }
