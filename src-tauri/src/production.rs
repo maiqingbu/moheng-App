@@ -1785,7 +1785,7 @@ fn run_chapter_production_inner(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":execution_mode == "LONG_FORM","realityDeltaTemplate":reality_delta_template,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":request.pointer("/payload/requireRealityDelta").and_then(Value::as_bool).unwrap_or(execution_mode == "LONG_FORM"),"realityDeltaTemplate":reality_delta_template,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
