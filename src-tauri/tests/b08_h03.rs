@@ -458,7 +458,7 @@ fn xiaomi_r07_retry_blocks_before_render_when_plan_is_stale() {
     let context_ref = json!({"artifactId":context_id,"version":1,"payloadHash":context_hash});
     let plan_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "xiaomi:r07:plan").unwrap();
-    let plan_payload = json!({"payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":0,"compiledFromStateDigest":"0".repeat(64),"contextManifestRef":context_ref,"chapterGoal":"retry","activeTaskRefs":[],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[]});
+    let plan_payload = json!({"payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":-1,"compiledFromStateDigest":"0".repeat(64),"contextManifestRef":context_ref,"chapterGoal":"retry","activeTaskRefs":[],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[]});
     let plan_hash = sha256_canonical(&plan_payload).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,'p-xiaomi-r07','ChapterPlan','CHAPTER',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![plan_id, scope, plan_hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![plan_id, plan_payload.to_string(), plan_hash]).unwrap();

@@ -12,7 +12,8 @@ use crate::generated::types::{
     CommitBundle,
 };
 use crate::hash::sha256_canonical;
-use crate::project_db::ProjectManager;
+use crate::narrative::{PromotionSignal, ThreadPromotionDecision};
+use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectHandle, ProjectManager};
 use crate::provider::{
     OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
     ProviderRequest, ProviderResponse,
@@ -692,6 +693,159 @@ fn require(value: &Value, path: &str) -> Result<String, String> {
 
 fn chapter_scope(chapter_id: &str) -> Value {
     json!({"level":"CHAPTER","chapterId":chapter_id})
+}
+
+fn execute_reconciliation_action(
+    handle: &ProjectHandle,
+    project_id: &str,
+    volume_id: &str,
+    source_chapter_id: &str,
+    action: &str,
+    command_id: &str,
+    now: &str,
+) -> Result<Value, String> {
+    let next_no = crate::repositories::narrative::NarrativeRepository::next_chapter_number(
+        handle, project_id, volume_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let Some(next_no) = next_no else {
+        let payload = json!({"sourceChapterId":source_chapter_id,"status":"NO_NEXT_CHAPTER"});
+        DurableJobService::record_reconciliation_action(
+            handle, project_id, command_id, action, &payload, now,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(payload);
+    };
+    if !matches!(action, "NO_ACTION" | "RECOMPILE_NEXT_CHAPTER") {
+        let payload =
+            json!({"sourceChapterId":source_chapter_id,"status":"DEFERRED","reason":action});
+        DurableJobService::record_reconciliation_action(
+            handle, project_id, command_id, action, &payload, now,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(payload);
+    }
+
+    let chapter_id = StableIdentityFactory::from_command(
+        StableIdKind::Chapter,
+        &format!("{project_id}:{volume_id}:chapter:{next_no}"),
+    )?;
+    let budget_id = format!("budget:{chapter_id}");
+    let prepare_command_id = format!("{command_id}:reconciliation:prepare");
+    let prepare_request = json!({
+        "type":"planning_prepare_next_chapter",
+        "projectId":project_id,
+        "commandId":prepare_command_id,
+        "idempotencyKey":format!("{prepare_command_id}:key"),
+        "requestedAt":now,
+        "payload":{"volumeId":volume_id}
+    });
+    let prepare_digest = sha256_canonical(&prepare_request).map_err(|error| error.to_string())?;
+    let prepare_spec = ProjectCommandSpec {
+        project_id,
+        result_project_id: project_id,
+        command_id: &prepare_command_id,
+        idempotency_key: &format!("{prepare_command_id}:key"),
+        command_type: "planning_prepare_next_chapter",
+        request_digest: &prepare_digest,
+        expected_revision: Some(
+            crate::repositories::narrative::NarrativeRepository::project_revision(
+                handle, project_id,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        now,
+        advance_revision: true,
+    };
+    let prepare_outcome =
+        CommitService::commit_project_command(handle, prepare_spec, |connection| {
+            crate::repositories::narrative::NarrativeRepository::ensure_planned_chapter(
+                connection,
+                project_id,
+                volume_id,
+                &chapter_id,
+                next_no,
+                &format!("第{next_no}章 · 当前卷推进"),
+                &budget_id,
+                now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            Ok(json!({"chapterId":chapter_id,"chapterNo":next_no,"volumeId":volume_id}))
+        })
+        .map_err(|error| error.to_string())?;
+    let prepare_receipt = match prepare_outcome {
+        ProjectCommandOutcome::Replayed(receipt) => receipt,
+        ProjectCommandOutcome::Committed { receipt, .. } => receipt,
+    };
+    let current_revision = prepare_receipt.after_revision;
+    let authority = json!({"projectId":project_id,"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","chapterGoalHint":"根据 Reality t+1 重新评估下一步行动。"});
+    let context_command_id = format!("{command_id}:reconciliation:context");
+    let context_input = crate::commands::context_input_from_authority(
+        handle,
+        &authority,
+        project_id,
+        current_revision,
+    )?;
+    let context_ref = crate::narrative::commit_context_manifest_owner(
+        handle,
+        project_id,
+        &authority,
+        current_revision,
+        &context_command_id,
+        &format!("{context_command_id}:key"),
+        "LONG_FORM",
+        now,
+    )?
+    .1;
+    let plan_revision =
+        crate::repositories::narrative::NarrativeRepository::project_revision(handle, project_id)
+            .map_err(|error| error.to_string())?;
+    let plan_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1",
+        "chapterId":chapter_id,
+        "compiledFromProjectRevision":plan_revision,
+        "compiledFromStateDigest":plan_digest,
+        "contextManifestRef":context_ref,
+        "chapterGoal":"根据 Reality t+1 重新评估下一步行动。",
+        "activeTaskRefs":context_input.active_task_refs,
+        "continuityActions":context_input.continuity_threads.iter().map(|thread| json!({"threadRef":thread.thread_id,"disposition":"DEFER_WITH_BRIDGE","bridge":"reconciliation next plan"})).collect::<Vec<_>>(),
+        "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],
+        "horizonPreview":[
+            {"slotNo":1,"objective":"根据本章结果重新评估下一步行动。","tentative":true},
+            {"slotNo":2,"objective":"保持长期悬念，并为后续冲突留出空间。","tentative":true},
+            {"slotNo":3,"objective":"让新的选择产生可验证的叙事后果。","tentative":true}
+        ]
+    });
+    let plan_command_id = format!("{command_id}:reconciliation:plan");
+    let plan_receipt = crate::planning::recompile_chapter_plan_owner(
+        handle,
+        project_id,
+        &chapter_id,
+        &plan,
+        &authority,
+        "LONG_FORM",
+        &plan_command_id,
+        &format!("{plan_command_id}:key"),
+        plan_revision,
+        now,
+        None,
+    )?;
+    let payload = json!({
+        "sourceChapterId":source_chapter_id,
+        "nextChapterId":chapter_id,
+        "nextChapterNo":next_no,
+        "status":"EXECUTED",
+        "prepareReceiptId":prepare_receipt.receipt_id,
+        "contextManifestRef":context_ref,
+        "chapterPlanRefs":plan_receipt.committed_artifact_refs,
+        "planRevision":plan_receipt.after_revision
+    });
+    DurableJobService::record_reconciliation_action(
+        handle, project_id, command_id, action, &payload, now,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(payload)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1813,12 +1967,37 @@ fn run_chapter_production_inner(
     {
         return Err("B08_REALITY_DELTA_REQUIRED".into());
     }
+    let thread_promotion_decisions = extraction
+        .continuity_candidates
+        .iter()
+        .map(|candidate| {
+            let signal = PromotionSignal {
+                unresolved_major_conflict: !matches!(
+                    candidate.disposition.as_str(),
+                    "RESOLVE" | "RESOLVED"
+                ),
+                mystery_or_reveal_responsibility: candidate.thread_ref.contains("mystery")
+                    || candidate.thread_ref.contains("reveal"),
+                future_reservation_responsibility: candidate.thread_ref.contains("reservation"),
+                ..PromotionSignal::default()
+            };
+            let decision = match crate::narrative::decide_thread_promotion(signal) {
+                ThreadPromotionDecision::Promote => "PROMOTE",
+                ThreadPromotionDecision::DoNotPromote => "DO_NOT_PROMOTE",
+            };
+            json!({
+                "threadRef": candidate.thread_ref,
+                "decision": decision,
+                "evidence": {"start": candidate.evidence.start, "end": candidate.evidence.end}
+            })
+        })
+        .collect::<Vec<_>>();
     let mut audit = artifact(
         &project_id,
         audit_id,
         ArtifactType::ReviewReport,
         &chapter_id,
-        json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"audit":audit_payload}),
+        json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()}),
         &command_id,
         &job_id,
         Some(&audit_run_id),
@@ -2012,7 +2191,7 @@ fn run_chapter_production_inner(
             "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
         })
     }));
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -2117,6 +2296,18 @@ fn run_chapter_production_inner(
     update_stage(connection, &project_id, &job_id, "COMMIT", &now)?;
     let receipt =
         CommitService::commit(connection, &bundle, &now).map_err(|error| error.to_string())?;
+    let reconciliation_execution = match execute_reconciliation_action(
+        &handle,
+        &project_id,
+        &volume_id,
+        &chapter_id,
+        reconciliation,
+        &command_id,
+        &now,
+    ) {
+        Ok(value) => value,
+        Err(error) => json!({"status":"FAILED","error":error}),
+    };
     // B09 owns the rebuildable volume planning projection. Refresh it only
     // after B08's authoritative chapter CommitBundle succeeds; a projection
     // failure is recoverable and must not turn an already committed chapter
@@ -2149,7 +2340,7 @@ fn run_chapter_production_inner(
     }
     update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(
-        json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"receipt":receipt}),
+        json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":"B08 章节已完成原子提交","stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"reconciliationExecution":reconciliation_execution,"receipt":receipt}),
     )
 }
 

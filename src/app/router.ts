@@ -16,6 +16,7 @@ import HistoryCenter from '../ui/pages/HistoryCenter.vue'
 import LongFormHealth from '../ui/pages/LongFormHealth.vue'
 import SettingsPage from '../ui/pages/SettingsPage.vue'
 import Completion from '../ui/pages/Completion.vue'
+import RealLlmGate from '../ui/pages/RealLlmGate.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -41,6 +42,7 @@ export const router = createRouter({
     { path: '/projects/:id/history', name: 'history', component: HistoryCenter, meta: { scope: 'project', availability: 'available' } },
     { path: '/projects/:id/settings', name: 'project-settings', component: SettingsPage, meta: { scope: 'project' } },
     { path: '/settings', name: 'settings', component: SettingsPage, meta: { scope: 'global' } },
+    { path: '/real-llm-gate', name: 'real-llm-gate', component: RealLlmGate, meta: { scope: 'library', availability: 'acceptance' } },
     { path: '/:pathMatch(.*)*', redirect: '/projects' },
   ],
   scrollBehavior: () => ({ top: 0 }),

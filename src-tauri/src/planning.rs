@@ -1998,7 +1998,23 @@ pub fn planning_pressure(
         + overdue_threads.saturating_mul(3)
         + reservations.saturating_mul(2)
         + if remaining <= 8 { 8 } else { 0 };
-    json!({"remainingChapterCapacity":remaining,"requiredTasksRemaining":required_remaining,"blockedRequiredTasks":blocked_required,"exitConditionGap":exit_gap,"overdueThreadPressure":overdue_threads,"reservationPressure":reservations,"priorityScore":score})
+    let readiness_gap = required_remaining
+        .saturating_mul(40)
+        .saturating_add(blocked_required.saturating_mul(40))
+        .saturating_add(exit_gap.saturating_mul(20));
+    let climax_readiness = 100_i64.saturating_sub(readiness_gap.min(100));
+    let continuity_aging = overdue_threads.saturating_mul(current_chapter.max(1));
+    json!({
+        "remainingChapterCapacity":remaining,
+        "requiredTasksRemaining":required_remaining,
+        "blockedRequiredTasks":blocked_required,
+        "exitConditionGap":exit_gap,
+        "overdueThreadPressure":overdue_threads,
+        "continuityAging":continuity_aging,
+        "climaxReadiness":climax_readiness,
+        "reservationPressure":reservations,
+        "priorityScore":score
+    })
 }
 
 pub fn validate_current_chapter_plan(
@@ -2612,6 +2628,8 @@ mod tests {
             pressured["priorityScore"].as_i64().unwrap() > calm["priorityScore"].as_i64().unwrap()
         );
         assert_eq!(pressured["remainingChapterCapacity"], 5);
+        assert_eq!(calm["climaxReadiness"], 60);
+        assert_eq!(calm["continuityAging"], 0);
     }
 
     #[test]

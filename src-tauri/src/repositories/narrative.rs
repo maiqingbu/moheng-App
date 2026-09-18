@@ -1793,7 +1793,7 @@ impl NarrativeRepository {
             .optional()?
             .ok_or_else(|| NarrativeRepositoryError::Invariant("VOLUME_NOT_FOUND".into()))?;
         let max_chapter: i64 = connection.query_row(
-            "SELECT COALESCE(MAX(chapter_no),?3-1) FROM chapters WHERE project_id=?1 AND volume_id=?2",
+            "SELECT COALESCE(MAX(chapter_no),?3-1) FROM chapters WHERE project_id=?1 AND volume_id=?2 AND status='COMMITTED'",
             libsql_rusqlite::params![project_id, volume_id, chapter_start],
             |row| row.get(0),
         )?;

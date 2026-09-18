@@ -20,9 +20,25 @@ use std::time::Instant;
 const NOW: &str = "2026-09-02T05:00:00Z";
 
 #[test]
-fn b12_same_revision_with_changed_authority_digest_is_stale() {
+fn b12_same_revision_with_changed_authority_digest_is_valid() {
     assert_eq!(
         evaluate_plan_stale(7, &"a".repeat(64), 7, &"b".repeat(64)),
+        PlanStaleStatus::Valid
+    );
+}
+
+#[test]
+fn b12_revision_advance_with_same_relevant_digest_is_valid() {
+    assert_eq!(
+        evaluate_plan_stale(7, &"a".repeat(64), 8, &"a".repeat(64)),
+        PlanStaleStatus::Valid
+    );
+}
+
+#[test]
+fn b12_revision_advance_with_changed_relevant_digest_is_stale() {
+    assert_eq!(
+        evaluate_plan_stale(7, &"a".repeat(64), 8, &"b".repeat(64)),
         PlanStaleStatus::PlanStale
     );
 }

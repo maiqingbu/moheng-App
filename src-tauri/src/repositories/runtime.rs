@@ -705,6 +705,26 @@ impl DurableJobService {
         Ok(())
     }
 
+    pub fn record_reconciliation_action(
+        connection: &Connection,
+        project_id: &str,
+        action_id: &str,
+        action: &str,
+        payload: &serde_json::Value,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "INSERT OR REPLACE INTO production_events(event_id,project_id,event_type,payload_json,created_at) VALUES (?1,?2,'RECONCILIATION_ACTION_EXECUTED',?3,?4)",
+            libsql_rusqlite::params![
+                format!("event:reconciliation:{action_id}"),
+                project_id,
+                serde_json::json!({"action":action,"actionId":action_id,"payload":payload}).to_string(),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn fail_job(
         connection: &Connection,
         project_id: &str,

@@ -553,10 +553,12 @@ pub fn evaluate_plan_stale(
     current_revision: i64,
     current_digest: &str,
 ) -> PlanStaleStatus {
-    // A revision can advance for an unrelated scope while the relevant
-    // authority digest remains unchanged.  The digest is the freshness proof;
-    // a changed digest is stale even when the numeric revision is unchanged.
-    let _ = (compiled_revision, current_revision);
+    // FR-016: an unchanged project revision is already the authoritative
+    // short-circuit.  Only a revision advance requires recomputing/comparing
+    // the relevant HARD-state digest.
+    if compiled_revision == current_revision {
+        return PlanStaleStatus::Valid;
+    }
     if compiled_digest == current_digest {
         PlanStaleStatus::Valid
     } else {

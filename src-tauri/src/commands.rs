@@ -1589,13 +1589,28 @@ pub fn volume_progress_from_authority(
                 .is_some_and(|refs| !refs.is_empty())
         })
         .count() as i64;
+    let overdue_thread_pressure = plan
+        .get("crossVolumeResponsibilityRefs")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default() as i64
+        + plan
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|task| {
+                task.get("threadRef").and_then(Value::as_str).is_some()
+                    && task.get("status").and_then(Value::as_str) != Some("SATISFIED")
+            })
+            .count() as i64;
     result["planningPressure"] = crate::planning::planning_pressure(
         current_chapter,
         target_chapters,
         required_remaining,
         blocked_required,
         exit_gap,
-        0,
+        overdue_thread_pressure,
         reservation_pressure,
     );
     result["truncated"] = json!(false);
