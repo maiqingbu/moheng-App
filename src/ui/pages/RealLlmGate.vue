@@ -38,6 +38,11 @@ async function command(type: string, payload: Record<string, unknown> = {}) {
   if (typeof receipt.projectId === 'string') projectId.value = receipt.projectId
   if (typeof receipt.resultProjectId === 'string') projectId.value = receipt.resultProjectId
   if (typeof receipt.afterRevision === 'number') revision.value = receipt.afterRevision
+  if (projectId.value) {
+    const overview = await frontendPort.queryProjectOverview({ projectId: projectId.value, scope: 'overview', pageSize: 1 } as never)
+    const authoritativeRevision = (overview as unknown as { project?: { revision?: number } }).project?.revision
+    if (typeof authoritativeRevision === 'number') revision.value = authoritativeRevision
+  }
   return receipt
 }
 
