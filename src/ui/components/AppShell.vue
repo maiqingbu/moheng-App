@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
@@ -12,6 +12,7 @@ const router = useRouter()
 const store = useProjectStore()
 const library = useProjectLibraryStore()
 const assistantCollapsed = ref(false)
+const workspaceEl = ref<HTMLElement | null>(null)
 const id = computed(() => store.currentProjectId ?? (typeof route.params.id === 'string' ? route.params.id : ''))
 const inWorkspace = computed(() => route.meta.scope === 'project' && !!id.value)
 const projectTitle = computed(() => store.project?.title?.trim() || '未命名作品')
@@ -33,6 +34,11 @@ const workspaceNav = computed<NavItem[]>(() => inWorkspace.value ? [
 const isActive = (item: NavItem) => item.matches.includes(String(route.name))
 // 冻结路由兼容：长篇健康继续使用 /health；版本与变更记录保留 match: 'history'，但统一归入待处理。
 watch(inWorkspace, value => { if (value) assistantCollapsed.value = false }, { immediate: true })
+watch(() => route.fullPath, () => {
+  void nextTick(() => {
+    if (workspaceEl.value) workspaceEl.value.scrollTop = 0
+  })
+}, { flush: 'post', immediate: true })
 </script>
 
 <template>
@@ -59,7 +65,7 @@ watch(inWorkspace, value => { if (value) assistantCollapsed.value = false }, { i
         </template>
       </nav>
 
-      <main class="prototype-workspace"><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><div v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel">正在读取作品记录…</div><slot v-else /></main>
+      <main ref="workspaceEl" class="prototype-workspace"><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><div v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel">正在读取作品记录…</div><slot v-else /></main>
       <ProjectAssistantDock v-if="inWorkspace" :collapsed="assistantCollapsed" @toggle="assistantCollapsed = !assistantCollapsed" />
     </div>
   </div>
