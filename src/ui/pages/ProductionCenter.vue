@@ -14,6 +14,7 @@ const store = useProjectStore()
 const route = useRoute()
 const project = computed(() => store.project)
 const production = computed(() => store.production)
+const productionLoadError = ref('')
 const lastCommand = ref('none')
 const commandState = computed(() => store.commandState(lastCommand.value))
 const productionStartState = computed(() => store.commandState('production-start'))
@@ -21,6 +22,8 @@ const evaluationCommandState = computed(() => store.commandState('opening-evalua
 const bookPlanCommandState = computed(() => store.commandState('book-plan-revise'))
 const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
 const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
+const qualityRepairScope = computed(() => production.value?.quality?.repair?.scope ?? [])
+const repairAffectedScopes = computed(() => production.value?.repair?.affectedScopes ?? [])
 const openingProgress = computed(() => production.value?.openingProgress)
 const signing = computed(() => production.value?.signing)
 const bookPlan = computed(() => production.value?.bookPlan)
@@ -99,14 +102,21 @@ const runtimePoller = createProductionRuntimePoller({
 })
 
 onMounted(() => {
-  void store.loadProduction(true)
-    .then(value => {
-      if (value?.runtimeOperation?.active || (value?.jobStatus && !isProductionJobTerminal(value.jobStatus))) runtimePoller.start()
-    })
-    .catch(() => undefined)
+  void loadProductionProjection()
 })
 
 onUnmounted(() => runtimePoller.stop())
+
+async function loadProductionProjection() {
+  productionLoadError.value = ''
+  try {
+    const value = await store.loadProduction(true)
+    if (!value) throw new Error('生产状态暂不可用。')
+    if (value.runtimeOperation?.active || (value.jobStatus && !isProductionJobTerminal(value.jobStatus))) runtimePoller.start()
+  } catch (error) {
+    productionLoadError.value = error instanceof Error ? error.message : '暂时无法读取创作状态。'
+  }
+}
 
 function focusProductionProgress() {
   document.querySelector<HTMLElement>('[data-production-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -202,6 +212,8 @@ async function finalizeBookPlan() {
   lastCommand.value = 'book-plan-revise'
   runtimePoller.start({ waitForActive: true })
   try {
+    await store.refresh()
+    await store.loadProduction(true)
     await store.runCommand(lastCommand.value, { type: 'book_plan_revise', payload: {} })
   } catch {
     // Store-owned command feedback keeps the typed failure visible.
@@ -376,7 +388,7 @@ async function executeRepair() {
       </div>
       <div v-if="production.quality?.repair" class="task-row">
         <strong>局部修订 {{ production.quality.repair.run }}/{{ production.quality.repair.limit }}</strong>
-        <small class="muted">影响范围：{{ production.quality.repair.scope.map(scopeLabel).join('、') || '无' }} · {{ detailLabel(production.quality.repair.escalation, '未升级') }}</small>
+        <small class="muted">影响范围：{{ qualityRepairScope.map(scopeLabel).join('、') || '无' }} · {{ detailLabel(production.quality.repair.escalation, '未升级') }}</small>
       </div>
       <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
         <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '可以做局部修订' : '仅供查看' }}</small>
@@ -392,13 +404,18 @@ async function executeRepair() {
       <div class="metric-grid">
         <MetricCard label="状态" :value="statusLabel(production.repair.status)" :note="production.repair.authorizationId ? '已获得本次确认' : '尚未确认'" />
         <MetricCard label="影响等级" :value="production.repair.riskLevel === 'LOW' ? '较低' : '需要关注'" :note="production.repair.requiresBackup ? '执行前需要备份' : '无需备份'" />
-        <MetricCard label="核对范围" :value="production.repair.affectedScopes.map(scopeLabel).join('、') || '当前作品'" note="执行后会再次核对" />
+        <MetricCard label="核对范围" :value="repairAffectedScopes.map(scopeLabel).join('、') || '当前作品'" note="执行后会再次核对" />
       </div>
-      <p><strong>影响范围：</strong>{{ production.repair.affectedScopes.map(scopeLabel).join('、') || '无' }}</p>
+      <p><strong>影响范围：</strong>{{ repairAffectedScopes.map(scopeLabel).join('、') || '无' }}</p>
       <p><strong>处理方式：</strong>重新整理并核对当前作品展示。</p>
       <div v-if="production.repair.executionReceipt" class="task-row">
         <strong>{{ statusLabel(production.repair.executionReceipt.status) }}</strong><small class="muted">修复结果已经重新核对</small>
       </div>
     </section>
+  </div>
+  <div v-else-if="project" class="page">
+    <PageHeader title="创作" subtitle="正在重新读取当前作品的正式创作状态。" />
+    <div class="banner warning"><div><div class="banner-title">暂时无法读取创作状态</div><div class="banner-copy">{{ productionLoadError || '正在读取当前作品记录…' }}</div></div></div>
+    <div class="actions" style="margin-top:14px"><button class="btn primary" @click="loadProductionProjection">重试读取</button></div>
   </div>
 </template>

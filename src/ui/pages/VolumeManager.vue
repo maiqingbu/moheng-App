@@ -62,6 +62,9 @@ async function build() {
   }
   buildInFlight.value = true
   try {
+    await store.refresh()
+    await store.loadVolumes(true)
+    await store.loadVolumeDetail(current.id, true)
     await executeVolumePlanningSequence({
       startIntent: options => intentRuntimePoller.start(options),
       stopIntent: () => intentRuntimePoller.stop(),
