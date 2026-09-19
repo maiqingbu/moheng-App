@@ -171,7 +171,12 @@ export const useProjectStore = defineStore('project-projection', () => {
     workspaceLoading.value[key] = true
     try {
       const value = await loader()
-      if (generation !== loadSequence || projectId !== currentProjectId.value) return value
+      // A route transition can start the workspace query while AppShell is
+      // still completing a duplicate openProject() for the same project. The
+      // project-id binding is the authority for clobber protection; a newer
+      // generation for that same project must not discard the already valid
+      // projection and leave the page blank.
+      if (projectId !== currentProjectId.value) return value
       assign(value)
       return value
     } finally {
