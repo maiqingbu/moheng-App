@@ -1971,16 +1971,7 @@ fn run_chapter_production_inner(
         .continuity_candidates
         .iter()
         .map(|candidate| {
-            let signal = PromotionSignal {
-                unresolved_major_conflict: !matches!(
-                    candidate.disposition.as_str(),
-                    "RESOLVE" | "RESOLVED"
-                ),
-                mystery_or_reveal_responsibility: candidate.thread_ref.contains("mystery")
-                    || candidate.thread_ref.contains("reveal"),
-                future_reservation_responsibility: candidate.thread_ref.contains("reservation"),
-                ..PromotionSignal::default()
-            };
+            let signal = candidate.promotion_signals;
             let decision = match crate::narrative::decide_thread_promotion(signal) {
                 ThreadPromotionDecision::Promote => "PROMOTE",
                 ThreadPromotionDecision::DoNotPromote => "DO_NOT_PROMOTE",
@@ -1988,6 +1979,7 @@ fn run_chapter_production_inner(
             json!({
                 "threadRef": candidate.thread_ref,
                 "decision": decision,
+                "promotionSignals": signal,
                 "evidence": {"start": candidate.evidence.start, "end": candidate.evidence.end}
             })
         })
@@ -2031,6 +2023,7 @@ fn run_chapter_production_inner(
     let mut obligation_delta = Vec::new();
     let mut foreshadow_delta = Vec::new();
     let mut obligation_evidence_records = Vec::new();
+    let mut effective_continuity_refs = BTreeSet::new();
     for (index, item) in extraction.continuity_candidates.iter().enumerate() {
         let promotion_decision = promotion_decision_for(&item.thread_ref);
         let authority_id = item
@@ -2057,6 +2050,7 @@ fn run_chapter_production_inner(
                 "decisionRef":obligation.decision_ref,
                 "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE"}
             }));
+            effective_continuity_refs.insert(item.thread_ref.clone());
             obligation_evidence_records.push(json!({
                 "evidenceId":format!("obligation-evidence:{}:{}",final_id,index+1),
                 "obligationId":authority_id,
@@ -2080,6 +2074,7 @@ fn run_chapter_production_inner(
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE",
                     "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}}
             }));
+            effective_continuity_refs.insert(item.thread_ref.clone());
             continue;
         }
         if promotion_decision != "PROMOTE" {
@@ -2099,6 +2094,7 @@ fn run_chapter_production_inner(
             "decisionRef":format!("thread-promotion:{}:{}", final_id, index + 1),
             "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":"PROMOTE","deltaMode":"NEW_CONTINUITY"}
         }));
+        effective_continuity_refs.insert(item.thread_ref.clone());
     }
     let evidence_records = extraction
         .canon_candidates
@@ -2142,7 +2138,7 @@ fn run_chapter_production_inner(
         .filter(|item| item.event_type.is_some())
         .map(|item| format!("event:{}", item.fact_id))
         .collect::<Vec<_>>();
-    let exit_payload = json!({"payloadSchema":"chapter-exit-state.r1","chapterId":chapter_id,"closedAt":now,"stateDigest":state_digest,"activeThreadRefs":extraction.continuity_candidates.iter().filter(|item| item.disposition != "RESOLVED").map(|item| item.thread_ref.clone()).collect::<Vec<_>>(),"taskStates":task_states,"canonEventRefs":canon_event_refs,"evidenceRefs":[]});
+    let exit_payload = json!({"payloadSchema":"chapter-exit-state.r1","chapterId":chapter_id,"closedAt":now,"stateDigest":state_digest,"activeThreadRefs":extraction.continuity_candidates.iter().filter(|item| item.disposition != "RESOLVED" && effective_continuity_refs.contains(&item.thread_ref)).map(|item| item.thread_ref.clone()).collect::<Vec<_>>(),"taskStates":task_states,"canonEventRefs":canon_event_refs,"evidenceRefs":[]});
     let exit_artifact = artifact(
         &project_id,
         exit_id,
@@ -2207,7 +2203,7 @@ fn run_chapter_production_inner(
             "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
         })
     }));
-    reality.extend(extraction.continuity_candidates.iter().map(|item| {
+    reality.extend(extraction.continuity_candidates.iter().filter(|item| effective_continuity_refs.contains(&item.thread_ref)).map(|item| {
         json!({
             "kind":"CONTINUITY",
             "threadRef":item.thread_ref,
@@ -2450,6 +2446,8 @@ struct ContinuityCandidate {
     thread_ref: String,
     disposition: String,
     evidence: EvidenceSpan,
+    #[serde(default)]
+    promotion_signals: PromotionSignal,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

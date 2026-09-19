@@ -1527,6 +1527,19 @@ pub fn volume_progress_from_authority(
     )
     .map_err(|e| e.to_string())?
     .unwrap_or(Value::Null);
+    let intent = crate::repositories::narrative::NarrativeRepository::artifact_payload(
+        connection,
+        project_id,
+        "VolumeIntent",
+        volume_id,
+    )
+    .map_err(|e| e.to_string())?
+    .unwrap_or_else(|| json!({}));
+    let book_plan = crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+        connection, project_id, "BookPlan",
+    )
+    .map_err(|e| e.to_string())?
+    .unwrap_or_else(|| json!({}));
     let current_chapter = request
         .get("currentChapter")
         .and_then(Value::as_i64)
@@ -1557,35 +1570,12 @@ pub fn volume_progress_from_authority(
     .map_err(|e| e.to_string())?;
     result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
     result["tasks"] = serde_json::to_value(&tasks).map_err(|e| e.to_string())?;
-    let continuity_refs = plan
-        .get("crossVolumeResponsibilityRefs")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(ToOwned::to_owned)
-        .chain(
-            plan.get("tasks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .flat_map(|task| {
-                    task.get("continuityThreadRefs")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(ToOwned::to_owned)
-                }),
-        )
-        .collect::<BTreeSet<_>>();
-    let continuity_pressure =
+    let continuity_authority =
         crate::repositories::narrative::NarrativeRepository::continuity_pressure_records(
             connection, project_id,
         )
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|record| continuity_refs.contains(&record.thread_id))
         .map(|record| {
             json!({
                 "threadId": record.thread_id,
@@ -1597,40 +1587,21 @@ pub fn volume_progress_from_authority(
             })
         })
         .collect::<Vec<_>>();
-    let route_tasks = plan
-        .get("tasks")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let reservations = route_tasks
-        .iter()
-        .flat_map(|task| {
-            task.get("reservationRefs")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .cloned()
-        })
-        .collect::<Vec<_>>();
+    let reservation_authority = crate::planning::future_reservation_authority(&book_plan, &intent);
     let task_reality_values = serde_json::to_value(&tasks)
         .map_err(|e| e.to_string())?
         .as_array()
         .cloned()
         .unwrap_or_default();
-    result["planningPressure"] =
-        crate::planning::planning_pressure_from_authority(crate::planning::PlanningPressureInput {
-            current_chapter,
-            max_chapters: target_chapters,
-            route_tasks: &route_tasks,
-            task_reality: &task_reality_values,
-            continuity_threads: &continuity_pressure,
-            reservations: &reservations,
-            exit_conditions: plan
-                .get("requiredExitConditions")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        });
+    result["planningPressure"] = crate::planning::compile_planning_pressure(
+        current_chapter,
+        target_chapters,
+        &plan,
+        &intent,
+        &task_reality_values,
+        &continuity_authority,
+        &reservation_authority,
+    );
     result["truncated"] = json!(false);
     Ok(result)
 }

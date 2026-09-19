@@ -2030,6 +2030,126 @@ pub struct PlanningPressureInput<'a> {
     pub exit_conditions: &'a [Value],
 }
 
+/// Resolve the structured FutureReservation authority used by pressure and
+/// chapter planning. A route's `reservationRefs` are only identifiers; they
+/// are never treated as pressure by themselves.
+pub fn future_reservation_authority(book_plan: &Value, intent: &Value) -> Vec<Value> {
+    let allowed = intent
+        .get("futureReservationRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.as_str()
+                .or_else(|| item.get("reservationId").and_then(Value::as_str))
+        })
+        .collect::<BTreeSet<_>>();
+    book_plan
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|reservation| {
+            reservation
+                .get("reservationId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| allowed.is_empty() || allowed.contains(id))
+        })
+        .map(|reservation| {
+            let mut value = reservation.clone();
+            if value.get("status").is_none() && value.get("lifecycle").is_none() {
+                value["status"] = json!("DECLARED");
+            }
+            value
+        })
+        .collect()
+}
+
+/// Build one pressure projection for every production caller. Route task
+/// refs and intent refs are merged here, then resolved against the supplied
+/// authority projections, so VolumeProgress and VolumeLifecycle cannot drift.
+pub fn compile_planning_pressure(
+    current_chapter: i64,
+    max_chapters: i64,
+    route: &Value,
+    intent: &Value,
+    task_reality: &[Value],
+    continuity_authority: &[Value],
+    reservation_authority: &[Value],
+) -> Value {
+    let route_tasks = route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let continuity_refs = intent
+        .get("crossVolumeResponsibilityRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(route_tasks.iter().flat_map(|task| {
+            task.get("continuityThreadRefs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        }))
+        .collect::<BTreeSet<_>>();
+    let continuity = continuity_authority
+        .iter()
+        .filter(|thread| {
+            thread
+                .get("threadId")
+                .or_else(|| thread.get("threadRef"))
+                .and_then(Value::as_str)
+                .is_some_and(|id| continuity_refs.contains(id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let reservation_refs = route_tasks
+        .iter()
+        .flat_map(|task| {
+            task.get("reservationRefs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .chain(
+            intent
+                .get("futureReservationRefs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )
+        .collect::<BTreeSet<_>>();
+    let reservations = reservation_authority
+        .iter()
+        .filter(|reservation| {
+            reservation
+                .get("reservationId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| reservation_refs.is_empty() || reservation_refs.contains(id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    planning_pressure_from_authority(PlanningPressureInput {
+        current_chapter,
+        max_chapters,
+        route_tasks: &route_tasks,
+        task_reality,
+        continuity_threads: &continuity,
+        reservations: &reservations,
+        exit_conditions: route
+            .get("requiredExitConditions")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    })
+}
+
 /// Calculate pressure from the actual B07/B06 authority inputs. The legacy
 /// `planning_pressure` helper remains for frozen compatibility tests, while
 /// product projections call this function so CLIMAX readiness, thread age,
@@ -2170,9 +2290,11 @@ pub fn planning_pressure_from_authority(input: PlanningPressureInput<'_>) -> Val
     let reservation_pressure = input
         .reservations
         .iter()
+        .filter(|reservation| reservation.is_object())
         .filter(|reservation| {
             reservation
                 .get("status")
+                .or_else(|| reservation.get("lifecycle"))
                 .and_then(Value::as_str)
                 .is_none_or(|status| !matches!(status, "RESOLVED" | "SATISFIED" | "ABANDONED"))
         })
@@ -2859,6 +2981,26 @@ mod tests {
         });
         assert!(pressure["climaxReadiness"].is_null());
         assert_eq!(pressure["climaxTaskCount"], 0);
+    }
+
+    #[test]
+    fn pressure_does_not_count_ref_only_reservations() {
+        let route = json!({"tasks":[],"requiredExitConditions":[]});
+        let intent = json!({"futureReservationRefs":["reservation:future"]});
+        let ref_only = vec![json!("reservation:future")];
+        let object = vec![
+            json!({"reservationId":"reservation:future","status":"DECLARED","mayReveal":false}),
+        ];
+        assert_eq!(
+            compile_planning_pressure(1, 10, &route, &intent, &[], &[], &ref_only)
+                ["reservationPressure"],
+            0
+        );
+        assert_eq!(
+            compile_planning_pressure(1, 10, &route, &intent, &[], &[], &object)
+                ["reservationPressure"],
+            1
+        );
     }
 
     #[test]

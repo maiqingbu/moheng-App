@@ -15,19 +15,32 @@ pub enum ThreadPromotionDecision {
     DoNotPromote,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromotionSignal {
+    #[serde(default)]
     pub explicit_promise: bool,
+    #[serde(default)]
     pub unresolved_major_conflict: bool,
+    #[serde(default)]
     pub major_relationship_transition: bool,
+    #[serde(default)]
     pub mystery_or_reveal_responsibility: bool,
+    #[serde(default)]
     pub foreshadow_recovery_responsibility: bool,
+    #[serde(default)]
     pub key_future_use_object_or_information: bool,
+    #[serde(default)]
     pub goal_contract_responsibility: bool,
+    #[serde(default)]
     pub hard_authority_responsibility: bool,
+    #[serde(default)]
     pub future_reservation_responsibility: bool,
+    #[serde(default)]
     pub ambient_description: bool,
+    #[serde(default)]
     pub completed_trivial_event: bool,
+    #[serde(default)]
     pub non_continuing_scene_detail: bool,
 }
 
