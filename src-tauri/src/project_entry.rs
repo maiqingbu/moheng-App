@@ -1005,7 +1005,7 @@ pub fn commit_opening_ready(
         format!("gate-policy:{project_id}:{command_id}"),
         "GatePolicy",
         project_scope(),
-        json!({"payloadSchema":"gate-policy.r1","policyId":"b11-opening","rules":["story-core-bound","opening-ready","existing-b08-production-root"],"createdAt":now}),
+        json!({"payloadSchema":"gate-policy.r1","policyId":"b11-opening","rules":["story-core-bound","opening-ready","existing-b08-production-root"],"canonSemantics":{"policyVersion":"canon-semantics.r1","rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},{"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"found_evidence","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"protected_oath","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"appears_in_opening","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"distrusts","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"allied_with","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"opening_event","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}]},"createdAt":now}),
         vec![opening_ref.clone()],
         "B11::OpeningPreparationOwner",
         &opening_command_id,

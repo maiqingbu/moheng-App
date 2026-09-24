@@ -198,8 +198,11 @@ export async function confirmRetconPlan(
   execute: ExecuteCommand,
   plan: RetconDraft & RetconPlanView,
 ): Promise<CommandReceipt> {
+  const logicalRetconId = `${plan.projectId}:${plan.changeRequestId}:${plan.retconPlanId}`
   await execute('retcon-decision', {
     type: 'change_request_decide',
+    commandId: `b12-retcon-decision:${logicalRetconId}`,
+    idempotencyKey: `b12-retcon-decision:${logicalRetconId}`,
     projectId: plan.projectId,
     payload: {
       changeRequestId: plan.changeRequestId,
@@ -218,6 +221,8 @@ export async function confirmRetconPlan(
   })
   return execute('retcon-apply', {
     type: 'retcon_apply',
+    commandId: `b12-retcon-apply:${logicalRetconId}`,
+    idempotencyKey: `b12-retcon-apply:${logicalRetconId}`,
     projectId: plan.projectId,
     payload: {
       changeRequestId: plan.changeRequestId,

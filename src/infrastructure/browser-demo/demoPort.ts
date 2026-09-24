@@ -729,12 +729,11 @@ export class BrowserDemoPort implements FrontendPort {
             message='你的选择已记录，系统将按新的正式约束继续。'; break
           }
           case 'revision_request':
-          case 'chapter_revision_request': message=request.payload?.kind==='chapter_rollback'?'版本回退已提交并生成新的正式版本记录。':'章节修订请求已记录，系统会先分析影响范围。'; break
+            message=request.payload?.kind==='chapter_rollback'?'版本回退已提交并生成新的正式版本记录。':'章节修订请求已记录，系统会先分析影响范围。'; break
           case 'change_request_create': message='变更请求已创建，正在计算类型化影响范围；尚未改写正式状态。'; break
           case 'change_request_apply': message='已批准的变更请求已提交，受影响投影将按依赖规则刷新。'; break
           case 'retcon_plan_create': message='事实修订方案已建立；正式事实仍保持不变，等待影响确认。'; break
           case 'retcon_apply': message='Retcon 已按批准计划提交，并保留原正式历史与审计回执。'; break
-          case 'export_create': message='正式成品导出任务已完成。'; break
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break
           case 'integrity_check_run': message='完整性检查已完成，未发现作品数据断链。'; break
           case 'settings_save': if(request.payload?.settings) bundle.settings=clone(request.payload.settings as unknown as SettingsProjection); message='项目设置已保存。'; break

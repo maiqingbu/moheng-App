@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 import type { CommandStatus, CompletionStatusProjection, EndgameMappingWorkflowProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
+import { productErrorMessage } from '../presentation/productLanguage'
 import { scopedMappingCandidates } from '../../application/endgameMapping'
 
 const route = useRoute()
@@ -17,6 +18,9 @@ const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
 const message = ref('')
+const resultPending = ref(false)
+const committedReceiptId = ref('')
+const messageKind = ref<'info' | 'success' | 'warning'>('info')
 const endgameAdvice = ref<SoftCreativeAdviceProjection | null>(null)
 const qualityReview = ref<SoftCreativeAdviceProjection | null>(null)
 const mappingWorkflow = ref<EndgameMappingWorkflowProjection | null>(null)
@@ -35,7 +39,7 @@ const statusText = computed(() => {
 })
 
 const statusClass = computed(() => status.value?.status === 'READY' ? 'success' : status.value?.status === 'NEEDS_DECISION' || status.value?.status === 'NEEDS_RECHECK' ? 'warning' : 'danger')
-const canComplete = computed(() => status.value?.status === 'READY' || (status.value?.status === 'NEEDS_RECHECK' && status.value.blockerCount === 0 && status.value.checks.every(check => check.status === 'READY')))
+const canComplete = computed(() => status.value?.status === 'READY' && !status.value.completed && !resultPending.value && !loading.value && !error.value)
 
 function checkName(kind: string) {
   return ({ OBLIGATION: '正式剧情责任', MYSTERY: '重要谜团', PAYOFF: '关键回报', REQUESTED_ENDING: '用户确认的结局', CHANGE_STALE: '变更与规划', EXPORT_INTEGRITY: '成品完整性' } as Record<string, string>)[kind] ?? '完结条件'
@@ -60,8 +64,16 @@ async function load() {
   error.value = ''
   try {
     status.value = await frontendPort.queryCompletionStatus({ projectId: projectId.value, scope: 'completion', pageSize: 1 })
+    if (resultPending.value && committedReceiptId.value) {
+      resultPending.value = false
+      messageKind.value = 'success'
+      message.value = '正式回执已返回，当前完结状态已重新读取。'
+    }
+    return true
   } catch (cause) {
-    error.value = cause instanceof Error ? userError(cause.message) : '完结状态暂时无法读取。'
+    status.value = null
+    error.value = resultPending.value ? '正式回执已返回，但重新查询未完成，结果待确认。请只重新读取，不要重复提交。' : cause instanceof Error ? userError(cause.message) : '完结状态暂时无法读取。'
+    return false
   } finally {
     loading.value = false
   }
@@ -72,31 +84,53 @@ function commandId(prefix: string) {
 }
 
 async function submit(type: 'endgame_contract_create' | 'complete_book', payload: Record<string, unknown>, successMessage: string) {
-  if (!status.value) return
+  if (!status.value || submitting.value || resultPending.value) return
+  const id = commandId(type)
   submitting.value = true
   error.value = ''
   message.value = ''
+  messageKind.value = 'info'
+  committedReceiptId.value = ''
   try {
-    await frontendPort.executeCommand({
+    const receipt = await frontendPort.executeCommand({
       type,
       projectId: projectId.value,
-      commandId: commandId(type),
-      idempotencyKey: commandId(`idempotency:${type}`),
+      commandId: id,
+      idempotencyKey: id,
       requestedAt: new Date().toISOString(),
       expectedRevision: status.value.projectRevision,
       payload,
     }, (_state: CommandStatus, detail: string) => { message.value = detail })
-    message.value = successMessage
-    await load()
+    if (receipt.commandId !== id || receipt.projectId !== projectId.value) {
+      resultPending.value = true
+      messageKind.value = 'warning'
+      error.value = '操作回执与当前作品不匹配，结果待确认；请核对记录，不要重复提交。'
+      return
+    }
+    if (receipt.finalStatus !== 'committed') {
+      messageKind.value = 'warning'
+      message.value = productErrorMessage(receipt.message, '本次操作未正式提交，请核对原因。')
+      return
+    }
+    resultPending.value = true
+    committedReceiptId.value = receipt.receiptId || receipt.commandId
+    messageKind.value = 'warning'
+    message.value = '正式回执已返回，正在重新读取结果。'
+    if (await load()) {
+      messageKind.value = 'success'
+      message.value = successMessage
+    }
   } catch (cause) {
-    error.value = cause instanceof Error ? userError(cause.message) : '提交失败，请检查正式状态后重试。'
+    resultPending.value = true
+    messageKind.value = 'warning'
+    error.value = '尚未获得可确认的操作结果，请核对正式记录，不要重复提交。'
   } finally {
     submitting.value = false
   }
 }
 
 async function createContract() {
-  if (!endingConfirmed.value || !summary.value.trim()) return
+  if (!endingConfirmed.value || !summary.value.trim() || resultPending.value) return
   const workflow = mappingWorkflow.value
   await submit('endgame_contract_create', {
     requestedEnding: {
@@ -169,7 +203,7 @@ onMounted(() => { void load() })
         <p class="card-subtitle">终局约束需要由你明确确认；未确认时不能进入完结提交。</p>
         <label class="field-label" style="margin-top:14px">你希望本书如何结束？<textarea v-model="summary" rows="4" placeholder="用一句或几句明确描述结局边界。" /></label>
         <label class="check-line"><input v-model="endingConfirmed" type="checkbox" />我确认以上内容是本次正式完结目标。</label>
-        <button class="btn primary" :disabled="submitting || !endingConfirmed || !summary.trim()" @click="createContract">确认终局目标并保存约束</button>
+        <button class="btn primary" :disabled="submitting || resultPending || !endingConfirmed || !summary.trim()" @click="createContract">确认终局目标并保存约束</button>
       </section>
 
       <section v-if="!status.completed" class="card pad section">
@@ -213,7 +247,7 @@ onMounted(() => { void load() })
         <button class="btn primary" :disabled="submitting || !canComplete || !completionConfirmed" @click="completeBook">提交全书完结</button>
       </section>
 
-      <div v-if="message" class="banner success section" role="status"><div class="banner-title">已处理</div><div class="banner-copy">{{ message }}</div></div>
+      <div v-if="message" class="banner section" :class="messageKind" role="status"><div class="banner-title">{{ messageKind === 'success' ? '已确认' : messageKind === 'warning' ? '需要核对' : '正在处理' }}</div><div class="banner-copy">{{ message }}</div></div>
     </template>
   </div>
 </template>

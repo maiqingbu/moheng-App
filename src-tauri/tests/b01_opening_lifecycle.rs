@@ -107,13 +107,15 @@ impl ProductionModelGateway for B01Gateway {
                         "continuityCandidates":[],
                         "taskProgressCandidates":[],
                         "revealedReservationRefs":[],
-                        "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}]
+                        "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}],
+                        "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false
                     })
                 } else {
                     json!({
                         "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
                         "continuityCandidates":[],"taskProgressCandidates":[],
-                        "revealedReservationRefs":[],"evidenceRanges":[]
+                        "revealedReservationRefs":[],"evidenceRanges":[],
+                        "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
                     })
                 }
             }

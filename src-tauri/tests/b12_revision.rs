@@ -2398,6 +2398,60 @@ fn b12_h03_retcon_execution_uses_the_same_owner_and_postverify() {
     .expect("execute h03 retcon");
     assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
     assert_eq!(executed["receipt"]["owner"], "B12::ChangeRetconOwner");
+
+    let handle = state.manager.open("p-b12-r05", "", NOW).unwrap();
+    let owner_receipt = ai_novel_production_system_core::commit::CommitService::find_receipt(
+        &handle,
+        "p-b12-r05",
+        "h03:r05:apply:key",
+    )
+    .unwrap()
+    .expect("H03 Retcon commit receipt exists before replay");
+    handle
+        .execute(
+            "ALTER TABLE canon_facts RENAME TO canon_facts_r3_fault_injection",
+            [],
+        )
+        .expect("inject a post-commit authority re-query failure");
+    let replay = ai_novel_production_system_core::change_retcon::apply_approved_on_connection(
+        &handle,
+        "p-b12-r05",
+        "h03:r05:apply",
+        "h03:r05:apply:key",
+        1,
+        NOW,
+        &json!({"payload":{"changeRequestId":"change:r05","retconPlanId":"plan:r05","planDigest":plan_digest,"impactDigest":impact_digest}}),
+    )
+    .expect("H03 Retcon replay returns its committed receipt despite failed readback");
+    assert_eq!(replay["result"]["status"], "REPLAYED");
+    assert_eq!(replay["receiptId"], owner_receipt.receipt_id);
+    assert_eq!(replay["postverify"]["status"], "QUERY_FAILED");
+    assert_eq!(replay["postverify"]["statusPersisted"], true);
+    let receipt_count: i64 = handle
+        .query_row(
+            "SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b12-r05' AND idempotency_key='h03:r05:apply:key'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let revision: i64 = handle
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id='p-b12-r05'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let canon_count: i64 = handle
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts_r3_fault_injection WHERE project_id='p-b12-r05'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_count, 1);
+    assert_eq!(revision, 1);
+    assert_eq!(canon_count, 2);
+    println!("B12_H03_RETCON_REPLAY_FAULT_RESULT receipt=PASS queryFailure=PASS persistedStatus=PASS canon=PASS revision=PASS noDuplicate=PASS status=PASS");
     println!("B12_PRODUCT_UX_RETCON_RESULT command_boundary=PASS plan=PASS decision=PASS h03=PASS owner=B12::ChangeRetconOwner postverify=PASS status=PASS");
 }
 

@@ -41,6 +41,8 @@ export interface CommandUiState {
   status: CommandStatus
   message: string
   commandId?: string
+  confirmation?: 'pending' | 'confirmed'
+  receiptId?: string
 }
 
 export interface CommandBinding {
@@ -50,6 +52,7 @@ export interface CommandBinding {
 }
 
 const emptyPage = <T>(): PageResult<T> => ({ items: [], nextCursor: null, total: 0 })
+type HistoryKind = 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
 
 export const useProjectStore = defineStore('project-projection', () => {
   const currentProjectId = ref<string | null>(null)
@@ -73,6 +76,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const health = ref<BookHealthProjection | null>(null)
   const healthError = ref('')
   const history = ref<HistoryProjection | null>(null)
+  const historyKind = ref<HistoryKind | null>(null)
   const settings = ref<SettingsProjection | null>(null)
   const searchResults = ref<PageResult<SearchHit>>(emptyPage())
   const loading = ref(false)
@@ -81,6 +85,8 @@ export const useProjectStore = defineStore('project-projection', () => {
   const commandStates = ref<Record<string, CommandUiState>>({})
   const advancedMode = ref(false)
   let loadSequence = 0
+  const pendingConfirmations = new Map<string, { projectId: string | null; receipt: CommandReceipt }>()
+  const workspaceSequences = new Map<string, number>()
   const inFlightCommands = new Map<string, Promise<CommandReceipt>>()
 
   const project = computed(() => overview.value?.project ?? null)
@@ -113,6 +119,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     health.value = null
     healthError.value = ''
     history.value = null
+    historyKind.value = null
     settings.value = null
     searchResults.value = emptyPage()
   }
@@ -162,11 +169,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function withWorkspace<T>(key: string, loader: () => Promise<T>, assign: (value: T) => void) {
-    // Capture the store generation (loadSequence) and the project id at request
-    // time. When the response lands, it is only written if neither has changed —
-    // otherwise a slow response from a project the user already left would clobber
-    // the workspace the user is now looking at (FR-PRJ-003 / B01-T06).
-    const generation = loadSequence
+    // Only the latest request for this workspace may replace its projection.
+    const sequence = (workspaceSequences.get(key) ?? 0) + 1
+    workspaceSequences.set(key, sequence)
     const projectId = currentProjectId.value
     workspaceLoading.value[key] = true
     try {
@@ -176,11 +181,11 @@ export const useProjectStore = defineStore('project-projection', () => {
       // project-id binding is the authority for clobber protection; a newer
       // generation for that same project must not discard the already valid
       // projection and leave the page blank.
-      if (projectId !== currentProjectId.value) return value
+      if (projectId !== currentProjectId.value || workspaceSequences.get(key) !== sequence) return value
       assign(value)
       return value
     } finally {
-      workspaceLoading.value[key] = false
+      if (workspaceSequences.get(key) === sequence) workspaceLoading.value[key] = false
     }
   }
 
@@ -252,9 +257,19 @@ export const useProjectStore = defineStore('project-projection', () => {
       throw error
     }
   }
-  async function loadHistory(kind:'all'|'VERSION'|'CHANGE_REQUEST'|'RETCON'='all', force=false) {
-    if (history.value && !force && kind==='all') return history.value
-    return withWorkspace('history', () => frontendPort.queryHistory({ ...queryBase('history', 40), kind }), v => { history.value=v })
+  async function loadHistory(kind:HistoryKind='all', force=false, cursor: string | null = null) {
+    if (history.value && historyKind.value === kind && !force && cursor === null) return history.value
+    const pageCursor = cursor && historyKind.value === kind ? cursor : null
+    return withWorkspace('history', async () => {
+      const page = await frontendPort.queryHistory({ ...queryBase('history', 40), cursor: pageCursor, kind })
+      if (!pageCursor || !history.value || historyKind.value !== kind) return page
+      const existing = new Set(history.value.entries.items.map(entry => `${entry.kind}:${entry.id}`))
+      const appended = page.entries.items.filter(entry => !existing.has(`${entry.kind}:${entry.id}`))
+      return {
+        ...page,
+        entries: { ...page.entries, items: [...history.value.entries.items, ...appended] },
+      }
+    }, v => { history.value=v; historyKind.value=kind })
   }
   async function queryChangeRequest(changeRequestId: string) {
     return frontendPort.queryChangeRequest({ ...queryBase(`history:change:${changeRequestId}`, 40), changeRequestId })
@@ -350,6 +365,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (production.value) jobs.push(loadProduction(true))
     if (volumes.value) jobs.push(loadVolumes(true))
     if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
+    if (planningRoute.value) jobs.push(loadPlanningRoute(planningRoute.value.volumeId, true))
     if (volumeLifecycle.value) jobs.push(loadVolumeLifecycle(volumeLifecycle.value.volumeId, true))
     if (decisions.value) jobs.push(loadDecisions('all', true))
     if (readerVolumes.value) jobs.push(loadReaderVolumes(true))
@@ -357,7 +373,35 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (health.value) jobs.push(loadHealth(true))
     if (history.value) jobs.push(loadHistory('all', true))
     if (settings.value) jobs.push(loadSettings(true))
-    await Promise.all(jobs)
+    const results = await Promise.allSettled(jobs)
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+
+  async function confirmCommandResult(key: string) {
+    const pending = pendingConfirmations.get(key)
+    if (!pending || pending.projectId !== currentProjectId.value) return
+    const isCurrent = () => pendingConfirmations.get(key) === pending && pending.projectId === currentProjectId.value
+    try {
+      await refresh()
+      if (!isCurrent()) return
+      if (loadError.value) throw new Error(loadError.value)
+      await refreshLoadedWorkspaces()
+      if (!isCurrent()) return
+      commandStates.value[key] = {
+        status: pending.receipt.finalStatus, commandId: pending.receipt.commandId,
+        receiptId: pending.receipt.receiptId, confirmation: 'confirmed',
+        message: '正式回执已返回，当前作品展示已重新读取。',
+      }
+      pendingConfirmations.delete(key)
+    } catch {
+      if (!isCurrent()) return
+      commandStates.value[key] = {
+        status: pending.receipt.finalStatus, commandId: pending.receipt.commandId,
+        receiptId: pending.receipt.receiptId, confirmation: 'pending',
+        message: '正式回执已返回，但重新查询未完成，结果待确认。请只重新读取，不要重复提交。',
+      }
+    }
   }
 
   async function executeCommand(key: string, request: CommandRequest) {
@@ -395,11 +439,18 @@ export const useProjectStore = defineStore('project-projection', () => {
     let receipt: CommandReceipt
     try {
       receipt = await frontendPort.executeCommand(envelope, (status, message) => {
-        setStateIfCurrent({ ...commandStates.value[key], commandId, status, message })
+        setStateIfCurrent({ ...commandStates.value[key], commandId, status: status === 'committed' ? 'processing' : status, message: status === 'committed' ? '回执已返回，正在读取当前作品状态。' : message })
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      setStateIfCurrent({ status: 'failed', message, commandId })
+      if (request.type === 'retcon_apply' || request.type === 'change_request_apply') {
+        const message = request.type === 'retcon_apply'
+          ? '事实修订提交结果暂时无法确认。请先重新读取；若重试，将使用同一操作编号。'
+          : '普通修改结果待确认，提交状态未知。请先重新读取；若重试，将使用同一操作编号。'
+        setStateIfCurrent({ status: 'processing', confirmation: 'pending', message, commandId })
+      } else {
+        setStateIfCurrent({ status: 'failed', message, commandId })
+      }
       if (request.type.startsWith('production_')) {
         try { await loadProduction(true) } catch { /* preserve the original command error */ }
       }
@@ -415,8 +466,9 @@ export const useProjectStore = defineStore('project-projection', () => {
 
     commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
     if (receipt.finalStatus === 'committed') {
-      await refresh()
-      await refreshLoadedWorkspaces()
+      pendingConfirmations.set(key, { projectId: binding.sourceProjectId, receipt })
+      commandStates.value[key] = { status: 'committed', message: '回执已返回，正在读取当前作品状态。', commandId: receipt.commandId, receiptId: receipt.receiptId, confirmation: 'pending' }
+      await confirmCommandResult(key)
     }
     void useProjectLibraryStore().refresh()
     return receipt
@@ -436,6 +488,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function runCommand(key: string, request: CommandRequest) {
+    if (pendingConfirmations.get(key)?.projectId === (request.projectId ?? currentProjectId.value)) {
+      throw new Error('COMMAND_RESULT_UNCONFIRMED')
+    }
     const dedupeKey = inFlightCommandKey(request)
     if (!dedupeKey) return executeCommand(key, request)
     const active = inFlightCommands.get(dedupeKey)
@@ -471,16 +526,16 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   function commandState(key:string):CommandUiState { return commandStates.value[key] ?? { status:'idle',message:'' } }
-  function clearCommandState(key:string){ commandStates.value[key]={status:'idle',message:''} }
+  function clearCommandState(key:string){ if (pendingConfirmations.has(key)) return; commandStates.value[key]={status:'idle',message:''} }
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
     currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, decisions,
-    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthError, history, settings, searchResults, volumeLifecycle,
+    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadCanon, loadHealth, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
-    clearCommandState, isWorkspaceLoading
+    clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

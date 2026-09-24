@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
-import { sanitizeProductText } from '../presentation/productLanguage'
+import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
+import { buildReaderRevisionCommands } from '../flows/readerRevision'
 
 const store = useProjectStore()
+const router = useRouter()
 const volumeId = ref('')
 const chapterId = ref('')
 const query = ref('')
 const feedback = ref('')
-const exportScope = ref<'chapter' | 'range' | 'volume' | 'book'>('chapter')
-const rangeStart = ref(1)
-const rangeEnd = ref(3)
-const revisionState = computed(() => store.commandState('reader-revision'))
-const exportState = computed(() => store.commandState('reader-export'))
+const revisionError = ref('')
+const pendingChangeRequestId = ref('')
+const exportCapabilityAvailable = false
+const revisionState = computed(() => store.commandState('reader-revision-proposal'))
+const revisionImpactState = computed(() => store.commandState('reader-revision-impact'))
 const volumes = computed(() => store.readerVolumes?.items ?? [])
 const chapters = computed(() => volumeId.value ? store.chapterLists[volumeId.value]?.items ?? [] : [])
 const versionReason = (value: unknown) => sanitizeProductText(value, '这次版本调整已记录。')
@@ -38,22 +41,44 @@ async function search() {
   await store.search(query.value.trim())
 }
 async function revise() {
-  if (!chapterId.value || !feedback.value.trim()) return
-  await store.runCommand('reader-revision', {
-    type: 'chapter_revision_request',
-    payload: { chapterId: chapterId.value, feedback: feedback.value.trim() }
-  })
-  feedback.value = ''
-}
-async function exportFinal() {
-  const payload: Record<string, unknown> = { scope: exportScope.value, finalOnly: true }
-  if (exportScope.value === 'chapter') payload.chapterId = chapterId.value
-  if (exportScope.value === 'volume') payload.volumeId = volumeId.value
-  if (exportScope.value === 'range') {
-    payload.chapterStart = rangeStart.value
-    payload.chapterEnd = rangeEnd.value
+  const projectId = store.currentProjectId
+  const chapter = store.activeChapter
+  if (!projectId || !chapter || chapter.id !== chapterId.value || !feedback.value.trim()) return
+  revisionError.value = ''
+  pendingChangeRequestId.value = ''
+  try {
+    const commands = buildReaderRevisionCommands({
+      projectId,
+      chapterId: chapter.id,
+      chapterNumber: chapter.number,
+      chapterTitle: chapter.title,
+      feedback: feedback.value,
+    })
+    const created = await store.runCommand('reader-revision-proposal', commands.proposal)
+    if (created.finalStatus !== 'committed') throw new Error(created.message || '修改请求未能保存。')
+    pendingChangeRequestId.value = commands.changeRequestId
+    const preflight = await store.runCommand('reader-revision-impact', commands.impact)
+    const bootstrap = preflight.result?.status === 'SUMMARY_BOOTSTRAP_REQUIRED' ? '1' : undefined
+    feedback.value = ''
+    await router.push({
+      name: 'history',
+      params: { id: projectId },
+      query: { changeRequestId: commands.changeRequestId, ...(bootstrap ? { bootstrap } : {}) },
+    })
+  } catch (error) {
+    revisionError.value = pendingChangeRequestId.value
+      ? '修改请求已保存，但影响分析未完成。你可以到版本与变更记录继续核对。'
+      : productErrorMessage(error, '修改请求未能保存。')
   }
-  await store.runCommand('reader-export', { type: 'export_create', payload })
+}
+
+async function openPendingChangeRequest() {
+  if (!store.currentProjectId || !pendingChangeRequestId.value) return
+  await router.push({
+    name: 'history',
+    params: { id: store.currentProjectId },
+    query: { changeRequestId: pendingChangeRequestId.value },
+  })
 }
 
 onMounted(async () => {
@@ -93,20 +118,19 @@ onMounted(async () => {
 
         <section class="card pad">
           <h2 class="card-title">导出正式成品</h2>
-          <select v-model="exportScope" class="select">
-            <option value="chapter">当前章节</option><option value="range">章节范围</option><option value="volume">当前卷</option><option value="book">整书</option>
-          </select>
-          <div v-if="exportScope === 'range'" class="setting-grid" style="margin-top:8px"><label class="field"><span class="field-label">起始章</span><input v-model.number="rangeStart" class="input" type="number" min="1"></label><label class="field"><span class="field-label">结束章</span><input v-model.number="rangeEnd" class="input" type="number" :min="rangeStart"></label></div>
-          <CommandFeedback :state="exportState" />
-          <button class="btn" style="width:100%;margin-top:8px" @click="exportFinal">创建导出任务</button>
-          <div class="muted" style="font-size:10px;margin-top:7px">格式使用项目设置中的默认导出格式；只导出正式提交版本。</div>
+          <p class="muted">正式导出功能尚未开放，当前不能创建导出任务。</p>
+          <button class="btn" style="width:100%;margin-top:8px" :disabled="!exportCapabilityAvailable">导出暂不可用</button>
         </section>
 
         <section class="card pad">
           <h2 class="card-title">不满意这章？</h2>
           <textarea v-model="feedback" class="textarea" placeholder="例如：节奏更快，主角更主动" />
           <CommandFeedback :state="revisionState" />
-          <button class="btn primary" style="margin-top:8px" :disabled="!feedback.trim()" @click="revise">创建修订请求</button>
+          <CommandFeedback :state="revisionImpactState" />
+          <p v-if="revisionError" class="banner warning">{{ revisionError }}</p>
+          <button v-if="pendingChangeRequestId" class="btn" style="margin-top:8px" @click="openPendingChangeRequest">查看已保存的修改请求</button>
+          <button class="btn primary" style="margin-top:8px" :disabled="!chapterId || !feedback.trim()" @click="revise">创建修订请求</button>
+          <div class="muted" style="font-size:10px;margin-top:7px">请求会进入版本与变更记录并先核对影响，不会直接覆盖正式章节。</div>
         </section>
       </aside>
     </div>

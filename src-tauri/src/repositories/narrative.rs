@@ -401,11 +401,25 @@ impl NarrativeRepository {
         subject_id: &str,
         predicate: &str,
     ) -> Result<Vec<SemanticCanonFactRecord>, NarrativeRepositoryError> {
+        Self::current_canon_facts_for_semantic_key_bounded(
+            connection, project_id, subject_id, predicate, 100,
+        )
+        .map(|(facts, _)| facts)
+    }
+
+    pub fn current_canon_facts_for_semantic_key_bounded(
+        connection: &Connection,
+        project_id: &str,
+        subject_id: &str,
+        predicate: &str,
+        limit: i64,
+    ) -> Result<(Vec<SemanticCanonFactRecord>, bool), NarrativeRepositoryError> {
+        let query_limit = Self::limit(limit).saturating_add(1);
         let mut statement = connection.prepare(
-            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id",
+            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id LIMIT ?4",
         )?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, subject_id, predicate],
+            libsql_rusqlite::params![project_id, subject_id, predicate, query_limit],
             |row| {
                 let object_json: String = row.get(1)?;
                 Ok(SemanticCanonFactRecord {
@@ -420,7 +434,12 @@ impl NarrativeRepository {
                 })
             },
         )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut facts = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(NarrativeRepositoryError::from)?;
+        let truncated = facts.len() > limit as usize;
+        facts.truncate(limit as usize);
+        Ok((facts, truncated))
     }
 
     pub fn goal_contract_refs(

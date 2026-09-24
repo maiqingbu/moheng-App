@@ -17,7 +17,7 @@ use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 const NOW: &str = "2026-08-30T12:00:00Z";
@@ -25,6 +25,10 @@ const NOW: &str = "2026-08-30T12:00:00Z";
 struct RecordingGateway;
 
 struct GoodQualityGateway;
+
+struct CompleteNoChangeGateway;
+
+struct TruncatedAuditGateway;
 
 impl ProductionModelGateway for RecordingGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
@@ -70,7 +74,9 @@ impl ProductionModelGateway for RecordingGateway {
                     "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                 }],
                 "revealedReservationRefs":[],
-                "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}]
+                "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}],
+                "auditCompleteness":"COMPLETE_WITH_DELTA",
+                "unresolvedHard":false
             }),
             other => return Err(format!("unexpected capability: {other}")),
         };
@@ -88,10 +94,44 @@ impl ProductionModelGateway for GoodQualityGateway {
             response.output = json!({
                 "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
                 "continuityCandidates":[],"taskProgressCandidates":[],
-                "revealedReservationRefs":[],"evidenceRanges":[]
+                "revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
             });
         }
         Ok(response)
+    }
+}
+
+impl ProductionModelGateway for CompleteNoChangeGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output = json!({
+                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                "continuityCandidates":[],"taskProgressCandidates":[],
+                "revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+            });
+        }
+        Ok(response)
+    }
+}
+
+impl ProductionModelGateway for TruncatedAuditGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability != "AUDIT_EXTRACT" {
+            return RecordingGateway.invoke(capability, input);
+        }
+        Ok(ProductionModelResponse {
+            output: Value::Null,
+            raw_response: Some(
+                json!({
+                    "choices":[{"message":{"content":"{\\\"canonCandidates\\\":[]"}}]
+                })
+                .to_string(),
+            ),
+            usage: ProductionModelResponse::deterministic(Value::Null).usage,
+        })
     }
 }
 
@@ -137,6 +177,38 @@ struct KnowledgeGateway {
 
 struct AuditVariantGateway {
     variant: &'static str,
+}
+
+struct W13AuditGateway {
+    variant: &'static str,
+    database: PathBuf,
+    canonical_heads_at_audit: Arc<Mutex<Option<String>>>,
+}
+
+impl ProductionModelGateway for W13AuditGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "AUDIT_EXTRACT" {
+            let connection =
+                ai_novel_production_system_core::project_db::connection::open_connection(
+                    &self.database,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            let heads = connection.query_row(
+                "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads ORDER BY artifact_type,scope_key)",
+                [],
+                |row| row.get::<_, String>(0),
+            ).map_err(|error| error.to_string())?;
+            *self
+                .canonical_heads_at_audit
+                .lock()
+                .map_err(|error| error.to_string())? = Some(heads);
+        }
+        AuditVariantGateway {
+            variant: self.variant,
+        }
+        .invoke(capability, input)
+    }
 }
 
 struct FailingPostverifyOwner;
@@ -226,7 +298,7 @@ impl ProductionModelGateway for AuditVariantGateway {
                         "objectJson":{"place":"other-city"},
                         "authorityLevel":"C",
                         "eventType":"ACTION",
-                        "storyTime":"2026-01-01T00:00:00Z",
+                        "storyTime":"2020-06-01T00:00:00Z",
                         "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                     }])
                 }
@@ -267,6 +339,150 @@ impl ProductionModelGateway for AuditVariantGateway {
                 }
                 "route" => response.output["capacityExhausted"] = json!(true),
                 "change" => response.output["changeRequested"] = json!(true),
+                "multi-legal" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:map","subjectId":"entity:actual:linzhou",
+                        "predicate":"owns_item","objectJson":{"item":"map"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "unknown-predicate" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:unknown","subjectId":"entity:actual:linzhou",
+                        "predicate":"unclassified_claim","objectJson":{"value":"new"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "scope-disjoint" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:membership:beta","subjectId":"entity:actual:linzhou",
+                        "predicate":"membership","objectJson":{"scope":"beta","role":"member"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "mutual-exclusion" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:loadout:b","subjectId":"entity:actual:linzhou",
+                        "predicate":"loadout","objectJson":{"kind":"B"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "polarity" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:allegiance:negative","subjectId":"entity:actual:linzhou",
+                        "predicate":"allegiance","objectJson":{"value":"city","polarity":"NEGATIVE"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "disjoint-time" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:later","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"place":"later-city"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2030-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "duplicate" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:duplicate","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"region":"north","place":"stone-door"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2030-06-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "unknown-time" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:unknown-time","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"place":"unknown-time-city"},"authorityLevel":"C",
+                        "eventType":"ACTION",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "flashback" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:flashback","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"place":"earlier-city"},"authorityLevel":"C",
+                        "validFromChapterId":"chapter:b1b:flashback:later","validToChapterId":"chapter:b1b:flashback:later",
+                        "eventType":"ACTION","storyTime":"2019-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "unknown-scope" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:membership:unknown-scope","subjectId":"entity:actual:linzhou",
+                        "predicate":"membership","objectJson":{"role":"member"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "invalid-candidate-time" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:invalid-time","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"place":"unknown-time-format"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"later",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "invalid-current-time" => {
+                    response.output["canonCandidates"] = json!([{
+                        "factId":"fact:actual:location:invalid-interval","subjectId":"entity:actual:linzhou",
+                        "predicate":"location","objectJson":{"place":"royal-city"},"authorityLevel":"C",
+                        "eventType":"ACTION","storyTime":"2020-12-01T00:00:00Z",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
+                }
+                "same-batch-single" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:location:a","subjectId":"entity:actual:linzhou","predicate":"location","objectJson":{"place":"stone-door"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2020-06-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:location:b","subjectId":"entity:actual:linzhou","predicate":"location","objectJson":{"place":"royal-city"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2020-06-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "same-batch-multi" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:item:sword","subjectId":"entity:actual:linzhou","predicate":"owns_item","objectJson":{"item":"sword"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:item:map","subjectId":"entity:actual:linzhou","predicate":"owns_item","objectJson":{"item":"map"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "same-batch-mutual" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:loadout:a","subjectId":"entity:actual:linzhou","predicate":"loadout","objectJson":{"kind":"A"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:loadout:b","subjectId":"entity:actual:linzhou","predicate":"loadout","objectJson":{"kind":"B"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "same-batch-polarity" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:allegiance:positive","subjectId":"entity:actual:linzhou","predicate":"allegiance","objectJson":{"value":"city","polarity":"POSITIVE"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:allegiance:negative","subjectId":"entity:actual:linzhou","predicate":"allegiance","objectJson":{"value":"city","polarity":"NEGATIVE"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "same-batch-scope" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:membership:alpha","subjectId":"entity:actual:linzhou","predicate":"membership","objectJson":{"scope":"alpha","role":"member"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:membership:beta","subjectId":"entity:actual:linzhou","predicate":"membership","objectJson":{"scope":"beta","role":"member"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2026-01-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "same-batch-equivalent" => {
+                    response.output["canonCandidates"] = json!([
+                        {"factId":"fact:actual:batch:location:one","subjectId":"entity:actual:linzhou","predicate":"location","objectJson":{"place":"stone-door","region":"north"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2020-06-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}},
+                        {"factId":"fact:actual:batch:location:two","subjectId":"entity:actual:linzhou","predicate":"location","objectJson":{"region":"north","place":"stone-door"},"authorityLevel":"C","eventType":"ACTION","storyTime":"2020-06-01T00:00:00Z","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
+                    ]);
+                }
+                "missing-category" => {
+                    response
+                        .output
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("evidenceRanges");
+                }
+                "unresolved-hard" => {
+                    response.output["auditCompleteness"] = json!("UNRESOLVED_HARD");
+                    response.output["unresolvedHard"] = json!(true);
+                }
                 _ => {}
             }
         }
@@ -334,10 +550,26 @@ fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
     connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'Chapter 1','NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![chapter_id, project_id, volume_id, NOW]).unwrap();
     connection.execute("INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',10,100,?4)", libsql_rusqlite::params![format!("budget:b08:{project_id}"), project_id, chapter_id, NOW]).unwrap();
     connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:actual:linzhou',?1,'林舟','CHARACTER',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
-    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:actual:seed',?1,'entity:actual:linzhou','location','{\"place\":\"stone-door\"}','A',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,created_at,updated_at) VALUES ('fact:actual:seed',?1,'entity:actual:linzhou','location','{\"place\":\"stone-door\"}','A','2020-01-01T00:00:00Z','2021-01-01T00:00:00Z',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
 
-    let policy_payload = json!({"payloadSchema":"gate-policy.r1","policyId":"b08-default","rules":["candidate-audit","chapter-final"]});
+    let policy_payload = json!({
+        "payloadSchema":"gate-policy.r1",
+        "policyId":"b08-default",
+        "rules":["candidate-audit","chapter-final"],
+        "canonSemantics":{
+            "policyVersion":"canon-semantics.r1",
+            "rules":[
+                {"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},
+                {"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},
+                {"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},
+                {"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}
+            ]
+        }
+    });
     let policy_hash = sha256_canonical(&policy_payload).unwrap();
     let policy_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
@@ -355,6 +587,21 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:book:reservation',?1,'BookPlan','PROJECT',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, scope, hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book:reservation',1,?1,?2)", libsql_rusqlite::params![payload.to_string(), hash]).unwrap();
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'BookPlan','PROJECT',?2,'plan:book:reservation',1,?3)", libsql_rusqlite::params![project_id, json!({"level":"PROJECT"}).to_string(), hash]).unwrap();
+}
+
+fn seed_semantic_fact(
+    connection: &Connection,
+    project_id: &str,
+    fact_id: &str,
+    predicate: &str,
+    object: serde_json::Value,
+    story_time_from: Option<&str>,
+    story_time_to: Option<&str>,
+) {
+    connection.execute(
+        "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,created_at,updated_at) VALUES (?1,?2,'entity:actual:linzhou',?3,?4,'C',?5,?6,?7,?7)",
+        libsql_rusqlite::params![fact_id, project_id, predicate, object.to_string(), story_time_from, story_time_to, NOW],
+    ).unwrap();
 }
 
 #[test]
@@ -576,6 +823,93 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     })).unwrap();
     assert_eq!(replay["replayed"], true);
     println!("B08_PRODUCTION_RESULT opening=PASS candidate_isolation=PASS final_commit=PASS model_provenance=PASS receipt=PASS status=PASS");
+}
+
+#[test]
+fn b1a_complete_no_change_audit_commits_final_and_receipt_without_reality_delta() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(CompleteNoChangeGateway),
+    );
+    let connection = state
+        .manager
+        .create("p-b1a-no-change", "B1-A no change", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b1a-no-change");
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b1a:no-change","idempotencyKey":"key:b1a:no-change",
+        "projectId":"p-b1a-no-change","expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"requireRealityDelta":true}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open("p-b1a-no-change", "B1-A no change", NOW)
+        .unwrap();
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p-b1a-no-change' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p-b1a-no-change' AND artifact_type='ReviewReport' AND artifact_status='COMMITTED'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id='p-b1a-no-change' AND domain='B08_CHAPTER_PRODUCTION'", [], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b1a-no-change'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM model_runs WHERE project_id='p-b1a-no-change' AND status='COMPLETED'", [], |row| row.get(0)).unwrap(), 3);
+}
+
+#[test]
+fn b1a_incomplete_unresolved_and_truncated_audits_fail_closed_before_final_commit() {
+    for (suffix, gateway, expected_error) in [
+        (
+            "missing",
+            Arc::new(AuditVariantGateway {
+                variant: "missing-category",
+            }) as Arc<dyn ProductionModelGateway>,
+            "B08_AUDIT_INCOMPLETE",
+        ),
+        (
+            "unresolved",
+            Arc::new(AuditVariantGateway {
+                variant: "unresolved-hard",
+            }) as Arc<dyn ProductionModelGateway>,
+            "B08_AUDIT_UNRESOLVED_HARD",
+        ),
+        (
+            "truncated",
+            Arc::new(TruncatedAuditGateway) as Arc<dyn ProductionModelGateway>,
+            "B08_AUDIT_TRUNCATED_OR_INVALID",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = format!("p-b1a-audit-{suffix}");
+        let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
+        let connection = state
+            .manager
+            .create(&project_id, "B1-A audit failure", NOW)
+            .unwrap();
+        let chapter_id = seed_chapter_and_gate(&connection, &project_id);
+        drop(connection);
+        let error = execute_command_impl(&state, json!({
+            "type":"production_start","commandId":format!("cmd:b1a:{suffix}"),"idempotencyKey":format!("key:b1a:{suffix}"),
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+        })).unwrap_err();
+        assert!(error.starts_with(expected_error), "{error}");
+        let connection = state
+            .manager
+            .open(&project_id, "B1-A audit failure", NOW)
+            .unwrap();
+        assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
+        assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [&project_id], |row| row.get(0)).unwrap(), 0);
+    }
 }
 
 #[test]
@@ -1144,6 +1478,445 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         .open(project_id, "B08 actual reveal", NOW)
         .unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
+    let cases = [
+        (
+            "multi",
+            "multi-legal",
+            "owns_item",
+            json!({"item":"sword"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "unknown",
+            "unknown-predicate",
+            "unclassified_claim",
+            json!({"value":"old"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_SEMANTICS_UNRESOLVED"),
+        ),
+        (
+            "scope",
+            "scope-disjoint",
+            "membership",
+            json!({"scope":"alpha","role":"member"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "mutual",
+            "mutual-exclusion",
+            "loadout",
+            json!({"kind":"A"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "polarity",
+            "polarity",
+            "allegiance",
+            json!({"value":"city","polarity":"POSITIVE"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "disjoint",
+            "disjoint-time",
+            "location",
+            json!({"place":"old-city"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "single",
+            "canon-semantic-conflict",
+            "location",
+            json!({"place":"stone-door","region":"north"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "duplicate",
+            "duplicate",
+            "location",
+            json!({"place":"stone-door","region":"north"}),
+            Some("2030-01-01T00:00:00Z"),
+            Some("2031-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "unknown-time",
+            "unknown-time",
+            "location",
+            json!({"place":"stone-door"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            Some("B08_CANON_TIME_UNRESOLVED"),
+        ),
+        (
+            "flashback",
+            "flashback",
+            "location",
+            json!({"place":"stone-door"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "unknown-scope",
+            "unknown-scope",
+            "membership",
+            json!({"scope":"alpha","role":"member"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_SEMANTICS_UNRESOLVED_SCOPE"),
+        ),
+        (
+            "invalid-candidate-time",
+            "invalid-candidate-time",
+            "location",
+            json!({"place":"stone-door"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            Some("B08_CANON_TIME_UNRESOLVED"),
+        ),
+        (
+            "invalid-current-time",
+            "invalid-current-time",
+            "location",
+            json!({"place":"unused"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            Some("B08_CANON_TIME_UNRESOLVED"),
+        ),
+        (
+            "batch-single",
+            "same-batch-single",
+            "location",
+            json!({"place":"unused"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "batch-multi",
+            "same-batch-multi",
+            "owns_item",
+            json!({"item":"unused"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "batch-mutual",
+            "same-batch-mutual",
+            "loadout",
+            json!({"kind":"unused"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "batch-polarity",
+            "same-batch-polarity",
+            "allegiance",
+            json!({"value":"unused","polarity":"UNKNOWN"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"),
+        ),
+        (
+            "batch-scope",
+            "same-batch-scope",
+            "membership",
+            json!({"scope":"unused","role":"unused"}),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        ),
+        (
+            "batch-equivalent",
+            "same-batch-equivalent",
+            "location",
+            json!({"place":"unused"}),
+            Some("2020-01-01T00:00:00Z"),
+            Some("2021-01-01T00:00:00Z"),
+            None,
+        ),
+    ];
+    for (suffix, variant, predicate, existing, from, to, expected_error) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = format!("p-b1b-semantic-{suffix}");
+        let paths = AppPaths::new(temp.path());
+        let database = paths.project_dir(&project_id).unwrap().join("project.db");
+        let canonical_heads_at_audit = Arc::new(Mutex::new(None));
+        let state = KernelState::with_production_gateway(
+            paths,
+            Arc::new(W13AuditGateway {
+                variant,
+                database,
+                canonical_heads_at_audit: canonical_heads_at_audit.clone(),
+            }),
+        );
+        let connection = state
+            .manager
+            .create(&project_id, "B1-B semantic", NOW)
+            .unwrap();
+        let chapter_id = seed_chapter_and_gate(&connection, &project_id);
+        let same_batch = variant.starts_with("same-batch-");
+        if same_batch {
+            connection.execute(
+                "UPDATE canon_facts SET predicate='seed_location' WHERE fact_id='fact:actual:seed'",
+                [],
+            ).unwrap();
+        }
+        if variant == "invalid-current-time" {
+            connection.execute(
+                "UPDATE canon_facts SET story_time_from='2020-10-01T00:00:00Z',story_time_to='2020-2-01T00:00:00Z' WHERE fact_id='fact:actual:seed'",
+                [],
+            ).unwrap();
+        }
+        if variant == "flashback" {
+            let volume_id: String = connection
+                .query_row(
+                    "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                    libsql_rusqlite::params![project_id, chapter_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            connection.execute(
+                "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b1b:flashback:later',?1,?2,2,'Flashback evidence','NORMAL','PLANNED',0,?3,?3)",
+                libsql_rusqlite::params![project_id, volume_id, NOW],
+            ).unwrap();
+        }
+        if !same_batch && variant != "invalid-current-time" && variant != "invalid-candidate-time" {
+            seed_semantic_fact(
+                &connection,
+                &project_id,
+                &format!("fact:b1b:{suffix}"),
+                predicate,
+                existing,
+                from,
+                to,
+            );
+        }
+        let canon_before = connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let final_before = connection.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let receipt_before = connection.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let revision_before = connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let canonical_heads_before: String = connection.query_row(
+            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let (policy_id, policy_version, policy_hash): (String, i64, String) = connection.query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='GatePolicy'",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        let authority_fact_ids = {
+            let mut statement = connection.prepare(
+                "SELECT fact_id FROM canon_facts WHERE project_id=?1 AND subject_id='entity:actual:linzhou' AND predicate=?2 AND superseded_by IS NULL ORDER BY fact_id",
+            ).unwrap();
+            statement
+                .query_map(libsql_rusqlite::params![project_id, predicate], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        drop(connection);
+        let result = execute_command_impl(
+            &state,
+            json!({
+                "type":"production_start","commandId":format!("cmd:b1b:{suffix}"),
+                "idempotencyKey":format!("key:b1b:{suffix}"),"projectId":project_id,
+                "expectedRevision":0,"requestedAt":NOW,
+                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+            }),
+        );
+        let connection = state
+            .manager
+            .open(&project_id, "B1-B semantic", NOW)
+            .unwrap();
+        let final_after = connection.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let canon_after = connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt_after = connection.query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt' AND artifact_status='COMMITTED'",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let revision_after = connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let canonical_heads_after: String = connection.query_row(
+            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
+            [&project_id],
+            |row| row.get(0),
+        ).unwrap();
+        let canonical_heads_at_audit = canonical_heads_at_audit.lock().unwrap().clone().unwrap();
+        let semantic_outcome = match variant {
+            "multi-legal" => "NO_CONFLICT_MULTI",
+            "unknown-predicate" => "UNRESOLVED_PREDICATE_SEMANTICS",
+            "scope-disjoint" => "NO_CONFLICT_DIFFERENT_SCOPE",
+            "mutual-exclusion" => "CONFLICT_MUTUAL_EXCLUSION",
+            "polarity" => "CONFLICT_POLARITY",
+            "disjoint-time" => "NO_CONFLICT_DISJOINT_TIME",
+            "canon-semantic-conflict" => "CONFLICT_SINGLE",
+            "duplicate" => "EQUIVALENT_DUPLICATE",
+            "unknown-time" => "UNRESOLVED_TIME",
+            "flashback" => "NO_CONFLICT_DISJOINT_TIME",
+            "unknown-scope" => "UNRESOLVED_SCOPE",
+            "invalid-candidate-time" | "invalid-current-time" => "UNRESOLVED_TIME",
+            "same-batch-single" => "CONFLICT_SINGLE",
+            "same-batch-multi" => "NO_CONFLICT_MULTI",
+            "same-batch-mutual" => "CONFLICT_MUTUAL_EXCLUSION",
+            "same-batch-polarity" => "CONFLICT_POLARITY",
+            "same-batch-scope" => "NO_CONFLICT_DIFFERENT_SCOPE",
+            "same-batch-equivalent" => "EQUIVALENT_DUPLICATE",
+            _ => "UNMAPPED_FIXTURE",
+        };
+        if let Some(expected) = expected_error {
+            let actual_error = result.unwrap_err();
+            assert!(actual_error.starts_with(expected));
+            assert_eq!(final_after, final_before);
+            assert_eq!(canon_after, canon_before);
+            assert_eq!(receipt_after, receipt_before);
+            assert_eq!(canonical_heads_at_audit, canonical_heads_after);
+            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
+            assert_eq!(
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0)
+                    )
+                    .unwrap(),
+                canon_before
+            );
+            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [&project_id], |row| row.get(0)).unwrap(), 0);
+        } else {
+            assert_eq!(result.unwrap()["finalStatus"], "committed");
+            assert_eq!(final_after, 1);
+            assert_eq!(receipt_after, 1);
+            assert!(revision_after > revision_before);
+            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'", [&project_id], |row| row.get(0)).unwrap(), 1);
+            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [&project_id], |row| row.get(0)).unwrap(), 1);
+
+            let (receipt_policy_id, receipt_policy_version, receipt_policy_hash, semantic_version): (String, i64, String, String) = connection.query_row(
+                "SELECT json_extract(p.payload_json,'$.gatePolicyRef.artifactId'),json_extract(p.payload_json,'$.gatePolicyRef.version'),json_extract(p.payload_json,'$.gatePolicyRef.payloadHash'),json_extract(p.payload_json,'$.canonSemanticPolicyVersion') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
+                [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            let (review_policy_id, review_policy_version, review_policy_hash, review_semantic_version): (String, i64, String, String) = connection.query_row(
+                "SELECT json_extract(p.payload_json,'$.gatePolicyRef.artifactId'),json_extract(p.payload_json,'$.gatePolicyRef.version'),json_extract(p.payload_json,'$.gatePolicyRef.payloadHash'),json_extract(p.payload_json,'$.canonSemanticPolicyVersion') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ReviewReport'",
+                [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            let (certificate_policy_id, certificate_policy_version, certificate_policy_hash): (String, i64, String) = connection.query_row(
+                "SELECT gate_policy_artifact_id,gate_policy_version,gate_policy_payload_hash FROM gate_certificates WHERE project_id=?1 ORDER BY certificate_id LIMIT 1",
+                [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            assert_eq!(
+                (
+                    receipt_policy_id.as_str(),
+                    receipt_policy_version,
+                    receipt_policy_hash.as_str(),
+                    semantic_version.as_str()
+                ),
+                (
+                    policy_id.as_str(),
+                    policy_version,
+                    policy_hash.as_str(),
+                    "canon-semantics.r1"
+                )
+            );
+            assert_eq!(
+                (
+                    review_policy_id.as_str(),
+                    review_policy_version,
+                    review_policy_hash.as_str(),
+                    review_semantic_version.as_str()
+                ),
+                (
+                    policy_id.as_str(),
+                    policy_version,
+                    policy_hash.as_str(),
+                    "canon-semantics.r1"
+                )
+            );
+            assert_eq!(
+                (
+                    certificate_policy_id.as_str(),
+                    certificate_policy_version,
+                    certificate_policy_hash.as_str()
+                ),
+                (policy_id.as_str(), policy_version, policy_hash.as_str())
+            );
+        }
+        println!(
+            "W13_CASE_EVIDENCE {}",
+            json!({
+                "case":suffix,
+                "variant":variant,
+                "predicate":predicate,
+                "policyRef":{"artifactId":policy_id,"version":policy_version,"payloadHash":policy_hash,"policyVersion":"canon-semantics.r1"},
+                "authorityFactIds":authority_fact_ids,
+                "semanticOutcome":semantic_outcome,
+                "errorCode":expected_error,
+                "finalChapter":{"before":final_before,"after":final_after},
+                "canonRows":{"before":canon_before,"after":canon_after},
+                "productionReceipt":{"before":receipt_before,"after":receipt_after},
+                "canonicalHeads":{"before":canonical_heads_before,"after":canonical_heads_after},
+                "canonicalHeadsAtSemanticGate":canonical_heads_at_audit,
+                "projectRevision":{"before":revision_before,"after":revision_after}
+            })
+        );
+    }
 }
 
 #[test]

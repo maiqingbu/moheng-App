@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const evidence = path.resolve(process.env.B12_EVIDENCE_DIR ?? fs.mkdtempSync(path.join(os.tmpdir(), 'moheng-b12-evidence-')))
+const laterBatchReverify = process.env.B12_REVERIFY_LATER_SOURCE === '1'
 const startCommit = '84195d156be8bf852b26867fc6f26dd51632e2db'
 const ownerName = 'B12::ChangeRetconOwner'
 const migrationHashes = {
@@ -21,6 +22,9 @@ const migrationHashes = {
   '0009_h03_repair_workflow.sql': 'b2ac4457e982b1b4e93d50b95e4c07d3e6a77f6b36ed2b796e2bc6ed576353ba',
   '0010_b09_h04_volume_lifecycle.sql': 'c1257d5a8c9d3b52cadb5f6973f6ac8764d9bbcb77ec84a4b036929bc313f99d',
   '0011_b12_change_retcon_runtime.sql': '70b1a0c21da65c9bfa3b06d41acabbc6edf10f18f067a9b9aa481bf8a4d37610',
+}
+const approvedLaterMigrationHashes = {
+  '0012_b13_longform_health_indexes.sql': '46605ab2845a471e4f18357bdeec83c8a99f436b1df84e509738b3760fc0157a',
 }
 const B12 = Array.from({ length: 61 }, (_, index) => `B12-A${String(index).padStart(2, '0')}`)
 const NEGATIVE = Array.from({ length: 28 }, (_, index) => `NEG-${String(index + 1).padStart(2, '0')}`)
@@ -67,6 +71,7 @@ const setGate = (name, passed, source, actual = {}) => { gates[name] = gate(Bool
 const parseCount = (output, expression) => Number(output.match(expression)?.[1] ?? 0)
 const rust = run('b12_change_retcon', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b12_change_retcon', '--', '--nocapture'])
 const rustRevision = run('b12_revision', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'b12_revision', '--', '--nocapture'])
+const postverifyContract = run('b12_postverify_contract', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', 'postverify_contract_tests', '--', '--nocapture'])
 const b12Node = run('b12_node', 'node', ['--test', 'tests/b12-acceptance-generator.test.mjs', 'tests/b12-capability-parity.test.mjs', 'tests/b12-negative-matrix.test.mjs', 'tests/b12-revision-gates.test.mjs'])
 const node = run('node', 'npm', ['test'])
 const frontendEvidencePath = path.join(evidence, 'b12_frontend_ux.jsonl')
@@ -110,7 +115,17 @@ const migrationResults = Object.entries(migrationHashes).map(([name, expected]) 
   const actual = fs.existsSync(file) ? crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null
   return { name, expected, actual, status: actual === expected ? 'PASS' : 'FAIL' }
 })
-const migrationPass = migrationResults.every(item => item.status === 'PASS') && !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0012/.test(name))
+const laterMigrationNames = fs.readdirSync(path.join(root, 'src-tauri/migrations')).filter(name => /^001[2-9]|^00[2-9][0-9]/.test(name)).sort()
+const laterMigrationResults = laterMigrationNames.map(name => {
+  const expected = approvedLaterMigrationHashes[name]
+  const file = path.join(root, 'src-tauri/migrations', name)
+  const actual = fs.existsSync(file) ? crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null
+  return { name, expected, actual, status: expected && actual === expected ? 'PASS' : 'FAIL' }
+})
+const noLaterMigrations = laterMigrationNames.length === 0
+const laterMigrationPass = laterMigrationResults.length > 0 && laterMigrationResults.every(item => item.status === 'PASS')
+const migrationPass = migrationResults.every(item => item.status === 'PASS')
+  && (laterBatchReverify ? laterMigrationPass : noLaterMigrations)
 const freeze = JSON.parse(sourceByPath('evidence/B12/B12_PREBATCH_FREEZE.json') || '{}')
 const freezePass = freeze.freezeThrough === 'B11' && ['edadc96aba68fe89b8e1e453387eb6ffe3fd9968', startCommit].includes(freeze.acceptedBaseline) && freeze.nextAuthorizedBatch === 'B12'
 const rustPass = rust.status === 'PASS' && rustRevision.status === 'PASS'
@@ -143,7 +158,7 @@ const sourceBindingReport = {
   status: sourceBinding ? 'PASS' : 'FAIL',
 }
 fs.writeFileSync(path.join(evidence, 'B12_SOURCE_BINDING.json'), `${JSON.stringify(sourceBindingReport, null, 2)}\n`)
-fs.writeFileSync(path.join(evidence, 'B12_MIGRATION_FREEZE.json'), `${JSON.stringify({ schema: 'b12-migration-freeze-r2', frozen: migrationResults, frozenThrough: '0010', additiveMigration: '0011_b12_change_retcon_runtime.sql', noUnapprovedMigration: !fs.readdirSync(path.join(root, 'src-tauri/migrations')).some(name => /^0012/.test(name)), status: migrationPass ? 'PASS' : 'FAIL' }, null, 2)}\n`)
+fs.writeFileSync(path.join(evidence, 'B12_MIGRATION_FREEZE.json'), `${JSON.stringify({ schema: 'b12-migration-freeze-r3', sourceMode: laterBatchReverify ? 'LATER_BATCH_REVERIFY' : 'B12_PREBATCH', frozen: migrationResults, frozenThrough: '0011', approvedLaterMigrations: laterMigrationResults, noUnapprovedMigration: laterBatchReverify ? laterMigrationPass : noLaterMigrations, status: migrationPass ? 'PASS' : 'FAIL' }, null, 2)}\n`)
 
 const runtimePass = rustPass
 const targetOwnerBody = owner.match(/fn materialize_typed_target[\s\S]*?(?=\nfn |\npub fn |$)/)?.[0] ?? ''
@@ -156,9 +171,19 @@ const sourceArchitecturePass = /B12::ChangeRetconOwner/.test(owner)
 const noFutureOwner = !/(B13|B14|B15|RC1|EndgameOwner|ExportOwner)/.test(`${owner}\n${repository}`)
 const noHarnessSkillWriter = !/(change_request_apply|retcon_apply|canonDelta|INSERT INTO canon_)/.test(sourceByPath('src-tauri/src/harness/mod.rs')) && !/(change_request_apply|retcon_apply|INSERT INTO canon_)/.test(sourceByPath('src-tauri/src/creative_skills.rs'))
 const chinesePass = templates.length > 0 && !/作为\s*AI|根据你提供的上下文|以下是详细分析|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|change_request_id|impact_set_id|retcon_plan_id|sourceHash|operationDigest|basedOnRevision/.test(templates)
-const routePass = /HistoryCenter/.test(router) && /UnavailableFeature/.test(router.split('\n').find(line => line.includes('/projects/:id/health')) ?? '') && /match: 'history'/.test(shell)
+const healthRoute = router.split('\n').find(line => line.includes('/projects/:id/health')) ?? ''
+const routePass = /HistoryCenter/.test(router)
+  && (laterBatchReverify ? /LongFormHealth/.test(healthRoute) : /UnavailableFeature/.test(healthRoute))
+  && /match: 'history'/.test(shell)
 const h03Pass = /execute_change_request/.test(repair) && /crate::change_retcon::apply_approved_on_connection/.test(commands) && /apply_retcon_on_connection/.test(owner) && /claim_repair_authorization/.test(repair)
 const productUxRuntimePass = /B12_PRODUCT_UX_RETCON_RESULT[^\n]+status=PASS/.test(rustRevision.output)
+const h03ReplayPass = /B12_H03_CHANGE_REPLAY_RUNTIME_RESULT receipt=PASS query=PASS incomplete=PASS revision=PASS stale=PASS noDuplicate=PASS status=PASS/.test(rust.output)
+  && /B12_H03_RETCON_REPLAY_FAULT_RESULT receipt=PASS queryFailure=PASS persistedStatus=PASS canon=PASS revision=PASS noDuplicate=PASS status=PASS/.test(rustRevision.output)
+const postverifyOutcomeContractPass = postverifyContract.status === 'PASS'
+  && /B12_POSTVERIFY_QUERY_FAILURE_RESULT committed=PASS receipt=PASS revisions=PASS retryForbidden=PASS status=PASS/.test(postverifyContract.output)
+  && /B12_POSTVERIFY_INCOMPLETE_RESULT status=PASS/.test(postverifyContract.output)
+const firstApplyPostverifyFaultPass = postverifyContract.status === 'PASS'
+  && /B12_FIRST_APPLY_POSTVERIFY_FAULT_RESULT commit=PASS committed=PASS queryFailed=PASS receipt=PASS revision=PASS stale=PASS authority=PASS safeReplay=PASS status=PASS/.test(postverifyContract.output)
 const readJsonl = file => {
   if (!fs.existsSync(file)) return []
   return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap(line => {
@@ -169,6 +194,7 @@ const frontendEvidenceRecords = readJsonl(frontendEvidencePath)
 const frontendHistoryEvidence = frontendEvidenceRecords.find(record => record.marker === 'B12_FRONTEND_HISTORY_RETCON_RESULT')
 const frontendAssistantEvidence = frontendEvidenceRecords.find(record => record.marker === 'B12_FRONTEND_ASSISTANT_RETCON_RESULT')
 const frontendAsyncEvidence = frontendEvidenceRecords.find(record => record.marker === 'B12_FRONTEND_SUMMARY_ASYNC_RESULT')
+const ordinaryChangeUnknownEvidence = frontendEvidenceRecords.find(record => record.marker === 'B12_ORDINARY_CHANGE_UNKNOWN_RESULT')
 const frontendHistoryPass = vitest.status === 'PASS'
   && frontendHistoryEvidence?.status === 'PASS'
   && frontendHistoryEvidence.planDisplayed === true
@@ -186,6 +212,12 @@ const frontendAsyncPass = vitest.status === 'PASS'
   && frontendAsyncEvidence.commandReturnedBeforeWorker === true
   && frontendAsyncEvidence.workerStatusPolled === true
   && frontendAsyncEvidence.uiNonBlocking === true
+const ordinaryChangeUnknownPass = vitest.status === 'PASS'
+  && ordinaryChangeUnknownEvidence?.status === 'PASS'
+  && ordinaryChangeUnknownEvidence.unknownIsPending === true
+  && ordinaryChangeUnknownEvidence.noAutomaticResubmit === true
+  && ordinaryChangeUnknownEvidence.manualRetryUsesSameIdempotencyKey === true
+  && ordinaryChangeUnknownEvidence.replayReceiptReturned === true
 const summaryConcurrentJobs = Number(rustRevision.output.match(/B12_SUMMARY_BOOTSTRAP_CONCURRENCY_RESULT[^\n]+concurrentJobs=(\d+)/)?.[1] ?? 0)
 const summaryAsyncPass = /B12_SUMMARY_BOOTSTRAP_ASYNC_RESULT[^\n]+commandReturnedBeforeWorker=PASS[^\n]+workerCompletesLater=PASS[^\n]+status=PASS/.test(rustRevision.output)
 const groundingRuntimePass = /B12_ASSISTANT_GROUNDING_RESULT[^\n]+naturalLanguage=PASS[^\n]+exactFact=PASS[^\n]+status=PASS/.test(rustRevision.output)
@@ -218,7 +250,8 @@ fs.writeFileSync(path.join(evidence, 'B12_FRONTEND_EVIDENCE.json'), `${JSON.stri
   historyRetcon: frontendHistoryEvidence ?? null,
   assistantRetcon: frontendAssistantEvidence ?? null,
   asyncBootstrap: frontendAsyncEvidence ?? null,
-  status: frontendHistoryPass && frontendAssistantPass && frontendAsyncPass ? 'PASS' : 'FAIL',
+  ordinaryChangeUnknownOutcome: ordinaryChangeUnknownEvidence ?? null,
+  status: frontendHistoryPass && frontendAssistantPass && frontendAsyncPass && ordinaryChangeUnknownPass ? 'PASS' : 'FAIL',
 }, null, 2)}\n`)
 const scalePreflightMs = Number(scale.output.match(/warmPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
 const scaleColdPreflightMs = Number(scale.output.match(/coldPreflightMs=([\d.]+)/)?.[1] ?? Number.POSITIVE_INFINITY)
@@ -256,11 +289,11 @@ setGate('B12-A28', runtimePass && /b12\.stale\.activation/.test(owner), 'B12_NO_
 setGate('B12-A29', runtimePass && /scope_class/.test(owner), 'B12_STALE_SCOPE.json')
 setGate('B12-A30', runtimePass && /GLOBAL/.test(owner), 'B12_STALE_SCOPE.json')
 setGate('B12-A31', runtimePass, 'B12_STALE_SCOPE.json')
-setGate('B12-A32', runtimePass && /typedRequery/.test(owner), 'B12_POSTVERIFY.json')
+setGate('B12-A32', runtimePass && postverifyOutcomeContractPass && /typedRequery/.test(owner), 'B12_POSTVERIFY.json')
 setGate('B12-A33', runtimePass && /oldFactPreserved/.test(owner), 'B12_POSTVERIFY.json')
 setGate('B12-A34', runtimePass && /stale_queue/.test(repository), 'B12_POSTVERIFY.json')
-setGate('B12-A35', runtimePass && /finalStatus.*failed/s.test(owner), 'B12_POSTVERIFY.json')
-setGate('B12-A36', h03Pass && productUxRuntimePass, 'B12_H03_CHANGE_CAPABILITY.json')
+setGate('B12-A35', runtimePass && firstApplyPostverifyFaultPass, 'b12_postverify_contract.log')
+setGate('B12-A36', h03Pass && productUxRuntimePass && h03ReplayPass, 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A37', h03Pass && /one-time|claim_repair_authorization/.test(repair), 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A38', h03Pass && /B12_CHANGE_APPROVAL/.test(owner), 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('B12-A39', b12NodePass && frontendAssistantPass, 'B12_FRONTEND_EVIDENCE.json')
@@ -271,12 +304,12 @@ setGate('B12-A43', routePass, 'B12_HISTORY_UI.json')
 setGate('B12-A44', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('B12-A45', chinesePass, 'B12_INTERNAL_IDENTIFIER_LEAKAGE.json')
 setGate('B12-A46', b12NodePass && !/作为\s*AI/.test(templates), 'B12_AI_TRACE_LINT.json')
-setGate('B12-A47', b12NodePass && /change_request_create|impact_preflight|change_request_decide|change_request_apply/.test(historyPage), 'B12_UI_CAPABILITY_PARITY.json')
+setGate('B12-A47', b12NodePass && ordinaryChangeUnknownPass && /change_request_create|impact_preflight|change_request_decide|change_request_apply/.test(historyPage), 'B12_UI_CAPABILITY_PARITY.json')
 setGate('B12-A48', scale.status === 'PASS' && summaryBootstrapPass && /dependencies=3000000/.test(scale.output) && scalePreflightMs <= 2_000 && scaleColdPreflightMs <= 2_000 && scaleColdBounded, ['B12_3M_DEPENDENCY_CERTIFICATION.json', 'B12_DEPENDENCY_SUMMARY_BOOTSTRAP.json', 'B12_FRONTEND_EVIDENCE.json'], { coldPreflightMs: scaleColdPreflightMs, warmPreflightMs: scalePreflightMs, targetMs: 2_000, coldBounded: scaleColdBounded, summaryBootstrap: summaryBootstrapPass, summaryAsync: summaryAsyncPass, leaseExpiry: leaseExpiryPass, frontendAsync: frontendAsyncPass })
 setGate('B12-A49', b12NodePass && productUxRuntimePass && frontendHistoryPass && frontendAssistantPass && frontendAsyncPass && groundingRuntimePass && chapterSemanticPass && exactEvidencePass && leaseExpiryPass, ['B12_FRONTEND_EVIDENCE.json', 'B12_ASSISTANT_CHANGE_GROUNDING.json', 'B12_DEPENDENCY_SUMMARY_BOOTSTRAP.json'])
 setGate('B12-A50', runtimePass, 'B12_ATOMIC_COMMIT.json')
 setGate('B12-A51', runtimePass && /commit_with_post_apply/.test(owner), 'B12_ATOMIC_COMMIT.json')
-setGate('B12-A52', runtimePass && /idempotent|REPLAYED/.test(owner + sourceByPath('src-tauri/tests/b12_change_retcon.rs')), 'B12_IDEMPOTENCY.json')
+setGate('B12-A52', runtimePass && /B12_RETCON_REPLAY_RUNTIME_RESULT receipt=PASS revision=PASS canon=PASS stale=PASS status=PASS/.test(rust.output), 'b12_change_retcon.log')
 setGate('B12-A53', runtimePass && /two_workers|concurrent/.test(sourceByPath('src-tauri/tests/b12_change_retcon.rs')), 'B12_CONCURRENCY.json')
 setGate('B12-A54', cargoAll.status === 'PASS' && nodePass, 'B12_REGRESSION.json')
 setGate('B12-A55', architecture.status === 'PASS', 'architecture.log')
@@ -306,7 +339,7 @@ setGate('base_architecture', architecture.status === 'PASS', 'architecture.log')
 setGate('module_boundary', moduleBoundary.status === 'PASS', 'module_boundary.log')
 setGate('m0a', nodePass && architecture.status === 'PASS', 'B12_REGRESSION.json')
 setGate('b12_change_retcon', runtimePass, 'b12_change_retcon.log', { passed: parseCount(rust.output, /test result: ok\.\s*(\d+) passed/) + parseCount(rustRevision.output, /test result: ok\.\s*(\d+) passed/) })
-setGate('b12_h03_capability', h03Pass && productUxRuntimePass && runtimePass, 'B12_H03_CHANGE_CAPABILITY.json')
+setGate('b12_h03_capability', h03Pass && productUxRuntimePass && h03ReplayPass && runtimePass, 'B12_H03_CHANGE_CAPABILITY.json')
 setGate('b12_product_ux', b12NodePass && productUxRuntimePass && frontendHistoryPass && frontendAssistantPass && frontendAsyncPass && groundingRuntimePass, ['B12_FRONTEND_EVIDENCE.json', 'B12_ASSISTANT_CHANGE_GROUNDING.json'])
 setGate('b12_language_scan', chinesePass, 'B12_CHINESE_LANGUAGE_SCAN.json')
 setGate('b12_scale_bound', scale.status === 'PASS', 'b12_scale_bound.log')
@@ -337,10 +370,10 @@ const evidencePayloads = {
   'B12_NO_INCONSISTENT_WINDOW.json': { schema: 'b12-no-inconsistent-window-r1', staleStateInCommitBundle: true, status: gates['B12-A28'].status },
   'B12_ATOMIC_COMMIT.json': { schema: 'b12-atomic-commit-r1', commitService: true, rollbackBoundary: true, status: gates['B12-A27'].status },
   'B12_EXECUTION_RECEIPT.json': { schema: 'b12-execution-receipt-r1', receipt: true, status: runtimePass ? 'PASS' : 'FAIL' },
-  'B12_POSTVERIFY.json': { schema: 'b12-postverify-r1', typedRequery: true, statuses: ['VERIFIED', 'FAILED', 'INCOMPLETE'], status: gates['B12-A32'].status },
+  'B12_POSTVERIFY.json': { schema: 'b12-postverify-r2', typedRequery: true, statuses: ['VERIFIED', 'INCOMPLETE', 'QUERY_FAILED'], queryFailureIsWriteFailure: false, firstApplyCommitThenQueryFailure: firstApplyPostverifyFaultPass, status: gates['B12-A32'].status === 'PASS' && gates['B12-A35'].status === 'PASS' ? 'PASS' : 'FAIL' },
   'B12_IDEMPOTENCY.json': { schema: 'b12-idempotency-r1', status: gates['B12-A52'].status },
   'B12_CONCURRENCY.json': { schema: 'b12-concurrency-r1', concurrentWinner: 1, status: gates['B12-A53'].status },
-  'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: ownerName, oneTimeP3: true, status: gates['B12-A36'].status },
+  'B12_H03_CHANGE_CAPABILITY.json': { schema: 'b12-h03-change-capability-r1', owner: ownerName, oneTimeP3: true, ordinaryChangeReplay: h03ReplayPass, retconReplay: h03ReplayPass, status: gates['B12-A36'].status },
   'B12_ASSISTANT_CHANGE_FLOW.json': { schema: 'b12-assistant-change-flow-r2', proposalOnlyBeforeDecision: true, frontendSequence: frontendAssistantPass, status: gates['B12-A39'].status },
   'B12_ASSISTANT_CHANGE_GROUNDING.json': { schema: 'b12-assistant-change-grounding-r4', groundedCanonQuery: groundingRuntimePass, exactFactAndEvidenceRefs: exactEvidencePass, evidenceGapFailsClosed: exactEvidencePass, unrelatedEvidenceRejected: exactEvidencePass, ambiguousRequiresUserSelection: groundingRuntimePass, impactFromBackend: true, frontendSequence: frontendAssistantPass, status: gates['B12-A40'].status },
   'B12_PRODUCT_UX_CHANGE_E2E.json': { schema: 'b12-product-ux-change-e2e-r2', frontendSequence: frontendHistoryPass, proposalImpactDecisionApply: frontendHistoryPass, runtimeFixture: productUxRuntimePass, status: gates['B12-A49'].status },
@@ -354,7 +387,7 @@ const evidencePayloads = {
   'B12_CHINESE_LANGUAGE_SCAN.json': languageReport,
   'B12_INTERNAL_IDENTIFIER_LEAKAGE.json': { schema: 'b12-identifier-leakage-r1', visibleLeakageCount: chinesePass ? 0 : 1, status: gates['B12-A45'].status },
   'B12_AI_TRACE_LINT.json': { schema: 'b12-ai-trace-lint-r1', blockingBoilerplateCount: 0, status: gates['B12-A46'].status },
-  'B12_UI_CAPABILITY_PARITY.json': { schema: 'b12-ui-capability-parity-r1', historyBackend: true, status: gates['B12-A47'].status },
+  'B12_UI_CAPABILITY_PARITY.json': { schema: 'b12-ui-capability-parity-r2', historyBackend: true, ordinaryChangeUnknownOutcome: ordinaryChangeUnknownPass, status: gates['B12-A47'].status },
   'B12_3M_DEPENDENCY_CERTIFICATION.json': { schema: 'b12-3m-dependency-certification-r2', dependencies: /dependencies=3000000/.test(scale.output) ? 3000000 : 0, coldPath: { status: scale.output.match(/coldStatus="([^"]+)/)?.[1] ?? 'NOT_RUN', preflightMs: scaleColdPreflightMs, fullGraphSynchronousScan: scaleColdBounded ? false : null }, warmPath: { preflightMs: scalePreflightMs, fullGraphSynchronousScan: false }, preflightOnly: true, expandedEdges: /expanded=0/.test(scale.output) ? 0 : null, targetMs: 2_000, status: gates['B12-A48'].status },
   'B12_GLOBAL_GATES.json': { schema: 'b12-global-gates-r1', gates: Object.fromEntries(GLOBAL.map(name => [name, gates[name]?.status === 'PASS'])), status: globalPass ? 'PASS' : 'FAIL' },
   'B12_REGRESSION.json': { schema: 'b12-regression-r1', node: node.status, cargoAllTargets: cargoAll.status, status: gates['B12-A54'].status },
@@ -403,7 +436,7 @@ if (packageRoot) {
   for (const name of RELEASE.slice(1)) setGate(name, false, 'package not supplied')
 }
 let otherBlocking = REQUIRED.filter(name => name !== 'B12-A59').filter(name => gates[name]?.status !== 'PASS')
-setGate('B12-A59', otherBlocking.length === 0, 'B12_ACCEPTANCE.json', { failedBeforeSelfGate: otherBlocking })
+setGate('B12-A59', otherBlocking.length === 0, 'gate-results.json', { failedBeforeSelfGate: otherBlocking })
 writeEvidencePayloads()
 writeGateReport()
 
@@ -423,7 +456,7 @@ if (packageRoot) {
 }
 writeEvidencePayloads()
 otherBlocking = REQUIRED.filter(name => name !== 'B12-A59').filter(name => gates[name]?.status !== 'PASS')
-setGate('B12-A59', otherBlocking.length === 0, 'B12_ACCEPTANCE.json', { failedBeforeSelfGate: otherBlocking })
+setGate('B12-A59', otherBlocking.length === 0, 'gate-results.json', { failedBeforeSelfGate: otherBlocking })
 writeGateReport()
 if (packageRoot) copyEvidenceToPackage()
 const gateStatus = REQUIRED.filter(name => gates[name]?.status !== 'PASS')

@@ -12,6 +12,10 @@ const statusLabels: Record<string, string> = {
   committed: '已完成',
   blocked: '暂时无法继续',
   failed: '未完成',
+  NOT_STARTED: '未开始',
+  SATISFIED: '已满足',
+  INVALIDATED: '已失效',
+  ABANDONED: '已放弃',
   ACTIVE: '进行中',
   RUNNING: '进行中',
   QUEUED: '等待处理',
@@ -62,6 +66,16 @@ const statusLabels: Record<string, string> = {
 }
 
 const errorLabels: Record<string, string> = {
+  COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
+  REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
+  CONTEXT_HARD_BUDGET_EXCEEDED: '本章必需资料超出预算，请调整当前任务范围后重新准备；不能省略硬性约束。',
+  CONTEXT_INCOMPLETE: '本章必需资料不完整，暂时不能继续生产。',
+  AUDIT_INCOMPLETE: '正文审计未完成，不能作为无变更结果提交。',
+  AUDIT_STALE: '正文已变化，需重新审计最终版本。',
+  CANON_CONFLICT: '正文与正式事实存在冲突，请核对依据并通过正式变更流程处理。',
+  FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
+  CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
+  UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
   PLAN_STALE: '当前规划已与最新内容不一致，需要重新确认或更新。',
   AUTHORIZATION_STALE: '作品状态已经变化，请重新确认修复方案。',
   EVIDENCE_GAP: '现有信息不足，暂时无法给出可靠结论。请补充对应章节或设定依据。',

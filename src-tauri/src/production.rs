@@ -25,7 +25,7 @@ use crate::repositories::runtime::{
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const STAGES: &[&str] = &[
     "CONTEXT",
@@ -532,21 +532,6 @@ fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
     Some(payload)
 }
 
-/// A compatible endpoint may stop an audit object immediately after a
-/// complete candidate array. Accept only that narrow missing outer delimiter;
-/// any truncation inside a candidate remains a hard parse failure.
-fn recover_truncated_audit_payload(value: &Value) -> Option<Value> {
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|content| content.starts_with('{') && content.ends_with(']'))?;
-    let repaired = format!("{content}}}");
-    let payload = serde_json::from_str::<Value>(&repaired).ok()?;
-    payload.as_object()?;
-    Some(payload)
-}
-
 fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
     let normalized = quote.replace("……", "...").replace('…', "...");
     let segments = normalized
@@ -586,7 +571,7 @@ fn parse_provider_model_payload_for_capability(
             recover_truncated_renderer_payload(&value).ok_or(error)
         }
         Err(error) if capability == "AUDIT_EXTRACT" => {
-            recover_truncated_audit_payload(&value).ok_or(error)
+            Err(format!("B08_AUDIT_TRUNCATED_OR_INVALID:{error}"))
         }
         Err(error) => Err(error),
     }
@@ -961,32 +946,6 @@ fn existing_canon_semantic_keys(authority_context: &Value) -> Value {
         .unwrap_or_else(|| json!([]))
 }
 
-fn reality_delta_template(authority_context: &Value) -> Value {
-    let subject_id = authority_context
-        .pointer("/state/facts")
-        .and_then(Value::as_array)
-        .and_then(|facts| facts.first())
-        .and_then(|fact| fact.get("subjectId"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("entity:current-protagonist");
-    let existing = authority_context
-        .pointer("/state/facts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|fact| fact.get("subjectId").and_then(Value::as_str) == Some(subject_id))
-        .filter_map(|fact| fact.get("predicate").and_then(Value::as_str))
-        .collect::<BTreeSet<_>>();
-    let mut predicate = "OBSERVED_NEW_EVENT".to_string();
-    let mut suffix = 2;
-    while existing.contains(predicate.as_str()) {
-        predicate = format!("OBSERVED_NEW_EVENT_{suffix}");
-        suffix += 1;
-    }
-    json!({"subjectId":subject_id,"predicate":predicate})
-}
-
 fn current_authority_digest(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
@@ -1277,6 +1236,7 @@ fn run_chapter_production_inner(
         .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
     let policy_ref: ArtifactRef =
         serde_json::from_value(policy).map_err(|e| format!("B08_GATE_POLICY_INVALID:{e}"))?;
+    let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
 
     DurableJobService::start_job(
         connection,
@@ -1570,7 +1530,6 @@ fn run_chapter_production_inner(
         current_revision,
     )?;
     let existing_canon_semantic_keys = existing_canon_semantic_keys(&authority_context);
-    let reality_delta_template = reality_delta_template(&authority_context);
 
     // B10 is an enrichment/quality layer on the existing B08 composition
     // root. Disabling it is an explicit compatibility path and still uses the
@@ -1662,7 +1621,7 @@ fn run_chapter_production_inner(
         .and_then(Value::as_i64)
         .unwrap_or(1_800)
         .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys.clone(),"realityDeltaTemplate":reality_delta_template.clone(),"targetChineseCharacters":target_chinese_characters});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys.clone(),"targetChineseCharacters":target_chinese_characters});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
@@ -1939,7 +1898,7 @@ fn run_chapter_production_inner(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"requireRealityDelta":request.pointer("/payload/requireRealityDelta").and_then(Value::as_bool).unwrap_or(execution_mode == "LONG_FORM"),"realityDeltaTemplate":reality_delta_template,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -1947,26 +1906,17 @@ fn run_chapter_production_inner(
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
     let audit_payload = normalize_audit_model_output(audit_payload, &effective_body);
     let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
-        .map_err(|error| format!("B08_AUDIT_CONTRACT:{error}"))?;
+        .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
+    validate_audit_completeness(&audit_payload, &extraction)?;
     validate_actual_extraction(
         connection,
         &project_id,
         &chapter_id,
         &effective_body,
         &plan_payload,
+        &gate_policy_payload,
         &mut extraction,
     )?;
-    if request
-        .pointer("/payload/requireRealityDelta")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        && extraction.canon_candidates.is_empty()
-        && extraction.knowledge_candidates.is_empty()
-        && extraction.continuity_candidates.is_empty()
-        && extraction.task_progress_candidates.is_empty()
-    {
-        return Err("B08_REALITY_DELTA_REQUIRED".into());
-    }
     let thread_promotion_decisions = extraction
         .continuity_candidates
         .iter()
@@ -1991,12 +1941,13 @@ fn run_chapter_production_inner(
             .and_then(|item| item.get("decision").and_then(Value::as_str))
             .unwrap_or("DO_NOT_PROMOTE")
     };
+    let review_payload = json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()});
     let mut audit = artifact(
         &project_id,
         audit_id,
         ArtifactType::ReviewReport,
         &chapter_id,
-        json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()}),
+        review_payload,
         &command_id,
         &job_id,
         Some(&audit_run_id),
@@ -2004,6 +1955,7 @@ fn run_chapter_production_inner(
         vec![effective_candidate_ref.clone()],
     )?;
     audit.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
+    validate_audit_candidate_binding(&audit.payload, &effective_candidate_ref)?;
     update_stage(connection, &project_id, &job_id, "GATE", &now)?;
     if let Err(error) = validate_plan_is_current(
         connection,
@@ -2211,7 +2163,7 @@ fn run_chapter_production_inner(
             "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
         })
     }));
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -2458,29 +2410,105 @@ struct TaskProgressCandidate {
     evidence: EvidenceSpan,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AuditCompleteness {
+    CompleteNoChange,
+    CompleteWithDelta,
+    Incomplete,
+    Truncated,
+    UnresolvedHard,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuditExtraction {
-    #[serde(default)]
     quality_findings: Vec<Value>,
-    #[serde(default)]
     canon_candidates: Vec<CanonCandidate>,
-    #[serde(default)]
     knowledge_candidates: Vec<KnowledgeCandidate>,
-    #[serde(default)]
     continuity_candidates: Vec<ContinuityCandidate>,
-    #[serde(default)]
     task_progress_candidates: Vec<TaskProgressCandidate>,
-    #[serde(default)]
     revealed_reservation_refs: Vec<String>,
-    #[serde(default)]
     evidence_ranges: Vec<EvidenceSpan>,
+    audit_completeness: AuditCompleteness,
+    unresolved_hard: bool,
     #[serde(default)]
     capacity_exhausted: bool,
     #[serde(default)]
     change_requested: bool,
     #[serde(default)]
     next_chapter_recompile_required: bool,
+}
+
+fn validate_audit_candidate_binding(
+    review_payload: &Value,
+    effective_candidate_ref: &ArtifactRef,
+) -> Result<(), String> {
+    let expected = serde_json::to_value(effective_candidate_ref)
+        .map_err(|error| format!("B08_AUDIT_CANDIDATE_BINDING:{error}"))?;
+    validate_audit_candidate_binding_value(review_payload, &expected)
+}
+
+fn validate_audit_candidate_binding_value(
+    review_payload: &Value,
+    effective_candidate_ref: &Value,
+) -> Result<(), String> {
+    if review_payload.get("candidateRef") != Some(effective_candidate_ref) {
+        return Err("B08_AUDIT_CANDIDATE_BINDING_MISMATCH".into());
+    }
+    Ok(())
+}
+
+fn validate_audit_completeness(
+    audit_payload: &Value,
+    audit: &AuditExtraction,
+) -> Result<(), String> {
+    let dropped = audit_payload
+        .pointer("/normalization/droppedCandidates")
+        .and_then(Value::as_object)
+        .map(|items| items.values().any(|value| value.as_u64().unwrap_or(0) > 0))
+        .unwrap_or(false)
+        || audit_payload
+            .pointer("/normalization/droppedEvidenceRanges")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0;
+    if dropped {
+        return Err("B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT".into());
+    }
+    if audit.unresolved_hard || audit.audit_completeness == AuditCompleteness::UnresolvedHard {
+        return Err("B08_AUDIT_UNRESOLVED_HARD".into());
+    }
+    match audit.audit_completeness {
+        AuditCompleteness::Incomplete => Err("B08_AUDIT_INCOMPLETE".into()),
+        AuditCompleteness::Truncated => Err("B08_AUDIT_TRUNCATED".into()),
+        AuditCompleteness::CompleteNoChange => {
+            if audit.canon_candidates.is_empty()
+                && audit.knowledge_candidates.is_empty()
+                && audit.continuity_candidates.is_empty()
+                && audit.task_progress_candidates.is_empty()
+                && audit.revealed_reservation_refs.is_empty()
+                && (!audit.quality_findings.is_empty() || audit.evidence_ranges.is_empty())
+            {
+                Ok(())
+            } else {
+                Err("B08_AUDIT_COMPLETENESS_MISMATCH".into())
+            }
+        }
+        AuditCompleteness::CompleteWithDelta => {
+            if audit.canon_candidates.is_empty()
+                && audit.knowledge_candidates.is_empty()
+                && audit.continuity_candidates.is_empty()
+                && audit.task_progress_candidates.is_empty()
+                && audit.revealed_reservation_refs.is_empty()
+            {
+                Err("B08_AUDIT_COMPLETENESS_MISMATCH".into())
+            } else {
+                Ok(())
+            }
+        }
+        AuditCompleteness::UnresolvedHard => unreachable!("handled above"),
+    }
 }
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
@@ -2540,7 +2568,6 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     let mut dropped = serde_json::Map::new();
     for (field, required) in candidate_requirements {
         let Some(items) = payload.get_mut(field).and_then(Value::as_array_mut) else {
-            payload[field] = json!([]);
             continue;
         };
         let before = items.len();
@@ -2573,20 +2600,25 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         });
         dropped.insert(field.into(), json!(before - items.len()));
     }
-    let ranges = payload
+    let (normalized_ranges, dropped_ranges) = payload
         .get("evidenceRanges")
         .and_then(Value::as_array)
         .map(|items| {
-            items
+            let ranges = items
                 .iter()
                 .filter_map(&normalize_evidence)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let dropped = items.len() - ranges.len();
+            (Some(ranges), dropped)
         })
-        .unwrap_or_default();
-    payload["evidenceRanges"] = json!(ranges);
+        .unwrap_or((None, 0));
+    if let Some(ranges) = normalized_ranges {
+        payload["evidenceRanges"] = json!(ranges);
+    }
     payload["normalization"] = json!({
         "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
-        "droppedCandidates":dropped
+        "droppedCandidates":dropped,
+        "droppedEvidenceRanges":dropped_ranges
     });
     payload
 }
@@ -2610,8 +2642,24 @@ fn validate_actual_extraction(
     chapter_id: &str,
     body: &str,
     plan: &Value,
+    gate_policy: &Value,
     audit: &mut AuditExtraction,
 ) -> Result<(), String> {
+    let canon_semantics = if audit.canon_candidates.is_empty() {
+        None
+    } else {
+        Some(
+            crate::canon_semantics::CanonSemanticPolicy::from_gate_policy(gate_policy)
+                .map_err(str::to_owned)?,
+        )
+    };
+    if audit.canon_candidates.len() > 100 {
+        return Err("B08_CANON_SEMANTICS_UNRESOLVED_TOO_MANY_CANDIDATES".into());
+    }
+    let mut pending_canon_facts = BTreeMap::<
+        (String, String),
+        Vec<crate::repositories::narrative::SemanticCanonFactRecord>,
+    >::new();
     for evidence in &audit.evidence_ranges {
         exact_quote(body, evidence)?;
     }
@@ -2646,6 +2694,11 @@ fn validate_actual_extraction(
         .collect::<BTreeSet<_>>();
 
     for candidate in &audit.canon_candidates {
+        canon_semantics
+            .as_ref()
+            .expect("canon semantics is required for Canon candidates")
+            .validate_predicate(&candidate.predicate)
+            .map_err(str::to_owned)?;
         exact_quote(body, &candidate.evidence)?;
         let subject_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
@@ -2659,13 +2712,17 @@ fn validate_actual_extraction(
         if !subject_exists && !subject_created_in_commit {
             return Err("B08_CANON_SUBJECT_NOT_FOUND".into());
         }
-        let current = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key(
+        let (current, truncated) = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key_bounded(
             connection,
             project_id,
             &candidate.subject_id,
             &candidate.predicate,
+            100,
         )
         .map_err(|error| error.to_string())?;
+        if truncated {
+            return Err("B08_CANON_SEMANTICS_UNRESOLVED_TOO_MANY_FACTS".into());
+        }
         let candidate_from_chapter_no =
             crate::repositories::narrative::NarrativeRepository::chapter_number(
                 connection,
@@ -2686,17 +2743,39 @@ fn validate_actual_extraction(
                     .unwrap_or(chapter_id),
             )
             .map_err(|error| error.to_string())?;
-        if current.iter().any(|fact| {
-            fact.object_json != candidate.object_json
-                && semantic_windows_overlap(
-                    fact,
-                    candidate,
-                    candidate_from_chapter_no,
-                    candidate_to_chapter_no,
-                )
-        }) {
-            return Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED".into());
+        let semantic_key = (candidate.subject_id.clone(), candidate.predicate.clone());
+        let policy = canon_semantics
+            .as_ref()
+            .expect("canon semantics is required for Canon candidates");
+        let candidate_input = crate::canon_semantics::CandidateSemanticInput {
+            object_json: &candidate.object_json,
+            story_time: candidate.story_time.as_deref(),
+            valid_from_chapter_no: candidate_from_chapter_no,
+            valid_to_chapter_no: candidate_to_chapter_no,
+        };
+        for fact in current
+            .iter()
+            .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
+        {
+            if let Some(error) = policy
+                .evaluate(&candidate.predicate, fact, candidate_input.clone())
+                .error_code()
+            {
+                return Err(error.into());
+            }
         }
+        pending_canon_facts.entry(semantic_key).or_default().push(
+            crate::repositories::narrative::SemanticCanonFactRecord {
+                fact_id: candidate.fact_id.clone(),
+                object_json: candidate.object_json.clone(),
+                valid_from_chapter_id: candidate.valid_from_chapter_id.clone(),
+                valid_to_chapter_id: candidate.valid_to_chapter_id.clone(),
+                story_time_from: candidate.story_time.clone(),
+                story_time_to: candidate.story_time.clone(),
+                valid_from_chapter_no: candidate_from_chapter_no,
+                valid_to_chapter_no: candidate_to_chapter_no,
+            },
+        );
     }
     for candidate in &audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
@@ -2787,31 +2866,6 @@ fn knowledge_authority_is_bound(
         && (fact_exists || pending_facts.contains(fact_id))
 }
 
-fn semantic_windows_overlap(
-    current: &crate::repositories::narrative::SemanticCanonFactRecord,
-    candidate: &CanonCandidate,
-    candidate_from_chapter_no: Option<i64>,
-    candidate_to_chapter_no: Option<i64>,
-) -> bool {
-    let candidate_story = candidate.story_time.as_deref();
-    let story_overlap = candidate_story.is_none_or(|point| {
-        current
-            .story_time_from
-            .as_deref()
-            .is_none_or(|start| start <= point)
-            && current
-                .story_time_to
-                .as_deref()
-                .is_none_or(|end| point <= end)
-    });
-    let chapter_overlap = current
-        .valid_from_chapter_no
-        .is_none_or(|start| candidate_to_chapter_no.is_none_or(|end| start <= end))
-        && candidate_from_chapter_no
-            .is_none_or(|start| current.valid_to_chapter_no.is_none_or(|end| start <= end));
-    story_overlap && chapter_overlap
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2853,15 +2907,16 @@ mod tests {
     }
 
     #[test]
-    fn audit_payload_recovery_only_closes_a_complete_outer_candidate_array() {
+    fn audit_payload_never_recovers_truncated_json_as_a_success_path() {
         let value = json!({
             "choices": [{
                 "message": {"content": "{\"canonCandidates\":[]"}
             }]
         });
-        assert_eq!(
-            parse_provider_model_payload_for_capability(value, "AUDIT_EXTRACT").unwrap(),
-            json!({"canonCandidates":[]})
+        assert!(
+            parse_provider_model_payload_for_capability(value, "AUDIT_EXTRACT")
+                .unwrap_err()
+                .starts_with("B08_AUDIT_TRUNCATED_OR_INVALID")
         );
         let value = json!({
             "choices": [{
@@ -2878,6 +2933,54 @@ mod tests {
             "PLAN_STRATEGY"
         )
         .is_err());
+    }
+
+    #[test]
+    fn audit_contract_requires_all_categories_and_explicit_completeness() {
+        let missing = json!({
+            "qualityFindings":[], "canonCandidates":[], "knowledgeCandidates":[],
+            "continuityCandidates":[], "taskProgressCandidates":[],
+            "revealedReservationRefs":[]
+        });
+        assert!(serde_json::from_value::<AuditExtraction>(missing).is_err());
+
+        let unresolved: AuditExtraction = serde_json::from_value(json!({
+            "qualityFindings":[], "canonCandidates":[], "knowledgeCandidates":[],
+            "continuityCandidates":[], "taskProgressCandidates":[],
+            "revealedReservationRefs":[], "evidenceRanges":[],
+            "auditCompleteness":"UNRESOLVED_HARD", "unresolvedHard":true
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_audit_completeness(&json!({}), &unresolved).unwrap_err(),
+            "B08_AUDIT_UNRESOLVED_HARD"
+        );
+
+        let standalone_ranges: AuditExtraction = serde_json::from_value(json!({
+            "qualityFindings":[], "canonCandidates":[], "knowledgeCandidates":[],
+            "continuityCandidates":[], "taskProgressCandidates":[],
+            "revealedReservationRefs":[], "evidenceRanges":[{"start":0,"end":2,"quote":"证据"}],
+            "auditCompleteness":"COMPLETE_NO_CHANGE", "unresolvedHard":false
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_audit_completeness(&json!({}), &standalone_ranges).unwrap_err(),
+            "B08_AUDIT_COMPLETENESS_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn audit_candidate_binding_rejects_a_review_for_a_different_candidate_version() {
+        let candidate_a =
+            json!({"artifactId":"candidate:a","version":1,"payloadHash":"a".repeat(64)});
+        let candidate_b =
+            json!({"artifactId":"candidate:a","version":2,"payloadHash":"b".repeat(64)});
+        let report = json!({"candidateRef":candidate_a});
+        assert!(validate_audit_candidate_binding_value(&report, &candidate_a).is_ok());
+        assert_eq!(
+            validate_audit_candidate_binding_value(&report, &candidate_b).unwrap_err(),
+            "B08_AUDIT_CANDIDATE_BINDING_MISMATCH"
+        );
     }
 
     #[test]
@@ -3054,21 +3157,5 @@ mod tests {
         assert_eq!(payload["projectRevision"], 7);
         assert_eq!(payload["activeTaskRefs"][0], "task:current");
         assert!(payload.get("state").is_some());
-    }
-
-    #[test]
-    fn reality_delta_template_avoids_existing_subject_predicate_keys() {
-        let context = json!({
-            "state": {
-                "facts": [
-                    {"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT"},
-                    {"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT_2"}
-                ]
-            }
-        });
-        assert_eq!(
-            reality_delta_template(&context),
-            json!({"subjectId":"entity:hero","predicate":"OBSERVED_NEW_EVENT_3"})
-        );
     }
 }

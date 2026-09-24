@@ -50,6 +50,46 @@ test('B12 Product UX gates consume real frontend sequence markers', () => {
   assert.doesNotMatch(runner, /setGate\('B12-A49',[^\n]*retcon_plan_create/)
 })
 
+test('B12 postverify and Retcon replay gates require runtime evidence markers', () => {
+  const runner = read('scripts/run-b12-evidence-gates.mjs')
+  assert.match(runner, /B12_POSTVERIFY_QUERY_FAILURE_RESULT/)
+  assert.match(runner, /B12_FIRST_APPLY_POSTVERIFY_FAULT_RESULT/)
+  assert.match(runner, /B12_RETCON_REPLAY_RUNTIME_RESULT/)
+  assert.match(runner, /statuses: \['VERIFIED', 'INCOMPLETE', 'QUERY_FAILED'\]/)
+  assert.doesNotMatch(runner, /statuses: \[[^\]]*'FAILED'/)
+  assert.doesNotMatch(runner, /setGate\('B12-A35',[^\n]*finalStatus\.\*failed/)
+  assert.doesNotMatch(runner, /setGate\('B12-A52',[^\n]*idempotent\|REPLAYED/)
+})
+
+test('B12 H03 gate requires ordinary Change and Retcon replay runtime outcomes', () => {
+  const runner = read('scripts/run-b12-evidence-gates.mjs')
+  assert.match(runner, /B12_H03_CHANGE_REPLAY_RUNTIME_RESULT/)
+  assert.match(runner, /B12_H03_RETCON_REPLAY_FAULT_RESULT/)
+  assert.match(runner, /const h03ReplayPass = [\s\S]*?B12_H03_CHANGE_REPLAY_RUNTIME_RESULT[\s\S]*?B12_H03_RETCON_REPLAY_FAULT_RESULT/)
+  assert.match(runner, /setGate\('B12-A36', h03Pass && productUxRuntimePass && h03ReplayPass/)
+})
+
+test('B12 later-source re-verification permits only the pinned B13 migration', () => {
+  const runner = read('scripts/run-b12-evidence-gates.mjs')
+  assert.match(runner, /B12_REVERIFY_LATER_SOURCE/)
+  assert.match(runner, /0012_b13_longform_health_indexes\.sql/)
+  assert.match(runner, /46605ab2845a471e4f18357bdeec83c8a99f436b1df84e509738b3760fc0157a/)
+  assert.match(runner, /laterBatchReverify \? \/LongFormHealth\//)
+})
+
+test('ordinary Change unknown outcome shows pending and uses a stable manual replay identity', () => {
+  const history = read('src/ui/pages/HistoryCenter.vue')
+  const store = read('src/ui/stores/projectStore.ts')
+  const runner = read('scripts/run-b12-evidence-gates.mjs')
+  assert.match(history, /b12-change-decision:\$\{logicalChangeId\}/)
+  assert.match(history, /b12-change-apply:\$\{logicalChangeId\}/)
+  assert.match(history, /普通修改结果待确认/)
+  assert.match(history, /await loadHistoryKind\('all', true\)/)
+  assert.match(store, /request\.type === 'retcon_apply' \|\| request\.type === 'change_request_apply'/)
+  assert.match(runner, /B12_ORDINARY_CHANGE_UNKNOWN_RESULT/)
+  assert.match(runner, /ordinaryChangeUnknownPass/)
+})
+
 test('B12 global preflight has a formal durable bootstrap job boundary', () => {
   const owner = read('src-tauri/src/change_retcon.rs')
   const runtime = read('src-tauri/src/repositories/runtime.rs')

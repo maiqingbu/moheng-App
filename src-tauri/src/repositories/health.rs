@@ -4,7 +4,6 @@
 //! It deliberately returns bounded, typed inputs; factor policy and user-facing
 //! presentation live in `crate::health`.
 
-use crate::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use crate::repositories::change_retcon;
 use crate::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::{Connection, OptionalExtension};
@@ -360,16 +359,15 @@ fn formal_route_rows(
         } else {
             false
         };
-        let digest_stale = match (
-            compiled_state_digest.as_deref(),
-            current_state_digest.as_deref(),
-        ) {
-            (Some(compiled), Some(current)) => matches!(
-                evaluate_plan_stale(generated_revision, compiled, generated_revision, current),
-                PlanStaleStatus::PlanStale
-            ),
-            _ => false,
-        };
+        // Health consumes a persisted route projection, not a newly compiled
+        // ChapterPlan. Its projection revision cannot stand in for both sides
+        // of the R2 stale comparison: a refresh may advance that revision while
+        // retaining an older route digest. When both authoritative digests are
+        // available, their mismatch is the deterministic stale signal.
+        let digest_stale = matches!(
+            (compiled_state_digest.as_deref(), current_state_digest.as_deref()),
+            (Some(compiled), Some(current)) if compiled != current
+        );
         let formal_stale = pending_stale
             || digest_stale
             || index_plan_state

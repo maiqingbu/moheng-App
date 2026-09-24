@@ -66,6 +66,24 @@ export interface NarrativeRuntimeQueryRequest extends ProjectQueryRequest {
 export interface NarrativeStateProjection { projectId: string; projectRevision: number; view: Record<string, unknown> }
 export interface ContinuityProjection { projectId: string; projectRevision: number; threads: import('../generated/contracts').ContinuityThreadProjection[] }
 export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
+/** Optional backend projection for the 2026-09-19 PRD. Absence is not PASS. */
+export interface NarrativeValidationProjection {
+  canExecute: boolean
+  context?: {
+    status: 'COMPLETE' | 'OVER_BUDGET' | 'INCOMPLETE' | 'UNAVAILABLE'
+    reason: string
+    hardSourceCount?: number
+    hardTokens?: number
+    hardTokenLimit?: number
+    sourceRefs?: string[]
+  }
+  audit?: {
+    status: 'COMPLETE' | 'INCOMPLETE' | 'UNRESOLVED' | 'STALE' | 'UNAVAILABLE'
+    reason: string
+    candidateRef?: { artifactId: string; version: number; payloadHash: string }
+    evidenceRefs?: string[]
+  }
+}
 export interface PlanStaleProjection { projectId: string; projectRevision: number; status: 'VALID' | 'PLAN_STALE' }
 export interface SupportSessionProjection {
   plan: Record<string, unknown>
@@ -449,6 +467,7 @@ export interface NarrativeTasteProjection {
 }
 
 export interface ProductionCenterProjection {
+  validation?: NarrativeValidationProjection
   timeline: TimelineItem[]
   tasks: ProductionTask[]
   artifacts: PageResult<ArtifactSummary>
@@ -504,7 +523,7 @@ export interface ProductionCenterProjection {
   } | null
   triggeredContinuity?: Array<{ threadRef: string; disposition: string; bridge?: string }>
   gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
-  stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
+  stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
   candidateRef?: { artifactId: string; version: number; payloadHash: string } | null
   finalChapterRef?: { artifactId: string; version: number; payloadHash: string } | null
@@ -690,6 +709,9 @@ export type BookHealthProjection = LongFormHealthProjectionR1
 export interface HistoryEntry {
   id: string
   kind: 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
+  source?: string | null
+  targetClass?: string | null
+  authorityType?: string | null
   title: string
   status: 'draft' | 'impact_ready' | 'approved' | 'applied' | 'rejected'
   createdAt: string
@@ -793,7 +815,6 @@ export type CommandType =
   | 'volume_handoff'
   | 'decision_submit'
   | 'revision_request'
-  | 'chapter_revision_request'
   | 'change_request_create'
   | 'impact_preflight'
   | 'impact_expand'
@@ -805,7 +826,6 @@ export type CommandType =
   | 'retcon_apply'
   | 'dependency_summary_bootstrap'
   | 'opening_evaluate'
-  | 'export_create'
   | 'backup_create'
   | 'integrity_check_run'
   | 'endgame_contract_create'

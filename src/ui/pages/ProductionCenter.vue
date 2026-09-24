@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
+import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import type { RunState } from '../../application/contracts'
@@ -29,21 +30,24 @@ const signing = computed(() => production.value?.signing)
 const bookPlan = computed(() => production.value?.bookPlan)
 const stageLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成', OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
-const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', CONTINUE: '继续', PAUSE: '暂时暂停', ESCALATE: '需要确认' } as Record<string, string>)[String(value)] ?? '等待判断'
+const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', RECOMPILE_NEXT_CHAPTER: '需要重新规划下一章', RECOMPILE_ROLLING_WINDOW: '需要更新后续预览', REPLAN_VOLUME_ROUTE: '需要调整本卷路线', CHANGE_REQUEST: '需要正式变更确认' } as Record<string, string>)[String(value)] ?? '等待判断'
 const capabilityLabel = (value: unknown) => ({ RENDER_CHAPTER: '撰写章节', AUDIT_EXTRACT: '检查章节', QUALITY_EVALUATION: '评估叙事质量' } as Record<string, string>)[String(value)] ?? '创作步骤'
 const timelineLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成' } as Record<string, string>)[String(value)] ?? '创作步骤'
 const timelineDescription = (item: { title?: unknown; description?: unknown; status?: unknown }) => {
+  if (item.status === 'pending' || item.status === 'waiting') return '等待执行。'
+  if (item.status === 'blocked' || item.status === 'failed') return sanitizeProductText(item.description, '本步骤未完成，请核对阻断原因。')
+  if (item.status === 'done') return sanitizeProductText(item.description, '本步骤已完成。')
   const title = String(item.title ?? '')
-  if (title === 'CONTEXT') return '已整理当前作品记录和本章所需上下文。'
-  if (title === 'PLAN') return '已建立本章目标、冲突和结构安排。'
-  if (title === 'RENDER') return '已形成正文候选，等待检查和确认。'
+  if (title === 'CONTEXT') return '正在整理当前作品记录和本章所需上下文。'
+  if (title === 'PLAN') return '正在建立本章目标、冲突和结构安排。'
+  if (title === 'RENDER') return '正在生成正文候选，完成后还需检查和确认。'
   if (title === 'CANDIDATE') return '正在检查正文候选与当前作品约束。'
   if (title === 'AUDIT') return '正在核对连续性、质量和正式准入条件。'
   if (title === 'GATE') return '正式确认前的一致性与准入校验正在进行。'
   if (title === 'COMMIT') return '正在把正文、事实和回执正式写入作品记录。'
   if (title === 'RECONCILE') return '正在回写正式结果并准备下一章。'
   if (item.status === 'blocked' && production.value?.jobStatus === 'CANCELLED') return '当前任务已取消，未伪装为完成。'
-  return sanitizeProductText(item.description, '当前步骤已完成。')
+  return sanitizeProductText(item.description, '当前步骤状态待确认。')
 }
 const statusLabel = (value: unknown) => productStatusLabel(value, '待检查')
 const detailLabel = (value: unknown, fallback = '当前状态已查询。') => sanitizeProductText(value, fallback)
@@ -72,7 +76,7 @@ const canEvaluateOpening = computed(() => openingProgress.value?.completed === o
   && signing.value?.status !== 'PASS')
 const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
   && bookPlan.value?.status !== 'APPROVED')
-const canStartProduction = computed(() => Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
+const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
 const authoritativeRunState = computed<RunState>(() => {
   switch (production.value?.jobStatus) {
     case 'FAILED': return 'FAILED'
@@ -93,7 +97,8 @@ const runtimePoller = createProductionRuntimePoller({
     if (!value) throw new Error('生产状态暂不可用。')
     return value
   },
-  onProjection: projection => { store.production = projection },
+  onProjection: () => { productionLoadError.value = '' },
+  onError: () => { productionLoadError.value = '创作状态暂时无法更新；当前展示为上次查询结果，请重新读取后再操作。' },
   isActiveProjection: projection => projection.runtimeOperation?.active === true || projection.isActive === true,
   isTerminalProjection: projection => {
     if (projection.runtimeOperation) return ['COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'].includes(projection.runtimeOperation.status)
@@ -127,6 +132,7 @@ function focusOpeningEvaluationProgress() {
 }
 
 async function startProduction() {
+  if (!canStartProduction.value) return
   const chapter = production.value?.nextChapter
   if (!chapter) throw new Error('B08_CHAPTER_REQUIRED')
   if (productionStartInFlight.value || productionIsActive.value) {
@@ -145,7 +151,6 @@ async function startProduction() {
         entityIds: [],
         references: [],
         skillsEnabled: true,
-        requireRealityDelta: true,
         ...(canRetryProduction.value && production.value?.tasks[0]?.id
           ? { retryOfJobId: production.value.tasks[0].id }
           : {}),
@@ -159,12 +164,16 @@ async function startProduction() {
 }
 
 function evaluationStatusLabel() {
+  if (signing.value?.status === 'STALE') return '签约依据已失效'
+  if (signing.value?.evaluation?.status === 'FAILED') return '评估未完成'
   if (evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW') return '正在评估'
   if (signing.value?.status === 'PASS' || signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '评估完成'
   return '等待三章完成'
 }
 
 function signingVerdictLabel() {
+  if (signing.value?.status === 'STALE') return '需要重新评估'
+  if (signing.value?.evaluation?.status === 'FAILED') return '评估失败，尚无有效结论'
   if (signing.value?.status === 'PASS') return 'PASS'
   if (signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '需要修订'
   return '尚未评估'
@@ -203,6 +212,15 @@ async function evaluateOpening() {
   }
 }
 
+const planValidityLabel = computed(() => {
+  switch (production.value?.stale?.status) {
+    case 'VALID': return '后端已确认有效'
+    case 'PLAN_STALE': return '需要重新确认'
+    case 'NO_PLAN': return '当前没有可执行章节计划'
+    default: return '等待相关状态复核'
+  }
+})
+
 async function finalizeBookPlan() {
   if (!canFinalizeBookPlan.value) return
   if (bookPlanInFlight.value || production.value?.runtimeOperation?.kind === 'B02::BOOK_PLAN' && production.value.runtimeOperation.active) {
@@ -214,6 +232,7 @@ async function finalizeBookPlan() {
   try {
     await store.refresh()
     await store.loadProduction(true)
+    if (!canFinalizeBookPlan.value) return
     await store.runCommand(lastCommand.value, { type: 'book_plan_revise', payload: {} })
   } catch {
     // Store-owned command feedback keeps the typed failure visible.
@@ -274,7 +293,9 @@ async function executeRepair() {
       <button v-if="productionStatus === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
     </PageHeader>
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
-    <CommandFeedback :state="commandState" />
+    <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
+    <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
+    <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />
 
     <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
       <div class="card-head">
@@ -285,8 +306,8 @@ async function executeRepair() {
         </div>
         <span class="badge" :class="signing?.status === 'PASS' ? 'success' : signing?.status === 'REVISE' || signing?.status === 'REJECTED' ? 'warning' : 'info'">{{ evaluationStatusLabel() }}</span>
       </div>
-      <CommandFeedback :state="evaluationCommandState" />
-      <CommandFeedback :state="bookPlanCommandState" />
+      <CommandFeedback :state="evaluationCommandState" @confirm="store.confirmCommandResult('opening-evaluate')" />
+      <CommandFeedback :state="bookPlanCommandState" @confirm="store.confirmCommandResult('book-plan-revise')" />
       <div class="evaluation-steps" v-if="signing?.evaluation?.steps?.length" data-opening-evaluation-progress>
         <div v-for="step in signing.evaluation.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
           <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>
@@ -294,9 +315,9 @@ async function executeRepair() {
         </div>
       </div>
       <div class="task-row" aria-live="polite"><strong>评估结果</strong><span>{{ signingVerdictLabel() }} · {{ signing?.verdict || '等待三章正式提交后开始评估。' }}</span></div>
-      <div class="task-row"><strong>评估依据摘要</strong><span>三章 {{ signing?.summary?.chapters ?? 0 }} · 事实 {{ signing?.summary?.canonRefs ?? 0 }} 条 · 证据 {{ signing?.summary?.evidenceRefs ?? 0 }} 条</span></div>
+      <div class="task-row"><strong>评估依据摘要</strong><span>三章 {{ signing?.summary?.chapters ?? '未提供' }} · 事实 {{ signing?.summary?.canonRefs ?? '未提供' }} 条 · 证据 {{ signing?.summary?.evidenceRefs ?? '未提供' }} 条</span></div>
       <div class="task-row"><strong>正式签约回执</strong><span>{{ signing?.receipt?.id ? `${signing.receipt.id} · 已提交` : '尚未生成' }}</span></div>
-      <div class="task-row"><strong>正式总纲</strong><span>{{ bookPlan?.status === 'APPROVED' ? '已完成' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
+      <div class="task-row"><strong>正式总纲</strong><span>{{ signing?.status === 'STALE' ? '历史版本保留，等待依据复核' : bookPlan?.status === 'APPROVED' ? '已生成正式版本' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
       <div v-if="bookPlan?.steps?.length" class="evaluation-steps" aria-label="正式总纲运行步骤">
         <div v-for="step in bookPlan.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
           <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>
@@ -325,7 +346,7 @@ async function executeRepair() {
     <div class="metric-grid section">
       <MetricCard label="当前阶段" :value="production.jobStatus === 'FAILED' ? '生成失败' : stageLabel(production.productionStage)" :note="detailLabel(production.activeWork.detail)" />
       <MetricCard label="正式章节" :value="project.committedChapters" note="只有正式确认的正文会计入这里" />
-      <MetricCard label="黄金三章" :value="`第 ${openingProgress?.completed ?? 0} / ${openingProgress?.total ?? 3} 章`" :note="openingProgress?.currentChapter ? `当前第 ${openingProgress.currentChapter} 章` : '黄金三章已完成'" />
+      <MetricCard label="黄金三章" :value="`第 ${openingProgress?.completed ?? '—'} / ${openingProgress?.total ?? 3} 章`" :note="openingProgress?.currentChapter ? `当前第 ${openingProgress.currentChapter} 章` : '当前章信息尚未提供'" />
       <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
     </div>
@@ -348,10 +369,10 @@ async function executeRepair() {
             <p><strong>{{ production.chapterPlan.chapterGoal }}</strong></p>
             <small class="muted">当前规划已与作品版本绑定</small>
             <p class="muted">依据范围：当前任务所需的作品记录</p>
-            <p class="muted">规划状态：{{ production.stale?.status === 'PLAN_STALE' ? '需要重新确认' : '可以使用' }}<span v-if="production.stale?.reason"> · {{ productErrorMessage(production.stale.reason, '当前规划需要重新确认。') }}</span></p>
+            <p class="muted">规划状态：{{ planValidityLabel }}<span v-if="production.stale?.reason"> · {{ productErrorMessage(production.stale.reason, '当前规划需要重新确认。') }}</span></p>
             <div v-for="item in production.triggeredContinuity" :key="item.threadRef" class="task-row"><strong>相关剧情线</strong><small>{{ detailLabel(item.bridge, '这条剧情线需要继续核对。') }}</small></div>
           </template>
-          <p v-else class="muted">开篇阶段会先整理当前所需信息，再建立第一章规划。</p>
+          <p v-else class="muted">当前没有可执行章节计划。未规划、被阻断或已完结时可以为空；开篇无需先创建全卷计划。</p>
         </section>
         <section class="card pad">
           <h2 class="card-title">创作步骤与结果</h2>
@@ -361,6 +382,18 @@ async function executeRepair() {
         </section>
       </aside>
     </div>
+
+    <section v-if="store.advancedMode" class="card pad section">
+      <h2 class="card-title">规划与签约来源</h2>
+      <dl class="pitch-kv">
+        <div><dt>执行模式</dt><dd>{{ production.nextChapter?.executionMode ?? '无当前执行章' }}</dd></div>
+        <div><dt>编译 revision / digest</dt><dd>{{ production.chapterPlan?.compiledFromProjectRevision ?? '未提供' }} / {{ production.chapterPlan?.compiledFromStateDigest ?? '未提供' }}</dd></div>
+        <div><dt>ContextManifest</dt><dd>{{ production.chapterPlan?.contextManifestRef?.artifactId ?? '未提供' }} · v{{ production.chapterPlan?.contextManifestRef?.version ?? '—' }}</dd></div>
+        <div><dt>签约受评章节摘要</dt><dd>{{ signing?.receipt?.chapterHashes?.join('、') || '未提供' }}</dd></div>
+        <div><dt>开篇合同 / 评估规则版本</dt><dd>{{ signing?.receipt?.openingContractVersion ?? '未提供' }} / {{ signing?.receipt?.platformPolicyVersion ?? '未提供' }}</dd></div>
+        <div><dt>签约证据引用</dt><dd>{{ signing?.signingEvidenceRefs?.join('、') || '未提供' }}</dd></div>
+      </dl>
+    </section>
 
     <section v-if="production.creativeSkills || production.quality" class="card pad section">
       <div class="card-head">
@@ -409,7 +442,7 @@ async function executeRepair() {
       <p><strong>影响范围：</strong>{{ repairAffectedScopes.map(scopeLabel).join('、') || '无' }}</p>
       <p><strong>处理方式：</strong>重新整理并核对当前作品展示。</p>
       <div v-if="production.repair.executionReceipt" class="task-row">
-        <strong>{{ statusLabel(production.repair.executionReceipt.status) }}</strong><small class="muted">修复结果已经重新核对</small>
+        <strong>{{ statusLabel(production.repair.executionReceipt.status) }}</strong><small class="muted">{{ production.repair.executionReceipt.status === 'REPAIR_VERIFIED' ? '修复结果已经重新核对' : '请根据回执状态核对结果' }}</small>
       </div>
     </section>
   </div>

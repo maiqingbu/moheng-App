@@ -128,7 +128,7 @@ for (const contract of [
 }
 for (const command of [
   'book_plan_create', 'book_plan_revise', 'volume_plan_build', 'volume_production_start',
-  'volume_production_pause', 'volume_close', 'chapter_revision_request', 'change_request_create',
+  'volume_production_pause', 'volume_close', 'change_request_create',
   'change_request_apply', 'retcon_plan_create', 'retcon_apply', 'market_pulse_refresh',
   'backup_create', 'integrity_check_run'
 ]) {
@@ -154,10 +154,16 @@ for (const label of ['总览', '创作', '规划', '当前卷', '待处理', '�
 }
 
 const reader = read('ui/pages/ManuscriptReader.vue')
-for (const scope of ['chapter', 'range', 'volume', 'book']) {
-  if (!reader.includes(`value=\"${scope}\"`)) errors.push(`成品阅读缺少导出范围：${scope}`)
+const readerRevision = read('ui/flows/readerRevision.ts')
+if (!reader.includes('buildReaderRevisionCommands') || !readerRevision.includes("type: 'change_request_create'") || !readerRevision.includes("type: 'impact_preflight'")) {
+  errors.push('成品阅读的章节修改请求未进入正式 Change 与影响预检流程')
 }
-if (!reader.includes("type: 'export_create'")) errors.push('成品阅读未通过 Command 创建导出任务')
+if (contracts.includes("'chapter_revision_request'")) errors.push('Frontend Command 合同仍暴露未接线的 chapter_revision_request')
+if (contracts.includes("'export_create'")) errors.push('Frontend Command 合同仍暴露未实现的 export_create')
+if (!reader.includes('exportCapabilityAvailable = false') || !/disabled[^>]*>导出暂不可用/.test(reader)) {
+  errors.push('成品阅读未将尚未实现的导出能力明确禁用')
+}
+if (/type:\s*['"]export_create['"]|function\s+exportFinal/.test(reader)) errors.push('成品阅读仍提供未实现的导出命令入口')
 
 const settings = read('ui/pages/SettingsPage.vue')
 if (!settings.includes("type:'backup_create'")) errors.push('项目设置缺少备份 Command')

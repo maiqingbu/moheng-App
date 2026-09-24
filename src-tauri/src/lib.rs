@@ -1,3 +1,4 @@
+pub mod canon_semantics;
 pub mod catalog;
 pub mod change_retcon;
 pub mod commands;

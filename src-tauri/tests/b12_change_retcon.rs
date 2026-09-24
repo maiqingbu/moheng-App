@@ -352,6 +352,18 @@ fn b12_retcon_creates_versioned_canon_and_preserves_old_fact_history() {
     .unwrap();
     assert_eq!(applied["finalStatus"], "committed");
     assert_eq!(applied["postverify"]["status"], "VERIFIED");
+    let replayed = command(
+        &state,
+        "p-b12-retcon",
+        "retcon_apply",
+        "cmd:b12:retcon:apply",
+        0,
+        json!({"changeRequestId":"change:b12:retcon","retconPlanId":"retcon-plan:b12:father","impactDigest":digest}),
+    )
+    .expect("same logical Retcon retry must replay its durable receipt");
+    assert_eq!(replayed["finalStatus"], "committed");
+    assert_eq!(replayed["result"]["status"], "REPLAYED");
+    assert_eq!(replayed["receiptId"], applied["receiptId"]);
 
     state
         .manager
@@ -364,9 +376,26 @@ fn b12_retcon_creates_versioned_canon_and_preserves_old_fact_history() {
                 .unwrap();
             assert_eq!(old_superseded, "fact:b12:father:retcon:retcon-plan:b12:father");
             assert_eq!(new_count, 1);
+            let receipt_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b12-retcon' AND idempotency_key='cmd:b12:retcon:apply:key'", [], |row| row.get(0))
+                .unwrap();
+            let revision: i64 = connection
+                .query_row("SELECT revision FROM project_meta WHERE project_id='p-b12-retcon'", [], |row| row.get(0))
+                .unwrap();
+            let stale_delta_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM state_deltas WHERE project_id='p-b12-retcon' AND state_id='stale:change:b12:retcon'", [], |row| row.get(0))
+                .unwrap();
+            let postverify_status: String = connection
+                .query_row("SELECT json_extract(impact_seed_json,'$.postverifyStatus') FROM change_requests WHERE project_id='p-b12-retcon' AND change_request_id='change:b12:retcon'", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(receipt_count, 1);
+            assert_eq!(revision, 1);
+            assert_eq!(stale_delta_count, 1);
+            assert_eq!(postverify_status, "VERIFIED");
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
+    println!("B12_RETCON_REPLAY_RUNTIME_RESULT receipt=PASS revision=PASS canon=PASS stale=PASS status=PASS");
 }
 
 #[test]
@@ -528,6 +557,58 @@ fn b12_h03_execute_change_request_uses_one_time_p3_and_the_same_typed_owner() {
     })).unwrap();
     assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
     assert_eq!(executed["receipt"]["owner"], "B12::ChangeRetconOwner");
+    let handle = state.manager.open("p-b12-h03", "", NOW).unwrap();
+    let owner_receipt = ai_novel_production_system_core::commit::CommitService::find_receipt(
+        &handle,
+        "p-b12-h03",
+        "h03:b12:apply:key",
+    )
+    .unwrap()
+    .expect("H03 Change receipt exists before replay");
+    handle
+        .execute(
+            "DELETE FROM state_deltas WHERE project_id='p-b12-h03' AND state_id='change-state:change:b12:h03'",
+            [],
+        )
+        .unwrap();
+    let replay = ai_novel_production_system_core::change_retcon::apply_approved_on_connection(
+        &handle,
+        "p-b12-h03",
+        "h03:b12:apply",
+        "h03:b12:apply:key",
+        1,
+        NOW,
+        &json!({"payload":{"changeRequestId":"change:b12:h03","impactDigest":impact_digest}}),
+    )
+    .unwrap();
+    assert_eq!(replay["result"]["status"], "REPLAYED");
+    assert_eq!(replay["receiptId"], owner_receipt.receipt_id);
+    assert_eq!(replay["postverify"]["status"], "INCOMPLETE");
+    let receipt_count: i64 = handle
+        .query_row(
+            "SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b12-h03' AND idempotency_key='h03:b12:apply:key'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let revision: i64 = handle
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id='p-b12-h03'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stale_delta_count: i64 = handle
+        .query_row(
+            "SELECT COUNT(*) FROM state_deltas WHERE project_id='p-b12-h03' AND state_id='stale:change:b12:h03'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_count, 1);
+    assert_eq!(revision, 1);
+    assert_eq!(stale_delta_count, 1);
+    println!("B12_H03_CHANGE_REPLAY_RUNTIME_RESULT receipt=PASS query=PASS incomplete=PASS revision=PASS stale=PASS noDuplicate=PASS status=PASS");
 }
 
 #[test]

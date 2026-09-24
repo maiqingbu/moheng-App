@@ -1605,7 +1605,11 @@ pub fn mark_applied(
 ) -> Result<i64, ChangeRetconRepositoryError> {
     let mut updated_seed = seed.clone();
     updated_seed["commitReceiptId"] = json!(receipt_id);
-    updated_seed["postverifyStatus"] = json!("VERIFIED");
+    updated_seed["postverifyStatus"] = json!("PENDING");
+    if let Some(before_revision) = seed.get("basedOnRevision").and_then(Value::as_i64) {
+        updated_seed["commitBeforeRevision"] = json!(before_revision);
+        updated_seed["commitAfterRevision"] = json!(before_revision + 1);
+    }
     update_change_request(
         connection,
         project_id,
@@ -1639,6 +1643,29 @@ pub fn mark_applied(
         project_id,
         change_request_id,
         impact_set_id,
+        now,
+    )
+}
+
+pub fn set_postverify_status(
+    connection: &Connection,
+    project_id: &str,
+    change_request_id: &str,
+    receipt_id: &str,
+    status: &str,
+    now: &str,
+) -> Result<(), ChangeRetconRepositoryError> {
+    let mut change = load_change_request(connection, project_id, change_request_id)?
+        .ok_or_else(|| libsql_rusqlite::Error::QueryReturnedNoRows)?;
+    change.impact_seed["commitReceiptId"] = json!(receipt_id);
+    change.impact_seed["postverifyStatus"] = json!(status);
+    update_change_request(
+        connection,
+        project_id,
+        change_request_id,
+        &change.status,
+        &change.impact_seed,
+        change.decision_ref.as_deref(),
         now,
     )
 }
