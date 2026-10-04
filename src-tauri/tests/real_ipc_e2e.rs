@@ -711,6 +711,262 @@ fn real_ipc_create_query_rename_archive_restore_and_delete() {
     assert_eq!(restored["projects"][0]["title"], "第二部");
 }
 
+fn f01_create_cost_fixture_project(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    command_id: &str,
+    title: &str,
+) -> String {
+    let receipt = invoke(
+        webview,
+        "execute_command",
+        json!({
+            "request": {
+                "type": "project_create_from_idea",
+                "commandId": command_id,
+                "idempotencyKey": format!("{command_id}:key"),
+                "requestedAt": "2026-10-04T00:00:00Z",
+                "payload": {"title": title}
+            }
+        }),
+    );
+    assert_eq!(receipt["finalStatus"], "committed");
+    receipt_project_id(&receipt).to_string()
+}
+
+/// Seeds only the synthetic test fixture. The business query itself is invoked
+/// through the registered Tauri command below, never through a frontend mock.
+fn f01_seed_project_cost_cents(root: &Path, project_id: &str, cents: i64) {
+    let db = root.join("projects").join(project_id).join("project.db");
+    let connection = open_connection(&db, false).expect("open synthetic project fixture");
+    let model_run_id = format!("mr:f01:{project_id}");
+    let idempotency_key = format!("f01-fixture:{project_id}");
+    connection
+        .execute(
+            "INSERT INTO model_runs(model_run_id,project_id,provider,model,idempotency_key,capability,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES (?1,?2,'f01-synthetic','fixture',?3,'RENDER_CHAPTER',?4,?4,'COMPLETED','2026-10-04T00:00:01Z','2026-10-04T00:00:01Z')",
+            libsql_rusqlite::params![model_run_id, project_id, idempotency_key, cents],
+        )
+        .expect("seed synthetic ModelRun");
+    connection
+        .execute(
+            "INSERT INTO model_usage(usage_id,project_id,model_run_id,input_tokens,output_tokens,total_tokens,latency_ms,cost_cents,recorded_at) VALUES (?1,?2,?3,0,0,0,0,?4,'2026-10-04T00:00:01Z')",
+            libsql_rusqlite::params![format!("usage:{model_run_id}"), project_id, model_run_id, cents],
+        )
+        .expect("seed synthetic usage");
+    connection
+        .execute(
+            "INSERT INTO model_cost_ledger(ledger_id,project_id,model_run_id,budget_id,cost_cents,token_total,cost_type,created_at) VALUES (?1,?2,?3,NULL,?4,0,'ACTUAL','2026-10-04T00:00:01Z')",
+            libsql_rusqlite::params![format!("ledger:actual:{model_run_id}"), project_id, model_run_id, cents],
+        )
+        .expect("seed synthetic actual cost ledger");
+    connection
+        .execute(
+            "INSERT INTO project_runtime_state(project_id,total_cost_cents,updated_at) VALUES (?1,?2,'2026-10-04T00:00:01Z') ON CONFLICT(project_id) DO UPDATE SET total_cost_cents=excluded.total_cost_cents,updated_at=excluded.updated_at",
+            libsql_rusqlite::params![project_id, cents],
+        )
+        .expect("seed synthetic cents projection");
+}
+
+fn f01_project_cost_snapshot(root: &Path, project_id: &str) -> (i64, i64, i64, i64) {
+    let db = root.join("projects").join(project_id).join("project.db");
+    let connection = open_connection(&db, true).expect("read synthetic project fixture");
+    let total_cost_cents = connection
+        .query_row(
+            "SELECT total_cost_cents FROM project_runtime_state WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("read authoritative cents");
+    let ledger_cost_cents = connection
+        .query_row(
+            "SELECT COALESCE(SUM(cost_cents),0) FROM model_cost_ledger WHERE project_id=?1 AND cost_type='ACTUAL'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("read cost ledger");
+    let usage_cost_cents = connection
+        .query_row(
+            "SELECT COALESCE(SUM(cost_cents),0) FROM model_usage WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("read usage costs");
+    let usage_rows = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_usage WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .expect("read usage row count");
+    (
+        total_cost_cents,
+        ledger_cost_cents,
+        usage_cost_cents,
+        usage_rows,
+    )
+}
+
+fn f01_assert_currency_value(value: &Value, cents: i64, label: &str) {
+    let actual = value
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label} must be a JSON number: {value}"));
+    let expected = cents as f64 / 100.0;
+    assert!(
+        (actual - expected).abs() < 1e-12,
+        "{label} must be {expected:.2} yuan for {cents} cents, got {actual:.2}"
+    );
+}
+
+#[test]
+fn real_ipc_project_library_reports_currency_units_for_all_cent_values() {
+    let (app, temp) = build_app();
+    let root = temp.path().to_path_buf();
+    let w = webview(&app);
+    let cases = [
+        ("zero", 0_i64),
+        ("one", 1),
+        ("four", 4),
+        ("one-twenty-three", 123),
+    ];
+    let mut projects = Vec::new();
+
+    for (name, cents) in cases {
+        let project_id = f01_create_cost_fixture_project(
+            &w,
+            &format!("f01-all-cents-{name}"),
+            &format!("F01 {cents} 分合成项目"),
+        );
+        f01_seed_project_cost_cents(&root, &project_id, cents);
+        projects.push((project_id, cents));
+    }
+
+    let before: Vec<_> = projects
+        .iter()
+        .map(|(project_id, _)| f01_project_cost_snapshot(&root, project_id))
+        .collect();
+    let library = invoke(&w, "query_project_library", json!({}));
+    assert_eq!(
+        library["projects"].as_array().unwrap().len(),
+        projects.len()
+    );
+    for (project_id, cents) in &projects {
+        let row = library["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == *project_id)
+            .expect("registered library query returns project");
+        f01_assert_currency_value(&row["totalCost"], *cents, "project totalCost");
+        let overview = invoke(
+            &w,
+            "query_project_overview",
+            json!({"request":{"projectId":project_id,"scope":"overview","pageSize":8}}),
+        );
+        f01_assert_currency_value(
+            &overview["project"]["totalCost"],
+            *cents,
+            "overview totalCost",
+        );
+    }
+    f01_assert_currency_value(&library["totals"]["totalCost"], 128, "library totalCost");
+    let after: Vec<_> = projects
+        .iter()
+        .map(|(project_id, _)| f01_project_cost_snapshot(&root, project_id))
+        .collect();
+    assert_eq!(
+        before, after,
+        "queries must not change cents, ledger, or usage rows"
+    );
+}
+
+#[test]
+fn real_ipc_project_library_aggregates_four_and_one_hundred_twenty_three_cents_and_reloads() {
+    let evidence_root = std::env::var_os("MOHENG_F01_NATIVE_APP_DATA_DIR").map(PathBuf::from);
+    let temp = if evidence_root.is_none() {
+        Some(tempdir().unwrap())
+    } else {
+        None
+    };
+    let root = evidence_root.unwrap_or_else(|| temp.as_ref().unwrap().path().to_path_buf());
+    if std::env::var_os("MOHENG_F01_NATIVE_APP_DATA_DIR").is_some() {
+        assert!(
+            !root.exists(),
+            "MOHENG_F01_NATIVE_APP_DATA_DIR must be a new, isolated directory"
+        );
+        std::fs::create_dir_all(&root).unwrap();
+    }
+
+    let app = build_app_over(&root);
+    let w = webview(&app);
+    let four_cents = f01_create_cost_fixture_project(&w, "f01-aggregate-four", "F01 四分项目");
+    let one_twenty_three =
+        f01_create_cost_fixture_project(&w, "f01-aggregate-123", "F01 一元二角三分项目");
+    f01_seed_project_cost_cents(&root, &four_cents, 4);
+    f01_seed_project_cost_cents(&root, &one_twenty_three, 123);
+
+    let before_four = f01_project_cost_snapshot(&root, &four_cents);
+    let before_123 = f01_project_cost_snapshot(&root, &one_twenty_three);
+    let library_before_close = invoke(&w, "query_project_library", json!({}));
+    f01_assert_currency_value(
+        &library_before_close["totals"]["totalCost"],
+        127,
+        "two-project library totalCost",
+    );
+    for (project_id, cents) in [(&four_cents, 4_i64), (&one_twenty_three, 123_i64)] {
+        let row = library_before_close["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == *project_id)
+            .expect("registered library query returns project");
+        f01_assert_currency_value(&row["totalCost"], cents, "project card totalCost");
+        let overview = invoke(
+            &w,
+            "query_project_overview",
+            json!({"request":{"projectId":project_id,"scope":"overview","pageSize":8}}),
+        );
+        f01_assert_currency_value(
+            &overview["project"]["totalCost"],
+            cents,
+            "overview/library totalCost consistency",
+        );
+    }
+    let after_first_query_four = f01_project_cost_snapshot(&root, &four_cents);
+    let after_first_query_123 = f01_project_cost_snapshot(&root, &one_twenty_three);
+    assert_eq!(before_four, after_first_query_four);
+    assert_eq!(before_123, after_first_query_123);
+    drop(w);
+    drop(app);
+
+    let reopened = build_app_over(&root);
+    let reopened_webview = webview(&reopened);
+    let library_after_reopen = invoke(&reopened_webview, "query_project_library", json!({}));
+    f01_assert_currency_value(
+        &library_after_reopen["totals"]["totalCost"],
+        127,
+        "reloaded library totalCost",
+    );
+    let after_reopen_four = f01_project_cost_snapshot(&root, &four_cents);
+    let after_reopen_123 = f01_project_cost_snapshot(&root, &one_twenty_three);
+    assert_eq!(before_four, after_reopen_four);
+    assert_eq!(before_123, after_reopen_123);
+    println!(
+        "F01_REGISTERED_LIBRARY_COST_RESULT={}",
+        json!({
+            "projects":[{"projectId":four_cents,"costCents":4,"displayYuan":0.04},{"projectId":one_twenty_three,"costCents":123,"displayYuan":1.23}],
+            "libraryTotalYuan":1.27,
+            "query":"registered query_project_library",
+            "sameAsOverview":true,
+            "databaseBeforeQuery":{"fourCents":before_four,"oneTwentyThreeCents":before_123},
+            "databaseAfterFirstQuery":{"fourCents":after_first_query_four,"oneTwentyThreeCents":after_first_query_123},
+            "databaseAfterReopenQuery":{"fourCents":after_reopen_four,"oneTwentyThreeCents":after_reopen_123},
+            "databaseChangedByQuery":false
+        })
+    );
+    drop(reopened_webview);
+    drop(reopened);
+    drop(temp);
+}
+
 #[test]
 fn real_ipc_duplicate_and_delete_to_trash_round_trip() {
     let (app, _temp) = build_app();

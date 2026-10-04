@@ -428,7 +428,7 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
         entry["blockReason"] = block_reason.map(Value::String).unwrap_or(Value::Null);
         entry["signingStatus"] = json!(signing_status);
         entry["progress"] = json!(progress);
-        entry["totalCost"] = json!(cost_cents);
+        entry["totalCost"] = json!(cost_cents as f64 / 100.0);
         entry["totalWords"] = json!(words);
         entry["committedChapters"] = json!(committed);
         entry["candidateChapters"] = json!(candidate);
@@ -452,7 +452,7 @@ pub fn query_project_library_impl(state: &KernelState) -> Result<Value, String> 
             "producing": producing,
             "waitingDecision": waiting_decision,
             "completed": completed,
-            "totalCost": total_cost
+            "totalCost": total_cost as f64 / 100.0
         }
     }))
 }
