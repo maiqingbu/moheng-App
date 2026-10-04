@@ -927,6 +927,65 @@ fn authority_context_payload(
     serde_json::to_value(input).map_err(|error| format!("B06_CONTEXT_SERIALIZATION:{error}"))
 }
 
+fn audit_policy_contract(
+    policy_ref: &ArtifactRef,
+    gate_policy_payload: &Value,
+    authority_context: &Value,
+) -> Result<Value, String> {
+    let actual_payload_hash = sha256_canonical(gate_policy_payload)
+        .map_err(|error| format!("B08_GATE_POLICY_INVALID:{error}"))?;
+    if actual_payload_hash != policy_ref.payload_hash {
+        return Err("B08_GATE_POLICY_INVALID_HASH".into());
+    }
+    let policy = crate::canon_semantics::CanonSemanticPolicy::from_gate_policy(gate_policy_payload)
+        .map_err(str::to_owned)?;
+    let semantics = gate_policy_payload
+        .get("canonSemantics")
+        .ok_or("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")?;
+    let canon_semantics = json!({
+        "policyVersion":policy.version.clone(),
+        "rules":semantics
+            .get("rules")
+            .cloned()
+            .ok_or("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")?
+    });
+
+    let mut bounded_context = authority_context.clone();
+    if let Some(context) = bounded_context.as_object_mut() {
+        context.insert("hardTokens".into(), json!(0));
+        context.insert("softTokens".into(), json!(0));
+        context.insert("omittedSoftSources".into(), json!([]));
+    }
+    let bounded_input = json!({
+        "authorityContext": bounded_context,
+        "canonSemanticPolicy": canon_semantics
+    });
+    let serialized = serde_json::to_string(&bounded_input).map_err(|error| error.to_string())?;
+    let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+    let non_ascii_scalars = serialized
+        .chars()
+        .filter(|character| !character.is_ascii())
+        .count();
+    let estimated_tokens = ascii_bytes.div_ceil(3) + non_ascii_scalars;
+    let serialized_bytes = serialized.len();
+    if estimated_tokens as i64 > crate::narrative::CONTEXT_HARD_TOKEN_LIMIT
+        || serialized_bytes > crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+    {
+        return Err(format!(
+            "CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens={estimated_tokens}|limitTokens={}|serializedBytes={serialized_bytes}|limitBytes={}|scope=CHAPTER",
+            crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+        ));
+    }
+
+    Ok(json!({
+        "gatePolicyRef":policy_ref,
+        "gatePolicyPayloadHash":policy_ref.payload_hash.clone(),
+        "canonSemanticPolicyVersion":policy.version,
+        "canonSemanticPolicy":canon_semantics
+    }))
+}
+
 fn existing_canon_semantic_keys(authority_context: &Value) -> Value {
     authority_context
         .pointer("/state/facts")
@@ -1205,6 +1264,24 @@ fn run_chapter_production_inner(
             return Err("B08_OPENING_ORDER_REQUIRED".into());
         }
     }
+    let canonical_policy_ref =
+        crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+            connection,
+            &project_id,
+            "GatePolicy",
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
+    let policy_ref = if let Some(policy) = request.pointer("/payload/gatePolicyRef").cloned() {
+        serde_json::from_value::<ArtifactRef>(policy)
+            .map_err(|error| format!("B08_GATE_POLICY_INVALID:{error}"))?
+    } else {
+        canonical_policy_ref.clone()
+    };
+    if policy_ref != canonical_policy_ref {
+        return Err("B08_GATE_POLICY_STALE".into());
+    }
+    let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
     let provider_profile = gateway.resolve_profile()?;
     if let Some(previous_job_id) = &retry_of_job_id {
         DurableJobService::validate_retry_source(
@@ -1222,24 +1299,6 @@ fn run_chapter_production_inner(
     let production_budget_id =
         DurableModelRunner::chapter_budget_id(connection, &project_id, &chapter_id)
             .map_err(|_| "B08_PRODUCTION_BUDGET_REQUIRED".to_string())?;
-    let policy = request
-        .pointer("/payload/gatePolicyRef")
-        .cloned()
-        .or_else(|| {
-            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-                connection,
-                &project_id,
-                "GatePolicy",
-            )
-            .ok()
-            .flatten()
-            .and_then(|reference| serde_json::to_value(reference).ok())
-        })
-        .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
-    let policy_ref: ArtifactRef =
-        serde_json::from_value(policy).map_err(|e| format!("B08_GATE_POLICY_INVALID:{e}"))?;
-    let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
-
     DurableJobService::start_job(
         connection,
         &JobSpec {
@@ -1323,7 +1382,7 @@ fn run_chapter_production_inner(
         &format!("{command_id}:audit"),
     )?;
 
-    let (context_ref, context_payload, plan_ref, plan_payload, authority_context) =
+    let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if execution_mode == "OPENING_BOOTSTRAP" {
             let bootstrap_command_id = format!("{command_id}:bootstrap");
             let compiler_input = crate::commands::context_input_from_authority(
@@ -1339,6 +1398,8 @@ fn run_chapter_production_inner(
                 current_revision,
             )?;
             let authority_context = authority_context_payload(&compiler_input)?;
+            let audit_contract =
+                audit_policy_contract(&policy_ref, &gate_policy_payload, &authority_context)?;
             let manifest = crate::narrative::compile_context_manifest(compiler_input.clone())?;
             let context_payload = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
             let mut context = artifact(
@@ -1467,6 +1528,7 @@ fn run_chapter_production_inner(
                 plan_ref,
                 plan_payload,
                 authority_context,
+                audit_contract,
             )
         } else {
             let plan_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
@@ -1499,12 +1561,15 @@ fn run_chapter_production_inner(
                 current_revision,
             )?;
             let authority_context = authority_context_payload(&authority_input)?;
+            let audit_contract =
+                audit_policy_contract(&policy_ref, &gate_policy_payload, &authority_context)?;
             (
                 context_ref,
                 context_payload,
                 plan_ref,
                 plan_payload,
                 authority_context,
+                audit_contract,
             )
         };
     if let Err(error) = validate_plan_is_current(
@@ -1901,7 +1966,7 @@ fn run_chapter_production_inner(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"gatePolicyRef":audit_contract["gatePolicyRef"].clone(),"gatePolicyPayloadHash":audit_contract["gatePolicyPayloadHash"].clone(),"canonSemanticPolicyVersion":audit_contract["canonSemanticPolicyVersion"].clone(),"canonSemanticPolicy":audit_contract["canonSemanticPolicy"].clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
