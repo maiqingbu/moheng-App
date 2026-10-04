@@ -24,6 +24,23 @@ const NOW: &str = "2026-08-30T12:00:00Z";
 
 struct RecordingGateway;
 
+#[derive(Clone, Default)]
+struct CapturingAuditPolicyGateway {
+    audit_input: Arc<Mutex<Option<Value>>>,
+}
+
+impl ProductionModelGateway for CapturingAuditPolicyGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "AUDIT_EXTRACT" {
+            *self
+                .audit_input
+                .lock()
+                .map_err(|error| error.to_string())? = Some(input.clone());
+        }
+        RecordingGateway.invoke(capability, input)
+    }
+}
+
 struct GoodQualityGateway;
 
 struct CompleteNoChangeGateway;
@@ -880,6 +897,53 @@ fn xiaomi_r07_retry_blocks_before_render_when_plan_is_stale() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn b08_audit_provider_request_uses_the_registered_gate_policy_and_receipt_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-audit-policy-binding";
+    let gateway = CapturingAuditPolicyGateway::default();
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let connection = state.manager.create(project_id, "B08 audit policy binding", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let (artifact_id, version, payload_hash, payload_json): (String, i64, String, String) =
+        connection
+            .query_row(
+                "SELECT a.artifact_id,a.version,a.payload_hash,p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='GatePolicy'",
+                [project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+    let gate_policy_payload: Value = serde_json::from_str(&payload_json).unwrap();
+    let canon_semantics = gate_policy_payload["canonSemantics"].clone();
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:audit-policy-binding","idempotencyKey":"key:b08:audit-policy-binding",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+
+    let captured = gateway.audit_input.lock().unwrap().clone().expect("production owner must send AUDIT_EXTRACT");
+    let expected_ref = json!({"artifactId":artifact_id,"version":version,"payloadHash":payload_hash});
+    assert_eq!(captured["gatePolicyRef"], expected_ref);
+    assert_eq!(captured["canonSemanticPolicyVersion"], canon_semantics["policyVersion"]);
+    assert_eq!(captured["gatePolicyPayloadHash"], payload_hash);
+    assert_eq!(captured["canonSemanticPolicy"], canon_semantics);
+
+    let connection = state.manager.open(project_id, "B08 audit policy binding", NOW).unwrap();
+    let receipt_json: String = connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let receipt: Value = serde_json::from_str(&receipt_json).unwrap();
+    assert_eq!(receipt["gatePolicyRef"], expected_ref);
+    assert_eq!(receipt["canonSemanticPolicyVersion"], canon_semantics["policyVersion"]);
 }
 
 #[test]
