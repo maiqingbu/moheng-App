@@ -1240,7 +1240,7 @@ fn b08_invalid_or_over_budget_gate_policy_blocks_before_provider_calls() {
                     .collect::<Vec<_>>();
                 json!({"payloadSchema":"gate-policy.r1","policyId":"oversized","rules":["candidate-audit"],"canonSemantics":{"policyVersion":"canon-semantics.oversized","rules":rules}})
             },
-            "CONTEXT_HARD_BUDGET_EXCEEDED",
+            "B08_GATE_POLICY_HARD_BUDGET_EXCEEDED",
         ),
     ] {
         let temp = tempfile::tempdir().unwrap();

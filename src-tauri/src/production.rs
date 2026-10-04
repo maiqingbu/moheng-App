@@ -930,7 +930,6 @@ fn authority_context_payload(
 fn audit_policy_contract(
     policy_ref: &ArtifactRef,
     gate_policy_payload: &Value,
-    authority_context: &Value,
 ) -> Result<Value, String> {
     let actual_payload_hash = sha256_canonical(gate_policy_payload)
         .map_err(|error| format!("B08_GATE_POLICY_INVALID:{error}"))?;
@@ -950,17 +949,7 @@ fn audit_policy_contract(
             .ok_or("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")?
     });
 
-    let mut bounded_context = authority_context.clone();
-    if let Some(context) = bounded_context.as_object_mut() {
-        context.insert("hardTokens".into(), json!(0));
-        context.insert("softTokens".into(), json!(0));
-        context.insert("omittedSoftSources".into(), json!([]));
-    }
-    let bounded_input = json!({
-        "authorityContext": bounded_context,
-        "canonSemanticPolicy": canon_semantics
-    });
-    let serialized = serde_json::to_string(&bounded_input).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_string(&canon_semantics).map_err(|error| error.to_string())?;
     let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
     let non_ascii_scalars = serialized
         .chars()
@@ -972,7 +961,7 @@ fn audit_policy_contract(
         || serialized_bytes > crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
     {
         return Err(format!(
-            "CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens={estimated_tokens}|limitTokens={}|serializedBytes={serialized_bytes}|limitBytes={}|scope=CHAPTER",
+            "B08_GATE_POLICY_HARD_BUDGET_EXCEEDED|usedTokens={estimated_tokens}|limitTokens={}|serializedBytes={serialized_bytes}|limitBytes={}",
             crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
             crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
         ));
@@ -1398,8 +1387,7 @@ fn run_chapter_production_inner(
                 current_revision,
             )?;
             let authority_context = authority_context_payload(&compiler_input)?;
-            let audit_contract =
-                audit_policy_contract(&policy_ref, &gate_policy_payload, &authority_context)?;
+            let audit_contract = audit_policy_contract(&policy_ref, &gate_policy_payload)?;
             let manifest = crate::narrative::compile_context_manifest(compiler_input.clone())?;
             let context_payload = serde_json::to_value(&manifest).map_err(|e| e.to_string())?;
             let mut context = artifact(
@@ -1561,8 +1549,7 @@ fn run_chapter_production_inner(
                 current_revision,
             )?;
             let authority_context = authority_context_payload(&authority_input)?;
-            let audit_contract =
-                audit_policy_contract(&policy_ref, &gate_policy_payload, &authority_context)?;
+            let audit_contract = audit_policy_contract(&policy_ref, &gate_policy_payload)?;
             (
                 context_ref,
                 context_payload,
