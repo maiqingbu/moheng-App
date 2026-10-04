@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
@@ -9,39 +9,51 @@ const store = useProjectStore()
 const router = useRouter()
 const setup = computed(() => store.storySetup)
 const state = computed(() => store.commandState('story-setup-save'))
+const loadError = ref('')
 const core = reactive({
   protagonist: '',
   desire: '',
   mechanism: '',
   conflict: '',
   readerPromise: '',
+  worldRules: '',
+  forbiddenReveals: '',
+  style: '',
+  expandableDirections: '',
 })
 
 onMounted(async () => {
-  const value = await store.loadStorySetup()
-  const storyCore = value?.storyCore
-  if (!storyCore) return
-  for (const key of Object.keys(core) as Array<keyof typeof core>) {
-    const value = storyCore[key]
-    if (typeof value === 'string') core[key] = value
-  }
+  try {
+    const value = await store.loadStorySetup()
+    const storyCore = value?.storyCore
+    if (!storyCore) return
+    for (const key of Object.keys(core) as Array<keyof typeof core>) {
+      const value = storyCore[key]
+      if (typeof value === 'string') core[key] = value
+      else if (Array.isArray(value)) core[key] = value.filter((item): item is string => typeof item === 'string').join('\n')
+    }
+  } catch { loadError.value = '故事核心暂时无法读取，请重新打开本页后再保存。' }
 })
 
+const lines = (value: string) => value.split('\n').map(item => item.trim()).filter(Boolean)
+
 async function saveAndContinue() {
-  if (!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.value.status)) return
-  const receipt = await store.runCommand('story-setup-save', {
-    type: 'story_setup_save',
-    payload: {
-      storyCore: {
-        ...core,
-        worldRules: ['核心机制必须支付可验证代价'],
-        forbiddenReveals: ['前三章不揭开机制来源'],
-        style: '紧凑、悬疑、带成长回报',
-        expandableDirections: ['首卷局部回收', '多卷机制真相'],
+  if (loadError.value || !core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.value.status)) return
+  try {
+    const receipt = await store.runCommand('story-setup-save', {
+      type: 'story_setup_save',
+      payload: {
+        storyCore: {
+          ...setup.value?.storyCore,
+          ...core,
+          worldRules: lines(core.worldRules),
+          forbiddenReveals: lines(core.forbiddenReveals),
+          expandableDirections: lines(core.expandableDirections),
+        },
       },
-    },
-  })
-  if (receipt.finalStatus === 'committed') router.push(`/projects/${store.currentProjectId ?? ''}/opening`)
+    })
+    if (receipt.finalStatus === 'committed' && store.commandState('story-setup-save').confirmation !== 'pending') router.push(`/projects/${store.currentProjectId ?? ''}/opening`)
+  } catch { /* CommandFeedback preserves the command outcome. */ }
 }
 </script>
 
@@ -51,7 +63,8 @@ async function saveAndContinue() {
       <button class="btn" @click="router.push(`/projects/${store.currentProjectId ?? ''}/directions`)">返回故事方向</button>
     </PageHeader>
 
-    <div v-if="!setup || setup.status === 'NOT_SELECTED'" class="banner warning">
+    <div v-if="loadError" class="banner warning" role="alert">{{ loadError }}</div>
+    <div v-else-if="!setup || setup.status === 'NOT_SELECTED'" class="banner warning">
       <div><div class="banner-title">请先明确选择故事方向</div><div class="banner-copy">系统不会替你选择，也不会在没有明确选择时建立正式故事核心。</div></div>
       <button class="btn small" @click="router.push(`/projects/${store.currentProjectId ?? ''}/directions`)">去选择</button>
     </div>
@@ -66,10 +79,14 @@ async function saveAndContinue() {
         <label class="field"><span class="field-label">核心机制</span><textarea v-model="core.mechanism" class="textarea" /></label>
         <label class="field"><span class="field-label">主要冲突</span><textarea v-model="core.conflict" class="textarea" /></label>
         <label class="field"><span class="field-label">希望读者持续期待什么</span><textarea v-model="core.readerPromise" class="textarea" /></label>
+        <label class="field"><span class="field-label">必须遵守的世界规则（每行一条）</span><textarea v-model="core.worldRules" class="textarea" /></label>
+        <label class="field"><span class="field-label">开篇暂不揭示的内容（每行一条）</span><textarea v-model="core.forbiddenReveals" class="textarea" /></label>
+        <label class="field"><span class="field-label">叙述风格</span><input v-model="core.style" class="input" /></label>
+        <label class="field"><span class="field-label">可扩展方向（每行一条）</span><textarea v-model="core.expandableDirections" class="textarea" /></label>
       </div>
       <div class="banner info" style="margin-top:16px"><div><div class="banner-title">下一步只准备开篇</div><div class="banner-copy">系统会为第一章建立最小的正式规划，后续卷章仍按既有规划链路逐步创建。</div></div></div>
-      <CommandFeedback :state="state" />
-      <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn primary" :aria-disabled="!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.status)" @click="saveAndContinue">保存故事核心并继续</button></div>
+      <CommandFeedback :state="state" @confirm="store.confirmCommandResult('story-setup-save')" />
+      <div class="actions" style="justify-content:flex-end;margin-top:16px"><button class="btn primary" :disabled="!core.protagonist.trim() || !core.readerPromise.trim() || ['submitting','accepted','processing'].includes(state.status)" @click="saveAndContinue">保存故事核心并继续</button></div>
     </section>
   </div>
 </template>

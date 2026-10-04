@@ -1,12 +1,15 @@
+pub mod canon_semantics;
 pub mod catalog;
 pub mod change_retcon;
 pub mod commands;
 pub mod commit;
 pub mod creative_skills;
 pub mod endgame;
+pub mod export;
 pub mod generated;
 pub mod harness;
 pub mod health;
+pub mod market_source;
 pub mod narrative;
 pub mod planning;
 pub mod production;
@@ -17,6 +20,7 @@ pub mod provider;
 pub mod repair;
 pub mod repositories;
 pub mod signing;
+pub mod skill_deployment;
 pub mod stable_id;
 pub mod volume_lifecycle;
 

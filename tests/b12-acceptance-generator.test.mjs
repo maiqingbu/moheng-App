@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { B12_BLOCKING_GATES, NEGATIVE_BLOCKING_GATES, REQUIRED_BLOCKING_GATES, START_COMMIT, evaluateAcceptance } from '../scripts/generate-b12-acceptance.mjs'
 import { packageGeneratorEnvironment } from '../scripts/b12-package-environment.mjs'
 
@@ -54,6 +57,27 @@ test('B12 acceptance cannot pass with a false R2 global guard', () => {
   const acceptance = evaluateAcceptance(report)
   assert.equal(acceptance.status, 'NOT_READY')
   assert.ok(acceptance.failedGates.includes('second_authority'))
+})
+
+test('B12-A59 references gate-results instead of its own acceptance output', () => {
+  const runner = fs.readFileSync(new URL('../scripts/run-b12-evidence-gates.mjs', import.meta.url), 'utf8')
+  const selfGateBindings = runner.match(/setGate\('B12-A59',[^\n]+/g) ?? []
+  assert.equal(selfGateBindings.length, 2)
+  assert.ok(selfGateBindings.every(binding => binding.includes("'gate-results.json'")))
+  assert.ok(selfGateBindings.every(binding => !binding.includes("'B12_ACCEPTANCE.json'")))
+
+  const evidenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'b12-acceptance-self-gate-'))
+  try {
+    const report = passingReport()
+    for (const gate of Object.values(report.gates)) gate.source = 'gate-results.json'
+    report.gates['B12-A59'].source = 'gate-results.json'
+    fs.writeFileSync(path.join(evidenceDir, 'gate-results.json'), JSON.stringify(report))
+    const acceptance = evaluateAcceptance(report, { evidenceDir })
+    assert.equal(acceptance.status, 'READY_FOR_ACCEPTANCE')
+    assert.deepEqual(acceptance.missingEvidenceSources, [])
+  } finally {
+    fs.rmSync(evidenceDir, { recursive: true, force: true })
+  }
 })
 
 test('package self-check delegates package gates to the package verifier', () => {

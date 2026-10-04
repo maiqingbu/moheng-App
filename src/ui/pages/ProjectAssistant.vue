@@ -13,7 +13,7 @@ import {
   startDependencySummaryBootstrap,
 } from '../flows/b12RetconFlow'
 import type { RetconFactOption } from '../flows/b12RetconFlow'
-import { isProductUxEvidenceDemoEnabled, productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
+import { isProductUxEvidenceDemoEnabled, productErrorMessage, repairExecutionLabel, sanitizeProductText } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -25,6 +25,10 @@ const plan = ref<AssistantPlan | null>(null)
 const evidenceOpen = ref(false)
 const repairOpen = ref(false)
 const repairMessage = ref('')
+const repairVerificationIncomplete = ref(false)
+const repairOutcomeUnknown = ref(false)
+const repairKnownNotExecuted = ref(false)
+const repairOutcomeResolved = ref(false)
 const changeMessage = ref('')
 const queryState = computed(() => store.commandState('assistant-query'))
 const planState = computed(() => store.commandState('assistant-plan'))
@@ -43,6 +47,10 @@ async function ask() {
 }
 
 async function prepareRepair() {
+  repairVerificationIncomplete.value = false
+  repairOutcomeUnknown.value = false
+  repairKnownNotExecuted.value = false
+  repairOutcomeResolved.value = false
   try {
     plan.value = await store.prepareAssistantRepair(question.value)
   } catch (error) {
@@ -58,12 +66,67 @@ async function prepareRepair() {
 
 async function authorizeRepair() {
   if (!plan.value || plan.value.action !== 'EXECUTABLE') return
+  repairOutcomeUnknown.value = false
+  repairKnownNotExecuted.value = false
+  repairOutcomeResolved.value = false
   try {
     const execute = await store.authorizeAssistantRepair(plan.value)
-    repairMessage.value = execute.finalStatus === 'committed' ? '修复已完成，并已重新核对结果。' : '修复没有完成，请先刷新当前作品后再试。'
+    if (execute.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
+      repairVerificationIncomplete.value = true
+      repairMessage.value = '修复已执行，但核对不完整。请前往创作中心重新核对现有回执，不会再次执行修复。'
+      return
+    }
+    repairVerificationIncomplete.value = false
+    repairOutcomeResolved.value = true
+    repairMessage.value = execute.receipt?.status === 'REPAIR_VERIFICATION_FAILED'
+      ? `${repairExecutionLabel(execute.receipt)}；请查看回执中的验证项。`
+      : execute.finalStatus === 'committed' && execute.receipt?.status === 'REPAIR_VERIFIED'
+        ? '修复已完成，并已重新核对结果。'
+        : execute.message || '修复执行未完成，请先查看创作中心中的正式回执。'
   } catch (error) {
+    const outcome = store.commandState('assistant-execute')
+    if (outcome.repairOutcome === 'unknown') {
+      repairOutcomeUnknown.value = true
+      repairMessage.value = outcome.message
+      return
+    }
+    if (outcome.repairOutcome === 'not_executed') {
+      repairKnownNotExecuted.value = true
+      repairMessage.value = outcome.message
+      return
+    }
     repairMessage.value = productErrorMessage(error, '修复没有完成，请先刷新当前作品后再试。')
   }
+}
+
+async function requeryRepairOutcome() {
+  if (!plan.value || plan.value.action !== 'EXECUTABLE') return
+  repairOutcomeUnknown.value = true
+  repairMessage.value = '正在重新读取现有正式回执；不会再次执行修复。'
+  try {
+    const receipt = await store.requeryAssistantRepair(plan.value, 'assistant-execute')
+    if (receipt?.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
+      repairOutcomeUnknown.value = false
+      repairVerificationIncomplete.value = true
+      repairMessage.value = '修复已执行，但核对不完整。请前往创作中心重新核对现有回执，不会再次执行修复。'
+      return
+    }
+    if (receipt) {
+      repairOutcomeUnknown.value = false
+      repairOutcomeResolved.value = true
+      repairMessage.value = receipt.receipt?.status === 'REPAIR_VERIFICATION_FAILED'
+        ? `${repairExecutionLabel(receipt.receipt)}；请查看回执中的验证项。`
+        : '已从正式回执确认修复结果。'
+      return
+    }
+  } catch {
+    // Keep the outcome unknown until a durable projection can be read.
+  }
+  const state = store.commandState('assistant-execute')
+  repairOutcomeUnknown.value = state.repairOutcome !== 'not_executed'
+  repairKnownNotExecuted.value = state.repairOutcome === 'not_executed'
+  repairOutcomeResolved.value = false
+  repairMessage.value = state.message || '结果仍待确认；请重新读取现有正式回执，不会再次执行修复。'
 }
 
 async function proposeChange() {
@@ -182,7 +245,7 @@ onMounted(() => {
       <CommandFeedback :state="authState" />
       <CommandFeedback :state="executeState" />
       <p v-if="repairMessage" class="banner" :class="repairMessage.includes('完成') ? 'success' : 'warning'">{{ repairMessage }}</p>
-      <template #footer><button class="btn" @click="repairOpen=false">暂不执行</button><button class="btn primary" :disabled="!plan || plan.action !== 'EXECUTABLE' || planState.status !== 'committed' || ['submitting','accepted','processing'].includes(authState.status)" @click="authorizeRepair">我确认并执行修复</button></template>
+      <template #footer><button class="btn" @click="repairOpen=false">暂不处理</button><button v-if="repairVerificationIncomplete" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心重新核对</button><button v-else-if="repairOutcomeUnknown" class="btn primary" @click="requeryRepairOutcome">重新读取现有回执</button><button v-else-if="repairKnownNotExecuted || repairOutcomeResolved" class="btn primary" @click="router.push(`/projects/${store.currentProjectId}/production`)">{{ repairKnownNotExecuted ? '前往创作中心核对执行状态' : '查看创作中心修复回执' }}</button><button v-else class="btn primary" :disabled="!plan || plan.action !== 'EXECUTABLE' || planState.status !== 'committed' || ['submitting','accepted','processing'].includes(authState.status)" @click="authorizeRepair">我确认并执行修复</button></template>
     </BaseModal>
   </div>
 </template>

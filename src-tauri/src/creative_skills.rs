@@ -7,18 +7,19 @@
 
 use crate::generated::types::ArtifactRef;
 use crate::hash::sha256_canonical;
+use crate::skill_deployment::{self, VerifiedSkillDeployment};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CREATIVE_SKILLS_VERSION: &str = "1.2.0";
-pub const CREATIVE_SKILLS_ARCHIVE_SHA256: &str =
-    "a90ab6e12d82d57b32f06d5a3780d0153d6f372e1efd47df1d70ef1aebbdef8f";
-const CREATIVE_SKILLS_REGISTRY: &str = include_str!("../../creative-skills/v1.2.0/registry.json");
+pub const CREATIVE_SKILLS_ARCHIVE_SHA256: &str = skill_deployment::EXPECTED_PACKAGE_ARCHIVE_SHA256;
 const MAX_CONTEXT_BYTES: usize = 64_000;
 const MAX_REFS: usize = 64;
 const MAX_CAPSULES: usize = 16;
@@ -93,14 +94,6 @@ pub struct SkillRegistry {
     pub skills: Vec<SkillMetadata>,
 }
 
-fn string_field(value: &Value, field: &str) -> String {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 fn string_array(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::String(item)) => vec![item.clone()],
@@ -113,58 +106,126 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// Loads package metadata only. Skill text and resources are intentionally not
-/// embedded or read here; the frontend loader fetches only selected files.
-pub fn load_registry() -> Result<SkillRegistry, String> {
-    let root: Value = serde_json::from_str(CREATIVE_SKILLS_REGISTRY)
-        .map_err(|error| format!("SKILL_REGISTRY_INVALID:{error}"))?;
+fn required_registry_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "SKILL_REGISTRY_SCHEMA_INVALID".to_string())
+}
+
+fn required_registry_bool(value: &Value, field: &str) -> Result<bool, String> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "SKILL_REGISTRY_SCHEMA_INVALID".to_string())
+}
+
+fn parse_skill_registry(bytes: &[u8]) -> Result<SkillRegistry, String> {
+    let root: Value =
+        serde_json::from_slice(bytes).map_err(|_| "SKILL_REGISTRY_INVALID".to_string())?;
     let skills = root
         .get("skills")
         .and_then(Value::as_array)
         .ok_or_else(|| "SKILL_REGISTRY_SKILLS_MISSING".to_string())?
         .iter()
-        .map(|value| SkillMetadata {
-            id: string_field(value, "id"),
-            slug: string_field(value, "slug"),
-            name_zh: string_field(value, "name_zh"),
-            version: string_field(value, "version"),
-            category: string_field(value, "category"),
-            role: string_field(value, "role"),
-            runtime_stage: string_field(value, "runtimeStage"),
-            context_policy: string_field(value, "contextPolicy"),
-            mutation_policy: string_field(value, "mutationPolicy"),
-            coverage: string_array(value.get("coverage")),
-            bundle_digest: string_field(value, "bundleDigest"),
-            method_resource: value
-                .get("methodResource")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            authority_access: string_field(value, "authorityAccess"),
-            hard_gate_authority: value
-                .get("hardGateAuthority")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            control_decision_authority: value
-                .get("controlDecisionAuthority")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+        .map(|value| {
+            let coverage = match value.get("coverage") {
+                Some(Value::String(_)) | Some(Value::Array(_)) => {
+                    let parsed = string_array(value.get("coverage"));
+                    if parsed.is_empty()
+                        || value
+                            .get("coverage")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| items.len() != parsed.len())
+                    {
+                        return Err("SKILL_REGISTRY_SCHEMA_INVALID".to_string());
+                    }
+                    parsed
+                }
+                _ => return Err("SKILL_REGISTRY_SCHEMA_INVALID".into()),
+            };
+            let method_resource = match value.get("methodResource") {
+                Some(Value::String(path)) if skill_deployment::is_safe_relative_path(path) => {
+                    Some(path.clone())
+                }
+                Some(Value::Null) | None => None,
+                _ => return Err("SKILL_REGISTRY_SCHEMA_INVALID".into()),
+            };
+            let skill = SkillMetadata {
+                id: required_registry_string(value, "id")?,
+                slug: required_registry_string(value, "slug")?,
+                name_zh: required_registry_string(value, "name_zh")?,
+                version: required_registry_string(value, "version")?,
+                category: required_registry_string(value, "category")?,
+                role: required_registry_string(value, "role")?,
+                runtime_stage: required_registry_string(value, "runtimeStage")?,
+                context_policy: required_registry_string(value, "contextPolicy")?,
+                mutation_policy: required_registry_string(value, "mutationPolicy")?,
+                coverage,
+                bundle_digest: required_registry_string(value, "bundleDigest")?,
+                method_resource,
+                authority_access: required_registry_string(value, "authorityAccess")?,
+                hard_gate_authority: required_registry_bool(value, "hardGateAuthority")?,
+                control_decision_authority: required_registry_bool(
+                    value,
+                    "controlDecisionAuthority",
+                )?,
+            };
+            if skill.id.trim().is_empty()
+                || skill.slug.trim().is_empty()
+                || skill.version != CREATIVE_SKILLS_VERSION
+                || skill.authority_access != "NONE_DIRECT"
+                || skill.hard_gate_authority
+                || skill.control_decision_authority
+                || skill
+                    .bundle_digest
+                    .strip_prefix("sha256:")
+                    .is_none_or(|digest| !skill_deployment::is_sha256(digest))
+            {
+                return Err("SKILL_REGISTRY_ENTRY_INVALID".to_string());
+            }
+            Ok(skill)
         })
-        .collect::<Vec<_>>();
-    let version = string_field(&root, "version");
+        .collect::<Result<Vec<_>, _>>()?;
+    let package = required_registry_string(&root, "package")?;
+    let version = required_registry_string(&root, "version")?;
+    let selection_policy = required_registry_string(&root, "selectionPolicy")?;
+    required_registry_string(&root, "methodPolicy")?;
+    required_registry_string(&root, "runtimeBoundary")?;
     let skill_count = root
         .get("skillCount")
         .and_then(Value::as_u64)
-        .unwrap_or(skills.len() as u64) as usize;
+        .ok_or_else(|| "SKILL_REGISTRY_SCHEMA_INVALID".to_string())? as usize;
     if version != CREATIVE_SKILLS_VERSION || skill_count != 45 || skills.len() != 45 {
         return Err("SKILL_REGISTRY_VERSION_OR_COUNT_INVALID".into());
     }
+    let ids = skills
+        .iter()
+        .map(|skill| skill.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let slugs = skills
+        .iter()
+        .map(|skill| skill.slug.as_str())
+        .collect::<BTreeSet<_>>();
+    if ids.len() != skills.len() || slugs.len() != skills.len() {
+        return Err("SKILL_REGISTRY_DUPLICATE_OR_UNKNOWN_ENTRY".into());
+    }
     Ok(SkillRegistry {
-        package: string_field(&root, "package"),
+        package,
         version,
         skill_count,
-        selection_policy: string_field(&root, "selectionPolicy"),
+        selection_policy,
         skills,
     })
+}
+
+/// Development/test convenience. Release call paths load the registry through
+/// the application resource resolver held by SkillBundleLoader.
+#[cfg(any(test, debug_assertions))]
+pub fn load_registry() -> Result<SkillRegistry, String> {
+    SkillBundleLoader::development_package().load_registry()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -189,8 +250,10 @@ pub struct SkillSelection {
     pub model_calls: i64,
 }
 
-pub fn select_creative_skills(request: SkillSelectionRequest) -> Result<SkillSelection, String> {
-    let registry = load_registry()?;
+fn select_from_registry(
+    registry: SkillRegistry,
+    request: SkillSelectionRequest,
+) -> Result<SkillSelection, String> {
     let by_id = registry
         .skills
         .iter()
@@ -241,6 +304,11 @@ pub fn select_creative_skills(request: SkillSelectionRequest) -> Result<SkillSel
     })
 }
 
+#[cfg(any(test, debug_assertions))]
+pub fn select_creative_skills(request: SkillSelectionRequest) -> Result<SkillSelection, String> {
+    SkillBundleLoader::development_package().select(request)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedSkillText {
@@ -268,93 +336,236 @@ pub struct SkillLoadingEvidence {
     pub unselected_resource_loads: usize,
 }
 
-/// Backend loader constrained to the tracked, immutable package. It never
-/// accepts an arbitrary root and never receives a database/repository handle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedSkillFileDigest {
+    pub skill_id: String,
+    pub reference: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillResourceIdentity {
+    pub package_version: String,
+    pub source_archive_sha256: String,
+    pub deployed_manifest_digest: String,
+    pub registry_sha256: String,
+    pub selected_file_digests: Vec<SelectedSkillFileDigest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedSelectedSkills {
+    pub skill_texts: Vec<LoadedSkillText>,
+    pub resources: Vec<LoadedResource>,
+    pub loading: SkillLoadingEvidence,
+    pub identity: SkillResourceIdentity,
+}
+
+/// Uses the same strict loader for development and installed resources. Only
+/// the application composition root chooses which trusted roots to inject.
+#[derive(Clone)]
 pub struct SkillBundleLoader {
     package_root: PathBuf,
+    manifest_path: PathBuf,
+    expected_manifest_digest: String,
+    // The bundle and registry are immutable per app process; selected files are
+    // still read and hashed on every use, while process restart invalidates both caches.
+    deployment: Arc<OnceLock<Result<VerifiedSkillDeployment, String>>>,
+    registry: Arc<OnceLock<Result<SkillRegistry, String>>>,
 }
 
 impl SkillBundleLoader {
-    pub fn tracked_package() -> Self {
+    pub fn from_application_package_root(package_root: PathBuf) -> Self {
         Self {
-            package_root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../creative-skills/v1.2.0"),
+            manifest_path: package_root.join(skill_deployment::DEPLOYMENT_MANIFEST_NAME),
+            package_root,
+            expected_manifest_digest: env!("CREATIVE_SKILLS_DEPLOYMENT_MANIFEST_SHA256").into(),
+            deployment: Arc::new(OnceLock::new()),
+            registry: Arc::new(OnceLock::new()),
         }
     }
 
-    fn package_file(&self, relative: &str) -> Result<PathBuf, String> {
-        if relative.is_empty() || relative.contains("..") || !relative.starts_with("skills/") {
-            return Err("SKILL_PACKAGE_PATH_DENIED".into());
-        }
-        let root = self
-            .package_root
-            .canonicalize()
-            .map_err(|error| format!("SKILL_PACKAGE_NOT_FOUND:{error}"))?;
-        let file = self
-            .package_root
-            .join(relative)
-            .canonicalize()
-            .map_err(|error| format!("SKILL_PACKAGE_FILE_NOT_FOUND:{error}"))?;
-        if !file.starts_with(&root) {
-            return Err("SKILL_PACKAGE_PATH_DENIED".into());
-        }
-        Ok(file)
+    pub fn diagnostic_report(&self) -> Result<Value, String> {
+        let selection = self.select(SkillSelectionRequest {
+            primary: "S14".into(),
+            support: vec!["S10".into()],
+            budget_reason: None,
+            context_tokens: 1200,
+            model_calls: 1,
+        })?;
+        let loaded = self.load_selected(&selection, &["resources/operating_method.md".into()])?;
+        Ok(json!({
+            "schema":"pre01-skill-resource-diagnostic-r1",
+            "identity":loaded.identity,
+            "loading":loaded.loading,
+            "selectedSkillIds":selection.selected_ids,
+            "networkCalls":0,
+            "authorityWrites":0,
+            "receiptCreated":false
+        }))
     }
 
-    fn load_text(&self, relative: &str) -> Result<(String, String), String> {
-        let file = self.package_file(relative)?;
-        let text = fs::read_to_string(&file)
-            .map_err(|error| format!("SKILL_PACKAGE_READ_FAILED:{error}"))?;
-        let digest = hex::encode(Sha256::digest(text.as_bytes()));
-        Ok((text, digest))
+    #[cfg(any(test, debug_assertions))]
+    pub fn development_package() -> Self {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let package_root = manifest_dir.join("../creative-skills/v1.2.0");
+        Self {
+            manifest_path: manifest_dir.join("resources/creative-skills-v1.2.0.deployment.json"),
+            package_root,
+            expected_manifest_digest: env!("CREATIVE_SKILLS_DEPLOYMENT_MANIFEST_SHA256").into(),
+            deployment: Arc::new(OnceLock::new()),
+            registry: Arc::new(OnceLock::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        package_root: PathBuf,
+        manifest_path: PathBuf,
+        expected_manifest_digest: String,
+    ) -> Self {
+        Self {
+            package_root,
+            manifest_path,
+            expected_manifest_digest,
+            deployment: Arc::new(OnceLock::new()),
+            registry: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn verified_deployment(&self) -> Result<VerifiedSkillDeployment, String> {
+        self.deployment
+            .get_or_init(|| {
+                skill_deployment::load_runtime_manifest(
+                    &self.manifest_path,
+                    &self.expected_manifest_digest,
+                )
+            })
+            .clone()
+    }
+
+    fn read_verified_file(
+        &self,
+        deployment: &VerifiedSkillDeployment,
+        relative: &str,
+    ) -> Result<Vec<u8>, String> {
+        skill_deployment::read_verified_file(&self.package_root, deployment, relative)
+    }
+
+    pub fn load_registry(&self) -> Result<SkillRegistry, String> {
+        self.registry
+            .get_or_init(|| {
+                let deployment = self.verified_deployment()?;
+                let bytes = self.read_verified_file(&deployment, "registry.json")?;
+                parse_skill_registry(&bytes)
+            })
+            .clone()
+    }
+
+    pub fn select(&self, request: SkillSelectionRequest) -> Result<SkillSelection, String> {
+        select_from_registry(self.load_registry()?, request)
+    }
+
+    fn validate_selected_skill(
+        &self,
+        skill: &SkillMetadata,
+        registry: &SkillRegistry,
+    ) -> Result<(), String> {
+        let registered = registry
+            .skills
+            .iter()
+            .find(|registered| registered.id == skill.id)
+            .ok_or_else(|| "SKILL_NOT_IN_DEPLOYED_REGISTRY".to_string())?;
+        if registered.slug != skill.slug || registered.version != skill.version {
+            return Err("SKILL_SELECTION_DEPLOYMENT_MISMATCH".into());
+        }
+        Ok(())
+    }
+
+    fn load_text(
+        &self,
+        deployment: &VerifiedSkillDeployment,
+        skill_id: &str,
+        relative: &str,
+    ) -> Result<(String, SelectedSkillFileDigest), String> {
+        let bytes = self.read_verified_file(deployment, relative)?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| format!("SKILL_PACKAGE_UTF8_INVALID:{relative}"))?;
+        let digest = hex::encode(Sha256::digest(&bytes));
+        let reference = format!("creative-skills/v1.2.0/{relative}");
+        Ok((
+            text,
+            SelectedSkillFileDigest {
+                skill_id: skill_id.into(),
+                reference,
+                size_bytes: bytes.len() as u64,
+                sha256: digest,
+            },
+        ))
     }
 
     pub fn load_selected(
         &self,
         selection: &SkillSelection,
         required_resources: &[String],
-    ) -> Result<
-        (
-            Vec<LoadedSkillText>,
-            Vec<LoadedResource>,
-            SkillLoadingEvidence,
-        ),
-        String,
-    > {
+    ) -> Result<LoadedSelectedSkills, String> {
+        let deployment = self.verified_deployment()?;
+        let registry = self.load_registry()?;
         let mut loaded_skill_texts = Vec::with_capacity(selection.selected.len());
         let mut loaded_resources = Vec::new();
+        let mut selected_file_digests = Vec::new();
         for skill in &selection.selected {
+            self.validate_selected_skill(skill, &registry)?;
             let relative = format!("skills/{}/SKILL.md", skill.slug);
-            let (text, digest) = self.load_text(&relative)?;
+            let (text, file_digest) = self.load_text(&deployment, &skill.id, &relative)?;
             loaded_skill_texts.push(LoadedSkillText {
-                reference: format!("creative-skills/v1.2.0/{relative}"),
-                digest,
+                reference: file_digest.reference.clone(),
+                digest: file_digest.sha256.clone(),
                 text,
             });
+            selected_file_digests.push(file_digest);
             for resource in required_resources {
-                if !resource.starts_with("resources/") || resource.contains("..") {
+                if !resource.starts_with("resources/")
+                    || !skill_deployment::is_safe_relative_path(resource)
+                {
                     return Err("SKILL_RESOURCE_PATH_DENIED".into());
                 }
                 let resource_relative = format!("skills/{}/{resource}", skill.slug);
-                let (text, digest) = self.load_text(&resource_relative)?;
+                let (text, file_digest) =
+                    self.load_text(&deployment, &skill.id, &resource_relative)?;
                 loaded_resources.push(LoadedResource {
-                    reference: format!("creative-skills/v1.2.0/{resource_relative}"),
-                    digest,
+                    reference: file_digest.reference.clone(),
+                    digest: file_digest.sha256.clone(),
                     text,
                 });
+                selected_file_digests.push(file_digest);
             }
         }
         let selected_resource_loads = loaded_resources.len();
-        Ok((
-            loaded_skill_texts,
-            loaded_resources,
-            SkillLoadingEvidence {
+        Ok(LoadedSelectedSkills {
+            skill_texts: loaded_skill_texts,
+            resources: loaded_resources,
+            loading: SkillLoadingEvidence {
                 selected_full_text_loads: selection.selected.len(),
                 unselected_full_text_loads: 0,
                 selected_resource_loads,
                 unselected_resource_loads: 0,
             },
-        ))
+            identity: SkillResourceIdentity {
+                package_version: deployment.package_version.clone(),
+                source_archive_sha256: deployment.source_archive_sha256.clone(),
+                deployed_manifest_digest: deployment.manifest_digest.clone(),
+                registry_sha256: deployment
+                    .file("registry.json")
+                    .ok_or_else(|| "SKILL_REGISTRY_NOT_IN_DEPLOYMENT_MANIFEST".to_string())?
+                    .sha256
+                    .clone(),
+                selected_file_digests,
+            },
+        })
     }
 
     pub fn load_selected_resource(
@@ -363,19 +574,23 @@ impl SkillBundleLoader {
         skill_id: &str,
         resource: &str,
     ) -> Result<LoadedResource, String> {
+        let deployment = self.verified_deployment()?;
+        let registry = self.load_registry()?;
         let skill = selection
             .selected
             .iter()
             .find(|skill| skill.id == skill_id)
             .ok_or_else(|| "SKILL_NOT_SELECTED".to_string())?;
-        if !resource.starts_with("resources/") || resource.contains("..") {
+        self.validate_selected_skill(skill, &registry)?;
+        if !resource.starts_with("resources/") || !skill_deployment::is_safe_relative_path(resource)
+        {
             return Err("SKILL_RESOURCE_PATH_DENIED".into());
         }
         let relative = format!("skills/{}/{resource}", skill.slug);
-        let (text, digest) = self.load_text(&relative)?;
+        let (text, file_digest) = self.load_text(&deployment, skill_id, &relative)?;
         Ok(LoadedResource {
-            reference: format!("creative-skills/v1.2.0/{relative}"),
-            digest,
+            reference: file_digest.reference,
+            digest: file_digest.sha256,
             text,
         })
     }
@@ -749,6 +964,12 @@ pub struct InvocationProvenance {
     pub skill_id: String,
     pub skill_version: String,
     pub bundle_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_archive_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_manifest_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_file_digests: Vec<SelectedSkillFileDigest>,
     pub role: String,
     pub loaded_skill_text_ref: String,
     pub loaded_skill_text_digest: String,
@@ -833,6 +1054,7 @@ fn create_invocation_provenance_at(
     context: &SkillTaskContext,
     loaded_skill_text: &LoadedSkillText,
     resources: &[LoadedResource],
+    asset_identity: Option<&SkillResourceIdentity>,
     project_context_refs: Vec<String>,
     output_digest: String,
     created_at: &str,
@@ -848,6 +1070,20 @@ fn create_invocation_provenance_at(
         skill_id: skill.id.clone(),
         skill_version: CREATIVE_SKILLS_VERSION.into(),
         bundle_digest: skill.bundle_digest.clone(),
+        source_archive_sha256: asset_identity
+            .map(|identity| identity.source_archive_sha256.clone()),
+        deployed_manifest_digest: asset_identity
+            .map(|identity| identity.deployed_manifest_digest.clone()),
+        selected_file_digests: asset_identity
+            .map(|identity| {
+                identity
+                    .selected_file_digests
+                    .iter()
+                    .filter(|file| file.skill_id == skill.id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
         role: skill.role.clone(),
         loaded_skill_text_ref: loaded_skill_text.reference.clone(),
         loaded_skill_text_digest: loaded_skill_text.digest.clone(),
@@ -900,6 +1136,7 @@ pub fn create_invocation_provenance(
         context,
         &loaded_skill_text,
         &[],
+        None,
         project_context_refs,
         output_digest,
         &current_rfc3339_utc(),
@@ -1520,6 +1757,9 @@ pub fn repair_candidate(request: RepairCandidateRequest) -> Result<RepairCandida
 pub struct ChapterSkillEnrichment {
     pub package_version: String,
     pub package_digest: String,
+    pub source_archive_sha256: String,
+    pub deployed_manifest_digest: String,
+    pub selected_file_digests: Vec<SelectedSkillFileDigest>,
     pub selection: SkillSelection,
     pub context: SkillTaskContext,
     pub proposal: NormalizedSkillOutput,
@@ -1534,6 +1774,7 @@ pub struct ChapterSkillEnrichment {
 /// B08 calls this pure composition step immediately before rendering. It adds
 /// bounded creative guidance to the existing render input; it does not create
 /// a ChapterPlan or perform any write.
+#[cfg(any(test, debug_assertions))]
 pub fn enrich_chapter(
     project_id: &str,
     chapter_id: &str,
@@ -1562,6 +1803,7 @@ pub fn enrich_chapter(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, debug_assertions))]
 pub fn enrich_chapter_with_policy(
     project_id: &str,
     chapter_id: &str,
@@ -1574,7 +1816,37 @@ pub fn enrich_chapter_with_policy(
     required_resources: Vec<String>,
     now: &str,
 ) -> Result<ChapterSkillEnrichment, String> {
-    let selection = select_creative_skills(SkillSelectionRequest {
+    let loader = SkillBundleLoader::development_package();
+    enrich_chapter_with_loader(
+        project_id,
+        chapter_id,
+        revision,
+        context_manifest_ref,
+        plan_payload,
+        execution_mode,
+        primary,
+        support,
+        required_resources,
+        now,
+        &loader,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn enrich_chapter_with_loader(
+    project_id: &str,
+    chapter_id: &str,
+    revision: i64,
+    context_manifest_ref: &str,
+    plan_payload: &Value,
+    execution_mode: &str,
+    primary: &str,
+    support: Vec<String>,
+    required_resources: Vec<String>,
+    now: &str,
+    loader: &SkillBundleLoader,
+) -> Result<ChapterSkillEnrichment, String> {
+    let selection = loader.select(SkillSelectionRequest {
         primary: primary.into(),
         support,
         budget_reason: None,
@@ -1588,10 +1860,8 @@ pub fn enrich_chapter_with_policy(
         context_manifest_ref,
         plan_payload,
     )?;
-    let loader = SkillBundleLoader::tracked_package();
-    let (loaded_skill_texts, loaded_resources, loading) =
-        loader.load_selected(&selection, &required_resources)?;
-    let method_guidance = build_method_guidance(&loaded_skill_texts, &loaded_resources);
+    let loaded = loader.load_selected(&selection, &required_resources)?;
+    let method_guidance = build_method_guidance(&loaded.skill_texts, &loaded.resources);
     let proposal = normalize_skill_output(json!({
         "kind":"CreativeProposal",
         "status":"OK",
@@ -1607,7 +1877,8 @@ pub fn enrich_chapter_with_policy(
         .iter()
         .enumerate()
         .map(|(index, skill)| {
-            let loaded = loaded_skill_texts
+            let loaded_text = loaded
+                .skill_texts
                 .iter()
                 .find(|loaded| {
                     loaded
@@ -1615,7 +1886,8 @@ pub fn enrich_chapter_with_policy(
                         .ends_with(&format!("skills/{}/SKILL.md", skill.slug))
                 })
                 .ok_or_else(|| "SKILL_LOADED_TEXT_MISSING".to_string())?;
-            let resources = loaded_resources
+            let resources = loaded
+                .resources
                 .iter()
                 .filter(|resource| {
                     resource
@@ -1628,8 +1900,9 @@ pub fn enrich_chapter_with_policy(
                 &format!("inv:{chapter_id}:{}", index + 1),
                 skill,
                 &context,
-                loaded,
+                loaded_text,
                 &resources,
+                Some(&loaded.identity),
                 vec![context_manifest_ref.into(), format!("plan:{chapter_id}")],
                 output_digest.clone(),
                 now,
@@ -1638,15 +1911,256 @@ pub fn enrich_chapter_with_policy(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ChapterSkillEnrichment {
         package_version: CREATIVE_SKILLS_VERSION.into(),
-        package_digest: CREATIVE_SKILLS_ARCHIVE_SHA256.into(),
+        package_digest: loaded.identity.deployed_manifest_digest.clone(),
+        source_archive_sha256: loaded.identity.source_archive_sha256.clone(),
+        deployed_manifest_digest: loaded.identity.deployed_manifest_digest.clone(),
+        selected_file_digests: loaded.identity.selected_file_digests.clone(),
         selection,
         context,
         proposal,
         taste_profile: default_taste_profile(revision),
-        loaded_skill_texts,
-        loaded_resources,
-        loading,
+        loaded_skill_texts: loaded.skill_texts,
+        loaded_resources: loaded.resources,
+        loading: loaded.loading,
         method_guidance,
         invocations,
     })
+}
+
+#[cfg(test)]
+mod pre01_skill_resource_tests {
+    use super::*;
+
+    fn copy_directory(source: &std::path::Path, destination: &std::path::Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                copy_directory(&source_path, &destination_path);
+            } else {
+                assert!(
+                    file_type.is_file(),
+                    "test fixture must not contain symlinks"
+                );
+                fs::copy(source_path, destination_path).unwrap();
+            }
+        }
+    }
+
+    fn copy_skill_package_for_test() -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let package_source = manifest_dir.join("../creative-skills/v1.2.0");
+        let package_root = temp.path().join("creative-skills/v1.2.0");
+        copy_directory(&package_source, &package_root);
+        let manifest_source = manifest_dir.join("resources/creative-skills-v1.2.0.deployment.json");
+        let manifest_path = temp
+            .path()
+            .join("creative-skills/v1.2.0/deployment-manifest.json");
+        fs::copy(&manifest_source, &manifest_path).unwrap();
+        let expected_manifest_digest =
+            hex::encode(Sha256::digest(fs::read(&manifest_path).unwrap()));
+        (temp, manifest_path, expected_manifest_digest)
+    }
+
+    fn selection(loader: &SkillBundleLoader) -> SkillSelection {
+        loader
+            .select(SkillSelectionRequest {
+                primary: "S14".into(),
+                support: vec!["S10".into()],
+                budget_reason: None,
+                context_tokens: 1200,
+                model_calls: 1,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn loader_reports_actual_deployment_and_selected_file_digests() {
+        let loader = SkillBundleLoader::development_package();
+        let selected = selection(&loader);
+        let loaded = loader
+            .load_selected(&selected, &["resources/operating_method.md".into()])
+            .unwrap();
+
+        assert_eq!(loaded.identity.package_version, "1.2.0");
+        assert_eq!(
+            loaded.identity.source_archive_sha256,
+            CREATIVE_SKILLS_ARCHIVE_SHA256
+        );
+        assert_eq!(loaded.identity.registry_sha256.len(), 64);
+        assert_eq!(loaded.identity.selected_file_digests.len(), 4);
+        assert_eq!(loaded.loading.selected_full_text_loads, 2);
+        assert_eq!(loaded.loading.unselected_full_text_loads, 0);
+        assert_eq!(loaded.loading.unselected_resource_loads, 0);
+        assert!(loaded.identity.deployed_manifest_digest.len() == 64);
+    }
+
+    #[test]
+    fn loader_rejects_a_changed_selected_method_file() {
+        let (root, manifest_path, expected_manifest_digest) = copy_skill_package_for_test();
+        let selected_file = root
+            .path()
+            .join("creative-skills/v1.2.0")
+            .join("skills/chapter-ending-next-click-design/SKILL.md");
+        fs::write(&selected_file, "tampered method").unwrap();
+        let loader = SkillBundleLoader::for_test(
+            root.path().join("creative-skills/v1.2.0"),
+            manifest_path,
+            expected_manifest_digest,
+        );
+        let selected = selection(&loader);
+
+        assert!(loader
+            .load_selected(&selected, &[])
+            .unwrap_err()
+            .starts_with("SKILL_RESOURCE_DIGEST_MISMATCH"));
+    }
+
+    #[test]
+    fn loader_rejects_a_missing_selected_method_file() {
+        let (root, manifest_path, expected_manifest_digest) = copy_skill_package_for_test();
+        let selected_file = root
+            .path()
+            .join("creative-skills/v1.2.0/skills/chapter-ending-next-click-design/SKILL.md");
+        fs::remove_file(selected_file).unwrap();
+        let loader = SkillBundleLoader::for_test(
+            root.path().join("creative-skills/v1.2.0"),
+            manifest_path,
+            expected_manifest_digest,
+        );
+        let selected = selection(&loader);
+
+        assert!(loader
+            .load_selected(&selected, &[])
+            .unwrap_err()
+            .starts_with("SKILL_PACKAGE_FILE_NOT_FOUND"));
+    }
+
+    #[test]
+    fn loader_rejects_a_manifest_that_differs_from_the_build_binding() {
+        let (root, manifest_path, expected_manifest_digest) = copy_skill_package_for_test();
+        let mut manifest = fs::read(&manifest_path).unwrap();
+        manifest.push(b' ');
+        fs::write(&manifest_path, manifest).unwrap();
+        let loader = SkillBundleLoader::for_test(
+            root.path().join("creative-skills/v1.2.0"),
+            manifest_path,
+            expected_manifest_digest,
+        );
+
+        assert!(loader
+            .load_registry()
+            .unwrap_err()
+            .starts_with("SKILL_DEPLOYMENT_MANIFEST_DIGEST_MISMATCH"));
+    }
+
+    #[test]
+    fn loader_rejects_a_missing_deployment_manifest() {
+        let (root, manifest_path, expected_manifest_digest) = copy_skill_package_for_test();
+        fs::remove_file(&manifest_path).unwrap();
+        let loader = SkillBundleLoader::for_test(
+            root.path().join("creative-skills/v1.2.0"),
+            manifest_path,
+            expected_manifest_digest,
+        );
+
+        assert_eq!(
+            loader.load_registry().unwrap_err(),
+            "SKILL_DEPLOYMENT_MANIFEST_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_ids_and_unknown_selected_skills() {
+        let (root, manifest_path, _) = copy_skill_package_for_test();
+        let registry_path = root.path().join("creative-skills/v1.2.0/registry.json");
+        let mut registry: Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+        let skills = registry["skills"].as_array_mut().unwrap();
+        skills[1]["id"] = skills[0]["id"].clone();
+        assert_eq!(
+            parse_skill_registry(&serde_json::to_vec(&registry).unwrap()).unwrap_err(),
+            "SKILL_REGISTRY_DUPLICATE_OR_UNKNOWN_ENTRY"
+        );
+
+        let loader = SkillBundleLoader::for_test(
+            root.path().join("creative-skills/v1.2.0"),
+            manifest_path.clone(),
+            {
+                let bytes = fs::read(&manifest_path).unwrap();
+                hex::encode(Sha256::digest(bytes))
+            },
+        );
+        assert_eq!(
+            loader
+                .select(SkillSelectionRequest {
+                    primary: "UNKNOWN".into(),
+                    support: Vec::new(),
+                    budget_reason: None,
+                    context_tokens: 100,
+                    model_calls: 1,
+                })
+                .unwrap_err(),
+            "SKILL_PRIMARY_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn registry_rejects_wrong_version_and_malformed_bundle_digest() {
+        let package_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../creative-skills/v1.2.0");
+        let mut registry: Value =
+            serde_json::from_slice(&fs::read(package_root.join("registry.json")).unwrap()).unwrap();
+        registry["version"] = Value::String("1.1.0".into());
+        assert_eq!(
+            parse_skill_registry(&serde_json::to_vec(&registry).unwrap()).unwrap_err(),
+            "SKILL_REGISTRY_VERSION_OR_COUNT_INVALID"
+        );
+
+        registry["version"] = Value::String(CREATIVE_SKILLS_VERSION.into());
+        registry["skills"][0]["bundleDigest"] = Value::String("not-a-digest".into());
+        assert_eq!(
+            parse_skill_registry(&serde_json::to_vec(&registry).unwrap()).unwrap_err(),
+            "SKILL_REGISTRY_ENTRY_INVALID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loader_rejects_a_selected_resource_symlink_that_escapes_the_package() {
+        use std::os::unix::fs::symlink;
+
+        let (root, manifest_path, expected_manifest_digest) = copy_skill_package_for_test();
+        let package_root = root.path().join("creative-skills/v1.2.0");
+        let outside = root.path().join("outside-skill.md");
+        fs::write(&outside, "outside package root").unwrap();
+        let selected_method = package_root.join("skills/chapter-ending-next-click-design/SKILL.md");
+        fs::remove_file(&selected_method).unwrap();
+        symlink(&outside, &selected_method).unwrap();
+        let loader =
+            SkillBundleLoader::for_test(package_root, manifest_path, expected_manifest_digest);
+        let selected = selection(&loader);
+
+        assert_eq!(
+            loader.load_selected(&selected, &[]).unwrap_err(),
+            "SKILL_PACKAGE_PATH_DENIED"
+        );
+    }
+
+    #[test]
+    fn loader_rejects_resource_paths_that_escape_the_package_root() {
+        let loader = SkillBundleLoader::development_package();
+        let selected = selection(&loader);
+
+        assert_eq!(
+            loader
+                .load_selected_resource(&selected, "S14", "resources/../../registry.json")
+                .unwrap_err(),
+            "SKILL_RESOURCE_PATH_DENIED"
+        );
+    }
 }

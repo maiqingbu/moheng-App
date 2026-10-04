@@ -331,39 +331,79 @@ pub fn history(
     let start = offset(cursor);
     let limit = bound(limit, 40);
     let mut entries = Vec::new();
-    if kind.is_none() || kind == Some("VERSION") {
-        let mut statement = connection.prepare("SELECT receipt_id,command_id,committed_at FROM commit_receipts WHERE project_id=?1 ORDER BY committed_at DESC,receipt_id DESC LIMIT ?2 OFFSET ?3")?;
-        let rows = statement.query_map(libsql_rusqlite::params![project_id,(limit + 1) as i64,start], |row| Ok(json!({"id":row.get::<_,String>(0)?,"kind":"VERSION","title":"正式提交记录","status":"applied","createdAt":row.get::<_,String>(2)?,"summary":"一次正式项目提交已记录。","impact":"以提交回执为准。","scope":"当前作品","receipt":row.get::<_,String>(0)?})))?;
-        entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
-    }
-    if kind.is_none() || kind == Some("CHANGE_REQUEST") || kind == Some("RETCON") {
-        let mut statement = connection.prepare("SELECT change_request_id,change_type,status,summary,created_at,updated_at,impact_seed_json FROM change_requests WHERE project_id=?1 ORDER BY created_at DESC,change_request_id DESC LIMIT ?2 OFFSET ?3")?;
-        let rows = statement.query_map(libsql_rusqlite::params![project_id,(limit + 1) as i64,start], |row| {
-            let change_type: String = row.get(1)?;
-            let entry_kind = if change_type.to_uppercase().contains("RETCON") { "RETCON" } else { "CHANGE_REQUEST" };
-            let seed: String = row.get(6)?;
+    let requested_kind = kind.unwrap_or("all");
+    let mut statement = connection.prepare(
+        "WITH history_rows AS (
+            SELECT 'VERSION' AS entry_kind,receipt_id AS entry_id,committed_at AS created_at,NULL AS request_status,NULL AS summary,NULL AS impact_seed_json
+            FROM commit_receipts WHERE project_id=?1
+            UNION ALL
+            SELECT CASE WHEN upper(change_type) LIKE '%RETCON%' THEN 'RETCON' ELSE 'CHANGE_REQUEST' END,
+                change_request_id,created_at,status,summary,impact_seed_json
+            FROM change_requests WHERE project_id=?1
+        )
+        SELECT entry_kind,entry_id,created_at,request_status,summary,impact_seed_json
+        FROM history_rows
+        WHERE ?2='all' OR entry_kind=?2
+        ORDER BY created_at DESC,entry_id DESC,entry_kind DESC
+        LIMIT ?3 OFFSET ?4",
+    )?;
+    let rows = statement.query_map(
+        libsql_rusqlite::params![project_id, requested_kind, (limit + 1) as i64, start],
+        |row| {
+            let entry_kind: String = row.get(0)?;
+            let entry_id: String = row.get(1)?;
+            let created_at: String = row.get(2)?;
+            if entry_kind == "VERSION" {
+                return Ok(json!({"id":entry_id,"kind":"VERSION","title":"正式提交记录","status":"applied","createdAt":created_at,"summary":"一次正式项目提交已记录。","impact":"以提交回执为准。","scope":"当前作品","receipt":entry_id}));
+            }
+
+            let request_status: String = row.get(3)?;
+            let summary: String = row.get(4)?;
+            let seed: String = row.get(5)?;
             let seed: serde_json::Value = serde_json::from_str(&seed).unwrap_or_else(|_| json!({}));
+            let source = seed.pointer("/requestedChange/source").and_then(|value| value.as_str());
+            // The apply result is materialized in the committed ChangeRequest artifact.
+            // Read its target class instead of inferring authority mutation from status.
+            let applied_payload: Option<String> = if request_status == "APPLIED" {
+                connection.query_row(
+                    "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='ChangeRequest' AND a.artifact_status='COMMITTED' AND json_extract(p.payload_json,'$.changeRequestId')=?2 ORDER BY a.version DESC LIMIT 1",
+                    libsql_rusqlite::params![project_id, entry_id],
+                    |artifact| artifact.get(0),
+                ).optional()?
+            } else {
+                None
+            };
+            let applied_payload = applied_payload
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok());
+            let target_class = applied_payload.as_ref().and_then(|value| value.get("targetClass")).and_then(|value| value.as_str());
+            let authority_type = applied_payload.as_ref().and_then(|value| value.get("authorityType")).and_then(|value| value.as_str());
             let scope = seed.pointer("/preflight/scopeClass").and_then(|value| value.as_str()).unwrap_or("LOCAL");
             let impact = match scope { "GLOBAL" => "预计影响全局内容。", "WIDE" => "预计影响较多关联内容。", _ => "预计影响当前相关内容。" };
-            let status = match row.get::<_,String>(2)?.as_str() { "APPLIED" => "applied", "APPROVED" => "approved", "IMPACT_READY" | "PENDING_APPROVAL" => "impact_ready", "REJECTED" => "rejected", _ => "draft" };
-            Ok(json!({"id":row.get::<_,String>(0)?,"kind":entry_kind,"title":if entry_kind == "RETCON" {"事实修订计划"} else {"作品修改请求"},"status":status,"createdAt":row.get::<_,String>(4)?,"summary":row.get::<_,String>(3)?,"impact":impact,"scope":match scope { "GLOBAL" => "全局", "WIDE" => "较广", _ => "局部" }}))
-        })?;
-        entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
-    }
-    entries.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
+            let status = match request_status.as_str() { "APPLIED" => "applied", "APPROVED" => "approved", "IMPACT_READY" | "PENDING_APPROVAL" => "impact_ready", "REJECTED" => "rejected", _ => "draft" };
+            Ok(json!({"id":entry_id,"kind":entry_kind,"source":source,"targetClass":target_class,"authorityType":authority_type,"title":if entry_kind == "RETCON" {"事实修订计划"} else {"作品修改请求"},"status":status,"createdAt":created_at,"summary":summary,"impact":impact,"scope":match scope { "GLOBAL" => "全局", "WIDE" => "较广", _ => "局部" }}))
+        },
+    )?;
+    entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
     let versions = connection.query_row(
         "SELECT COUNT(*) FROM commit_receipts WHERE project_id=?1",
         [project_id],
         |row| row.get::<_, i64>(0),
     )?;
-    let changes = connection.query_row("SELECT COUNT(*) FROM change_requests WHERE project_id=?1 AND change_type NOT LIKE '%RETCON%'", [project_id], |row| row.get::<_,i64>(0))?;
+    let changes = connection.query_row("SELECT COUNT(*) FROM change_requests WHERE project_id=?1 AND upper(change_type) NOT LIKE '%RETCON%'", [project_id], |row| row.get::<_,i64>(0))?;
     let retcons = connection.query_row(
-        "SELECT COUNT(*) FROM change_requests WHERE project_id=?1 AND change_type LIKE '%RETCON%'",
+        "SELECT COUNT(*) FROM change_requests WHERE project_id=?1 AND upper(change_type) LIKE '%RETCON%'",
         [project_id],
         |row| row.get::<_, i64>(0),
     )?;
     let pending = connection.query_row("SELECT COUNT(*) FROM change_requests WHERE project_id=?1 AND status IN ('DRAFT','IMPACT_READY','PENDING_APPROVAL')", [project_id], |row| row.get::<_,i64>(0))?;
+    let total = match requested_kind {
+        "VERSION" => versions,
+        "CHANGE_REQUEST" => changes,
+        "RETCON" => retcons,
+        "all" => versions + changes + retcons,
+        _ => 0,
+    };
     Ok(
-        json!({"entries":page(entries,versions + changes + retcons,start,limit),"stats":{"versions":versions,"changes":changes,"retcons":retcons,"pending":pending}}),
+        json!({"entries":page(entries,total,start,limit),"stats":{"versions":versions,"changes":changes,"retcons":retcons,"pending":pending}}),
     )
 }

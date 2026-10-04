@@ -1,8 +1,11 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_book_health_impl, KernelState,
+    execute_command_impl, query_book_health_factor_sources_impl, query_book_health_impl,
+    KernelState,
 };
+use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::health::HealthRepository;
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use ai_novel_production_system_core::volume_lifecycle::VolumeLifecycleOwner;
 use libsql_rusqlite::Connection;
@@ -38,17 +41,44 @@ fn create_project(state: &KernelState) -> String {
 }
 
 fn insert_formal_route(connection: &Connection, project_id: &str) {
+    insert_formal_route_with_task_status(connection, project_id, "BLOCKED");
+}
+
+fn insert_formal_route_with_task_status(
+    connection: &Connection,
+    project_id: &str,
+    required_status: &str,
+) {
     let book_id = "book:b13:r2";
     let volume_id = "volume:b13:r2";
     let route_id = "plan:b13:r2";
+    let intent_id = "intent:b13:r2";
+    let required_task_id = "task:b13:r2:required";
+    let is_blocked = required_status == "BLOCKED";
+    let is_satisfied = required_status == "SATISFIED";
     let scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
+    let intent = json!({
+        "payloadSchema":"volume-intent.r1",
+        "volumeFunction":"正式 R2 任务真值验证",
+        "entryConditions":[],
+        "mustAchieve":[],
+        "mustNotBreak":[],
+        "requiredExitConditions":[],
+        "futureReservationRefs":[],
+        "crossVolumeResponsibilityRefs":[],
+        "targetChapterRange":{"min":1,"preferred":3,"max":3},
+        "targetWordRange":{"preferred":3000}
+    });
+    let intent_hash = sha256_canonical(&intent).unwrap();
     let route = json!({
         "payloadSchema":"volume-plan.r1",
+        "volumeIntentRef":{"artifactId":intent_id,"version":1,"payloadHash":intent_hash},
         "routeVersion":1,
         "tasks":[
-            {"taskId":"task:b13:r2:required","class":"REQUIRED","objective":"正式必需任务"},
-            {"taskId":"task:b13:r2:optional","class":"OPTIONAL","objective":"正式可选任务"}
+            {"taskId":required_task_id,"class":"REQUIRED","objective":"正式必需任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":required_task_id},"estimatedChapterCost":{"preferred":1}},
+            {"taskId":"task:b13:r2:optional","class":"OPTIONAL","objective":"正式可选任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:b13:r2:optional"},"estimatedChapterCost":{"preferred":1}}
         ],
+        "routeInvariants":[],
         "requiredExitConditions":[],
         "capacityBudget":{"minChapters":1,"preferredChapters":3,"maxChapters":3}
     });
@@ -63,6 +93,30 @@ fn insert_formal_route(connection: &Connection, project_id: &str) {
         .execute(
             "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'正式规划卷','PRODUCING',1,3,3000,?4,?4)",
             libsql_rusqlite::params![volume_id, project_id, book_id, NOW],
+        )
+        .unwrap();
+    for chapter_no in 1..=3_i64 {
+        connection.execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',1000,?6,?6)",
+            libsql_rusqlite::params![format!("chapter:b13:r2:{chapter_no}"),project_id,volume_id,chapter_no,format!("R2 已提交章节 {chapter_no}"),NOW],
+        ).unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'VolumeIntent','VOLUME',?3,1,'b13.r2.fixture','COMMITTED',?4,'{}',?5,?5)",
+            libsql_rusqlite::params![intent_id, project_id, volume_id, intent_hash, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![intent_id, intent.to_string(), intent_hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumeIntent','VOLUME',?2,?3,1,?4)",
+            libsql_rusqlite::params![project_id, volume_id, intent_id, intent_hash],
         )
         .unwrap();
     connection
@@ -95,43 +149,22 @@ fn insert_formal_route(connection: &Connection, project_id: &str) {
             libsql_rusqlite::params![project_id, volume_id, route_id, NOW],
         )
         .unwrap();
-    let required_state = json!({"taskId":"task:b13:r2:required","status":"BLOCKED"});
+    let required_state = json!({"taskId":required_task_id,"status":required_status});
     connection
         .execute(
             "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:r2:required',?1,'volume.task.progress',?2,'{}',?3,?3)",
             libsql_rusqlite::params![project_id, required_state.to_string(), NOW],
         )
         .unwrap();
-    let projection = json!({
-        "projectId":project_id,
-        "volumeId":volume_id,
-        "generatedRevision":0,
-        "routeRef":{"artifactId":route_id,"version":1,"payloadHash":route_hash},
-        "activeTaskIds":["task:b13:r2:required"],
-        "blockedTaskIds":["task:b13:r2:required"],
-        "requiredTaskIds":["task:b13:r2:required"],
-        "remainingTaskIds":["task:b13:r2:required"],
-        "requiredTasksRemaining":1,
-        "blockedRequiredTasks":1,
-        "remainingChapterCapacity":0,
-        "planningPressure":{"remainingChapterCapacity":0,"requiredTasksRemaining":1},
-        "taskReality":[{"taskId":"task:b13:r2:required","status":"BLOCKED"}],
-        "stateDigest":"formal-state",
-        "projectionDigest":"formal-projection"
-    });
-    connection
-        .execute(
-            "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,?2,0,?3,?4,?5,?6)",
-            libsql_rusqlite::params![
-                project_id,
-                volume_id,
-                "d".repeat(64),
-                "e".repeat(64),
-                projection.to_string(),
-                NOW
-            ],
-        )
-        .unwrap();
+    let projection =
+        VolumeLifecycleOwner::rebuild_planning_state(connection, project_id, volume_id, NOW)
+            .unwrap();
+    assert_eq!(projection["remainingChapterCapacity"], 0);
+    assert_eq!(
+        projection["requiredTasksRemaining"],
+        if is_satisfied { 0 } else { 1 }
+    );
+    assert_eq!(projection["blockedRequiredTasks"], i64::from(is_blocked));
     // Compatibility fields are deliberately contradictory. They must not be
     // used as H03/H04 truth once formal B07/B09 sources exist.
     connection
@@ -148,6 +181,71 @@ fn insert_formal_route(connection: &Connection, project_id: &str) {
             ],
         )
         .unwrap();
+}
+
+fn insert_second_route_scope_for_task(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+    volume_no: i64,
+    task_id: &str,
+    task_class: &str,
+) {
+    let book_id = "book:b13:r2";
+    let intent_id = format!("intent:{volume_id}");
+    let route_id = format!("plan:{volume_id}");
+    let intent = json!({
+        "payloadSchema":"volume-intent.r1",
+        "volumeFunction":format!("跨卷任务 {volume_no}"),
+        "entryConditions":[],"mustAchieve":[],"mustNotBreak":[],
+        "requiredExitConditions":[],"futureReservationRefs":[],
+        "crossVolumeResponsibilityRefs":[],
+        "targetChapterRange":{"min":1,"preferred":3,"max":3},
+        "targetWordRange":{"preferred":3000}
+    });
+    let intent_hash = sha256_canonical(&intent).unwrap();
+    let route = json!({
+        "payloadSchema":"volume-plan.r1",
+        "volumeIntentRef":{"artifactId":intent_id,"version":1,"payloadHash":intent_hash},
+        "routeVersion":1,
+        "tasks":[{"taskId":task_id,"class":task_class,"objective":"跨 scope 任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":task_id},"estimatedChapterCost":{"preferred":1}}],
+        "routeInvariants":[],"requiredExitConditions":[],
+        "capacityBudget":{"minChapters":1,"preferredChapters":3,"maxChapters":3}
+    });
+    let route_hash = sha256_canonical(&route).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'PRODUCING',?6,?7,3000,?8,?8)",
+        libsql_rusqlite::params![volume_id,project_id,book_id,volume_no,format!("R2 scope {volume_no}"),(volume_no-1)*3+1,volume_no*3,NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'VolumeIntent','VOLUME',?3,1,'b13.r5.fixture','COMMITTED',?4,'{}',?5,?5)",
+        libsql_rusqlite::params![intent_id,project_id,volume_id,intent_hash,NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+        libsql_rusqlite::params![intent_id,intent.to_string(),intent_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumeIntent','VOLUME',?2,?3,1,?4)",
+        libsql_rusqlite::params![project_id,volume_id,intent_id,intent_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'VolumePlan','VOLUME',?3,1,'b13.r5.fixture','COMMITTED',?4,'{}',?5,?5)",
+        libsql_rusqlite::params![route_id,project_id,volume_id,route_hash,NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+        libsql_rusqlite::params![route_id,route.to_string(),route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumePlan','VOLUME',?2,?3,1,?4)",
+        libsql_rusqlite::params![project_id,volume_id,route_id,route_hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,?2,?3,1,'APPROVED',3,?4)",
+        libsql_rusqlite::params![project_id,volume_id,route_id,NOW],
+    ).unwrap();
+    VolumeLifecycleOwner::rebuild_planning_state(connection, project_id, volume_id, NOW).unwrap();
 }
 
 fn insert_committed_artifact(
@@ -194,6 +292,63 @@ fn insert_committed_artifact(
         )
         .unwrap();
     payload_hash
+}
+
+fn commit_task_progress(
+    state: &KernelState,
+    project_id: &str,
+    task_id: &str,
+    status: &str,
+    command_id: &str,
+) -> i64 {
+    commit_task_state_value(
+        state,
+        project_id,
+        task_id,
+        json!({"taskId":task_id,"status":status,"evidenceRefs":[],"remainingConditions":[]}),
+        command_id,
+    )
+}
+
+fn commit_task_state_value(
+    state: &KernelState,
+    project_id: &str,
+    task_id: &str,
+    value: Value,
+    command_id: &str,
+) -> i64 {
+    let connection = state
+        .manager
+        .open(project_id, "B-R2-03 R5 task truth", NOW)
+        .unwrap();
+    let revision = connection
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    let bundle: ai_novel_production_system_core::generated::types::CommitBundle =
+        serde_json::from_value(json!({
+            "commitId":format!("commit:{command_id}"),
+            "projectId":project_id,
+            "commandId":command_id,
+            "idempotencyKey":format!("{command_id}:key"),
+            "expectedProjectRevision":revision,
+            "contractVersion":"m0a.v1",
+            "createdAt":NOW,
+            "artifacts":[],
+            "stateDelta":[{
+                "stateId":task_id,
+                "stateType":"volume.task.progress",
+                "valueJson":value,
+                "payloadJson":{"source":"R5 formal state transition"}
+            }]
+        }))
+        .unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
+    drop(connection);
+    revision + 1
 }
 
 #[test]
@@ -533,35 +688,11 @@ fn b13_r2_formal_capacity_and_stale_boundaries_use_owner_sources() {
         .unwrap();
     connection
         .execute(
-            "UPDATE volume_planning_state_projection SET state_digest=?1, payload_json=?2 WHERE project_id=?3 AND volume_id='volume:b13:r2'",
-            libsql_rusqlite::params![
-                "d".repeat(64),
-                json!({"remainingChapterCapacity":8,"requiredTasksRemaining":1,"planningPressure":{"remainingChapterCapacity":8,"requiredTasksRemaining":1}}).to_string(),
-                project_id
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let capacity_attention = query_book_health_impl(
-        &state,
-        json!({"projectId":project_id,"scope":"health","pageSize":30}),
-    )
-    .unwrap();
-    assert_eq!(
-        factor(&capacity_attention, "ROUTE_DRIFT")["severity"],
-        "attention"
-    );
-
-    let connection = state
-        .manager
-        .open(&project_id, "B13 R2 boundaries", NOW)
-        .unwrap();
-    connection
-        .execute(
             "INSERT INTO stale_queue(stale_id,project_id,target_ref,stale_reason,revalidate_class,processed,created_at,updated_at) VALUES ('stale:b13:r2',?1,'plan:b13:r2','formal B06 stale test','REPLAN',0,?2,?2)",
             libsql_rusqlite::params![project_id, NOW],
         )
         .unwrap();
+    HealthRepository::flush_dirty(&connection, &project_id, NOW).unwrap();
     drop(connection);
     let stale = query_book_health_impl(
         &state,
@@ -569,6 +700,11 @@ fn b13_r2_formal_capacity_and_stale_boundaries_use_owner_sources() {
     )
     .unwrap();
     assert_eq!(factor(&stale, "ROUTE_DRIFT")["severity"], "risk");
+    assert!(stale["issues"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["title"] == "规划路线需要重新核对"));
 
     let connection = state
         .manager
@@ -580,26 +716,20 @@ fn b13_r2_formal_capacity_and_stale_boundaries_use_owner_sources() {
             [&project_id],
         )
         .unwrap();
-    connection
-        .execute(
-            "UPDATE project_meta SET revision=revision+1 WHERE project_id=?1",
-            [&project_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE volume_planning_state_projection SET payload_json=?1 WHERE project_id=?2 AND volume_id='volume:b13:r2'",
-            libsql_rusqlite::params![json!({"remainingChapterCapacity":10,"requiredTasksRemaining":0,"planningPressure":{"remainingChapterCapacity":10,"requiredTasksRemaining":0}}).to_string(), project_id],
-        )
-        .unwrap();
+    HealthRepository::flush_dirty(&connection, &project_id, NOW).unwrap();
     drop(connection);
     let revision_only = query_book_health_impl(
         &state,
         json!({"projectId":project_id,"scope":"health","pageSize":30}),
     )
     .unwrap();
-    assert_eq!(factor(&revision_only, "ROUTE_DRIFT")["severity"], "healthy");
-    println!("B13_R2_FORMAL_BOUNDARY_RESULT capacity0=PASS capacity8=PASS staleQueue=PASS revisionOnlyDigestStable=PASS status=PASS");
+    assert_eq!(factor(&revision_only, "ROUTE_DRIFT")["severity"], "risk");
+    assert!(!revision_only["issues"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["title"] == "规划路线需要重新核对"));
+    println!("B13_R2_FORMAL_BOUNDARY_RESULT capacityExhausted=PASS staleQueue=PASS staleQueueRemoval=PASS status=PASS");
 }
 
 #[test]
@@ -611,23 +741,22 @@ fn b13_r2_formal_task_classes_distinguish_optional_blocked_and_satisfied() {
         .open(&project_id, "B13 R2 task classes", NOW)
         .unwrap();
     insert_formal_route(&connection, &project_id);
-    connection
-        .execute(
-            "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:b13:r2:optional',?1,'volume.task.progress',?2,'{}',?3,?3)",
-            libsql_rusqlite::params![
-                project_id,
-                json!({"taskId":"task:b13:r2:optional","status":"BLOCKED"}).to_string(),
-                NOW
-            ],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE state_deltas SET value_json=?1 WHERE project_id=?2 AND state_id='task:b13:r2:required'",
-            libsql_rusqlite::params![json!({"taskId":"task:b13:r2:required","status":"SATISFIED"}).to_string(), project_id],
-        )
-        .unwrap();
     drop(connection);
+
+    commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:required",
+        "SATISFIED",
+        "b13-r2-formal-required-satisfied",
+    );
+    commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:optional",
+        "BLOCKED",
+        "b13-r2-formal-optional-blocked",
+    );
 
     let result = query_book_health_impl(
         &state,
@@ -643,18 +772,16 @@ fn b13_r2_formal_task_classes_distinguish_optional_blocked_and_satisfied() {
     assert_eq!(task_factor["severity"], "attention");
     assert_eq!(result["counters"]["blockedRequiredTasks"], 0);
     assert_eq!(result["counters"]["blockedOptionalTasks"], 1);
+    assert_eq!(task_factor["sourceRefsTotal"], 1);
+    assert_eq!(task_factor["sourceRefs"][0]["ref"], "task:b13:r2:optional");
 
-    let connection = state
-        .manager
-        .open(&project_id, "B13 R2 task classes", NOW)
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE state_deltas SET value_json=?1 WHERE project_id=?2 AND state_id='task:b13:r2:optional'",
-            libsql_rusqlite::params![json!({"taskId":"task:b13:r2:optional","status":"SATISFIED"}).to_string(), project_id],
-        )
-        .unwrap();
-    drop(connection);
+    commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:optional",
+        "SATISFIED",
+        "b13-r2-formal-optional-satisfied",
+    );
     let satisfied = query_book_health_impl(
         &state,
         json!({"projectId":project_id,"scope":"health","pageSize":30}),
@@ -662,7 +789,392 @@ fn b13_r2_formal_task_classes_distinguish_optional_blocked_and_satisfied() {
     .unwrap();
     assert_eq!(satisfied["counters"]["blockedRequiredTasks"], 0);
     assert_eq!(satisfied["counters"]["blockedOptionalTasks"], 0);
+    let satisfied_factor = satisfied["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["factorCode"] == "TASK_BLOCKAGE")
+        .unwrap();
+    assert_eq!(satisfied_factor["severity"], "healthy");
+    assert_eq!(satisfied_factor["sourceRefsTotal"], 0);
     println!("B13_R2_TASK_CLASS_RESULT requiredBlocked=PASS optionalBlocked=PASS satisfiedNotBlocked=PASS status=PASS");
+}
+
+#[test]
+fn b_r2_03_r5_formal_task_state_is_the_single_health_truth_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(EntryFixtureGateway),
+    );
+    let project_id = create_project(&state);
+    let connection = state
+        .manager
+        .open(&project_id, "B-R2-03 R5 task truth", NOW)
+        .unwrap();
+    insert_formal_route_with_task_status(&connection, &project_id, "NOT_STARTED");
+    drop(connection);
+
+    let health_at = |state: &KernelState| {
+        query_book_health_impl(
+            state,
+            json!({"projectId":project_id,"scope":"health","pageSize":50}),
+        )
+        .unwrap()
+    };
+    let task_factor = |health: &Value| {
+        health["factors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|factor| factor["factorCode"] == "TASK_BLOCKAGE")
+            .cloned()
+            .unwrap()
+    };
+    let source_page = |state: &KernelState| {
+        query_book_health_factor_sources_impl(
+            state,
+            json!({"projectId":project_id,"factorCode":"TASK_BLOCKAGE","pageSize":50}),
+        )
+        .unwrap()
+    };
+
+    let not_started = health_at(&state);
+    assert_eq!(not_started["counters"]["blockedRequiredTasks"], 0);
+    assert_eq!(task_factor(&not_started)["severity"], "healthy");
+    assert_eq!(source_page(&state)["total"], 0);
+
+    let revision = commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:required",
+        "BLOCKED",
+        "b-r2-03-r5-task-blocked",
+    );
+    let blocked = health_at(&state);
+    assert_eq!(blocked["projectRevision"], revision);
+    assert_eq!(blocked["counters"]["blockedRequiredTasks"], 1);
+    assert_eq!(blocked["counters"]["blockedOptionalTasks"], 0);
+    assert_eq!(task_factor(&blocked)["status"], "EVALUATED");
+    assert_eq!(task_factor(&blocked)["severity"], "risk");
+    assert!(blocked["issues"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| issue["issueId"] == "health:task:task:b13:r2:required"));
+    assert_eq!(
+        source_page(&state)["items"][0]["ref"],
+        "task:b13:r2:required"
+    );
+    assert_eq!(source_page(&state)["total"], 1);
+
+    // Let the formal B09 owner persist its normal projection, then change only
+    // the formal state delta. Health must prefer that state over B09's now-stale
+    // blockedTaskIds and blocked counters.
+    let connection = state
+        .manager
+        .open(&project_id, "B-R2-03 R5 task truth", NOW)
+        .unwrap();
+    let planning = VolumeLifecycleOwner::rebuild_planning_state(
+        &connection,
+        &project_id,
+        "volume:b13:r2",
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(planning["blockedTaskIds"][0], "task:b13:r2:required");
+    drop(connection);
+
+    let revision = commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:required",
+        "SATISFIED",
+        "b-r2-03-r5-task-satisfied",
+    );
+    let satisfied = health_at(&state);
+    assert_eq!(satisfied["projectRevision"], revision);
+    assert_eq!(satisfied["counters"]["blockedRequiredTasks"], 0);
+    assert_eq!(task_factor(&satisfied)["severity"], "healthy");
+    assert_eq!(source_page(&state)["total"], 0);
+    let stale_planning_blocked: String = state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            connection.query_row(
+                "SELECT json_extract(payload_json,'$.blockedTaskIds[0]') FROM volume_planning_state_projection WHERE project_id=?1 AND volume_id='volume:b13:r2'",
+                [project_id.as_str()],
+                |row| row.get(0),
+            ).map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(stale_planning_blocked, "task:b13:r2:required");
+
+    let revision = commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:required",
+        "INVALIDATED",
+        "b-r2-03-r5-task-invalidated",
+    );
+    let invalidated = health_at(&state);
+    assert_eq!(invalidated["projectRevision"], revision);
+    assert_eq!(invalidated["counters"]["blockedRequiredTasks"], 0);
+    assert_eq!(task_factor(&invalidated)["severity"], "healthy");
+    assert_eq!(source_page(&state)["total"], 0);
+
+    let revision = commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:optional",
+        "BLOCKED",
+        "b-r2-03-r5-optional-blocked",
+    );
+    let optional_blocked = health_at(&state);
+    assert_eq!(optional_blocked["projectRevision"], revision);
+    assert_eq!(optional_blocked["counters"]["blockedRequiredTasks"], 0);
+    assert_eq!(optional_blocked["counters"]["blockedOptionalTasks"], 1);
+    assert_eq!(task_factor(&optional_blocked)["severity"], "attention");
+    assert_eq!(
+        source_page(&state)["items"][0]["ref"],
+        "task:b13:r2:optional"
+    );
+
+    let revision = commit_task_progress(
+        &state,
+        &project_id,
+        "task:b13:r2:optional",
+        "INVALIDATED",
+        "b-r2-03-r5-optional-invalidated",
+    );
+    let optional_invalidated = health_at(&state);
+    assert_eq!(optional_invalidated["projectRevision"], revision);
+    assert_eq!(optional_invalidated["counters"]["blockedOptionalTasks"], 0);
+    assert_eq!(task_factor(&optional_invalidated)["severity"], "healthy");
+    assert_eq!(source_page(&state)["total"], 0);
+
+    let database = AppPaths::new(temp.path())
+        .project_dir(&project_id)
+        .unwrap()
+        .join("project.db");
+    let connection =
+        ai_novel_production_system_core::project_db::connection::open_connection(&database, false)
+            .unwrap();
+    // Fault-inject a malformed persisted Task Reality row; ordinary task
+    // transitions above and the repair below use formal CommitBundle owners.
+    connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE project_id=?2 AND state_id='task:b13:r2:required' AND state_type='volume.task.progress'",
+            libsql_rusqlite::params![json!({"taskId":"task:b13:r2:required","evidenceRefs":[],"remainingConditions":[]}).to_string(),project_id],
+        )
+        .unwrap();
+    let b09_failure = VolumeLifecycleOwner::rebuild_planning_state(
+        &connection,
+        &project_id,
+        "volume:b13:r2",
+        NOW,
+    )
+    .unwrap_err();
+    assert!(b09_failure.starts_with("PLANNING_TASK_STATE_STATUS_UNAVAILABLE"));
+    let missing_status = health_at(&state);
+    assert_eq!(task_factor(&missing_status)["status"], "SOURCE_UNAVAILABLE");
+    assert_eq!(source_page(&state)["total"], 0);
+    let dirty_count: i64 = state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM health_projection_dirty WHERE project_id=?1",
+                    [project_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(dirty_count, 1);
+
+    let revision: i64 = connection
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recovered_bundle: ai_novel_production_system_core::generated::types::CommitBundle =
+        serde_json::from_value(json!({
+            "commitId":"commit:b-r2-03-r5-task-status-recovered",
+            "projectId":project_id,
+            "commandId":"b-r2-03-r5-task-status-recovered",
+            "idempotencyKey":"b-r2-03-r5-task-status-recovered:key",
+            "expectedProjectRevision":revision,
+            "contractVersion":"m0a.v1",
+            "createdAt":NOW,
+            "artifacts":[],
+            "stateDelta":[{"stateId":"task:b13:r2:required","stateType":"volume.task.progress","valueJson":{"taskId":"task:b13:r2:required","status":"NOT_STARTED","evidenceRefs":[],"remainingConditions":[]}}]
+        }))
+        .unwrap();
+    CommitService::commit(&connection, &recovered_bundle, NOW).unwrap();
+    VolumeLifecycleOwner::rebuild_planning_state(&connection, &project_id, "volume:b13:r2", NOW)
+        .unwrap();
+    drop(connection);
+    let recovered = health_at(&state);
+    assert_eq!(task_factor(&recovered)["status"], "EVALUATED");
+    assert_eq!(task_factor(&recovered)["severity"], "healthy");
+    println!("B_R2_03_R5_TASK_TRUTH_RESULT formalCommitBundleOnly=true blocked=PASS satisfied=PASS invalidated=PASS optional=PASS stalePlanningProjectionIgnored=true noManualHealthWrites=true status=PASS");
+}
+
+#[test]
+fn b_r2_03_r5_cross_scope_task_counts_are_deduplicated_and_conflicts_fail_closed() {
+    for (suffix, second_class, expected_status) in [
+        ("same", "REQUIRED", "EVALUATED"),
+        ("conflict", "OPTIONAL", "SOURCE_UNAVAILABLE"),
+    ] {
+        let state = state();
+        let project_id = create_project(&state);
+        let connection = state
+            .manager
+            .open(&project_id, "B-R2-03 R5 cross-scope", NOW)
+            .unwrap();
+        insert_formal_route_with_task_status(&connection, &project_id, "NOT_STARTED");
+        insert_second_route_scope_for_task(
+            &connection,
+            &project_id,
+            &format!("volume:b13:r2:second:{suffix}"),
+            2,
+            "task:b13:r2:required",
+            second_class,
+        );
+        drop(connection);
+
+        commit_task_progress(
+            &state,
+            &project_id,
+            "task:b13:r2:required",
+            "BLOCKED",
+            &format!("b-r2-03-r5-cross-scope-{suffix}"),
+        );
+        let health = query_book_health_impl(
+            &state,
+            json!({"projectId":project_id,"scope":"health","pageSize":50}),
+        )
+        .unwrap();
+        let factor = health["factors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|factor| factor["factorCode"] == "TASK_BLOCKAGE")
+            .unwrap();
+        assert_eq!(factor["status"], expected_status);
+        assert_eq!(health["counters"]["blockedRequiredTasks"], 1);
+        assert_eq!(
+            health["issues"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|issue| issue["issueId"] == "health:task:task:b13:r2:required")
+                .count(),
+            1
+        );
+        let sources = query_book_health_factor_sources_impl(
+            &state,
+            json!({"projectId":project_id,"factorCode":"TASK_BLOCKAGE","pageSize":50}),
+        )
+        .unwrap();
+        assert_eq!(sources["total"], 1);
+        assert_eq!(sources["items"].as_array().unwrap().len(), 1);
+    }
+    println!("B_R2_03_R5_CROSS_SCOPE_RESULT sameClassDedup=PASS classConflictFailClosed=PASS countersIssuesSourcesAligned=true status=PASS");
+}
+
+#[test]
+fn b_r2_03_r5_route_capacity_attention_comes_from_b09_owner_rebuild() {
+    let state = state();
+    let project_id = create_project(&state);
+    let connection = state
+        .manager
+        .open(&project_id, "B-R2-03 R5 capacity attention", NOW)
+        .unwrap();
+    let book_id = "book:b-r2-03:r5-capacity";
+    let volume_id = "volume:b-r2-03:r5-capacity";
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'R5 容量 attention','ACTIVE',?3,?3)",
+        libsql_rusqlite::params![book_id,project_id,NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'十章容量卷','PRODUCING',1,10,10000,?4,?4)",
+        libsql_rusqlite::params![volume_id,project_id,book_id,NOW],
+    ).unwrap();
+    for chapter_no in 1..=2_i64 {
+        connection.execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',1000,?6,?6)",
+            libsql_rusqlite::params![format!("chapter:r5:capacity:{chapter_no}"),project_id,volume_id,chapter_no,format!("R5 章节 {chapter_no}"),NOW],
+        ).unwrap();
+    }
+    let intent_id = "intent:r5:capacity";
+    let intent = json!({
+        "payloadSchema":"volume-intent.r1","volumeFunction":"保持十章容量中的关键任务安排",
+        "entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],
+        "futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],
+        "targetChapterRange":{"min":1,"preferred":10,"max":10},"targetWordRange":{"preferred":10000}
+    });
+    let intent_hash = insert_committed_artifact(
+        &connection,
+        &project_id,
+        intent_id,
+        "VolumeIntent",
+        "VOLUME",
+        volume_id,
+        &intent,
+    );
+    let intent_ref = json!({"artifactId":intent_id,"version":1,"payloadHash":intent_hash});
+    let route_id = "plan:r5:capacity";
+    let route = json!({
+        "payloadSchema":"volume-plan.r1","volumeIntentRef":intent_ref,"routeVersion":1,
+        "tasks":[{"taskId":"task:r5:capacity:required","class":"REQUIRED","objective":"完成关键任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:r5:capacity:required"},"estimatedChapterCost":{"preferred":1}}],
+        "routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":10,"maxChapters":10}
+    });
+    insert_committed_artifact(
+        &connection,
+        &project_id,
+        route_id,
+        "VolumePlan",
+        "VOLUME",
+        volume_id,
+        &route,
+    );
+    connection.execute(
+        "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,?2,?3,1,'APPROVED',10,?4)",
+        libsql_rusqlite::params![project_id,volume_id,route_id,NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,payload_json,created_at,updated_at) VALUES ('task:r5:capacity:required',?1,'volume.task.progress',?2,'{}',?3,?3)",
+        libsql_rusqlite::params![project_id,json!({"taskId":"task:r5:capacity:required","status":"NOT_STARTED"}).to_string(),NOW],
+    ).unwrap();
+    let projection =
+        VolumeLifecycleOwner::rebuild_planning_state(&connection, &project_id, volume_id, NOW)
+            .unwrap();
+    assert_eq!(projection["remainingChapterCapacity"], 8);
+    assert_eq!(projection["requiredTasksRemaining"], 1);
+    drop(connection);
+
+    let health = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":50}),
+    )
+    .unwrap();
+    let route_factor = health["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "ROUTE_DRIFT")
+        .unwrap();
+    assert_eq!(route_factor["status"], "EVALUATED");
+    assert_eq!(route_factor["severity"], "attention");
+    assert_eq!(health["counters"]["blockedRequiredTasks"], 0);
+    assert_eq!(
+        health["provenance"]["sourceRevision"],
+        health["projectRevision"]
+    );
+    println!("B_R2_03_R5_CAPACITY_OWNER_RESULT remainingCapacity=8 requiredRemaining=1 routeAttention=PASS b09OwnerRebuild=PASS status=PASS");
 }
 
 #[test]

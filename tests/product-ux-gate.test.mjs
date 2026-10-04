@@ -75,6 +75,184 @@ test('Product UX gate exposes the R1-R3 Canon surface gate independently', () =>
   assert.equal(result.checks.canon_user_surface, 'PASS')
 })
 
+test('Product UX gate exposes Reader capability truth independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.reader_capability_truth, 'PASS')
+  assert.equal(result.readerCapabilityTruth.status, 'PASS')
+})
+
+test('Product UX gate fails closed when Reader invokes an unsupported capability', () => {
+  const source = read('src/ui/pages/ManuscriptReader.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/ManuscriptReader.vue'
+      ? source.replace('buildReaderRevisionCommands', "'chapter_revision_request'")
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails closed when Export appears available without backend support', () => {
+  const source = read('src/ui/pages/ManuscriptReader.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/ManuscriptReader.vue'
+      ? source.replace('const capability = await store.loadExportCapability(projectId)', 'const capability = { available:true, reason:null, supportedFormats:[\'TXT\'], currentFinalChapterCount:1 }')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails when Reader drops captured project identity from export requests', () => {
+  const source = read('src/ui/pages/ManuscriptReader.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/ManuscriptReader.vue'
+      ? source.replace("store.createExport(requestId, 'TXT', projectId)", "store.createExport(requestId, 'TXT')")
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails closed when Reader proposals regain the generic apply action', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('v-if="!readerProposalOnly" class="btn primary small"', 'class="btn primary small"')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails closed when Reader proposal history gets a generic applied label', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('historyEntryStatusLabel(entry)', 'historyStatusLabel(entry.status)')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails closed when History drops backend Reader provenance', () => {
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src-tauri/src/repositories/ui_projection.rs'
+      ? ''
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate fails closed when History all filter excludes all change rows', () => {
+  const source = read('src-tauri/src/repositories/ui_projection.rs')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src-tauri/src/repositories/ui_projection.rs'
+      ? source.replace("WHERE ?2='all' OR entry_kind=?2", 'WHERE entry_kind=?2')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.reader_capability_truth, 'FAIL')
+})
+
+test('Product UX gate exposes cross-type History pagination integrity independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.history_pagination_integrity, 'PASS')
+  assert.equal(result.historyPaginationIntegrity.status, 'PASS')
+})
+
+test('Product UX gate fails when History drops its deterministic cross-type ordering', () => {
+  const source = read('src-tauri/src/repositories/ui_projection.rs')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src-tauri/src/repositories/ui_projection.rs'
+      ? source.replace('ORDER BY created_at DESC,entry_id DESC,entry_kind DESC', 'ORDER BY created_at DESC')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_pagination_integrity, 'FAIL')
+})
+
+test('Product UX gate exposes History filter cache binding independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.history_filter_state_integrity, 'PASS')
+  assert.equal(result.historyFilterStateIntegrity.status, 'PASS')
+})
+
+test('Product UX gate fails when History can reuse a page from another filter', () => {
+  const source = read('src/ui/stores/projectStore.ts')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/stores/projectStore.ts'
+      ? source.replace('historyKind.value === kind && !force && cursor === null', 'historyKind.value !== kind && !force && cursor === null')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_filter_state_integrity, 'FAIL')
+})
+
+test('Product UX gate exposes History filter failure recovery independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.history_filter_async_recovery, 'PASS')
+  assert.equal(result.historyFilterAsyncRecovery.status, 'PASS')
+})
+
+test('Product UX gate fails when History removes the filter retry path', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('@click="retryHistoryFilter"', '')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_filter_async_recovery, 'FAIL')
+})
+
+test('Product UX gate fails when History exposes old rows during filter loading', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('v-if="history && !historyFilterLoading"', 'v-if="history"')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_filter_async_recovery, 'FAIL')
+})
+
+test('Product UX gate exposes History cold-start recovery independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.history_filter_cold_recovery, 'PASS')
+  assert.equal(result.historyFilterColdRecovery.status, 'PASS')
+})
+
+test('Product UX gate fails when History hides errors before any projection exists', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('v-if="history || historyFilterLoading || historyFilterError"', 'v-if="history"')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_filter_cold_recovery, 'FAIL')
+})
+
+test('Product UX gate exposes cold-start error copy truth independently', () => {
+  const result = evaluateProductUx()
+  assert.equal(result.checks.history_filter_copy_truth, 'PASS')
+  assert.equal(result.historyFilterCopyTruth.status, 'PASS')
+})
+
+test('Product UX gate fails when a cold start claims old history remains visible', () => {
+  const source = read('src/ui/pages/HistoryCenter.vue')
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? source.replace('暂时无法加载历史记录，请重试。', '未能加载“全部”记录，仍显示“全部”记录。')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.history_filter_copy_truth, 'FAIL')
+})
+
 test('Product UX gate fails closed when the shared dynamic guard is bypassed', () => {
   const source = read('src/ui/presentation/productLanguage.ts')
   const result = evaluateProductUx({

@@ -6,6 +6,7 @@ import {
   evidenceLabel,
   evidenceSelector,
   productErrorMessage,
+  repairExecutionLabel,
   receiptSummary,
   selectEvidenceByIdentity,
   selectEvidenceBySelector,
@@ -16,6 +17,13 @@ import {
 import { presentAssistantSession, sanitizeAssistantText } from '../../src/ui/presentation/assistantPresentation'
 
 describe('Product UX 展示语义映射', () => {
+  it('maps H03 execution and verification receipt states without claiming rollback', () => {
+    expect(repairExecutionLabel({ status: 'REPAIR_VERIFIED', postconditions: [] })).toBe('已执行并验证')
+    expect(repairExecutionLabel({ status: 'REPAIR_VERIFICATION_INCOMPLETE', postconditions: [] })).toBe('已执行，验证不完整')
+    expect(repairExecutionLabel({ status: 'REPAIR_VERIFICATION_FAILED', postconditions: [{ status: 'FAIL' }] })).toBe('已执行，核验未通过')
+    expect(repairExecutionLabel({ status: 'REPAIR_VERIFICATION_FAILED', postconditions: [{ status: 'OWNER_EXECUTION_FAILED' }] })).toBe('执行失败')
+  })
+
   it('maps internal runtime states to actionable Chinese without changing the protocol value', () => {
     expect(statusLabel('PLAN_STALE')).toBe('当前规划已与最新内容不一致，需要重新确认或更新')
     expect(statusLabel('AUTHORIZATION_STALE')).toBe('作品状态已经变化，请重新确认修复方案')
@@ -33,6 +41,32 @@ describe('Product UX 展示语义映射', () => {
     expect(productErrorMessage('连接服务失败，请检查 Endpoint')).toContain('模型服务连接失败')
     expect(productErrorMessage('PROTOCOL / projectId=secret payloadHash=abc')).not.toMatch(/projectId|payloadHash|PROTOCOL/)
     expect(commandMessage({ status: 'failed', message: 'EVIDENCE_GAP' })).toContain('现有信息不足，暂时无法给出可靠结论')
+  })
+
+  it('shows the formal HARD blocker source and scope without exposing internal codes', () => {
+    const message = productErrorMessage(
+      'ProjectCommand("CONTEXT_HARD_INCOMPLETE|sources=CANON,EVIDENCE|scope=CHAPTER:chapter:3")',
+    )
+    expect(message).toContain('设定与事实')
+    expect(message).toContain('依据材料')
+    expect(message).toContain('chapter:3')
+    expect(message).not.toMatch(/CONTEXT_HARD_INCOMPLETE|CANON|EVIDENCE/)
+
+    const unavailable = productErrorMessage(
+      'CONTEXT_SOURCE_UNAVAILABLE|source=KNOWLEDGE|scope=VOLUME:volume:2',
+    )
+    expect(unavailable).toContain('人物认知')
+    expect(unavailable).toContain('volume:2')
+  })
+
+  it('shows measured aggregate HARD usage and limit without exposing the protocol payload', () => {
+    const message = productErrorMessage(
+      'CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens=1530|limitTokens=1024|serializedBytes=4590|limitBytes=8192|scope=CHAPTER:chapter:3',
+    )
+    expect(message).toContain('1530')
+    expect(message).toContain('1024')
+    expect(message).toContain('chapter:3')
+    expect(message).not.toMatch(/CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens|serializedBytes|CHAPTER/)
   })
 
   it('blocks every dynamic internal engineering token while preserving a caller fallback', () => {

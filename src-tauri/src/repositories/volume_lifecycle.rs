@@ -22,6 +22,69 @@ pub struct VolumeMetadata {
 pub struct VolumeLifecycleRepository;
 
 impl VolumeLifecycleRepository {
+    pub fn with_planning_health_refresh<T>(
+        connection: &Connection,
+        operation: impl FnOnce(&Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        connection
+            .execute_batch("SAVEPOINT b09_planning_health_refresh")
+            .map_err(|error| error.to_string())?;
+        match operation(connection) {
+            Ok(value) => {
+                match connection.execute_batch("RELEASE SAVEPOINT b09_planning_health_refresh") {
+                    Ok(()) => Ok(value),
+                    Err(error) => {
+                        let rollback = connection.execute_batch(
+                        "ROLLBACK TO SAVEPOINT b09_planning_health_refresh; RELEASE SAVEPOINT b09_planning_health_refresh",
+                    );
+                        Err(match rollback {
+                            Ok(()) => error.to_string(),
+                            Err(rollback_error) => {
+                                format!("{error}; savepoint rollback failed: {rollback_error}")
+                            }
+                        })
+                    }
+                }
+            }
+            Err(error) => {
+                let rollback = connection.execute_batch(
+                    "ROLLBACK TO SAVEPOINT b09_planning_health_refresh; RELEASE SAVEPOINT b09_planning_health_refresh",
+                );
+                Err(match rollback {
+                    Ok(()) => error,
+                    Err(rollback_error) => {
+                        format!("{error}; savepoint rollback failed: {rollback_error}")
+                    }
+                })
+            }
+        }
+    }
+
+    pub fn route_compiled_state_digest(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<Option<String>, VolumeLifecycleRepositoryError> {
+        let input_refs: Option<String> = connection
+            .query_row(
+                "SELECT input_refs_json FROM volume_route_replans WHERE project_id=?1 AND volume_id=?2 AND new_artifact_id=?3 AND new_version=?4 ORDER BY created_at DESC, replan_id DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, volume_id, artifact_id, version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(input_refs
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| {
+                value
+                    .pointer("/actualReality/stateDigest")
+                    .or_else(|| value.pointer("/compiledInput/actualReality/stateDigest"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            }))
+    }
+
     pub fn volume_metadata(
         connection: &Connection,
         project_id: &str,

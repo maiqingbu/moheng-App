@@ -66,6 +66,24 @@ export interface NarrativeRuntimeQueryRequest extends ProjectQueryRequest {
 export interface NarrativeStateProjection { projectId: string; projectRevision: number; view: Record<string, unknown> }
 export interface ContinuityProjection { projectId: string; projectRevision: number; threads: import('../generated/contracts').ContinuityThreadProjection[] }
 export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
+/** Optional backend projection for the 2026-09-19 PRD. Absence is not PASS. */
+export interface NarrativeValidationProjection {
+  canExecute: boolean
+  context?: {
+    status: 'COMPLETE' | 'OVER_BUDGET' | 'INCOMPLETE' | 'UNAVAILABLE'
+    reason: string
+    hardSourceCount?: number
+    hardTokens?: number
+    hardTokenLimit?: number
+    sourceRefs?: string[]
+  }
+  audit?: {
+    status: 'COMPLETE' | 'INCOMPLETE' | 'UNRESOLVED' | 'STALE' | 'UNAVAILABLE'
+    reason: string
+    candidateRef?: { artifactId: string; version: number; payloadHash: string }
+    evidenceRefs?: string[]
+  }
+}
 export interface PlanStaleProjection { projectId: string; projectRevision: number; status: 'VALID' | 'PLAN_STALE' }
 export interface SupportSessionProjection {
   plan: Record<string, unknown>
@@ -200,43 +218,89 @@ export interface ProjectLibraryProjection {
 
 export interface MarketOpportunity {
   id: string
-  kind: '稳健型' | '潜力型' | '差异化型'
+  kind: '稳健型' | '潜力型' | '差异化型' | '官方展示'
   title: string
   direction: string
   platform: string
   audience: string
-  demand: number
-  competition: number
-  homogeneityRisk: number
-  saturation: number
-  growth: number
-  monetization: number
-  newcomerDifficulty: number
-  longFormCapacity: number
-  originalitySpace: number
-  aiFeasibility: number
-  complianceRisk: number
-  dataConfidence: number
-  recommendationConfidence: number
+  demand: number | null
+  competition: number | null
+  homogeneityRisk: number | null
+  saturation: number | null
+  growth: number | null
+  monetization: number | null
+  newcomerDifficulty: number | null
+  longFormCapacity: number | null
+  originalitySpace: number | null
+  aiFeasibility: number | null
+  complianceRisk: number | null
+  dataConfidence: number | null
+  recommendationConfidence: number | null
   evidence: string[]
   recommendWhy: string
   notRecommendWhy: string
   source: string
   collectedAt: string
-  policyVersion: string
+  policyVersion: string | null
+  topicId?: string
+  metricsBasis?: 'OFFICIAL_PUBLICATION_SAMPLE' | 'USER_PROVIDED_DATA' | 'DEMO_ONLY'
+  sampleCount?: number
+  categorySampleCount?: number
+  topMarkedCount?: number
+  collectedAtEpochMs?: number
+  sourceDigest?: string | null
+  stale?: boolean
+}
+
+export type MarketSourceStatus = 'READY' | 'PARTIAL' | 'SOURCE_UNAVAILABLE' | 'STALE' | 'NOT_CONFIGURED' | 'USER_DATA_ONLY' | 'DEMO_ONLY'
+
+export interface MarketPolicyReference {
+  title: string
+  url: string
+  publishedAt?: string | null
+  externalTextClassification: 'DATA_ONLY'
+}
+
+export interface MarketDiscoveryProjection {
+  status: MarketSourceStatus
+  source?: {
+    sourceId: string
+    sourceUrl: string
+    digest: string | null
+    observedAtEpochMs: number
+    sampleCount: number
+    metricsBasis: string
+  } | null
+  policyStatus: MarketSourceStatus | 'INDEXED'
+  policySourceUrl?: string | null
+  policyDigest?: string | null
+  policyObservedAtEpochMs?: number | null
+  policyReferences: MarketPolicyReference[]
+  errorCode?: string | null
+  opportunities: MarketOpportunity[]
+  limitations: string[]
 }
 
 export interface MarketStrategyProjection {
   projectId: string
-  targetPlatform: string
+  status: MarketSourceStatus
+  sourceStatus: MarketSourceStatus
+  policyStatus: MarketSourceStatus | 'INDEXED'
+  targetPlatform: string | null
   strategyTitle: string
   readerPromise: string
-  platformPolicyVersion: string
-  snapshotCollectedAt: string
-  confidence: number
-  lastPulseAt: string
+  platformPolicyVersion: string | null
+  snapshotCollectedAt: string | null
+  snapshotCollectedAtEpochMs: number | null
+  confidence: number | null
+  lastPulseAt: string | null
   nextReview: string
   opportunities: MarketOpportunity[]
+  selectedOpportunityId: string | null
+  source: MarketDiscoveryProjection['source']
+  sourceDigest: string | null
+  policyReferences: MarketPolicyReference[]
+  sourceAttempt: { observedAt: string | null; errorCode: string | null }
   signals: { label: string; value: string; trend: 'up' | 'flat' | 'down'; note: string }[]
   guardrails: string[]
 }
@@ -359,6 +423,56 @@ export interface ChapterProjection extends ChapterListItem {
   content: string[]
 }
 
+export interface ExportCapabilityProjection {
+  available: boolean
+  reason: string | null
+  supportedFormats: string[]
+  currentFinalChapterCount: number
+}
+
+export interface ExportProgressProjection {
+  status: 'RUNNING' | 'FINALIZING'
+  requestId: string
+  completedChapters: number
+  totalChapters: number
+  completedCharacters: number
+  totalCharacters: number
+  currentChapterNumber: number | null
+}
+
+export interface ExportChapterRefProjection {
+  chapterId: string
+  chapterNumber: number
+  title: string
+  artifactId: string
+  version: number
+  payloadHash: string
+  characterCount: number
+}
+
+export interface ExportReceiptProjection {
+  schema: string
+  status: 'COMPLETED'
+  receiptId: string
+  requestId: string
+  projectId: string
+  format: 'TXT'
+  fileName: string
+  finalPath: string
+  createdAtEpochMs: number
+  elapsedMs: number
+  sourceProjectRevision: number
+  chapters: ExportChapterRefProjection[]
+  sourceCharacterCount: number
+  outputCharacterCount: number
+  outputByteCount: number
+  sha256: string
+  maxChunkCharacters: number
+  maxWorkingBufferBytes: number
+}
+
+export type ExportQueryProjection = ExportProgressProjection | ExportReceiptProjection | { status: 'NONE' }
+
 export interface VersionProjection {
   id: string
   chapterId: string
@@ -449,6 +563,7 @@ export interface NarrativeTasteProjection {
 }
 
 export interface ProductionCenterProjection {
+  validation?: NarrativeValidationProjection
   timeline: TimelineItem[]
   tasks: ProductionTask[]
   artifacts: PageResult<ArtifactSummary>
@@ -504,7 +619,7 @@ export interface ProductionCenterProjection {
   } | null
   triggeredContinuity?: Array<{ threadRef: string; disposition: string; bridge?: string }>
   gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
-  stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
+  stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
   candidateRef?: { artifactId: string; version: number; payloadHash: string } | null
   finalChapterRef?: { artifactId: string; version: number; payloadHash: string } | null
@@ -533,7 +648,20 @@ export interface RepairWorkflowProjection {
   status: 'PROPOSED' | 'AUTHORIZED' | 'REPAIR_VERIFIED' | 'REPAIR_VERIFICATION_FAILED' | 'REPAIR_VERIFICATION_INCOMPLETE'
   authorizationId?: string | null
   consumedAt?: string | null
-  executionReceipt?: { receiptRef: string; status: string; postconditions: unknown[] } | null
+  executionReceipt?: {
+    receiptRef: string
+    projectId: string | null
+    repairPlanId: string | null
+    authorizationId: string | null
+    beforeRevision: number | null
+    afterRevision: number | null
+    operationDigest: string | null
+    owner: string | null
+    ownerReceiptRef: string | null
+    executedAt: string | null
+    status: string
+    postconditions: unknown[]
+  } | null
 }
 
 export interface CanonCharacter { id: string; name: string; role: string; status: string; location: string; note: string }
@@ -604,7 +732,7 @@ export interface ProjectOverviewProjection {
   recentChapters: ChapterListItem[]
   recentArtifacts: ArtifactSummary[]
   currentVolume?: { id: string; number: number; title: string; progress: number }
-  healthSummary: { level: 'healthy' | 'attention' | 'risk'; label: string; note: string }
+  healthSummary: { level: 'not_evaluated' | 'insufficient_data' | 'source_unavailable' | 'healthy' | 'attention' | 'risk'; label: string; note: string }
 }
 
 export interface VolumeSummary {
@@ -684,12 +812,16 @@ export interface VolumeLifecycleProjection {
 
 /** B13 long-form health is a rebuildable projection, never an authority. */
 export type HealthIssue = import('../generated/contracts').HealthIssue
+export type HealthSourcePage = import('../generated/contracts').HealthSourcePage
 export type LongFormHealthProjectionR1 = import('../generated/contracts').LongFormHealthProjectionR1
 export type BookHealthProjection = LongFormHealthProjectionR1
 
 export interface HistoryEntry {
   id: string
   kind: 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
+  source?: string | null
+  targetClass?: string | null
+  authorityType?: string | null
   title: string
   status: 'draft' | 'impact_ready' | 'approved' | 'applied' | 'rejected'
   createdAt: string
@@ -765,6 +897,7 @@ export type CommandType =
   | 'project_delete'
   | 'project_rename'
   | 'market_refresh'
+  | 'market_opportunity_select'
   | 'market_pulse_refresh'
   | 'story_directions_generate'
   | 'pitch_regenerate'
@@ -793,7 +926,6 @@ export type CommandType =
   | 'volume_handoff'
   | 'decision_submit'
   | 'revision_request'
-  | 'chapter_revision_request'
   | 'change_request_create'
   | 'impact_preflight'
   | 'impact_expand'
@@ -805,7 +937,6 @@ export type CommandType =
   | 'retcon_apply'
   | 'dependency_summary_bootstrap'
   | 'opening_evaluate'
-  | 'export_create'
   | 'backup_create'
   | 'integrity_check_run'
   | 'endgame_contract_create'
@@ -843,15 +974,20 @@ export interface FrontendPort {
   queryChapterList(request: ProjectQueryRequest & { volumeId: string }): Promise<PageResult<ChapterListItem>>
   queryChapterFinal(request: ProjectQueryRequest & { chapterId: string }): Promise<ChapterProjection>
   queryChapterVersions(request: ProjectQueryRequest & { chapterId: string }): Promise<PageResult<VersionProjection>>
+  queryExportCapability(request: ProjectQueryRequest): Promise<ExportCapabilityProjection>
+  createExport(request: { projectId: string; requestId: string; format: 'TXT' }): Promise<ExportReceiptProjection>
+  queryExportReceipt(request: { projectId: string; requestId: string }): Promise<ExportQueryProjection>
+  queryLatestExportReceipt(request: ProjectQueryRequest): Promise<ExportQueryProjection>
   queryCanon(request: ProjectQueryRequest): Promise<CanonProjection>
   queryRetconContext(request: ProjectQueryRequest & { query?: string }): Promise<RetconContextProjection>
   queryDependencySummaryBootstrap(request: ProjectQueryRequest): Promise<DependencySummaryBootstrapProjection>
   queryBookHealth(request: ProjectQueryRequest): Promise<BookHealthProjection>
+  queryBookHealthFactorSources(request: ProjectQueryRequest & { factorCode: string }): Promise<HealthSourcePage>
   queryHistory(request: ProjectQueryRequest & { kind?: 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON' }): Promise<HistoryProjection>
   queryChangeRequest(request: ProjectQueryRequest & { changeRequestId: string }): Promise<Record<string, unknown>>
   queryProjectSettings(request: ProjectQueryRequest): Promise<SettingsProjection>
   searchFulltext(request: ProjectQueryRequest & { text: string }): Promise<PageResult<SearchHit>>
-  queryMarketOpportunities(): Promise<MarketOpportunity[]>
+  queryMarketOpportunities(): Promise<MarketDiscoveryProjection>
   queryGlobalSettings(): Promise<SettingsProjection>
   queryNarrativeState(request: NarrativeRuntimeQueryRequest): Promise<NarrativeStateProjection>
   queryContinuity(request: NarrativeRuntimeQueryRequest): Promise<ContinuityProjection>

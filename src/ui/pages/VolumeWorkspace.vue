@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
@@ -13,16 +13,18 @@ import type { VolumeDetailProjection } from '../../application/contracts'
 const store = useProjectStore()
 const route = useRoute()
 const volumeId = computed(() => String(route.params.volumeId ?? ''))
-const detail = computed(() => store.volumeDetail)
-const planRoute = computed(() => store.planningRoute)
-const lifecycle = computed(() => store.volumeLifecycle)
+const detail = computed(() => store.volumeDetail?.volume.id === volumeId.value ? store.volumeDetail : null)
+const workspaceError = ref('')
+const planRoute = computed(() => store.planningRoute?.volumeId === volumeId.value ? store.planningRoute : null)
+const lifecycle = computed(() => store.volumeLifecycle?.volumeId === volumeId.value ? store.volumeLifecycle : null)
 const planningState = computed(() => lifecycle.value?.planningState ?? {})
 const tasks = computed(() => planRoute.value?.tasks ?? [])
 const state = computed(() => store.commandState('volume-build'))
 const closeState = computed(() => store.commandState('volume-close'))
 const locked = computed(() => detail.value?.volume.status === 'LOCKED')
+const chapterActionsAvailable = computed(() => !!detail.value && !locked.value && detail.value.volume.status !== 'CLOSED' && !workspaceError.value && planRoute.value?.truncated !== true)
 const taskReality = computed(() => planRoute.value?.taskReality ?? [])
-const realityStatus = (taskId: unknown) => { const value = taskReality.value.find(item => String(item.stateId) === String(taskId))?.value as Record<string, unknown> | undefined; return String(value?.status ?? 'NOT_STARTED') }
+const realityStatus = (taskId: unknown) => { const value = taskReality.value.find(item => String(item.stateId) === String(taskId))?.value as Record<string, unknown> | undefined; return typeof value?.status === 'string' ? value.status : 'UNKNOWN' }
 const tasksByClass = (taskClass: string) => tasks.value.filter(task => String(task.class) === taskClass)
 const closeReady = computed(() => planningState.value.closeReadiness === 'READY')
 const remainingTasks = computed(() => Array.isArray(planningState.value.remainingTaskIds) ? planningState.value.remainingTaskIds as string[] : [])
@@ -44,14 +46,15 @@ const nextChapter = computed(() => detail.value?.chapters.items
   .filter(chapter => chapter.status !== 'official')
   .sort((left, right) => left.number - right.number)[0] ?? null)
 const currentChapterPlan = computed(() => planRoute.value?.currentChapterPlan ?? null)
-const chapterPlanningBusy = (status: string) => status === 'submitting' || status === 'processing'
+const chapterPlanningBusy = (status: string) => ['submitting', 'accepted', 'processing'].includes(status)
 const workspaceRuntimePoller = createVolumePlanningRuntimePoller({
   query: async () => {
     const value = await store.loadVolumeDetail(volumeId.value, true)
     if (!value) throw new Error('当前卷状态暂不可用。')
     return value
   },
-  onProjection: (projection: VolumeDetailProjection) => { store.volumeDetail = projection },
+  onProjection: (_projection: VolumeDetailProjection) => {},
+  onError: () => { workspaceError.value = '卷状态暂时无法更新，请重新读取后再操作。' },
 })
 let workspaceMounted = false
 const statusLabel = (value: unknown) => productStatusLabel(value, '待确认')
@@ -69,12 +72,13 @@ const taskCost = (task: Record<string, unknown>) => {
   return String((cost as Record<string, unknown>).preferred ?? '—')
 }
 const realityEvidence = (task: Record<string, unknown>) => {
-  const refs = task.evidenceRefs
+  const value = task.value as Record<string, unknown> | undefined
+  const refs = value?.evidenceRefs ?? task.evidenceRefs
   return Array.isArray(refs) && refs.length ? refs.map(ref => String(ref)).join('、') : '尚无证据'
 }
 
 async function closeVolume() {
-  if (!closeReady.value || detail.value?.volume.status === 'CLOSED') return
+  if (!closeReady.value || !chapterActionsAvailable.value || chapterPlanningBusy(closeState.value.status)) return
   await store.runCommand('volume-close', {
     type: 'volume_close',
     projectId: store.currentProjectId ?? undefined,
@@ -84,7 +88,7 @@ async function closeVolume() {
 }
 
 async function prepareNextChapter() {
-  if (chapterPlanningBusy(chapterPrepareState.value.status)) return
+  if (!chapterActionsAvailable.value || chapterPlanningBusy(chapterPrepareState.value.status)) return
   await store.runCommand('chapter-prepare', {
     type: 'planning_prepare_next_chapter',
     projectId: store.currentProjectId ?? undefined,
@@ -99,7 +103,7 @@ async function prepareNextChapter() {
 
 async function compileNextChapterPlan() {
   const chapter = nextChapter.value
-  if (!chapter || chapterPlanningBusy(chapterPlanState.value.status)) return
+  if (!chapterActionsAvailable.value || !chapter || chapterPlanningBusy(chapterPlanState.value.status)) return
   await store.runCommand('chapter-plan-compile', {
     type: 'planning_compile_chapter_plan',
     projectId: store.currentProjectId ?? undefined,
@@ -111,21 +115,33 @@ async function compileNextChapterPlan() {
   await store.loadPlanningRoute(volumeId.value, true, chapter.number)
 }
 
-onMounted(() => {
-  workspaceMounted = true
-  void (async () => {
-    const detailPromise = store.loadVolumeDetail(volumeId.value)
-    void store.loadVolumeLifecycle(volumeId.value)
-    const initial = await detailPromise
-    if (!workspaceMounted) return
+async function loadWorkspace(force = false) {
+  workspaceError.value = ''
+  workspaceRuntimePoller.stop()
+  const requestedVolumeId = volumeId.value
+  try {
+    const [initial] = await Promise.all([
+      force ? store.loadVolumeDetail(requestedVolumeId, true) : store.loadVolumeDetail(requestedVolumeId),
+      store.loadVolumeLifecycle(requestedVolumeId, true),
+    ])
+    if (!workspaceMounted || requestedVolumeId !== volumeId.value) return
     const planned = initial?.chapters.items
       .filter(item => item.status !== 'official')
       .sort((left, right) => left.number - right.number)[0]
-    await store.loadPlanningRoute(volumeId.value, true, planned?.number)
-    if (!workspaceMounted) return
+    await store.loadPlanningRoute(requestedVolumeId, true, planned?.number)
+    if (!workspaceMounted || requestedVolumeId !== volumeId.value) return
     if (initial?.runtimeOperation?.active === true) workspaceRuntimePoller.start()
-  })()
-})
+  } catch {
+    if (workspaceMounted && requestedVolumeId === volumeId.value) workspaceError.value = '卷工作区查询未完成，当前结果可能不完整，请重新读取。'
+  }
+}
+
+async function performAction(action: () => Promise<void>) {
+  try { await action() } catch { workspaceError.value = '操作结果尚待核对，请查看回执并重新读取当前卷。' }
+}
+
+onMounted(() => { workspaceMounted = true; void loadWorkspace() })
+watch(volumeId, () => { void loadWorkspace(true) })
 onUnmounted(() => {
   workspaceMounted = false
   workspaceRuntimePoller.stop()
@@ -134,20 +150,21 @@ onUnmounted(() => {
 
 <template>
   <div v-if="detail" class="page">
-    <PageHeader :title="`第 ${detail.volume.number} 卷 · ${detail.volume.title}`" :subtitle="detail.volume.goal">
+    <PageHeader :title="`第 ${detail.volume.number} 卷 · ${detail.volume.title}`" :subtitle="detail.volume.goal"><button class="btn" @click="loadWorkspace(true)">重新读取</button>
     </PageHeader>
     <section class="card pad section"><span class="badge">PLAN</span><h2 class="card-title" style="margin-top:8px">本卷目标</h2><p class="card-subtitle">{{ detail.volume.goal }}</p></section>
-    <CommandFeedback :state="state" />
+    <CommandFeedback :state="state" @confirm="store.confirmCommandResult('volume-build')" />
+    <div v-if="workspaceError || planRoute?.truncated" class="banner warning" role="alert">{{ workspaceError || '当前卷查询结果已截断，不能据此确认必需信息完整。' }}</div>
 
     <VolumePlanningProgress :operation="runtimeOperation" />
 
-    <section class="card pad section" data-next-chapter-actions>
-      <div class="card-head"><div><h2 class="card-title">下一章正式生产</h2><p class="card-subtitle">章节准备、ContextManifest 与 ChapterPlan 均通过正式项目命令落库；计划确认后再到“创作”页启动真实模型。</p></div><span class="badge">B04 · B05 · B06</span></div>
-      <CommandFeedback :state="chapterPrepareState" />
-      <CommandFeedback :state="chapterPlanState" />
-      <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :aria-disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="prepareNextChapter">准备下一章</button><span class="muted" style="font-size:12px">从本卷当前 Reality 之后分配下一个章节号与预算。</span></div>
-      <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成可执行 ChapterPlan。</div></div><button class="btn primary" data-action="compile" :aria-disabled="chapterPlanningBusy(chapterPlanState.status)" @click="compileNextChapterPlan">生成当前章节计划</button></div>
-      <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">{{ currentChapterPlan.artifactId }} · v{{ currentChapterPlan.version }}</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>
+    <section v-if="chapterActionsAvailable" class="card pad section" data-next-chapter-actions>
+      <div class="card-head"><div><h2 class="card-title">下一章正式生产</h2><p class="card-subtitle">先准备当前章节并生成计划，再到“创作”页检查和开始生产。</p></div><span class="badge">当前章计划</span></div>
+      <CommandFeedback :state="chapterPrepareState" @confirm="store.confirmCommandResult('chapter-prepare')" />
+      <CommandFeedback :state="chapterPlanState" @confirm="store.confirmCommandResult('chapter-plan-compile')" />
+      <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="performAction(prepareNextChapter)">准备下一章</button><span class="muted" style="font-size:12px">以正式提交的章节为起点，准备当前章。</span></div>
+      <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成当前章计划。</div></div><button class="btn primary" data-action="compile" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="performAction(compileNextChapterPlan)">生成当前章节计划</button></div>
+      <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">第 {{ currentChapterPlan.version }} 版 · 执行有效性以生产前检查为准</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>
     </section>
 
     <section v-if="lifecycle" class="card pad section">
@@ -162,8 +179,8 @@ onUnmounted(() => {
       <div v-if="responsibilities.length" class="section-subgroup" style="margin-top:14px"><strong>未完成的跨卷事项</strong><div class="timeline"><div v-for="item in responsibilities" :key="String(item.threadRef)" class="timeline-item"><div class="timeline-marker">T</div><div><strong>相关剧情线</strong><div class="muted" style="font-size:12px">{{ statusLabel(item.status ?? 'OPEN') }} · 需要在后续卷继续核对</div></div></div></div></div>
       <div v-if="routeReplans.length" class="section-subgroup" style="margin-top:14px"><strong>规划调整记录</strong><div class="timeline"><div v-for="item in routeReplans" :key="String(item.replanId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>第 {{ String(item.newVersion) }} 次调整 · {{ statusLabel(item.validationStatus ?? 'UNKNOWN') }}</strong><div class="muted" style="font-size:12px">{{ sanitizeProductText(item.reason, '调整原因已记录。') }}</div></div></div></div></div>
       <div class="section-subgroup" style="margin-top:14px"><strong>下一卷交接</strong><div v-if="lifecycle.latestHandoff" class="muted">{{ statusLabel(lifecycle.latestHandoff.handoffStatus ?? 'UNKNOWN') }} · 下一卷安排已记录</div><div v-else class="muted">当前卷尚无交接记录；关闭并满足条件后才可创建。</div></div>
-      <CommandFeedback :state="closeState" />
-      <div class="actions" style="margin-top:14px"><button class="btn primary" :aria-disabled="!closeReady || detail.volume.status === 'CLOSED'" @click="closeVolume">生成本卷退出记录并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出记录会在同一流程中提交；失败会完整回滚。</span></div>
+      <CommandFeedback :state="closeState" @confirm="store.confirmCommandResult('volume-close')" />
+      <div class="actions" style="margin-top:14px"><button class="btn primary" :disabled="!closeReady || !chapterActionsAvailable || chapterPlanningBusy(closeState.status)" @click="performAction(closeVolume)">生成本卷退出记录并关闭本卷</button><span class="muted" style="font-size:12px">关闭与退出记录会在同一流程中提交；失败会完整回滚。</span></div>
     </section>
 
     <div v-if="locked" class="banner warning section"><div><div class="banner-title">当前卷仍处于准入锁定</div><div class="banner-copy">开篇评估通过前可以查看全书战略中的卷意图，但不能创建详细卷计划或启动后续正文生产。</div></div></div>
@@ -177,12 +194,19 @@ onUnmounted(() => {
 
     <section v-if="planRoute" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">任务实际进展</h2><p class="card-subtitle">这里显示已经发生的进展，不用计划内容代替实际状态。</p></div><span class="badge">REALITY · 实际进展</span></div>
-      <div v-for="taskClass in ['REQUIRED', 'OPTIONAL', 'FLEXIBLE', 'CLIMAX', 'RESERVED', 'BLOCKED']" :key="taskClass" class="section-subgroup"><strong>{{ taskClassLabel(taskClass) }}</strong><div class="timeline"><div v-for="task in tasksByClass(taskClass === 'BLOCKED' ? 'REQUIRED' : taskClass).filter(item => taskClass !== 'BLOCKED' || realityStatus(item.taskId) === 'BLOCKED')" :key="String(task.taskId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>当前任务</strong><div class="muted" style="font-size:12px">{{ statusLabel(realityStatus(task.taskId)) }} · 证据：{{ realityEvidence(taskReality.find(item => String(item.stateId) === String(task.taskId)) ?? {}) }}</div></div></div></div></div>
+      <div v-for="taskClass in ['REQUIRED', 'OPTIONAL', 'FLEXIBLE', 'CLIMAX', 'RESERVED', 'BLOCKED']" :key="taskClass" class="section-subgroup"><strong>{{ taskClassLabel(taskClass) }}</strong><div class="timeline"><div v-for="task in taskClass === 'BLOCKED' ? tasks.filter(item => realityStatus(item.taskId) === 'BLOCKED') : tasksByClass(taskClass)" :key="String(task.taskId)" class="timeline-item"><div class="timeline-marker">R</div><div><strong>{{ String(task.objective ?? '当前任务') }}</strong><div class="muted" style="font-size:12px">{{ realityStatus(task.taskId) === 'UNKNOWN' ? '实际状态尚未提供' : statusLabel(realityStatus(task.taskId)) }} · 证据：{{ realityEvidence(taskReality.find(item => String(item.stateId) === String(task.taskId)) ?? {}) }}</div></div></div></div></div>
     </section>
 
     <section v-if="planRoute" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">前后连贯与后续安排</h2><p class="card-subtitle">这些内容用于规划参考，不会改变正式作品事实或已经发生的进展。</p></div><span class="badge">PROJECTION · 系统推算</span></div>
-      <dl class="pitch-kv"><div><dt>未完成的剧情线</dt><dd>{{ planRoute.continuityThreads?.length ?? 0 }}</dd></div><div><dt>预留安排</dt><dd>{{ planRoute.futureReservations?.length ?? 0 }}</dd></div><div><dt>当前章节规划</dt><dd>{{ planRoute.currentChapterPlan ? '已生成' : '未生成' }}</dd></div><div><dt>后续预览</dt><dd>{{ planRoute.horizonPreview?.length ?? 0 }} 项暂定安排</dd></div></dl>
+      <dl class="pitch-kv"><div><dt>未完成的剧情线</dt><dd>{{ planRoute.continuityThreads?.length ?? '未提供' }}</dd></div><div><dt>预留安排</dt><dd>{{ planRoute.futureReservations?.length ?? '未提供' }}</dd></div><div><dt>当前章节规划</dt><dd>{{ planRoute.currentChapterPlan ? '已生成' : '未生成' }}</dd></div><div><dt>后续预览</dt><dd>{{ planRoute.horizonPreview == null ? '尚未提供预览' : planRoute.horizonPreview.length ? `${planRoute.horizonPreview.length} 项暂定安排` : '暂无后续预览' }}</dd></div></dl>
+    </section>
+
+    <section v-if="planRoute" class="card pad section" data-rolling-horizon>
+      <div class="card-head"><div><h2 class="card-title">后续章节预览</h2><p class="card-subtitle">仅为暂定安排，不代表未来事实或可执行计划；卷末或书末允许为空。</p></div><span class="badge">TENTATIVE · 暂定</span></div>
+      <p v-if="!planRoute.horizonPreview" class="muted">尚未提供预览。</p>
+      <p v-else-if="!planRoute.horizonPreview.length" class="muted">暂无后续预览。不需要补齐占位章节。</p>
+      <div v-for="(slot, index) in planRoute.horizonPreview ?? []" :key="index" class="task-row"><strong>暂定 {{ index + 1 }}</strong><span>{{ sanitizeProductText(slot.chapterGoal ?? slot.possibleConflict ?? slot.preparationDirection, '当前预览未提供可展示的安排说明。') }}</span></div>
     </section>
 
     <section v-if="planRoute" class="card pad section">
@@ -201,7 +225,8 @@ onUnmounted(() => {
 
     <section v-if="store.advancedMode" class="card pad section">
       <h2 class="card-title">高级详情</h2>
-      <dl v-if="planRoute" class="pitch-kv"><div><dt>本卷目标记录</dt><dd>已记录 · v{{ planRoute.volumeIntentRef.version }}</dd></div><div><dt>本卷规划版本</dt><dd>第 {{ planRoute.volumePlanRef.version }} 版</dd></div><div><dt>作品记录版本</dt><dd>{{ planRoute.projectRevision }}</dd></div></dl>
+      <dl v-if="planRoute" class="pitch-kv"><div><dt>本卷目标记录</dt><dd>已记录 · v{{ planRoute.volumeIntentRef.version }}</dd></div><div><dt>本卷规划版本</dt><dd>第 {{ planRoute.volumePlanRef.version }} 版</dd></div><div><dt>作品记录版本</dt><dd>{{ planRoute.projectRevision }}</dd></div><div><dt>编译版本 / 相关摘要</dt><dd>{{ planRoute.compiledFromProjectRevision ?? '未提供' }} / {{ planRoute.semanticDigest ?? '未提供' }}</dd></div><div><dt>来源证据</dt><dd>{{ planRoute.sourceEvidenceRefs?.join('、') || '未提供' }}</dd></div></dl>
     </section>
   </div>
+  <div v-else class="page"><PageHeader title="卷工作区" subtitle="读取当前卷的正式记录。" /><p role="status">{{ workspaceError || '正在读取当前卷…' }}</p><button class="btn" @click="loadWorkspace(true)">重新读取</button></div>
 </template>

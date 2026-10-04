@@ -5,6 +5,11 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "macos")]
+use security_framework::passwords::{
+    delete_generic_password, generic_password, set_generic_password, PasswordOptions,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error("runtime project not found")]
@@ -2279,28 +2284,24 @@ impl OsKeychainSecretStore {
             return Err(RuntimeError::SecretUnavailable);
         }
         let account = format!("{}:{}", self.account, provider);
-        let status = std::process::Command::new("/usr/bin/security")
-            .args([
-                "add-generic-password",
-                "-U",
-                "-s",
-                &self.service,
-                "-a",
-                &account,
-                "-w",
-                secret,
-            ])
-            .status()
-            .map_err(|_| RuntimeError::SecretUnavailable)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(RuntimeError::SecretUnavailable)
-        }
+        set_generic_password(&self.service, &account, secret.as_bytes())
+            .map_err(|_| RuntimeError::SecretUnavailable)
     }
 
     #[cfg(not(target_os = "macos"))]
     pub fn set(&self, _provider: &str, _secret: &str) -> Result<(), RuntimeError> {
+        Err(RuntimeError::SecretUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn delete(&self, provider: &str) -> Result<(), RuntimeError> {
+        let account = format!("{}:{}", self.account, provider);
+        delete_generic_password(&self.service, &account)
+            .map_err(|_| RuntimeError::SecretUnavailable)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn delete(&self, _provider: &str) -> Result<(), RuntimeError> {
         Err(RuntimeError::SecretUnavailable)
     }
 }
@@ -2309,21 +2310,12 @@ impl OsKeychainSecretStore {
 impl SecretStore for OsKeychainSecretStore {
     fn get(&self, provider: &str) -> Result<String, RuntimeError> {
         let account = format!("{}:{}", self.account, provider);
-        let output = std::process::Command::new("/usr/bin/security")
-            .args([
-                "find-generic-password",
-                "-s",
-                &self.service,
-                "-a",
-                &account,
-                "-w",
-            ])
-            .output()
-            .map_err(|_| RuntimeError::SecretUnavailable)?;
-        if !output.status.success() {
-            return Err(RuntimeError::SecretUnavailable);
-        }
-        String::from_utf8(output.stdout)
+        let secret = generic_password(PasswordOptions::new_generic_password(
+            &self.service,
+            &account,
+        ))
+        .map_err(|_| RuntimeError::SecretUnavailable)?;
+        String::from_utf8(secret)
             .map(|secret| secret.trim_end().to_string())
             .map_err(|_| RuntimeError::SecretUnavailable)
     }

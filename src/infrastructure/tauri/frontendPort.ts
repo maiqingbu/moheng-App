@@ -1,8 +1,12 @@
 import type {
   BookHealthProjection,
+  HealthSourcePage,
   CanonProjection,
   ChapterListItem,
   ChapterProjection,
+  ExportCapabilityProjection,
+  ExportQueryProjection,
+  ExportReceiptProjection,
   CommandReceipt,
   DecisionItem,
   CommandRequest,
@@ -10,6 +14,7 @@ import type {
   FrontendPort,
   HistoryProjection,
   MarketOpportunity,
+  MarketDiscoveryProjection,
   MarketStrategyProjection,
   PageResult,
   ProductionCenterProjection,
@@ -102,15 +107,20 @@ export class TauriFrontendPort implements FrontendPort {
   queryChapterList(request: Parameters<FrontendPort['queryChapterList']>[0]) { return invokeQuery<PageResult<ChapterListItem>>(this.ipc, 'query_chapter_list', { request }) }
   queryChapterFinal(request: Parameters<FrontendPort['queryChapterFinal']>[0]) { return invokeQuery<ChapterProjection>(this.ipc, 'query_chapter_final', { request }) }
   queryChapterVersions(request: Parameters<FrontendPort['queryChapterVersions']>[0]) { return invokeQuery<PageResult<VersionProjection>>(this.ipc, 'query_chapter_versions', { request }) }
+  queryExportCapability(request: ProjectQueryRequest) { return invokeQuery<ExportCapabilityProjection>(this.ipc, 'query_export_capability', { request }) }
+  createExport(request: { projectId: string; requestId: string; format: 'TXT' }) { return invokeQuery<ExportReceiptProjection>(this.ipc, 'create_export', { request }) }
+  queryExportReceipt(request: { projectId: string; requestId: string }) { return invokeQuery<ExportQueryProjection>(this.ipc, 'query_export_receipt', { request }) }
+  queryLatestExportReceipt(request: ProjectQueryRequest) { return invokeQuery<ExportQueryProjection>(this.ipc, 'query_latest_export_receipt', { request }) }
   queryCanon(request: ProjectQueryRequest) { return invokeQuery<CanonProjection>(this.ipc, 'query_canon', { request }) }
   queryRetconContext(request: ProjectQueryRequest & { query?: string }) { return invokeQuery<RetconContextProjection>(this.ipc, 'query_retcon_context', { request }) }
   queryDependencySummaryBootstrap(request: ProjectQueryRequest) { return invokeQuery<DependencySummaryBootstrapProjection>(this.ipc, 'query_dependency_summary_bootstrap', { request }) }
   queryBookHealth(request: ProjectQueryRequest) { return invokeQuery<BookHealthProjection>(this.ipc, 'query_book_health', { request }) }
+  queryBookHealthFactorSources(request: ProjectQueryRequest & { factorCode: string }) { return invokeQuery<HealthSourcePage>(this.ipc, 'query_book_health_factor_sources', { request }) }
   queryHistory(request: Parameters<FrontendPort['queryHistory']>[0]) { return invokeQuery<HistoryProjection>(this.ipc, 'query_history', { request }) }
   queryChangeRequest(request: Parameters<FrontendPort['queryChangeRequest']>[0]) { return invokeQuery<Record<string, unknown>>(this.ipc, 'query_change_request', { request }) }
   queryProjectSettings(request: ProjectQueryRequest) { return invokeQuery<SettingsProjection>(this.ipc, 'query_project_settings', { request }) }
   searchFulltext(request: Parameters<FrontendPort['searchFulltext']>[0]) { return invokeQuery<PageResult<SearchHit>>(this.ipc, 'search_fulltext', { request }) }
-  queryMarketOpportunities() { return invokeQuery<MarketOpportunity[]>(this.ipc, 'query_market_opportunities') }
+  queryMarketOpportunities() { return invokeQuery<MarketDiscoveryProjection>(this.ipc, 'query_market_opportunities') }
 }
 
 export function getTauriInvoke(): TauriInvoke | null {

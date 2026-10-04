@@ -10,17 +10,20 @@ use ai_novel_production_system_core::provider::{
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::runtime::{
-    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError,
+    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError, SecretStore,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::json;
-use std::io::Write;
-use std::net::TcpListener;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn p01_provider_adapter_maps_usage_and_typed_errors() {
@@ -168,6 +171,7 @@ fn local_provider_server(status: u16, body: &'static str, delay: Duration) -> St
     let address = listener.local_addr().unwrap();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        read_local_http_request(&mut stream);
         if !delay.is_zero() {
             thread::sleep(delay);
         }
@@ -180,6 +184,34 @@ fn local_provider_server(status: u16, body: &'static str, delay: Duration) -> St
     format!("http://{address}")
 }
 
+fn read_local_http_request(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while let Ok(read) = stream.read(&mut buffer) {
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+}
+
 fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -187,6 +219,7 @@ fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String,
     let observed_calls = Arc::clone(&calls);
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        read_local_http_request(&mut stream);
         observed_calls.fetch_add(1, Ordering::SeqCst);
         let response = format!(
             "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -195,6 +228,462 @@ fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String,
         let _ = stream.write_all(response.as_bytes());
     });
     (format!("http://{address}"), calls)
+}
+
+fn disconnect_after_provider_request() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        // Dropping the stream after the full request creates a post-send unknown outcome.
+    });
+    format!("http://{address}")
+}
+
+#[derive(Default)]
+struct SecretProcessObservation {
+    process_name_matches: usize,
+    process_count: usize,
+    argv_canary_matches: usize,
+    environment_dump_canary_matches: usize,
+}
+
+impl SecretProcessObservation {
+    fn merge(&mut self, other: Self) {
+        self.process_name_matches += other.process_name_matches;
+        self.process_count += other.process_count;
+        self.argv_canary_matches += other.argv_canary_matches;
+        self.environment_dump_canary_matches += other.environment_dump_canary_matches;
+    }
+}
+
+fn runtime_secret_canary() -> String {
+    let mut random = [0_u8; 24];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut random))
+        .expect("OS random source is available");
+    format!("MOHENG_SECRET_CANARY_{}", hex::encode(random))
+}
+
+#[cfg(target_os = "macos")]
+fn process_arguments_and_environment(pid: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    use std::ffi::c_void;
+
+    unsafe extern "C" {
+        fn sysctl(
+            name: *mut i32,
+            name_len: u32,
+            old_value: *mut c_void,
+            old_value_len: *mut usize,
+            new_value: *mut c_void,
+            new_value_len: usize,
+        ) -> i32;
+    }
+
+    const CTL_KERN: i32 = 1;
+    const KERN_PROCARGS2: i32 = 49;
+    let mut mib = [CTL_KERN, KERN_PROCARGS2, pid as i32];
+    let mut data = vec![0_u8; 512 * 1024];
+    let mut data_len = data.len();
+    // SAFETY: The MIB identifies this process query; `data` is a writable buffer,
+    // and `data_len` supplies its capacity and receives the initialized length.
+    let result = unsafe {
+        sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            data.as_mut_ptr().cast::<c_void>(),
+            &mut data_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || data_len < std::mem::size_of::<i32>() {
+        return None;
+    }
+    data.truncate(data_len);
+
+    let argument_count = i32::from_ne_bytes(data[..4].try_into().ok()?);
+    if argument_count <= 0 {
+        return None;
+    }
+    let executable_end = data[4..].iter().position(|byte| *byte == 0)? + 4;
+    let mut arguments_start = executable_end + 1;
+    while data.get(arguments_start) == Some(&0) {
+        arguments_start += 1;
+    }
+
+    let mut arguments_end = arguments_start;
+    for _ in 0..argument_count {
+        let next_end = data
+            .get(arguments_end..)?
+            .iter()
+            .position(|byte| *byte == 0)?;
+        arguments_end += next_end + 1;
+    }
+    let mut environment_start = arguments_end;
+    while data.get(environment_start) == Some(&0) {
+        environment_start += 1;
+    }
+    Some((
+        data[arguments_start..arguments_end].to_vec(),
+        data[environment_start..].to_vec(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_arguments_and_environment(_pid: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    None
+}
+
+fn observe_child_processes(
+    parent_pid: u32,
+    process_name: &str,
+    marker: &str,
+    canary: &str,
+) -> SecretProcessObservation {
+    let mut observed = SecretProcessObservation::default();
+    let Ok(listing) = ProcessCommand::new("/bin/ps")
+        .args(["-ww", "-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return observed;
+    };
+    for line in String::from_utf8_lossy(&listing.stdout).lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 3 {
+            continue;
+        }
+        let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) else {
+            continue;
+        };
+        let command_line = fields[2..].join(" ");
+        if ppid != parent_pid {
+            continue;
+        }
+        if !command_line.contains(process_name) {
+            continue;
+        }
+        observed.process_name_matches += 1;
+        let Some((arguments, environment)) = process_arguments_and_environment(pid) else {
+            continue;
+        };
+        if !arguments
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+        {
+            continue;
+        }
+        observed.process_count += 1;
+        observed.argv_canary_matches += usize::from(
+            arguments
+                .windows(canary.len())
+                .any(|window| window == canary.as_bytes()),
+        );
+        observed.environment_dump_canary_matches += usize::from(
+            environment
+                .windows(canary.len())
+                .any(|window| window == canary.as_bytes()),
+        );
+    }
+    observed
+}
+
+fn gated_local_provider_server() -> (String, Receiver<String>, Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_tx, request_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let Ok(read) = stream.read(&mut buffer) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..end]).into_owned();
+            if request_tx.send(headers).is_err() {
+                return;
+            }
+            break;
+        }
+        if release_rx.recv_timeout(Duration::from_secs(4)).is_err() {
+            return;
+        }
+        let body = r#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (format!("http://{address}"), request_rx, release_tx)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn p01_b205_provider_canary_stays_out_of_child_argv_and_environment() {
+    let canary = runtime_secret_canary();
+    let (endpoint, request_rx, release_tx) = gated_local_provider_server();
+    let marker = endpoint.trim_start_matches("http://").to_string();
+    let provider = OpenAiCompatibleProvider::new(endpoint);
+    let request = ProviderRequest {
+        capability: "TEST_PROVIDER".into(),
+        model_id: "fixture-model".into(),
+        prompt: "local secret-boundary fixture".into(),
+        timeout_ms: 4_000,
+    };
+    let secret = canary.clone();
+    let invocation = thread::spawn(move || provider.invoke(&request, &secret));
+    let headers = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("local server received the Provider request");
+    let expected_header = format!("authorization: bearer {}", canary.to_ascii_lowercase());
+    let header_received = headers.to_ascii_lowercase().contains(&expected_header);
+    let observation = observe_child_processes(std::process::id(), "curl", &marker, &canary);
+    let parent_environment_contains_canary =
+        std::env::vars().any(|(_, value)| value.contains(&canary));
+    let _ = release_tx.send(());
+    let response = invocation
+        .join()
+        .expect("Provider request thread completed");
+    println!(
+        "B_R2_05_PROVIDER_PROCESS_SCAN={{\"headerReceived\":{},\"matchedChildren\":{},\"argvCanaryMatches\":{},\"environmentDumpCanaryMatches\":{},\"parentEnvironmentCanaryMatches\":{}}}",
+        header_received,
+        observation.process_count,
+        observation.argv_canary_matches,
+        observation.environment_dump_canary_matches,
+        parent_environment_contains_canary
+    );
+    assert!(
+        header_received,
+        "local HTTP server did not receive the expected Authorization header"
+    );
+    assert_eq!(response.unwrap().raw_response, r#"{"ok":true}"#);
+    assert_eq!(
+        observation.argv_canary_matches, 0,
+        "Provider credential appeared in child argv"
+    );
+    assert_eq!(
+        observation.environment_dump_canary_matches, 0,
+        "Provider credential appeared in a process environment dump"
+    );
+    assert!(
+        !parent_environment_contains_canary,
+        "Provider credential appeared in the test process environment"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses disposable items in the current macOS user Keychain"]
+fn p01_b205_keychain_roundtrip_survives_process_reopen_and_delete() {
+    use ai_novel_production_system_core::repositories::runtime::OsKeychainSecretStore;
+
+    const PRIMARY_PROVIDER: &str = "provider-primary";
+    const SECONDARY_PROVIDER: &str = "provider-secondary";
+    struct Cleanup {
+        service: String,
+        account: &'static str,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let store = OsKeychainSecretStore::new(self.service.clone(), self.account);
+            let _ = store.delete(PRIMARY_PROVIDER);
+            let _ = store.delete(SECONDARY_PROVIDER);
+        }
+    }
+
+    let primary_secret = runtime_secret_canary();
+    let secondary_secret = runtime_secret_canary();
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let service = format!("com.moheng.b-r2-05.green.{unique}");
+    let account_base = "provider-api-key";
+    let _cleanup = Cleanup {
+        service: service.clone(),
+        account: account_base,
+    };
+    let worker_service = service.clone();
+    let primary_for_worker = primary_secret.clone();
+    let secondary_for_worker = secondary_secret.clone();
+    let worker = thread::spawn(move || {
+        let store = OsKeychainSecretStore::new(worker_service, account_base);
+        for _ in 0..8 {
+            store.set(PRIMARY_PROVIDER, &primary_for_worker)?;
+            assert_eq!(store.get(PRIMARY_PROVIDER)?, primary_for_worker);
+            store.set(SECONDARY_PROVIDER, &secondary_for_worker)?;
+            assert_eq!(store.get(SECONDARY_PROVIDER)?, secondary_for_worker);
+        }
+        Ok::<_, RuntimeError>(())
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut observation = SecretProcessObservation::default();
+    while !worker.is_finished() && std::time::Instant::now() < deadline {
+        observation.merge(observe_child_processes(
+            std::process::id(),
+            "security",
+            &service,
+            &primary_secret,
+        ));
+        thread::sleep(Duration::from_millis(2));
+    }
+    worker.join().expect("Keychain worker completed").unwrap();
+
+    let expected_digest = hex::encode(Sha256::digest(primary_secret.as_bytes()));
+    let mut child = ProcessCommand::new(std::env::current_exe().expect("test executable path"))
+        .args([
+            "--exact",
+            "p01_b205_keychain_reopen_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("MOHENG_B_R2_05_REOPEN", "1")
+        .env("MOHENG_B_R2_05_KEYCHAIN_SERVICE", &service)
+        .env("MOHENG_B_R2_05_KEYCHAIN_ACCOUNT", account_base)
+        .env("MOHENG_B_R2_05_KEYCHAIN_PROVIDER", PRIMARY_PROVIDER)
+        .env("MOHENG_B_R2_05_EXPECTED_DIGEST", expected_digest)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("restart-style Keychain reader process started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut child_argv_canary_matches = None;
+    let mut child_environment_canary_matches = None;
+    while std::time::Instant::now() < deadline {
+        if let Some((arguments, environment)) = process_arguments_and_environment(child.id()) {
+            child_argv_canary_matches = Some(usize::from(
+                arguments
+                    .windows(primary_secret.len())
+                    .any(|window| window == primary_secret.as_bytes()),
+            ));
+            child_environment_canary_matches = Some(usize::from(
+                environment
+                    .windows(primary_secret.len())
+                    .any(|window| window == primary_secret.as_bytes()),
+            ));
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(child.stdin.take());
+    let child_output = child
+        .wait_with_output()
+        .expect("restart-style Keychain reader completed");
+    let child_stdout = String::from_utf8_lossy(&child_output.stdout);
+    let child_stderr = String::from_utf8_lossy(&child_output.stderr);
+    let parent_environment_contains_primary = std::env::vars()
+        .any(|(_, value)| value.contains(&primary_secret) || value.contains(&secondary_secret));
+    println!(
+        "B_R2_05_KEYCHAIN_PROCESS_SCAN={{\"securityCliChildren\":{},\"childArgvCanaryMatches\":{},\"childEnvironmentCanaryMatches\":{},\"parentEnvironmentCanaryMatches\":{},\"reopenMatched\":{}}}",
+        observation.process_name_matches,
+        child_argv_canary_matches.unwrap_or(0),
+        child_environment_canary_matches.unwrap_or(0),
+        parent_environment_contains_primary,
+        child_stdout.contains("B_R2_05_KEYCHAIN_REOPEN={\"matched\":true}")
+    );
+    assert!(
+        child_output.status.success(),
+        "reopen process failed: {child_stderr}"
+    );
+    assert!(
+        child_stdout.contains("B_R2_05_KEYCHAIN_REOPEN={\"matched\":true}"),
+        "reopen process did not read the original Keychain value"
+    );
+    assert_eq!(child_argv_canary_matches, Some(0));
+    assert_eq!(child_environment_canary_matches, Some(0));
+    assert_eq!(observation.process_name_matches, 0);
+    assert!(
+        !parent_environment_contains_primary,
+        "Keychain credential appeared in the parent process environment"
+    );
+
+    let store = OsKeychainSecretStore::new(service, account_base);
+    assert_eq!(store.get(SECONDARY_PROVIDER).unwrap(), secondary_secret);
+    store.delete(PRIMARY_PROVIDER).unwrap();
+    store.delete(SECONDARY_PROVIDER).unwrap();
+    assert!(store.get(PRIMARY_PROVIDER).is_err());
+    assert!(store.get(SECONDARY_PROVIDER).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "invoked as a child process by the Keychain lifecycle acceptance test"]
+fn p01_b205_keychain_reopen_child() {
+    use ai_novel_production_system_core::repositories::runtime::OsKeychainSecretStore;
+
+    if std::env::var("MOHENG_B_R2_05_REOPEN").as_deref() != Ok("1") {
+        return;
+    }
+    let service = std::env::var("MOHENG_B_R2_05_KEYCHAIN_SERVICE").unwrap();
+    let account = std::env::var("MOHENG_B_R2_05_KEYCHAIN_ACCOUNT").unwrap();
+    let provider = std::env::var("MOHENG_B_R2_05_KEYCHAIN_PROVIDER").unwrap();
+    let expected_digest = std::env::var("MOHENG_B_R2_05_EXPECTED_DIGEST").unwrap();
+    let store = OsKeychainSecretStore::new(service, account);
+    let matched = store
+        .get(&provider)
+        .map(|secret| hex::encode(Sha256::digest(secret.as_bytes())) == expected_digest)
+        .unwrap_or(false);
+    println!("B_R2_05_KEYCHAIN_REOPEN={{\"matched\":{matched}}}");
+    assert!(
+        matched,
+        "reopened process did not read the expected Keychain entry"
+    );
+    let mut wait_for_parent = String::new();
+    std::io::stdin()
+        .read_to_string(&mut wait_for_parent)
+        .expect("read parent release signal");
 }
 
 #[test]
@@ -251,6 +740,25 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
     assert_eq!(timeout_error.kind, ProviderErrorKind::Timeout);
 }
 
+#[test]
+fn p01_openai_compatible_adapter_maps_post_send_disconnect_to_unknown_remote_outcome() {
+    let endpoint = disconnect_after_provider_request();
+    let canary = runtime_secret_canary();
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "disconnect after request body is received".into(),
+                timeout_ms: 2_000,
+            },
+            &canary,
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    assert!(!error.detail.contains(&canary));
+}
+
 #[derive(Clone)]
 struct FormalProvider {
     result: Result<ProviderResponse, ProviderError>,
@@ -305,6 +813,33 @@ fn formal_project() -> (
         .create("p01-formal", "P01 formal", "2026-08-28T00:00:00Z")
         .unwrap();
     (temp, manager, connection)
+}
+
+fn scan_project_files_for_secret(root: &std::path::Path, secret: &str) -> (usize, usize) {
+    let mut scanned = 0;
+    let mut matches = 0;
+    for entry in std::fs::read_dir(root).expect("read isolated project files") {
+        let entry = entry.expect("enumerate isolated project files");
+        let file_type = entry.file_type().expect("inspect isolated project file");
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            let (nested_scanned, nested_matches) =
+                scan_project_files_for_secret(&entry.path(), secret);
+            scanned += nested_scanned;
+            matches += nested_matches;
+        } else if file_type.is_file() {
+            scanned += 1;
+            let contents = std::fs::read(entry.path()).expect("read isolated project file");
+            matches += usize::from(
+                contents
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+            );
+        }
+    }
+    (scanned, matches)
 }
 
 fn formal_spec(command: &str, budget_id: Option<&str>, predicted_cost_cents: i64) -> ModelRunSpec {
@@ -620,12 +1155,13 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
 
 #[test]
 fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
-    let (_temp, _manager, connection) = formal_project();
+    let (temp, _manager, connection) = formal_project();
     seed_formal_budget(&connection, "budget:p01:real", 3, 20);
     let body = r#"{"id":"req:local","choices":[{"message":{"content":"{\"body\":\"ok\"}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}}"#;
     let (endpoint, calls) = local_provider_server_with_calls(200, body);
     let secrets = MemorySecretStore::new();
-    secrets.put("fixture", "fixture-token-real-http").unwrap();
+    let canary = runtime_secret_canary();
+    secrets.put("fixture", &canary).unwrap();
     let gateway = ConfiguredProductionGateway::new(
         ProviderConfig {
             provider_id: "fixture".into(),
@@ -710,4 +1246,11 @@ fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
             .unwrap(),
         2
     );
+    let (project_files_scanned, project_canary_file_matches) =
+        scan_project_files_for_secret(temp.path(), &canary);
+    println!(
+        "B_R2_05_PROJECT_SECRET_SCAN={{\"projectFilesScanned\":{},\"projectCanaryFileMatches\":{}}}",
+        project_files_scanned, project_canary_file_matches
+    );
+    assert_eq!(project_canary_file_matches, 0);
 }

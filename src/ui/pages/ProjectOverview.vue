@@ -16,7 +16,25 @@ const nextAction = computed(() => store.pendingDecisionCount
   : project.value?.phase === 'PITCHING' || project.value?.phase === 'STORY_BLUEPRINT'
     ? { label: '进入规划', to: `/projects/${id.value}/directions` }
     : { label: '进入创作', to: `/projects/${id.value}/production` })
-const healthClass = computed(() => overview.value?.healthSummary.level === 'risk' ? 'danger' : overview.value?.healthSummary.level === 'attention' ? 'warn' : 'brand')
+const healthClass = computed(() => {
+  switch (overview.value?.healthSummary.level) {
+    case 'risk': return 'danger'
+    case 'attention': return 'warn'
+    case 'healthy': return 'brand'
+    default: return 'muted'
+  }
+})
+const healthBadge = computed(() => {
+  switch (overview.value?.healthSummary.level) {
+    case 'risk': return '需处理'
+    case 'attention': return '关注'
+    case 'healthy': return '稳定'
+    case 'source_unavailable': return '暂不可用'
+    case 'insufficient_data': return '数据不足'
+    case 'not_evaluated': return '未评估'
+    default: return '暂不可用'
+  }
+})
 const healthTitle = computed(() => overview.value?.healthSummary.label ?? '正在积累作品记录')
 const healthNote = computed(() => overview.value?.healthSummary.note ?? '正式章节与项目记录积累后，会显示长期状态。')
 const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第 ${recentChapters.value[0].number + 1} 章创作` : '开始第一章创作')
@@ -50,7 +68,7 @@ const nextChapterLabel = computed(() => recentChapters.value.length ? `继续第
         <div v-else class="prototype-list"><div class="prototype-item"><div><strong>当前没有待确认事项</strong><small>需要确认、修改或重新检查的内容会集中显示在这里。</small></div><span class="prototype-badge brand">正常</span></div></div>
         <div style="height:16px" />
         <h3>长篇状态</h3>
-        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ overview.healthSummary.level === 'risk' ? '需处理' : overview.healthSummary.level === 'attention' ? '关注' : '正常' }}</span></div>
+        <div class="prototype-item"><div><strong>{{ healthTitle }}</strong><small>{{ healthNote }}</small></div><span class="prototype-badge" :class="healthClass">{{ healthBadge }}</span></div>
       </aside>
     </div>
   </div>

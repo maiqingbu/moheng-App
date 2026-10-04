@@ -61,6 +61,8 @@ test('B13 health workspace is active behind the formal backend query', () => {
   assert.match(router, /LongFormHealth/)
   assert.doesNotMatch(router.split('\n').find(line => line.includes('/projects/:id/health')) ?? '', /UnavailableFeature/)
   assert.match(health, /八类健康因素/)
+  assert.match(health, /完整来源可按页查看/)
+  assert.doesNotMatch(health, /下方问题列表分页核对/)
 })
 
 test('browser demo keeps internal RetconPlan naming out of user-visible copy', () => {

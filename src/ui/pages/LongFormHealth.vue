@@ -13,6 +13,9 @@ const router = useRouter()
 const factorFilter = ref('全部因素')
 const severityFilter = ref('全部状态')
 const pageHistory = ref<string[]>([])
+const factorSourceCursorHistory = ref<Record<string, string[]>>({})
+const factorSourceErrors = ref<Record<string, string>>({})
+const factorSourcePages = computed(() => store.healthFactorSourcePages)
 const evidenceMode = computed(() => isProductUxEvidenceDemoEnabled() ? String(route.query.healthEvidence ?? '') : '')
 const health = computed(() => {
   const base = store.health
@@ -25,7 +28,54 @@ const filteredIssues = computed(() => (health.value?.issues.items ?? []).filter(
   && (severityFilter.value === '全部状态' || severityLabel(issue.severity) === severityFilter.value)
 ))
 const factorOptions = computed(() => ['全部因素', ...(health.value?.factors ?? []).map(factor => factorLabel(factor.factorCode))])
-const scoreText = computed(() => health.value && health.value.coverage.evaluatedFactors > 0 ? `${health.value.score} 分` : '数据积累中')
+const scoreText = computed(() => health.value?.score == null
+  ? health.value?.level === 'source_unavailable' ? '暂不可用' : '数据积累中'
+  : `${health.value.score} 分`)
+
+function factorSourceCount(factor: NonNullable<typeof health.value>['factors'][number]) {
+  return factor.sourceRefsTotal ?? factor.sourceRefs.length
+}
+
+function openFactorSources(factorCode: string) {
+  factorSourceCursorHistory.value = { ...factorSourceCursorHistory.value, [factorCode]: [] }
+  factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '' }
+  void store.loadHealthFactorSources(factorCode).catch(() => {
+    factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '来源暂时无法读取，请重试。' }
+  })
+}
+
+function nextFactorSources(factorCode: string) {
+  const cursor = factorSourcePages.value[factorCode]?.nextCursor
+  if (!cursor) return
+  factorSourceCursorHistory.value = {
+    ...factorSourceCursorHistory.value,
+    [factorCode]: [...(factorSourceCursorHistory.value[factorCode] ?? []), cursor],
+  }
+  factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '' }
+  void store.loadHealthFactorSources(factorCode, cursor).catch(() => {
+    factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '来源暂时无法读取，请重试。' }
+  })
+}
+
+function previousFactorSources(factorCode: string) {
+  const history = [...(factorSourceCursorHistory.value[factorCode] ?? [])]
+  history.pop()
+  factorSourceCursorHistory.value = { ...factorSourceCursorHistory.value, [factorCode]: history }
+  factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '' }
+  void store.loadHealthFactorSources(factorCode, history.at(-1) ?? null).catch(() => {
+    factorSourceErrors.value = { ...factorSourceErrors.value, [factorCode]: '来源暂时无法读取，请重试。' }
+  })
+}
+
+function sourceKindLabel(kind: string) {
+  return ({
+    'volume-plan': '卷级规划',
+    task: '卷内任务',
+    obligation: '剧情义务',
+    foreshadow: '伏笔',
+    'reader-desire': '读者期待',
+  } as Record<string, string>)[kind] ?? '正式记录'
+}
 
 onMounted(() => { void store.loadHealth().catch(() => undefined) })
 
@@ -76,8 +126,8 @@ function openDestination(destination: string) {
         <MetricCard label="需要关注" :value="health.issues.total" note="按风险优先级排列" />
       </div>
 
-      <div v-if="health.coverage.evaluatedFactors === 0" class="banner info section">
-        <div><div class="banner-title">数据积累中</div><div class="banner-copy">正式章节与运行记录积累后，长期趋势会逐步清晰。</div></div>
+      <div v-if="health.level === 'not_evaluated' || health.level === 'insufficient_data'" class="banner info section">
+        <div><div class="banner-title">{{ healthLevelLabel(health.level) }}</div><div class="banner-copy">正式章节与运行记录积累后，长期趋势会逐步清晰。</div></div>
       </div>
 
       <section class="section">
@@ -87,6 +137,38 @@ function openDestination(destination: string) {
             <div class="card-head"><div><span class="badge" :class="factor.severity === 'risk' ? 'danger' : factor.severity === 'attention' ? 'warning' : 'success'">{{ severityLabel(factor.severity) }}</span><h3 style="margin:8px 0 4px">{{ factorLabel(factor.factorCode) }}</h3></div><small class="muted">{{ truthClassLabel(factor.truthClass) }}</small></div>
             <p class="card-subtitle">{{ factor.summary }}</p>
             <p class="muted" style="font-size:12px">{{ factor.detail }}</p>
+            <p class="muted health-source-count">
+              可核验来源：{{ factorSourceCount(factor) }} 项
+              <span v-if="factor.sourceRefsTruncated">（当前列出前 {{ factor.sourceRefs.length }} 项，完整来源可按页查看）</span>
+            </p>
+            <div v-if="factorSourceCount(factor) > 0" class="health-source-control">
+              <button v-if="factor.sourceRefsTruncated" class="btn small" :disabled="store.isWorkspaceLoading(`health-sources:${factor.factorCode}`)" @click="openFactorSources(factor.factorCode)">
+                {{ factorSourcePages[factor.factorCode] ? '重新读取来源' : '查看来源' }}
+              </button>
+              <details v-else-if="factor.sourceRefs.length" class="health-source-page">
+                <summary>查看来源</summary>
+                <ul>
+                  <li v-for="item in factor.sourceRefs" :key="`${item.kind}:${item.ref}`">
+                    <span>{{ sourceKindLabel(item.kind) }}</span><code>{{ item.ref }}</code>
+                  </li>
+                </ul>
+              </details>
+              <p v-if="factorSourceErrors[factor.factorCode]" class="muted" role="alert">{{ factorSourceErrors[factor.factorCode] }}</p>
+              <div v-if="factorSourcePages[factor.factorCode]" class="health-source-page">
+                <ul>
+                  <li v-for="item in factorSourcePages[factor.factorCode].items" :key="`${item.kind}:${item.ref}`">
+                    <span>{{ sourceKindLabel(item.kind) }}</span><code>{{ item.ref }}</code>
+                  </li>
+                </ul>
+                <div class="health-factor-foot">
+                  <span class="muted">第 {{ (factorSourceCursorHistory[factor.factorCode]?.length ?? 0) * 50 + 1 }}–{{ (factorSourceCursorHistory[factor.factorCode]?.length ?? 0) * 50 + factorSourcePages[factor.factorCode].items.length }} 项，共 {{ factorSourcePages[factor.factorCode].total }} 项</span>
+                  <div class="actions">
+                    <button class="btn small" :disabled="!(factorSourceCursorHistory[factor.factorCode]?.length) || store.isWorkspaceLoading(`health-sources:${factor.factorCode}`)" @click="previousFactorSources(factor.factorCode)">上一页</button>
+                    <button class="btn small" :disabled="!factorSourcePages[factor.factorCode].nextCursor || store.isWorkspaceLoading(`health-sources:${factor.factorCode}`)" @click="nextFactorSources(factor.factorCode)">下一页</button>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div class="health-factor-foot"><span class="muted">{{ statusLabel(factor.status) }}</span><button class="btn small" @click="openDestination(factor.recommendedDestination)">{{ destinationLabel(factor.recommendedDestination) }}</button></div>
           </article>
         </div>
@@ -113,6 +195,11 @@ function openDestination(destination: string) {
 
 <style scoped>
 .health-factor-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:14px; }
+.health-source-control { display:grid; gap:8px; margin-top:10px; }
+.health-source-page { display:grid; gap:8px; padding:10px; border:1px solid var(--line); border-radius:8px; }
+.health-source-page ul { display:grid; gap:5px; margin:0; padding-left:18px; color:var(--ink-3); font-size:12px; }
+.health-source-page li { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.health-source-page code { color:var(--ink-2); overflow-wrap:anywhere; }
 .filter-row { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px; }
 .filter-row label { display:grid; gap:4px; color:var(--ink-3); font-size:12px; }
 .filter-row select { min-width:150px; padding:7px 10px; border:1px solid var(--line); border-radius:7px; background:var(--surface); }

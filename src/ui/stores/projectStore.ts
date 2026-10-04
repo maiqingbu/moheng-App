@@ -2,9 +2,11 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type {
   BookHealthProjection,
+  HealthSourcePage,
   CanonProjection,
   ChapterListItem,
   ChapterProjection,
+  ExportQueryProjection,
   CommandReceipt,
   CommandRequest,
   CommandStatus,
@@ -32,7 +34,7 @@ import type {
   VolumeLifecycleProjection
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
-import { receiptSummary } from '../presentation/productLanguage'
+import { receiptSummary, repairExecutionLabel } from '../presentation/productLanguage'
 import { useProjectLibraryStore } from './projectLibraryStore'
 
 const frontendPort = getFrontendPort()
@@ -41,6 +43,9 @@ export interface CommandUiState {
   status: CommandStatus
   message: string
   commandId?: string
+  confirmation?: 'pending' | 'confirmed'
+  receiptId?: string
+  repairOutcome?: 'receipt' | 'unknown' | 'not_executed'
 }
 
 export interface CommandBinding {
@@ -50,6 +55,17 @@ export interface CommandBinding {
 }
 
 const emptyPage = <T>(): PageResult<T> => ({ items: [], nextCursor: null, total: 0 })
+type HistoryKind = 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON'
+type RepairOutcomeIdentity = { projectId: string; repairPlanId: string; authorizationId: string }
+type RepairOutcomeRead =
+  | { kind: 'receipt'; receipt: CommandReceipt }
+  | { kind: 'not_executed' }
+  | { kind: 'unknown' }
+type PendingCommandConfirmation = {
+  projectId: string | null
+  receipt?: CommandReceipt
+  repair?: RepairOutcomeIdentity
+}
 
 export const useProjectStore = defineStore('project-projection', () => {
   const currentProjectId = ref<string | null>(null)
@@ -71,8 +87,10 @@ export const useProjectStore = defineStore('project-projection', () => {
   const chapterVersions = ref<PageResult<VersionProjection>>(emptyPage())
   const canon = ref<CanonProjection | null>(null)
   const health = ref<BookHealthProjection | null>(null)
+  const healthFactorSourcePages = ref<Record<string, HealthSourcePage>>({})
   const healthError = ref('')
   const history = ref<HistoryProjection | null>(null)
+  const historyKind = ref<HistoryKind | null>(null)
   const settings = ref<SettingsProjection | null>(null)
   const searchResults = ref<PageResult<SearchHit>>(emptyPage())
   const loading = ref(false)
@@ -81,6 +99,8 @@ export const useProjectStore = defineStore('project-projection', () => {
   const commandStates = ref<Record<string, CommandUiState>>({})
   const advancedMode = ref(false)
   let loadSequence = 0
+  const pendingConfirmations = new Map<string, PendingCommandConfirmation>()
+  const workspaceSequences = new Map<string, number>()
   const inFlightCommands = new Map<string, Promise<CommandReceipt>>()
 
   const project = computed(() => overview.value?.project ?? null)
@@ -88,9 +108,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   const pendingDecisions = computed(() => decisions.value?.items.filter(item => item.status === 'pending') ?? [])
   const recentOfficialChapters = computed(() => overview.value?.recentChapters ?? [])
 
-  function queryBase(scope: string, pageSize = 50) {
-    if (!currentProjectId.value) throw new Error('当前没有打开的作品。')
-    return { projectId: currentProjectId.value, scope, cursor: null, pageSize }
+  function queryBase(scope: string, pageSize = 50, projectId = currentProjectId.value) {
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    return { projectId, scope, cursor: null, pageSize }
   }
 
   function resetWorkspaces() {
@@ -111,8 +131,10 @@ export const useProjectStore = defineStore('project-projection', () => {
     chapterVersions.value = emptyPage()
     canon.value = null
     health.value = null
+    healthFactorSourcePages.value = {}
     healthError.value = ''
     history.value = null
+    historyKind.value = null
     settings.value = null
     searchResults.value = emptyPage()
   }
@@ -162,11 +184,9 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function withWorkspace<T>(key: string, loader: () => Promise<T>, assign: (value: T) => void) {
-    // Capture the store generation (loadSequence) and the project id at request
-    // time. When the response lands, it is only written if neither has changed —
-    // otherwise a slow response from a project the user already left would clobber
-    // the workspace the user is now looking at (FR-PRJ-003 / B01-T06).
-    const generation = loadSequence
+    // Only the latest request for this workspace may replace its projection.
+    const sequence = (workspaceSequences.get(key) ?? 0) + 1
+    workspaceSequences.set(key, sequence)
     const projectId = currentProjectId.value
     workspaceLoading.value[key] = true
     try {
@@ -176,11 +196,11 @@ export const useProjectStore = defineStore('project-projection', () => {
       // project-id binding is the authority for clobber protection; a newer
       // generation for that same project must not discard the already valid
       // projection and leave the page blank.
-      if (projectId !== currentProjectId.value) return value
+      if (projectId !== currentProjectId.value || workspaceSequences.get(key) !== sequence) return value
       assign(value)
       return value
     } finally {
-      workspaceLoading.value[key] = false
+      if (workspaceSequences.get(key) === sequence) workspaceLoading.value[key] = false
     }
   }
 
@@ -203,6 +223,114 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function loadProduction(force=false) {
     if (production.value && !force) return production.value
     return withWorkspace('production', () => frontendPort.queryProductionCenter(queryBase('production', 20)), v => { production.value=v })
+  }
+
+  async function readRepairOutcome(identity: RepairOutcomeIdentity): Promise<RepairOutcomeRead> {
+    if (currentProjectId.value !== identity.projectId) return { kind: 'unknown' }
+    const projection = await loadProduction(true)
+    if (currentProjectId.value !== identity.projectId) return { kind: 'unknown' }
+    const repair = projection.repair
+    if (!repair
+      || repair.repairPlanId !== identity.repairPlanId
+      || repair.authorizationId !== identity.authorizationId) return { kind: 'unknown' }
+
+    const durable = repair.executionReceipt
+    if (durable) {
+      if (durable.projectId !== identity.projectId
+        || durable.repairPlanId !== identity.repairPlanId
+        || durable.authorizationId !== identity.authorizationId
+        || durable.operationDigest !== repair.operationDigest
+        || durable.beforeRevision !== repair.basedOnProjectRevision) return { kind: 'unknown' }
+      const ownerFailed = durable.postconditions.some(item =>
+        item && typeof item === 'object' && (item as Record<string, unknown>).status === 'OWNER_EXECUTION_FAILED',
+      )
+      let finalStatus: CommandReceipt['finalStatus']
+      if (durable.status === 'REPAIR_VERIFIED') finalStatus = 'committed'
+      else if (durable.status === 'REPAIR_VERIFICATION_INCOMPLETE') finalStatus = 'blocked'
+      else if (durable.status === 'REPAIR_VERIFICATION_FAILED') finalStatus = ownerFailed ? 'failed' : 'blocked'
+      else return { kind: 'unknown' }
+      return {
+        kind: 'receipt',
+        receipt: {
+          commandId: `repair-recovered:${identity.authorizationId}`,
+          projectId: identity.projectId,
+          acceptedAt: durable.executedAt ?? new Date().toISOString(),
+          finalStatus,
+          message: repairExecutionLabel(durable),
+          receiptId: durable.receiptRef,
+          beforeRevision: durable.beforeRevision ?? undefined,
+          afterRevision: durable.afterRevision ?? undefined,
+          receipt: { ...durable },
+        },
+      }
+    }
+    if (repair.status === 'AUTHORIZED' && !repair.consumedAt) return { kind: 'not_executed' }
+    return { kind: 'unknown' }
+  }
+
+  function sameRepairIdentity(left: RepairOutcomeIdentity, right: RepairOutcomeIdentity) {
+    return left.projectId === right.projectId
+      && left.repairPlanId === right.repairPlanId
+      && left.authorizationId === right.authorizationId
+  }
+
+  function applyRepairOutcome(key: string, identity: RepairOutcomeIdentity, outcome: RepairOutcomeRead): CommandReceipt | null {
+    const matchingKeys = [...pendingConfirmations.entries()]
+      .filter(([, pending]) => pending.repair && sameRepairIdentity(pending.repair, identity))
+      .map(([pendingKey]) => pendingKey)
+    const keys = new Set([key, ...matchingKeys])
+    if (outcome.kind === 'receipt') {
+      const receipt = {
+        ...outcome.receipt,
+        commandId: commandStates.value[key]?.commandId ?? outcome.receipt.commandId,
+      }
+      for (const stateKey of keys) {
+        commandStates.value[stateKey] = {
+          status: receipt.finalStatus,
+          commandId: commandStates.value[stateKey]?.commandId ?? receipt.commandId,
+          receiptId: receipt.receiptId,
+          confirmation: 'confirmed',
+          repairOutcome: 'receipt',
+          message: receipt.message,
+        }
+        pendingConfirmations.delete(stateKey)
+      }
+      return receipt
+    }
+    if (outcome.kind === 'not_executed') {
+      const message = '当前作品没有这项修复的执行回执，且授权尚未消费。请前往创作中心核对后，再由你明确确认是否执行。'
+      for (const stateKey of keys) {
+        commandStates.value[stateKey] = {
+          status: 'blocked',
+          commandId: commandStates.value[stateKey]?.commandId,
+          confirmation: 'confirmed',
+          repairOutcome: 'not_executed',
+          message,
+        }
+        pendingConfirmations.delete(stateKey)
+      }
+      return null
+    }
+    const message = '修复执行结果待确认，当前无法读取匹配的正式回执。请重新读取；系统不会自动再次执行。'
+    commandStates.value[key] = {
+      status: 'processing',
+      commandId: commandStates.value[key]?.commandId,
+      confirmation: 'pending',
+      repairOutcome: 'unknown',
+      message,
+    }
+    pendingConfirmations.set(key, { projectId: identity.projectId, repair: identity })
+    return null
+  }
+
+  async function requeryRepairOutcome(key: string, identity: RepairOutcomeIdentity): Promise<CommandReceipt | null> {
+    let outcome: RepairOutcomeRead
+    try {
+      outcome = await readRepairOutcome(identity)
+    } catch {
+      outcome = { kind: 'unknown' }
+    }
+    return applyRepairOutcome(key, identity, outcome)
   }
   async function loadVolumes(force=false) {
     if (volumes.value && !force) return volumes.value
@@ -238,6 +366,20 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function loadChapterVersions(chapterId:string) {
     return withWorkspace('chapter-versions', () => frontendPort.queryChapterVersions({ ...queryBase(`history:chapter:${chapterId}`, 30), chapterId }), v => { chapterVersions.value=v })
   }
+  async function loadExportCapability(projectId = currentProjectId.value) {
+    return frontendPort.queryExportCapability(queryBase('reader:export-capability', 1, projectId))
+  }
+  async function createExport(requestId:string, format:'TXT'='TXT', projectId = currentProjectId.value) {
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    return frontendPort.createExport({ projectId, requestId, format })
+  }
+  async function queryExportReceipt(requestId:string, projectId = currentProjectId.value):Promise<ExportQueryProjection> {
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    return frontendPort.queryExportReceipt({ projectId, requestId })
+  }
+  async function loadLatestExportReceipt(projectId = currentProjectId.value):Promise<ExportQueryProjection> {
+    return frontendPort.queryLatestExportReceipt(queryBase('reader:latest-export', 1, projectId))
+  }
   async function loadCanon(force=false) {
     if (canon.value && !force) return canon.value
     return withWorkspace('graph', () => frontendPort.queryCanon(queryBase('graph:overview', 60)), v => { canon.value=v })
@@ -245,6 +387,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   async function loadHealth(force=false, cursor: string | null = null) {
     if (health.value && !force && cursor === null) return health.value
     healthError.value = ''
+    if (force && cursor === null) healthFactorSourcePages.value = {}
     try {
       return await withWorkspace('health', () => frontendPort.queryBookHealth({ ...queryBase('health', 30), cursor }), v => { health.value=v })
     } catch (error) {
@@ -252,9 +395,27 @@ export const useProjectStore = defineStore('project-projection', () => {
       throw error
     }
   }
-  async function loadHistory(kind:'all'|'VERSION'|'CHANGE_REQUEST'|'RETCON'='all', force=false) {
-    if (history.value && !force && kind==='all') return history.value
-    return withWorkspace('history', () => frontendPort.queryHistory({ ...queryBase('history', 40), kind }), v => { history.value=v })
+  async function loadHealthFactorSources(factorCode: string, cursor: string | null = null) {
+    if (!currentProjectId.value) return null
+    return withWorkspace(
+      `health-sources:${factorCode}`,
+      () => frontendPort.queryBookHealthFactorSources({ ...queryBase(`health:sources:${factorCode}`, 50), factorCode, cursor }),
+      page => { healthFactorSourcePages.value = { ...healthFactorSourcePages.value, [factorCode]: page } },
+    )
+  }
+  async function loadHistory(kind:HistoryKind='all', force=false, cursor: string | null = null) {
+    if (history.value && historyKind.value === kind && !force && cursor === null) return history.value
+    const pageCursor = cursor && historyKind.value === kind ? cursor : null
+    return withWorkspace('history', async () => {
+      const page = await frontendPort.queryHistory({ ...queryBase('history', 40), cursor: pageCursor, kind })
+      if (!pageCursor || !history.value || historyKind.value !== kind) return page
+      const existing = new Set(history.value.entries.items.map(entry => `${entry.kind}:${entry.id}`))
+      const appended = page.entries.items.filter(entry => !existing.has(`${entry.kind}:${entry.id}`))
+      return {
+        ...page,
+        entries: { ...page.entries, items: [...history.value.entries.items, ...appended] },
+      }
+    }, v => { history.value=v; historyKind.value=kind })
   }
   async function queryChangeRequest(changeRequestId: string) {
     return frontendPort.queryChangeRequest({ ...queryBase(`history:change:${changeRequestId}`, 40), changeRequestId })
@@ -334,10 +495,40 @@ export const useProjectStore = defineStore('project-projection', () => {
       },
     })
     if (authorization.finalStatus !== 'committed') throw new Error(authorization.message || '授权未保存。')
-    return runCommand('assistant-execute', {
+    const receipt = await runCommand('assistant-execute', {
       type: 'repair_execute',
       projectId,
       payload: { repairPlanId: plan.repairPlanId, authorizationId },
+    })
+    try { await loadProduction(true) } catch { /* preserve the durable repair receipt for the caller */ }
+    return receipt
+  }
+
+  async function reverifyAssistantRepair(plan: AssistantRepairPlan): Promise<CommandReceipt> {
+    if (plan.action !== 'EXECUTABLE') throw new Error('当前方案没有可重新核对的正式修复。')
+    const projectId = currentProjectId.value
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    const authorizationId = `assistant-authorization:${plan.repairPlanId}`
+    const receipt = await runCommand('assistant-reverify', {
+      type: 'repair_execute',
+      projectId,
+      payload: { repairPlanId: plan.repairPlanId, authorizationId },
+    })
+    try { await loadProduction(true) } catch { /* preserve the durable repair receipt for the caller */ }
+    return receipt
+  }
+
+  async function requeryAssistantRepair(
+    plan: AssistantRepairPlan,
+    key = 'assistant-execute',
+  ): Promise<CommandReceipt | null> {
+    if (plan.action !== 'EXECUTABLE') throw new Error('当前方案没有可重新读取的正式修复。')
+    const projectId = currentProjectId.value
+    if (!projectId) throw new Error('当前没有打开的作品。')
+    return requeryRepairOutcome(key, {
+      projectId,
+      repairPlanId: plan.repairPlanId,
+      authorizationId: `assistant-authorization:${plan.repairPlanId}`,
     })
   }
 
@@ -350,6 +541,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (production.value) jobs.push(loadProduction(true))
     if (volumes.value) jobs.push(loadVolumes(true))
     if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
+    if (planningRoute.value) jobs.push(loadPlanningRoute(planningRoute.value.volumeId, true))
     if (volumeLifecycle.value) jobs.push(loadVolumeLifecycle(volumeLifecycle.value.volumeId, true))
     if (decisions.value) jobs.push(loadDecisions('all', true))
     if (readerVolumes.value) jobs.push(loadReaderVolumes(true))
@@ -357,7 +549,40 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (health.value) jobs.push(loadHealth(true))
     if (history.value) jobs.push(loadHistory('all', true))
     if (settings.value) jobs.push(loadSettings(true))
-    await Promise.all(jobs)
+    const results = await Promise.allSettled(jobs)
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+
+  async function confirmCommandResult(key: string) {
+    const pending = pendingConfirmations.get(key)
+    if (!pending || pending.projectId !== currentProjectId.value) return
+    if (pending.repair) {
+      await requeryRepairOutcome(key, pending.repair)
+      return
+    }
+    if (!pending.receipt) return
+    const isCurrent = () => pendingConfirmations.get(key) === pending && pending.projectId === currentProjectId.value
+    try {
+      await refresh()
+      if (!isCurrent()) return
+      if (loadError.value) throw new Error(loadError.value)
+      await refreshLoadedWorkspaces()
+      if (!isCurrent()) return
+      commandStates.value[key] = {
+        status: pending.receipt.finalStatus, commandId: pending.receipt.commandId,
+        receiptId: pending.receipt.receiptId, confirmation: 'confirmed',
+        message: '正式回执已返回，当前作品展示已重新读取。',
+      }
+      pendingConfirmations.delete(key)
+    } catch {
+      if (!isCurrent()) return
+      commandStates.value[key] = {
+        status: pending.receipt.finalStatus, commandId: pending.receipt.commandId,
+        receiptId: pending.receipt.receiptId, confirmation: 'pending',
+        message: '正式回执已返回，但重新查询未完成，结果待确认。请只重新读取，不要重复提交。',
+      }
+    }
   }
 
   async function executeCommand(key: string, request: CommandRequest) {
@@ -395,11 +620,35 @@ export const useProjectStore = defineStore('project-projection', () => {
     let receipt: CommandReceipt
     try {
       receipt = await frontendPort.executeCommand(envelope, (status, message) => {
-        setStateIfCurrent({ ...commandStates.value[key], commandId, status, message })
+        setStateIfCurrent({ ...commandStates.value[key], commandId, status: status === 'committed' ? 'processing' : status, message: status === 'committed' ? '回执已返回，正在读取当前作品状态。' : message })
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      setStateIfCurrent({ status: 'failed', message, commandId })
+      if (request.type === 'repair_execute') {
+        const repairPlanId = request.payload?.repairPlanId
+        const authorizationId = request.payload?.authorizationId
+        if (typeof repairPlanId === 'string'
+          && typeof authorizationId === 'string'
+          && binding.sourceProjectId) {
+          const recovered = await requeryRepairOutcome(key, {
+            projectId: binding.sourceProjectId,
+            repairPlanId,
+            authorizationId,
+          })
+          if (recovered) return recovered
+        } else {
+          setStateIfCurrent({ status: 'processing', confirmation: 'pending', message: '修复执行结果待确认；请重新读取正式回执，系统不会自动再次执行。', commandId, repairOutcome: 'unknown' })
+        }
+        throw error
+      }
+      if (request.type === 'retcon_apply' || request.type === 'change_request_apply') {
+        const message = request.type === 'retcon_apply'
+          ? '事实修订提交结果暂时无法确认。请先重新读取；若重试，将使用同一操作编号。'
+          : '普通修改结果待确认，提交状态未知。请先重新读取；若重试，将使用同一操作编号。'
+        setStateIfCurrent({ status: 'processing', confirmation: 'pending', message, commandId })
+      } else {
+        setStateIfCurrent({ status: 'failed', message, commandId })
+      }
       if (request.type.startsWith('production_')) {
         try { await loadProduction(true) } catch { /* preserve the original command error */ }
       }
@@ -415,8 +664,9 @@ export const useProjectStore = defineStore('project-projection', () => {
 
     commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
     if (receipt.finalStatus === 'committed') {
-      await refresh()
-      await refreshLoadedWorkspaces()
+      pendingConfirmations.set(key, { projectId: binding.sourceProjectId, receipt })
+      commandStates.value[key] = { status: 'committed', message: '回执已返回，正在读取当前作品状态。', commandId: receipt.commandId, receiptId: receipt.receiptId, confirmation: 'pending' }
+      await confirmCommandResult(key)
     }
     void useProjectLibraryStore().refresh()
     return receipt
@@ -436,6 +686,31 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function runCommand(key: string, request: CommandRequest) {
+    if (request.type === 'repair_execute') {
+      const repairPlanId = request.payload?.repairPlanId
+      const authorizationId = request.payload?.authorizationId
+      const projectId = request.projectId ?? currentProjectId.value
+      if (typeof repairPlanId === 'string' && typeof authorizationId === 'string' && projectId) {
+        const identity = { projectId, repairPlanId, authorizationId }
+        const pending = [...pendingConfirmations.entries()].find(([, value]) =>
+          value.repair && sameRepairIdentity(value.repair, identity),
+        )
+        if (pending) {
+          const [pendingKey] = pending
+          const recovered = await requeryRepairOutcome(pendingKey, identity)
+          const state = commandStates.value[pendingKey]
+          commandStates.value[key] = { ...state, commandId: request.commandId ?? state?.commandId }
+          if (recovered) return { ...recovered, commandId: request.commandId ?? recovered.commandId }
+          if (commandStates.value[key].repairOutcome === 'unknown') {
+            pendingConfirmations.set(key, { projectId, repair: identity })
+          }
+          throw new Error('COMMAND_RESULT_UNCONFIRMED')
+        }
+      }
+    }
+    if (pendingConfirmations.get(key)?.projectId === (request.projectId ?? currentProjectId.value)) {
+      throw new Error('COMMAND_RESULT_UNCONFIRMED')
+    }
     const dedupeKey = inFlightCommandKey(request)
     if (!dedupeKey) return executeCommand(key, request)
     const active = inFlightCommands.get(dedupeKey)
@@ -471,16 +746,17 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   function commandState(key:string):CommandUiState { return commandStates.value[key] ?? { status:'idle',message:'' } }
-  function clearCommandState(key:string){ commandStates.value[key]={status:'idle',message:''} }
+  function clearCommandState(key:string){ if (pendingConfirmations.has(key)) return; commandStates.value[key]={status:'idle',message:''} }
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
     currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, decisions,
-    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthError, history, settings, searchResults, volumeLifecycle,
+    readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
-    loadCanon, loadHealth, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, runCommand, testProvider, commandState,
-    clearCommandState, isWorkspaceLoading
+    loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, testProvider, commandState,
+    clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

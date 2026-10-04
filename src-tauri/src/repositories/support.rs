@@ -8,6 +8,8 @@ pub enum SupportRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("repair execution receipt binding changed during re-verification")]
+    RepairReceiptBindingChanged,
 }
 
 pub fn save_repair_plan(
@@ -172,6 +174,117 @@ pub fn save_repair_execution_receipt(
         "UPDATE repair_plans SET status=?1 WHERE project_id=?2 AND repair_plan_id=?3",
         libsql_rusqlite::params![receipt.status, receipt.project_id, receipt.repair_plan_id],
     )?;
+    Ok(())
+}
+
+pub fn load_repair_execution_receipt(
+    connection: &Connection,
+    project_id: &str,
+    authorization_id: &str,
+) -> Result<Option<ExecutionReceipt>, SupportRepositoryError> {
+    let row = connection
+        .query_row(
+            "SELECT receipt_ref,repair_plan_id,authorization_id,project_id,before_revision,after_revision,operation_digest,owner,owner_receipt_ref,executed_at,status,postconditions_json FROM repair_execution_receipts WHERE project_id=?1 AND authorization_id=?2",
+            libsql_rusqlite::params![project_id, authorization_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(
+            receipt_ref,
+            repair_plan_id,
+            authorization_id,
+            project_id,
+            before_revision,
+            after_revision,
+            operation_digest,
+            owner,
+            owner_receipt_ref,
+            executed_at,
+            status,
+            postconditions_json,
+        )| {
+            Ok(ExecutionReceipt {
+                receipt_ref,
+                repair_plan_id,
+                authorization_id,
+                project_id,
+                before_revision,
+                after_revision,
+                operation_digest,
+                owner,
+                owner_receipt_ref,
+                executed_at,
+                status,
+                postconditions: serde_json::from_str(&postconditions_json)?,
+            })
+        },
+    )
+    .transpose()
+}
+
+pub fn update_repair_execution_receipt(
+    connection: &Connection,
+    receipt: &ExecutionReceipt,
+) -> Result<(), SupportRepositoryError> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let changed = connection.execute(
+            "UPDATE repair_execution_receipts SET status=?1,postconditions_json=?2 WHERE receipt_ref=?3 AND repair_plan_id=?4 AND authorization_id=?5 AND project_id=?6 AND before_revision=?7 AND after_revision=?8 AND operation_digest=?9 AND owner=?10 AND owner_receipt_ref IS ?11 AND executed_at=?12 AND status='REPAIR_VERIFICATION_INCOMPLETE'",
+            libsql_rusqlite::params![
+                receipt.status,
+                serde_json::to_string(&receipt.postconditions)?,
+                receipt.receipt_ref,
+                receipt.repair_plan_id,
+                receipt.authorization_id,
+                receipt.project_id,
+                receipt.before_revision,
+                receipt.after_revision,
+                receipt.operation_digest,
+                receipt.owner,
+                receipt.owner_receipt_ref,
+                receipt.executed_at,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(SupportRepositoryError::RepairReceiptBindingChanged);
+        }
+        let plan_changed = connection.execute(
+            "UPDATE repair_plans SET status=?1 WHERE project_id=?2 AND repair_plan_id=?3 AND operation_digest=?4",
+            libsql_rusqlite::params![
+                receipt.status,
+                receipt.project_id,
+                receipt.repair_plan_id,
+                receipt.operation_digest
+            ],
+        )?;
+        if plan_changed != 1 {
+            return Err(SupportRepositoryError::RepairReceiptBindingChanged);
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => connection.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
     Ok(())
 }
 

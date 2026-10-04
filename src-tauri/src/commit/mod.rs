@@ -1,8 +1,8 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
-use crate::generated::types::ArtifactScopeLevel;
 use crate::generated::types::{
     ArtifactRef, CommitBundle, CommitReceipt, DomainReceipt, HeadChange, ProjectCommandReceipt,
 };
+use crate::generated::types::{ArtifactScopeLevel, ArtifactType};
 use crate::generated::validators::validate_commit_bundle;
 use crate::hash::sha256_canonical;
 use crate::repositories::artifacts::{enum_string, scope_key, ArtifactError, ArtifactRepository};
@@ -128,6 +128,12 @@ impl CommitService {
                     return Err(CommitError::RevisionConflict);
                 }
             }
+            crate::repositories::health::HealthRepository::flush_dirty(
+                connection,
+                spec.project_id,
+                spec.now,
+            )
+            .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
 
             let mut receipt = ProjectCommandReceipt {
                 receipt_id: format!("project-receipt:{}", spec.command_id),
@@ -213,7 +219,74 @@ impl CommitService {
             bundle,
             committed_at,
             true,
+            true,
             |_connection, _receipt| Ok(()),
+        )
+    }
+
+    /// Commits a B08 chapter while leaving its volume's Health projection dirty
+    /// for the post-commit B09 owner rebuild. The dirty marker is part of the
+    /// chapter transaction, so a crash or B09 failure cannot expose the old
+    /// Health projection as current after the chapter revision advances.
+    pub fn commit_b08_chapter_with_deferred_b09_projection(
+        connection: &Connection,
+        bundle: &CommitBundle,
+        volume_id: &str,
+        committed_at: &str,
+    ) -> Result<CommitReceipt, CommitError> {
+        if bundle
+            .receipt_draft
+            .as_ref()
+            .is_none_or(|receipt| receipt.domain != "B08_CHAPTER_PRODUCTION")
+        {
+            return Err(CommitError::ContractInvalid(
+                "deferred B09 refresh requires a B08 chapter receipt".into(),
+            ));
+        }
+        let chapter_id = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.artifact_type == ArtifactType::FinalChapter
+                    && artifact
+                        .payload
+                        .get("payloadSchema")
+                        .and_then(|value| value.as_str())
+                        == Some("final-chapter.r1")
+            })
+            .and_then(|artifact| artifact.scope.chapter_id.as_deref())
+            .ok_or_else(|| {
+                CommitError::ContractInvalid(
+                    "deferred B09 refresh requires a B08 FinalChapter".into(),
+                )
+            })?;
+        let chapter_volume: Option<String> = connection
+            .query_row(
+                "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![bundle.project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if chapter_volume.as_deref() != Some(volume_id) {
+            return Err(CommitError::ContractInvalid(
+                "deferred B09 refresh volume does not match the committed chapter".into(),
+            ));
+        }
+        Self::commit_with_revision_and_hook(
+            connection,
+            bundle,
+            committed_at,
+            true,
+            false,
+            |connection, _receipt| {
+                crate::repositories::health::HealthRepository::mark_b09_rebuild_pending(
+                    connection,
+                    &bundle.project_id,
+                    volume_id,
+                    committed_at,
+                )
+                .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))
+            },
         )
     }
 
@@ -232,6 +305,7 @@ impl CommitService {
             bundle,
             committed_at,
             false,
+            true,
             |_connection, _receipt| Ok(()),
         )
     }
@@ -248,7 +322,14 @@ impl CommitService {
         committed_at: &str,
         post_apply: impl FnOnce(&Connection, &CommitReceipt) -> Result<(), CommitError>,
     ) -> Result<CommitReceipt, CommitError> {
-        Self::commit_with_revision_and_hook(connection, bundle, committed_at, true, post_apply)
+        Self::commit_with_revision_and_hook(
+            connection,
+            bundle,
+            committed_at,
+            true,
+            true,
+            post_apply,
+        )
     }
 
     fn commit_with_revision_and_hook(
@@ -256,6 +337,7 @@ impl CommitService {
         bundle: &CommitBundle,
         committed_at: &str,
         advance_revision: bool,
+        refresh_health: bool,
         post_apply: impl FnOnce(&Connection, &CommitReceipt) -> Result<(), CommitError>,
     ) -> Result<CommitReceipt, CommitError> {
         let bundle_value = serde_json::to_value(bundle)?;
@@ -307,6 +389,14 @@ impl CommitService {
                 advance_revision,
             )?;
             post_apply(connection, &receipt)?;
+            if refresh_health {
+                crate::repositories::health::HealthRepository::flush_dirty(
+                    connection,
+                    &bundle.project_id,
+                    committed_at,
+                )
+                .map_err(|error| CommitError::ProjectCommandApply(error.to_string()))?;
+            }
             Ok(receipt)
         })();
         match result {

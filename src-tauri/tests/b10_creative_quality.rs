@@ -322,7 +322,7 @@ fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
         model_calls: 1,
     })
     .unwrap();
-    let loader = SkillBundleLoader::tracked_package();
+    let loader = SkillBundleLoader::development_package();
     assert_eq!(
         loader
             .load_selected_resource(&selection, "S21", "resources/operating_method.md")

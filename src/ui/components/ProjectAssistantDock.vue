@@ -3,11 +3,11 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
-import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
+import { productErrorMessage, repairExecutionLabel, sanitizeProductText } from '../presentation/productLanguage'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import type { AssistantRepairPlan } from '../../application/contracts'
 
-type AssistantPhase = 'PROPOSAL_READY' | 'AWAITING_AUTHORIZATION' | 'EXECUTING' | 'EXECUTED' | 'POST_VERIFYING' | 'VERIFIED' | 'FAILED'
+type AssistantPhase = 'PROPOSAL_READY' | 'AWAITING_AUTHORIZATION' | 'EXECUTING' | 'EXECUTED' | 'POST_VERIFYING' | 'VERIFY_INCOMPLETE' | 'OUTCOME_UNKNOWN' | 'OUTCOME_NOT_EXECUTED' | 'VERIFICATION_FAILED' | 'VERIFIED' | 'FAILED'
 
 defineProps<{ collapsed: boolean }>()
 const emit = defineEmits<{ toggle: [] }>()
@@ -25,6 +25,7 @@ const proposalMessage = ref('')
 const assistantError = ref('')
 const assistantPhase = ref<AssistantPhase>('PROPOSAL_READY')
 const executionBeforeRevision = ref<number | null>(null)
+const unknownCommandKey = ref<'assistant-execute' | 'assistant-reverify'>('assistant-execute')
 const context = computed(() => ({ 'project-overview': '总览', production: '创作', directions: '规划', volumes: '当前卷', 'volume-workspace': '当前卷', decisions: '待处理', health: '长篇健康', read: '资料', graph: '资料', completion: '完结准备' }[String(route.name)] ?? '当前作品'))
 const projectTitle = computed(() => store.project?.title?.trim() || '当前作品')
 const placeholder = computed(() => context.value === '当前卷' ? '问问这一卷还缺什么、为什么卡住……' : context.value === '创作' ? '问问这一章的设定、冲突或修改建议……' : '问问这部作品的进展、问题或下一步……')
@@ -73,12 +74,23 @@ async function authorizeProposal() {
   if (assistantPhase.value !== 'AWAITING_AUTHORIZATION' || !proposal.value || proposal.value.action !== 'EXECUTABLE' || authorizationState.value.status === 'submitting') return
   executionBeforeRevision.value = store.project?.revision ?? null
   assistantPhase.value = 'EXECUTING'
+  unknownCommandKey.value = 'assistant-execute'
   proposalMessage.value = '正在执行修改。'
   try {
     const receipt = await store.authorizeAssistantRepair(proposal.value)
+    if (receipt.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
+      assistantPhase.value = 'VERIFY_INCOMPLETE'
+      proposalMessage.value = '修复已执行，但核对不完整。你可以重新核对现有回执；系统不会再次执行修复。'
+      return
+    }
     if (receipt.finalStatus !== 'committed') {
-      assistantPhase.value = 'FAILED'
-      proposalMessage.value = '修改没有完成，请先刷新当前作品后再试。'
+      const label = receipt.receipt?.status === 'REPAIR_VERIFICATION_FAILED'
+        ? repairExecutionLabel(receipt.receipt)
+        : ''
+      assistantPhase.value = label === '已执行，核验未通过' ? 'VERIFICATION_FAILED' : 'FAILED'
+      proposalMessage.value = label
+        ? `${label}；请查看修复回执。`
+        : '修复执行未完成，请先刷新当前作品后再试。'
       return
     }
     assistantPhase.value = 'EXECUTED'
@@ -89,15 +101,101 @@ async function authorizeProposal() {
     const afterRevision = store.project?.revision ?? null
     const formalReceiptVerified = receipt.receipt?.status === 'REPAIR_VERIFIED'
     if (afterRevision == null || !formalReceiptVerified) {
-      assistantPhase.value = 'FAILED'
-      proposalMessage.value = '修改已经执行，但重新检查未完成，请稍后重试。'
+      assistantPhase.value = 'VERIFY_INCOMPLETE'
+      proposalMessage.value = '正式修改已经提交，但当前无法确认核对结果。请重新核对现有回执，不会再次执行修改。'
       return
     }
     assistantPhase.value = 'VERIFIED'
     proposalMessage.value = '修改已完成，并已重新核对结果。'
   } catch (error) {
+    const outcome = store.commandState('assistant-execute')
+    if (outcome.repairOutcome === 'unknown') {
+      assistantPhase.value = 'OUTCOME_UNKNOWN'
+      proposalMessage.value = outcome.message
+      return
+    }
+    if (outcome.repairOutcome === 'not_executed') {
+      assistantPhase.value = 'OUTCOME_NOT_EXECUTED'
+      proposalMessage.value = outcome.message
+      return
+    }
     assistantPhase.value = 'FAILED'
     proposalMessage.value = productErrorMessage(error, '修改没有完成，请先刷新当前作品后再试。')
+  }
+}
+
+async function reverifyProposal() {
+  if (assistantPhase.value !== 'VERIFY_INCOMPLETE' || !proposal.value || proposal.value.action !== 'EXECUTABLE') return
+  assistantPhase.value = 'POST_VERIFYING'
+  unknownCommandKey.value = 'assistant-reverify'
+  proposalMessage.value = '正在重新读取正式回执并核对；不会再次执行修改。'
+  try {
+    const receipt = await store.reverifyAssistantRepair(proposal.value)
+    if (receipt.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
+      assistantPhase.value = 'VERIFY_INCOMPLETE'
+      proposalMessage.value = '修复已执行，但核对仍不完整。可以稍后重新核对现有回执。'
+      return
+    }
+    if (receipt.finalStatus === 'committed' && receipt.receipt?.status === 'REPAIR_VERIFIED') {
+      assistantPhase.value = 'VERIFIED'
+      proposalMessage.value = '修改已完成，并已重新核对结果。'
+      return
+    }
+    const label = receipt.receipt?.status === 'REPAIR_VERIFICATION_FAILED'
+      ? repairExecutionLabel(receipt.receipt)
+      : ''
+    assistantPhase.value = label === '已执行，核验未通过' ? 'VERIFICATION_FAILED' : 'FAILED'
+    proposalMessage.value = label
+      ? `${label}；请查看修复回执。`
+      : '回执核对暂不可用；请重新读取当前作品，不要重新提交正式修改。'
+  } catch (error) {
+    const outcome = store.commandState('assistant-reverify')
+    if (outcome.repairOutcome === 'unknown') {
+      assistantPhase.value = 'OUTCOME_UNKNOWN'
+      proposalMessage.value = outcome.message
+      return
+    }
+    if (outcome.repairOutcome === 'not_executed') {
+      assistantPhase.value = 'OUTCOME_NOT_EXECUTED'
+      proposalMessage.value = outcome.message
+      return
+    }
+    assistantPhase.value = 'VERIFY_INCOMPLETE'
+    proposalMessage.value = productErrorMessage(error, '回执核对暂不可用；可稍后重新读取当前作品，不会再次执行正式修改。')
+  }
+}
+
+async function requeryProposalOutcome() {
+  if (!proposal.value || proposal.value.action !== 'EXECUTABLE') return
+  assistantPhase.value = 'POST_VERIFYING'
+  proposalMessage.value = '正在重新读取现有正式回执；不会再次提交修改。'
+  try {
+    const receipt = await store.requeryAssistantRepair(proposal.value, unknownCommandKey.value)
+    if (receipt?.receipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE') {
+      assistantPhase.value = 'VERIFY_INCOMPLETE'
+      proposalMessage.value = '修复已执行，但核对不完整。可以重新核对现有回执；不会再次执行正式修改。'
+      return
+    }
+    if (receipt?.receipt?.status === 'REPAIR_VERIFIED') {
+      assistantPhase.value = 'VERIFIED'
+      proposalMessage.value = '修改已完成，并已从正式回执核对通过。'
+      return
+    }
+    if (receipt?.receipt?.status === 'REPAIR_VERIFICATION_FAILED') {
+      assistantPhase.value = repairExecutionLabel(receipt.receipt) === '已执行，核验未通过' ? 'VERIFICATION_FAILED' : 'FAILED'
+      proposalMessage.value = `${repairExecutionLabel(receipt.receipt)}；请查看修复回执。`
+      return
+    }
+  } catch {
+    // Keep the outcome unknown until the durable projection can be read.
+  }
+  const outcome = store.commandState(unknownCommandKey.value)
+  if (outcome.repairOutcome === 'not_executed') {
+    assistantPhase.value = 'OUTCOME_NOT_EXECUTED'
+    proposalMessage.value = outcome.message
+  } else {
+    assistantPhase.value = 'OUTCOME_UNKNOWN'
+    proposalMessage.value = outcome.message || '修复结果仍待确认。请重新读取现有正式回执；系统不会自动再次执行。'
   }
 }
 
@@ -107,6 +205,10 @@ const assistantPhaseLabel = computed(() => ({
   EXECUTING: '正在执行修改',
   EXECUTED: '修改已执行',
   POST_VERIFYING: '正在重新核对',
+  VERIFY_INCOMPLETE: '已执行，验证不完整',
+  OUTCOME_UNKNOWN: '结果待确认',
+  OUTCOME_NOT_EXECUTED: '已确认尚未执行',
+  VERIFICATION_FAILED: '已执行，核验未通过',
   VERIFIED: '修改已完成并核对通过',
   FAILED: '修改未完成',
 }[assistantPhase.value]))
@@ -144,11 +246,11 @@ function startConversation() {
 
     <div v-if="proposalOpen" class="prototype-assistant-plan">
       <div v-if="proposal" class="prototype-answercard">
-        <div class="prototype-plan-title"><strong>修改方案</strong><span class="prototype-badge" :class="assistantPhase === 'VERIFIED' ? 'brand' : assistantPhase === 'FAILED' ? 'warn' : 'brand'">{{ assistantPhaseLabel }}</span></div>
+        <div class="prototype-plan-title"><strong>修改方案</strong><span class="prototype-badge" :class="assistantPhase === 'VERIFIED' ? 'brand' : ['FAILED','VERIFY_INCOMPLETE','OUTCOME_UNKNOWN','OUTCOME_NOT_EXECUTED','VERIFICATION_FAILED'].includes(assistantPhase) ? 'warn' : 'brand'">{{ assistantPhaseLabel }}</span></div>
         <p>{{ sanitizeProductText(proposal.diagnosis?.claim, '已完成当前作品记录核对。') }}</p>
         <div class="prototype-plan-grid"><span>影响范围</span><strong>{{ displayScopes(proposal.affectedScopes) }}</strong><span>风险</span><strong>{{ sanitizeProductText(proposal.riskLevel, '按当前记录评估') }}</strong><span>执行前备份</span><strong>{{ proposal.requiresBackup ? '需要' : '不需要' }}</strong></div>
         <p v-if="proposalMessage" class="prototype-plan-message">{{ proposalMessage }}</p>
-        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || authorizationState.status === 'submitting' || executionState.status === 'submitting'" @click="authorizeProposal">确认执行</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
+        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || authorizationState.status === 'submitting' || executionState.status === 'submitting'" @click="authorizeProposal">确认执行</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'VERIFY_INCOMPLETE'" class="prototype-btn primary" type="button" @click="reverifyProposal">重新核对现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_UNKNOWN'" class="prototype-btn primary" type="button" @click="requeryProposalOutcome">重新读取现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_NOT_EXECUTED'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心核对执行状态</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
       </div>
       <p v-else class="prototype-plan-message">{{ proposalMessage }}</p>
     </div>

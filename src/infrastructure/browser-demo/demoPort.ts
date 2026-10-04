@@ -4,6 +4,9 @@ import type {
   BookHealthProjection,
   ChapterListItem,
   ChapterProjection,
+  ExportCapabilityProjection,
+  ExportQueryProjection,
+  ExportReceiptProjection,
   CommandReceipt,
   CommandRequest,
   CommandStatus,
@@ -11,6 +14,7 @@ import type {
   FrontendPort,
   HistoryEntry,
   HistoryProjection,
+  MarketDiscoveryProjection,
   MarketStrategyProjection,
   OpeningReadyProjection,
   PageRequest,
@@ -376,12 +380,21 @@ export class BrowserDemoPort implements FrontendPort {
     const record = this.record(request.projectId)
     return clone({
       projectId: request.projectId,
+      status: 'DEMO_ONLY',
+      sourceStatus: 'DEMO_ONLY',
+      policyStatus: 'DEMO_ONLY',
       targetPlatform: record.bundle.project.platform,
       strategyTitle: '悬疑身份线优先 · 保持成长回报',
       readerPromise: record.bundle.pitches.find(p => p.recommended)?.promise ?? '等待确认故事方向后编译市场策略。',
       platformPolicyVersion: 'FQ-2026.08',
       snapshotCollectedAt: '2026-08-22', confidence: 86, lastPulseAt: '2026-08-22 09:10', nextReview: '下一卷规划前',
+      snapshotCollectedAtEpochMs: Date.parse('2026-08-22T09:10:00Z'),
       opportunities: record.bundle.market,
+      selectedOpportunityId: null,
+      source: { sourceId:'browser-demo', sourceUrl:'demo://market', digest:'demo', observedAtEpochMs:Date.parse('2026-08-22T09:10:00Z'), sampleCount:record.bundle.market.length, metricsBasis:'DEMO_ONLY' },
+      sourceDigest: 'demo',
+      policyReferences: [],
+      sourceAttempt: { observedAt:'2026-08-22T09:10:00Z', errorCode:null },
       signals: [
         { label:'题材需求', value:'较强', trend:'up', note:'悬疑元素在跨题材内容中的互动信号继续上升。' },
         { label:'同质化压力', value:'中等', trend:'flat', note:'宗门成长供给高，身份谜局提供差异空间。' },
@@ -529,6 +542,22 @@ export class BrowserDemoPort implements FrontendPort {
     return page(items, request, 20)
   }
 
+  async queryExportCapability(): Promise<ExportCapabilityProjection> {
+    return { available: false, reason: 'DEMO_ONLY', supportedFormats: [], currentFinalChapterCount: 0 }
+  }
+
+  async createExport(): Promise<ExportReceiptProjection> {
+    throw new Error('EXPORT_UNAVAILABLE_IN_BROWSER_DEMO')
+  }
+
+  async queryExportReceipt(): Promise<ExportQueryProjection> {
+    throw new Error('EXPORT_RECEIPT_NOT_FOUND')
+  }
+
+  async queryLatestExportReceipt(): Promise<ExportQueryProjection> {
+    return { status: 'NONE' }
+  }
+
   async queryCanon(request: ProjectQueryRequest) {
     await wait(40)
     const canon = this.record(request.projectId).bundle.canon
@@ -564,6 +593,19 @@ export class BrowserDemoPort implements FrontendPort {
       ...projection,
       issues: page(projection.issues.items, request, 30),
     })
+  }
+
+  async queryBookHealthFactorSources(request: ProjectQueryRequest & { factorCode: string }) {
+    await wait(25)
+    const projection = demoHealthProjection(this.record(request.projectId))
+    const factor = projection.factors.find(candidate => candidate.factorCode === request.factorCode)
+    const sourcePage = page(factor?.sourceRefs ?? [], request, 50)
+    return {
+      items: sourcePage.items,
+      total: sourcePage.total,
+      truncated: sourcePage.nextCursor !== null,
+      nextCursor: sourcePage.nextCursor,
+    }
   }
 
   async queryHistory(request: ProjectQueryRequest & { kind?: 'all' | 'VERSION' | 'CHANGE_REQUEST' | 'RETCON' }): Promise<HistoryProjection> {
@@ -609,9 +651,19 @@ export class BrowserDemoPort implements FrontendPort {
     return page(hits, request, 30)
   }
 
-  async queryMarketOpportunities() {
+  async queryMarketOpportunities(): Promise<MarketDiscoveryProjection> {
     await wait(40)
-    return clone(starterMarket)
+    return clone({
+      status:'DEMO_ONLY',
+      source:{sourceId:'browser-demo',sourceUrl:'demo://market',digest:'demo',observedAtEpochMs:Date.parse('2026-08-22T09:10:00Z'),sampleCount:starterMarket.length,metricsBasis:'DEMO_ONLY'},
+      policyStatus:'DEMO_ONLY',
+      policySourceUrl:'demo://policy',
+      policyDigest:'demo',
+      policyObservedAtEpochMs:Date.parse('2026-08-22T09:10:00Z'),
+      policyReferences:[],
+      opportunities:starterMarket,
+      limitations:['浏览器演示数据，不是正式市场来源或平台表现数据。']
+    })
   }
 
   async queryGlobalSettings(): Promise<SettingsProjection> {
@@ -729,12 +781,11 @@ export class BrowserDemoPort implements FrontendPort {
             message='你的选择已记录，系统将按新的正式约束继续。'; break
           }
           case 'revision_request':
-          case 'chapter_revision_request': message=request.payload?.kind==='chapter_rollback'?'版本回退已提交并生成新的正式版本记录。':'章节修订请求已记录，系统会先分析影响范围。'; break
+            message=request.payload?.kind==='chapter_rollback'?'版本回退已提交并生成新的正式版本记录。':'章节修订请求已记录，系统会先分析影响范围。'; break
           case 'change_request_create': message='变更请求已创建，正在计算类型化影响范围；尚未改写正式状态。'; break
           case 'change_request_apply': message='已批准的变更请求已提交，受影响投影将按依赖规则刷新。'; break
           case 'retcon_plan_create': message='事实修订方案已建立；正式事实仍保持不变，等待影响确认。'; break
           case 'retcon_apply': message='Retcon 已按批准计划提交，并保留原正式历史与审计回执。'; break
-          case 'export_create': message='正式成品导出任务已完成。'; break
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break
           case 'integrity_check_run': message='完整性检查已完成，未发现作品数据断链。'; break
           case 'settings_save': if(request.payload?.settings) bundle.settings=clone(request.payload.settings as unknown as SettingsProjection); message='项目设置已保存。'; break

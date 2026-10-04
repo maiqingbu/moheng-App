@@ -958,6 +958,58 @@ fn b11_market_entry_requires_user_material_and_keeps_market_evidence_out_of_cano
 }
 
 #[test]
+fn b_r2_04a_market_refresh_records_source_unavailability_without_story_mutation() {
+    let state = state();
+    let project_id = create_idea_fixture(&state, "cmd:b-r2-04a:market-unavailable");
+    let before_revision = state.manager.overview(&project_id).unwrap().1;
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"market_refresh",
+            "commandId":"cmd:b-r2-04a:market-unavailable:refresh",
+            "idempotencyKey":"cmd:b-r2-04a:market-unavailable:refresh:key",
+            "projectId":project_id,
+            "expectedRevision":before_revision,
+            "requestedAt":NOW,
+            "payload":{"platformId":"fanqie"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert_eq!(result["sourceStatus"], "SOURCE_UNAVAILABLE");
+    assert!(result["receiptId"].as_str().is_some());
+
+    let market = query_market_strategy_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"market","pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(market["status"], "SOURCE_UNAVAILABLE");
+    assert_eq!(market["policyStatus"], "SOURCE_UNAVAILABLE");
+    assert!(market["opportunities"].as_array().unwrap().is_empty());
+    assert!(market["sourceAttempt"]["observedAt"].as_str().is_some());
+
+    state.manager.with_read_connection(&project_id, NOW, |connection| {
+        let story_blueprint_heads: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='StoryBlueprint'",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        let canon_facts: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        let receipts: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM commit_receipts WHERE project_id=?1 AND command_id='cmd:b-r2-04a:market-unavailable:refresh'",
+            [&project_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(story_blueprint_heads, 0);
+        assert_eq!(canon_facts, 0);
+        assert_eq!(receipts, 1);
+        Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
+    }).unwrap();
+}
+
+#[test]
 fn b11_selection_setup_and_opening_ready_require_explicit_user_steps() {
     let state = state();
     let project_id = create_idea_fixture(&state, "cmd:b11:flow");

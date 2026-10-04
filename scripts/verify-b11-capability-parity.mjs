@@ -56,12 +56,25 @@ export function inspectB11CapabilityParity(projectRoot = root) {
     !frozenIa.healthSidebarPreserved ? 'health sidebar item missing or enabled' : null,
     !frozenIa.historySidebarPreserved ? 'history sidebar item missing or enabled' : null,
   ].filter(Boolean)
-  const unsupportedMarketActions = ['market_refresh', 'market_pulse_refresh']
+  const unsupportedMarketActions = ['market_pulse_refresh']
     .filter(marker => creation.includes(marker) || market.includes(marker))
+  const authorizedMarketActions = {
+    marketRefresh: market.includes("type: 'market_refresh'")
+      && frontend.includes("'execute_command'")
+      && commands.includes('"market_refresh"')
+      && commands.includes('commit_market_refresh'),
+    marketOpportunitySelect: market.includes("type: 'market_opportunity_select'")
+      && frontend.includes("'execute_command'")
+      && commands.includes('"market_opportunity_select"')
+      && commands.includes('commit_market_opportunity_selection'),
+  }
+  const missingMarketActionOwners = Object.entries(authorizedMarketActions)
+    .filter(([, wired]) => !wired)
+    .map(([action]) => action)
   const formalUiActions = {
     projectAssistant: ['support_session', 'query_assistant_repair_plan', 'repair_plan_create', 'repair_authorize', 'repair_execute'],
     projectRead: ['query_volume_detail', 'query_decisions', 'query_chapter_versions', 'query_canon'],
-    marketEntry: ['project_create_from_market', 'query_market_opportunities'],
+    marketEntry: ['project_create_from_market', 'query_market_opportunities', 'market_refresh', 'market_opportunity_select'],
   }
   const formalSources = `${frontend}\n${assistant}\n${store}\n${creation}\n${market}`
   const missingFormalActions = Object.fromEntries(Object.entries(formalUiActions).map(([surface, actions]) => [
@@ -72,6 +85,7 @@ export function inspectB11CapabilityParity(projectRoot = root) {
   const status = missingHandlers.length === 0
     && futureRouteLeaks.length === 0
     && unsupportedMarketActions.length === 0
+    && missingMarketActionOwners.length === 0
     && Object.values(missingFormalActions).every(actions => actions.length === 0)
     ? 'PASS'
     : 'FAIL'
@@ -86,6 +100,8 @@ export function inspectB11CapabilityParity(projectRoot = root) {
     frozenIa,
     futureRouteLeaks,
     unsupportedMarketActions,
+    authorizedMarketActions,
+    missingMarketActionOwners,
   }
 }
 

@@ -2,6 +2,7 @@ use ai_novel_production_system_core::health::query_book_health;
 use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
+use ai_novel_production_system_core::repositories::health::HealthRepository;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -192,6 +193,9 @@ fn b13_scale_health_query_materializes_the_full_r1_fixture_and_keeps_truth_globa
                     json!({
                         "remainingChapterCapacity":if volume_no == 1 {0} else {10},
                         "requiredTasksRemaining":if volume_no == 1 {1} else {0},
+                        "blockedRequiredTasks":if volume_no == 1 {1} else {0},
+                        "healthBlockedRequiredTasks":if volume_no == 1 {1} else {0},
+                        "healthBlockedOptionalTasks":0,
                         "planningPressure":{
                             "remainingChapterCapacity":if volume_no == 1 {0} else {10},
                             "requiredTasksRemaining":if volume_no == 1 {1} else {0}
@@ -306,6 +310,8 @@ fn b13_scale_health_query_materializes_the_full_r1_fixture_and_keeps_truth_globa
             .unwrap(),
         20
     );
+
+    HealthRepository::flush_dirty(&connection, "scale", NOW).unwrap();
 
     let small = query_book_health(&connection, "scale", None, 1).unwrap();
     let large = query_book_health(&connection, "scale", None, 50).unwrap();

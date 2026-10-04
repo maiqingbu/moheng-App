@@ -363,15 +363,33 @@ impl ProductionRepository {
             .and_then(|value| value.get("reconciliation").cloned())
             .unwrap_or(Value::Null);
         let repair: Option<Value> = connection.query_row(
-            "SELECT rp.repair_plan_id,rp.based_on_project_revision,rp.diagnosis_json,rp.finding_refs_json,rp.target_authority_owner,rp.proposed_operations_json,rp.affected_artifacts_json,rp.affected_scopes_json,rp.risk_level,rp.requires_backup,rp.expected_postconditions_json,rp.operation_digest,rp.status,ra.authorization_id,ra.consumed_at,rr.receipt_ref,rr.status,rr.postconditions_json FROM repair_plans rp LEFT JOIN repair_authorizations ra ON ra.project_id=rp.project_id AND ra.repair_plan_id=rp.repair_plan_id LEFT JOIN repair_execution_receipts rr ON rr.project_id=rp.project_id AND rr.repair_plan_id=rp.repair_plan_id WHERE rp.project_id=?1 ORDER BY rp.created_at DESC,ra.issued_at DESC LIMIT 1",
+            "SELECT rp.repair_plan_id,rp.based_on_project_revision,rp.diagnosis_json,rp.finding_refs_json,rp.target_authority_owner,rp.proposed_operations_json,rp.affected_artifacts_json,rp.affected_scopes_json,rp.risk_level,rp.requires_backup,rp.expected_postconditions_json,rp.operation_digest,rp.status,ra.authorization_id,ra.consumed_at,rr.receipt_ref,rr.status,rr.postconditions_json,rr.project_id,rr.repair_plan_id,rr.authorization_id,rr.before_revision,rr.after_revision,rr.operation_digest,rr.owner,rr.owner_receipt_ref,rr.executed_at FROM repair_plans rp LEFT JOIN repair_authorizations ra ON ra.project_id=rp.project_id AND ra.repair_plan_id=rp.repair_plan_id LEFT JOIN repair_execution_receipts rr ON rr.project_id=rp.project_id AND rr.repair_plan_id=rp.repair_plan_id WHERE rp.project_id=?1 ORDER BY rp.created_at DESC,ra.issued_at DESC LIMIT 1",
             [project_id],
             |row| {
                 let receipt_ref = row.get::<_, Option<String>>(15)?;
                 let receipt_status = row.get::<_, Option<String>>(16)?;
                 let receipt_postconditions = row.get::<_, Option<String>>(17)?;
+                let receipt_project_id = row.get::<_, Option<String>>(18)?;
+                let receipt_plan_id = row.get::<_, Option<String>>(19)?;
+                let receipt_authorization_id = row.get::<_, Option<String>>(20)?;
+                let receipt_before_revision = row.get::<_, Option<i64>>(21)?;
+                let receipt_after_revision = row.get::<_, Option<i64>>(22)?;
+                let receipt_operation_digest = row.get::<_, Option<String>>(23)?;
+                let receipt_owner = row.get::<_, Option<String>>(24)?;
+                let owner_receipt_ref = row.get::<_, Option<String>>(25)?;
+                let receipt_executed_at = row.get::<_, Option<String>>(26)?;
                 let execution_receipt = receipt_ref.map(|receipt_ref| {
                     json!({
                         "receiptRef":receipt_ref,
+                        "projectId":receipt_project_id,
+                        "repairPlanId":receipt_plan_id,
+                        "authorizationId":receipt_authorization_id,
+                        "beforeRevision":receipt_before_revision,
+                        "afterRevision":receipt_after_revision,
+                        "operationDigest":receipt_operation_digest,
+                        "owner":receipt_owner,
+                        "ownerReceiptRef":owner_receipt_ref,
+                        "executedAt":receipt_executed_at,
                         "status":receipt_status.unwrap_or_default(),
                         "postconditions":serde_json::from_str::<Value>(&receipt_postconditions.unwrap_or_else(|| "[]".into())).unwrap_or_else(|_| json!([]))
                     })

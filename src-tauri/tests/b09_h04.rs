@@ -1,5 +1,5 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, KernelState, RepositoryReadAdapter,
+    execute_command_impl, query_book_health_impl, KernelState, RepositoryReadAdapter,
 };
 use ai_novel_production_system_core::harness::{
     check_checkpoint_resume, registry_digest_map, BoundedCapabilityExecutor,
@@ -12,6 +12,7 @@ use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager}
 use ai_novel_production_system_core::repair::{
     operation_digest_with_postconditions, RepairOperation, RepairPlan,
 };
+use ai_novel_production_system_core::repositories::health::HealthRepository;
 use ai_novel_production_system_core::volume_lifecycle::{
     NextVolumeHandoffRequest, RouteReplanRequest, VolumeCloseRequest, VolumeLifecycleOwner,
 };
@@ -235,6 +236,22 @@ fn b09_planning_state_rebuild_is_deterministic_revision_bound_and_reality_derive
         NOW,
     )
     .unwrap();
+    assert!(HealthRepository::projection_is_current(&fixture.connection, "p-b09").unwrap());
+    let health = ai_novel_production_system_core::health::query_book_health(
+        &fixture.connection,
+        "p-b09",
+        None,
+        50,
+    )
+    .unwrap();
+    let task_factor = health["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "TASK_BLOCKAGE")
+        .unwrap();
+    assert_eq!(task_factor["status"], "EVALUATED");
+    assert_eq!(task_factor["severity"], "healthy");
     assert_eq!(first, second);
     assert_eq!(first["generatedRevision"], 0);
     assert_eq!(first["requiredTasksRemaining"], 1);
@@ -405,6 +422,22 @@ fn h04_projection_repair_changes_only_rebuildable_projection() {
         NOW,
     )
     .unwrap();
+    assert!(HealthRepository::projection_is_current(&fixture.connection, "p-b09").unwrap());
+    let health = ai_novel_production_system_core::health::query_book_health(
+        &fixture.connection,
+        "p-b09",
+        None,
+        50,
+    )
+    .unwrap();
+    let task_factor = health["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "TASK_BLOCKAGE")
+        .unwrap();
+    assert_eq!(task_factor["status"], "EVALUATED");
+    assert_eq!(task_factor["severity"], "healthy");
     let head_after: (String, i64, String) = fixture
         .connection
         .query_row(
@@ -426,6 +459,137 @@ fn h04_projection_repair_changes_only_rebuildable_projection() {
     assert_eq!(reality_before, reality_after);
     assert_eq!(first["projectionDigest"].as_str().unwrap().len(), 64);
     println!("H04_PROJECTION_REPAIR_RESULT authority_unchanged=PASS reality_unchanged=PASS projection_rebuilt=PASS status=PASS");
+}
+
+#[test]
+fn h04_authorized_projection_repair_returns_with_health_ready() {
+    let fixture = fixture();
+    let project_root = fixture._temp.path().to_path_buf();
+    let head_before: (String, i64, String) = fixture
+        .connection
+        .query_row(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let reality_before: String = fixture
+        .connection
+        .query_row(
+            "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let operation = RepairOperation {
+        operation: "rebuild_planning_state_projection".into(),
+        target: fixture.volume_id.clone(),
+        params: json!({"volumeId":fixture.volume_id}),
+        postconditions: json!({}),
+    };
+    let expected_postconditions =
+        vec![json!({"kind":"planning_state_projection_current","expected":true})];
+    let operation_digest = operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &expected_postconditions,
+    )
+    .unwrap();
+    let repair_plan = RepairPlan {
+        repair_plan_id: "repair-plan:b09:projection-r5".into(),
+        project_id: "p-b09".into(),
+        based_on_project_revision: 0,
+        diagnosis: json!({"kind":"health_scope_dirty","source":"formal_b09_projection_rebuild"}),
+        finding_refs: vec!["finding:b09:projection".into()],
+        target_authority_owner: "B09::PlanningStateProjectionOwner".into(),
+        proposed_operations: vec![operation],
+        affected_artifacts: vec!["plan:b09:1".into()],
+        affected_scopes: vec![fixture.volume_id.clone()],
+        risk_level: "LOW".into(),
+        requires_backup: false,
+        expected_postconditions,
+        operation_digest: operation_digest.clone(),
+        created_at: NOW.into(),
+    };
+    drop(fixture.connection);
+    drop(fixture._manager);
+
+    let state = KernelState::new(AppPaths::new(project_root));
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_plan_create","commandId":"cmd:b09:r5:projection-plan",
+            "idempotencyKey":"key:b09:r5:projection-plan","projectId":"p-b09",
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"dryRun":true,"repairPlan":repair_plan}
+        }),
+    )
+    .unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_authorize","commandId":"cmd:b09:r5:projection-auth",
+            "idempotencyKey":"key:b09:r5:projection-auth","projectId":"p-b09",
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"authorization":{
+                "authorizationId":"repair-auth:b09:projection-r5","projectId":"p-b09",
+                "repairPlanId":"repair-plan:b09:projection-r5","basedOnProjectRevision":0,
+                "operationDigest":operation_digest,"approvedByUser":true,"issuedAt":NOW
+            }}
+        }),
+    )
+    .unwrap();
+    let executed = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_execute","commandId":"cmd:b09:r5:projection-execute",
+            "idempotencyKey":"key:b09:r5:projection-execute","projectId":"p-b09",
+            "requestedAt":NOW,
+            "payload":{"repairPlanId":"repair-plan:b09:projection-r5","authorizationId":"repair-auth:b09:projection-r5"}
+        }),
+    )
+    .unwrap();
+    assert_eq!(executed["finalStatus"], "committed");
+    assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
+    let health = query_book_health_impl(
+        &state,
+        json!({"projectId":"p-b09","scope":"health","pageSize":50}),
+    )
+    .unwrap();
+    let task_factor = health["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "TASK_BLOCKAGE")
+        .unwrap();
+    assert_eq!(task_factor["status"], "EVALUATED");
+    assert_eq!(task_factor["severity"], "healthy");
+    let ready = state
+        .manager
+        .with_read_connection("p-b09", NOW, |connection| {
+            ai_novel_production_system_core::repositories::health::HealthRepository::projection_is_current(connection, "p-b09")
+                .map_err(|error| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(error.to_string()))
+        })
+        .unwrap();
+    assert!(ready);
+    let (head_after, reality_after) = state
+        .manager
+        .with_read_connection("p-b09", NOW, |connection| {
+            let head = connection.query_row(
+                "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            )?;
+            let reality = connection.query_row(
+                "SELECT value_json FROM state_deltas WHERE state_id='task:b09:required'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok::<_, ai_novel_production_system_core::project_db::ManagerError>((head, reality))
+        })
+        .unwrap();
+    assert_eq!(head_before, head_after);
+    assert_eq!(reality_before, reality_after);
+    println!("H04_R5_REPAIR_RESULT authorizedProjectionOwner=PASS healthReadyOnReturn=true authorityUnchanged=true status=PASS");
 }
 
 #[test]

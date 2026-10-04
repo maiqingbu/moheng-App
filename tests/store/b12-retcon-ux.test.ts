@@ -30,6 +30,46 @@ function recordFrontendEvidence(marker: string, payload: Record<string, unknown>
 }
 
 describe('B12 Retcon product flow', () => {
+  it('labels a committed Retcon with incomplete verification as pending and forbids repeat submission', () => {
+    const history = fs.readFileSync(new URL('../../src/ui/pages/HistoryCenter.vue', import.meta.url), 'utf8')
+    expect(history).toContain('事实修订已提交，结果待确认。请重新读取状态，不要重复提交。')
+    expect(history).toContain('事实修订提交结果待确认。请先重新读取作品状态；如需重试，系统会使用同一操作编号')
+  })
+
+  it('does not auto-resubmit after an unknown Retcon result and keeps the manual retry identity', async () => {
+    const calls: CommandRequest[] = []
+    let loseFirstResponse = true
+    const execute = vi.fn(async (_key: string, request: CommandRequest) => {
+      calls.push(request)
+      if (request.type === 'retcon_apply' && loseFirstResponse) {
+        loseFirstResponse = false
+        throw new Error('simulated lost response after durable commit')
+      }
+      return receipt(request, request.type === 'retcon_apply' ? { status: 'REPLAYED' } : {})
+    })
+    const plan = {
+      projectId: 'p-replay',
+      changeRequestId: 'change:replay',
+      retconPlanId: 'retcon-plan:replay',
+      planDigest: 'd'.repeat(64),
+      impactDigest: 'i'.repeat(64),
+      summary: '修订事实',
+      targetFactId: 'fact:replay',
+      replacement: '新事实',
+      evidenceRef: { artifactId: 'evidence:replay', version: 1, payloadHash: 'e'.repeat(64) },
+    }
+
+    await expect(confirmRetconPlan(execute, plan)).rejects.toThrow('simulated lost response')
+    expect(calls.map(request => request.type)).toEqual(['change_request_decide', 'retcon_apply'])
+    const firstApplyKey = calls[1].idempotencyKey
+    const replay = await confirmRetconPlan(execute, plan)
+    expect(replay.result).toEqual({ status: 'REPLAYED' })
+    expect(calls.map(request => request.type)).toEqual([
+      'change_request_decide', 'retcon_apply', 'change_request_decide', 'retcon_apply',
+    ])
+    expect(calls[3].idempotencyKey).toBe(firstApplyKey)
+  })
+
   it('stops after displaying the generated plan until the second confirmation', async () => {
     const calls: CommandRequest[] = []
     const execute = vi.fn(async (_key: string, request: CommandRequest) => {
@@ -65,13 +105,20 @@ describe('B12 Retcon product flow', () => {
     expect(calls.some(request => request.type === 'retcon_apply')).toBe(false)
 
     await confirmRetconPlan(execute, { ...draft, ...plan })
+    const firstDecision = calls.find(request => request.type === 'change_request_decide')
+    const firstApply = calls.find(request => request.type === 'retcon_apply')
+    await confirmRetconPlan(execute, { ...draft, ...plan })
     expect(calls.map(request => request.type)).toEqual([
       'change_request_create',
       'impact_preflight',
       'retcon_plan_create',
       'change_request_decide',
       'retcon_apply',
+      'change_request_decide',
+      'retcon_apply',
     ])
+    expect(calls[5].idempotencyKey).toBe(firstDecision?.idempotencyKey)
+    expect(calls[6].idempotencyKey).toBe(firstApply?.idempotencyKey)
     console.log('B12_FRONTEND_HISTORY_RETCON_RESULT planDisplayed=PASS decisionBeforeConfirm=0 applyBeforeConfirm=0 secondConfirm=PASS status=PASS')
     recordFrontendEvidence('B12_FRONTEND_HISTORY_RETCON_RESULT', { planDisplayed: true, decisionBeforeConfirm: 0, applyBeforeConfirm: 0, secondConfirm: true, status: 'PASS' })
   })

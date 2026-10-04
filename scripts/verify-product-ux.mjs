@@ -92,6 +92,12 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
   const canon = sourceReader('src/ui/pages/CanonGraph.vue')
   const volume = sourceReader('src/ui/pages/VolumeWorkspace.vue')
   const reader = sourceReader('src/ui/pages/ManuscriptReader.vue')
+  const readerRevision = sourceReader('src/ui/flows/readerRevision.ts')
+  const tauriPort = sourceReader('src/infrastructure/tauri/frontendPort.ts')
+  const historyCenter = sourceReader('src/ui/pages/HistoryCenter.vue')
+  const historyProjection = sourceReader('src-tauri/src/repositories/ui_projection.rs')
+  const historyStore = sourceReader('src/ui/stores/projectStore.ts')
+  const contracts = sourceReader('src/application/contracts.ts')
   const language = sourceReader('src/ui/presentation/productLanguage.ts')
   const assistantPresentation = sourceReader('src/ui/presentation/assistantPresentation.ts')
   const flow = sourceReader('src/ui/flows/b12RetconFlow.ts')
@@ -147,6 +153,77 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     b13_health_surface: /LongFormHealth\.vue/.test(router) && /factorLabel/.test(healthPage) && /statusLabel/.test(healthPage) && /factorLabel/.test(healthLanguage) && /issueKey/.test(healthLanguage),
     future_feature_boundary: /LongFormHealth/.test(healthRoute) && !/UnavailableFeature/.test(healthRoute) && Boolean(healthPage),
     b14_completion_surface: /queryCompletionStatus/.test(completionPage) && /queryEndgameAdvice/.test(completionPage) && /checkName/.test(completionPage) && /userError/.test(completionPage),
+    reader_capability_truth: /buildReaderRevisionCommands/.test(reader)
+      && /name:\s*['"]history['"]/.test(reader)
+      && /type:\s*['"]change_request_create['"]/.test(readerRevision)
+      && /type:\s*['"]impact_preflight['"]/.test(readerRevision)
+      && /store\.loadExportCapability\(projectId\)/.test(reader)
+      && /store\.loadLatestExportReceipt\(projectId\)/.test(reader)
+      && /store\.createExport\(requestId,\s*['"]TXT['"],\s*projectId\)/.test(reader)
+      && /store\.queryExportReceipt\(requestId,\s*projectId\)/.test(reader)
+      && /watch\(\(\)\s*=>\s*store\.currentProjectId/.test(reader)
+      && /onUnmounted\(/.test(reader)
+      && /isCurrentExport\(projectId,\s*generation\)/.test(reader)
+      && /exportReceipt\?\.status\s*===\s*['"]COMPLETED['"]/.test(reader)
+      && /:disabled="!exportCapability\?\.available\s*\|\|\s*exporting"/.test(reader)
+      && /query_export_capability/.test(tauriPort)
+      && /create_export/.test(tauriPort)
+      && /query_export_receipt/.test(tauriPort)
+      && !/chapter_revision_request|type:\s*['"]export_create['"]/.test(reader)
+      && !/['"]chapter_revision_request['"]|['"]export_create['"]/.test(sourceReader('src/application/contracts.ts'))
+      && /if\s*\(isReaderProposalOnlySource\(activeChange\.value\.source\)\)/.test(historyCenter)
+      && /v-if="!readerProposalOnly"[^>]*@click="approveAndApply"/.test(historyCenter)
+      && /章节修改建议仅作为意见留存/.test(historyCenter)
+      && /readerProposalStatusLabel\(activeChange\.value\.status\)/.test(historyCenter)
+      && /historyEntryStatusLabel\(entry\)/.test(historyCenter)
+      && /historyEntryStatusClass\(entry\)/.test(historyCenter)
+      && /readerHistoryStatusLabel/.test(readerRevision)
+      && /source\?: string \| null/.test(contracts)
+      && /targetClass\?: string \| null/.test(contracts)
+      && /WITH history_rows AS/.test(historyProjection)
+      && /UNION ALL/.test(historyProjection)
+      && /WHERE \?2='all' OR entry_kind=\?2/.test(historyProjection)
+      && /requestedChange\/source/.test(historyProjection)
+      && /json_extract\(p\.payload_json,'\$\.changeRequestId'\)/.test(historyProjection)
+      && /"targetClass":target_class/.test(historyProjection),
+    history_pagination_integrity: /WITH history_rows AS/.test(historyProjection)
+      && /UNION ALL/.test(historyProjection)
+      && /WHERE \?2='all' OR entry_kind=\?2/.test(historyProjection)
+      && /ORDER BY created_at DESC,entry_id DESC,entry_kind DESC/.test(historyProjection)
+      && /LIMIT \?3 OFFSET \?4/.test(historyProjection)
+      && /queryHistory\(\{ \.\.\.queryBase\('history', 40\), cursor: pageCursor, kind \}\)/.test(historyStore)
+      && /function loadMoreHistory\(\)/.test(historyCenter)
+      && /history\.entries\.nextCursor/.test(historyCenter)
+      && /loadHistory\(kind\.value, false, cursor\)/.test(historyCenter)
+      && /加载更多历史记录/.test(historyCenter),
+    history_filter_state_integrity: /type HistoryKind = 'all' \| 'VERSION' \| 'CHANGE_REQUEST' \| 'RETCON'/.test(historyStore)
+      && /const historyKind = ref<HistoryKind \| null>\(null\)/.test(historyStore)
+      && /historyKind\.value === kind && !force && cursor === null/.test(historyStore)
+      && /const pageCursor = cursor && historyKind\.value === kind \? cursor : null/.test(historyStore)
+      && /!history\.value \|\| historyKind\.value !== kind/.test(historyStore)
+      && /historyKind\.value=kind/.test(historyStore)
+      && /historyKind\.value = null/.test(historyStore)
+      && /history, historyKind, settings/.test(historyStore)
+      && /onMounted\(\(\) => \{\s*void loadHistoryKind\('all', false\)/.test(historyCenter)
+      && /setKind\(next: HistoryKind\)[\s\S]*loadHistoryKind\(next, true\)/.test(historyCenter),
+    history_filter_async_recovery: /function loadHistoryKind\(next: HistoryKind, force: boolean\)/.test(historyCenter)
+      && /requestSequence !== historyFilterRequestSequence/.test(historyCenter)
+      && /kind\.value = restoredKind/.test(historyCenter)
+      && /store\.historyKind/.test(historyCenter)
+      && /failedHistoryKind\.value = next/.test(historyCenter)
+      && /:disabled="historyFilterLoading"/.test(historyCenter)
+      && /role="status" aria-live="polite"/.test(historyCenter)
+      && /v-if="history && !historyFilterLoading"/.test(historyCenter)
+      && /role="alert"/.test(historyCenter)
+      && /@click="retryHistoryFilter"/.test(historyCenter)
+      && /loadHistoryKind\(failedHistoryKind\.value, true\)/.test(historyCenter),
+    history_filter_cold_recovery: /v-if="history \|\| historyFilterLoading \|\| historyFilterError"/.test(historyCenter)
+      && /v-if="history" class="metric-grid section"/.test(historyCenter)
+      && /v-if="history && !historyFilterLoading"/.test(historyCenter)
+      && /v-if="history" class="section actions"/.test(historyCenter),
+    history_filter_copy_truth: /const hasHistoryProjection = store\.history !== null/.test(historyCenter)
+      && /hasHistoryProjection\s*\?[\s\S]*?仍显示/.test(historyCenter)
+      && /hasHistoryProjection\s*\?[\s\S]*?暂时无法加载历史记录，请重试。/.test(historyCenter),
   }
   const internalCodeOnly = activeFiles.flatMap(item => {
     const source = item.source
@@ -174,6 +251,12 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'], note: 'B13 formal health workspace is active.' },
     b13HealthSurface: { status: checks.b13_health_surface ? 'PASS' : 'FAIL', route: healthRoute },
     b14CompletionSurface: { status: checks.b14_completion_surface ? 'PASS' : 'FAIL', verifiedBy: 'Completion.vue formal query and presentation mapper' },
+    readerCapabilityTruth: { status: checks.reader_capability_truth ? 'PASS' : 'FAIL', verifiedBy: 'Reader Change path and backend Export capability/receipt binding' },
+    historyPaginationIntegrity: { status: checks.history_pagination_integrity ? 'PASS' : 'FAIL', verifiedBy: 'single cross-type ordered page, frontend cursor request and append control' },
+    historyFilterStateIntegrity: { status: checks.history_filter_state_integrity ? 'PASS' : 'FAIL', verifiedBy: 'kind-bound cache, project reset, filter refresh and append isolation' },
+    historyFilterAsyncRecovery: { status: checks.history_filter_async_recovery ? 'PASS' : 'FAIL', verifiedBy: 'pending-result mask, restored filter, typed alert, retry and stale-response guard' },
+    historyFilterColdRecovery: { status: checks.history_filter_cold_recovery ? 'PASS' : 'FAIL', verifiedBy: 'loading/error shell renders without history while data-only regions remain guarded' },
+    historyFilterCopyTruth: { status: checks.history_filter_copy_truth ? 'PASS' : 'FAIL', verifiedBy: 'different safe recovery copy for empty cold start versus retained cached history' },
     internalCodeOnly,
     allowedProviderTerms: ['OpenAI Compatible', 'API Endpoint', 'API Key'],
     checks: Object.fromEntries(Object.entries(checks).map(([name, passed]) => [name, passed ? 'PASS' : 'FAIL'])),

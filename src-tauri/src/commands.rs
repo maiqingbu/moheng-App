@@ -11,7 +11,8 @@ use crate::harness::{
 use crate::hash::sha256_canonical;
 use crate::narrative::{
     build_continuity_threads, build_volume_progress, compile_context_manifest, evaluate_plan_stale,
-    CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
+    ContextHardSource, CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds,
+    VolumeProgressInput,
 };
 use crate::project_db::paths::AppPaths;
 use crate::project_db::{ManagerError, ProjectCommandOutcome, ProjectCommandSpec, ProjectManager};
@@ -31,29 +32,62 @@ use tauri::State;
 pub struct KernelState {
     pub manager: ProjectManager,
     pub paths: AppPaths,
+    pub(crate) skill_bundle_loader: crate::creative_skills::SkillBundleLoader,
     pub(crate) production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
+    pub(crate) market_source_adapter: Arc<dyn crate::market_source::MarketSourceAdapter>,
 }
 
 impl KernelState {
+    #[cfg(any(test, debug_assertions))]
     pub fn new(paths: AppPaths) -> Self {
-        Self {
-            manager: ProjectManager::new(paths.clone()),
-            paths: paths.clone(),
-            production_gateway: Arc::new(
-                crate::production::ConfiguredProductionGateway::for_desktop(paths.clone()),
-            ),
-        }
+        Self::with_skill_bundle_loader(
+            paths,
+            crate::creative_skills::SkillBundleLoader::development_package(),
+        )
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub fn with_production_gateway(
         paths: AppPaths,
+        production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
+    ) -> Self {
+        Self::with_skill_bundle_loader_and_gateway(
+            paths,
+            crate::creative_skills::SkillBundleLoader::development_package(),
+            production_gateway,
+        )
+    }
+
+    pub fn with_skill_bundle_loader(
+        paths: AppPaths,
+        skill_bundle_loader: crate::creative_skills::SkillBundleLoader,
+    ) -> Self {
+        let production_gateway = Arc::new(
+            crate::production::ConfiguredProductionGateway::for_desktop(paths.clone()),
+        );
+        Self::with_skill_bundle_loader_and_gateway(paths, skill_bundle_loader, production_gateway)
+    }
+
+    fn with_skill_bundle_loader_and_gateway(
+        paths: AppPaths,
+        skill_bundle_loader: crate::creative_skills::SkillBundleLoader,
         production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
     ) -> Self {
         Self {
             manager: ProjectManager::new(paths.clone()),
             paths,
+            skill_bundle_loader,
             production_gateway,
+            market_source_adapter: Arc::new(crate::market_source::UnavailableMarketSourceAdapter),
         }
+    }
+
+    pub fn with_market_source_adapter(
+        mut self,
+        market_source_adapter: Arc<dyn crate::market_source::MarketSourceAdapter>,
+    ) -> Self {
+        self.market_source_adapter = market_source_adapter;
+        self
     }
 }
 
@@ -470,6 +504,18 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
         .map_err(|error| error.to_string())?;
+    let health_summary =
+        match state
+            .manager
+            .with_read_connection(project_id, &updated_at, |connection| {
+                crate::health::query_book_health(connection, project_id, None, 1)
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            }) {
+            Ok(projection) => {
+                project_health_summary(projection["level"].as_str().unwrap_or("source_unavailable"))
+            }
+            Err(_) => project_health_summary("source_unavailable"),
+        };
     let mut project = project_snapshot(project_id, &title, revision, &updated_at);
     project["phase"] = json!(runtime.current_phase);
     project["runState"] = json!(runtime.run_state);
@@ -487,12 +533,49 @@ pub fn query_project_overview_impl(state: &KernelState, request: Value) -> Resul
         "pendingDecisionCount": pending_decisions,
         "recentChapters": recent_chapters,
         "recentArtifacts": [],
-        "healthSummary": {
-            "level": "healthy",
-            "label": "作品数据正常",
-            "note": "作品数据检查已通过"
-        }
+        "healthSummary": health_summary
     }))
+}
+
+fn project_health_summary(level: &str) -> Value {
+    let (level, label, note) = match level {
+        "not_evaluated" => (
+            "not_evaluated",
+            "尚未评估",
+            "正式章节与项目记录积累后，会显示长篇状态。",
+        ),
+        "insufficient_data" => (
+            "insufficient_data",
+            "数据仍不足",
+            "已有记录尚不足以完成全部长篇状态检查。",
+        ),
+        "source_unavailable" => (
+            "source_unavailable",
+            "检查暂不可用",
+            "正式健康数据暂时无法读取，请稍后重新检查。",
+        ),
+        "healthy" => (
+            "healthy",
+            "长篇状态稳定",
+            "正式健康检查未发现需要关注的项目。",
+        ),
+        "attention" => (
+            "attention",
+            "有项目需要关注",
+            "正式健康检查发现需要复核的项目，请查看长篇状态。",
+        ),
+        "risk" => (
+            "risk",
+            "存在需要优先处理的风险",
+            "正式健康检查发现风险，请查看相关项目后再决定后续安排。",
+        ),
+        _ => (
+            "source_unavailable",
+            "检查暂不可用",
+            "正式健康数据暂时无法读取，请稍后重新检查。",
+        ),
+    };
+    json!({"level":level,"label":label,"note":note})
 }
 
 pub fn query_market_strategy_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -510,6 +593,11 @@ pub fn query_market_strategy_impl(state: &KernelState, request: Value) -> Result
                 .map_err(ManagerError::ProjectCommand)
         })
         .map_err(|error| error.to_string())
+}
+
+pub fn query_market_opportunities_impl(state: &KernelState) -> Result<Value, String> {
+    let snapshot = state.market_source_adapter.fetch();
+    Ok(crate::market_source::discovery_projection(&snapshot))
 }
 
 pub fn query_story_directions_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -874,6 +962,32 @@ pub fn query_book_health_impl(state: &KernelState, request: Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+pub fn query_book_health_factor_sources_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let factor_code = required_string(&request, "factorCode")?;
+    let cursor = request.get("cursor").and_then(Value::as_str);
+    let limit = request
+        .get("pageSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(50);
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::health::query_book_health_factor_sources(
+                connection,
+                project_id,
+                factor_code,
+                cursor,
+                limit,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_history_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let kind = request.get("kind").and_then(Value::as_str);
@@ -995,11 +1109,44 @@ fn request_resume_context(request: &Value) -> ResumeContext {
     context
 }
 
+fn context_scope(request: &Value, project_id: &str) -> String {
+    if let Some(chapter_id) = request.get("chapterId").and_then(Value::as_str) {
+        format!("CHAPTER:{chapter_id}")
+    } else if let Some(volume_id) = request
+        .get("volumeId")
+        .or_else(|| request.get("currentVolumeId"))
+        .and_then(Value::as_str)
+    {
+        format!("VOLUME:{volume_id}")
+    } else {
+        format!("PROJECT:{project_id}")
+    }
+}
+
+fn map_context_query<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    source: ContextHardSource,
+    scope: &str,
+) -> Result<T, String> {
+    result.map_err(|error| {
+        let message = error.to_string();
+        if message.starts_with("CONTEXT_SOURCE_UNAVAILABLE|") {
+            message
+        } else {
+            format!(
+                "CONTEXT_SOURCE_UNAVAILABLE|source={}|scope={scope}",
+                source.code()
+            )
+        }
+    })
+}
+
 fn narrative_state_from_request(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
     project_id: &str,
 ) -> Result<CurrentNarrativeStateView, String> {
+    let scope = context_scope(request, project_id);
     let entity_ids = request_strings(request, "entityIds");
     let entity_refs = entity_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let references = request_strings(request, "references");
@@ -1008,15 +1155,17 @@ fn narrative_state_from_request(
     let opening_bootstrap =
         request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
     let previous_chapter_ids = if opening_bootstrap {
-        chapter_id
-            .map(|chapter| {
+        if let Some(chapter) = chapter_id {
+            map_context_query(
                 crate::repositories::narrative::NarrativeRepository::previous_committed_chapter_ids(
                     connection, project_id, chapter, 2,
-                )
-            })
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default()
+                ),
+                ContextHardSource::Canon,
+                &scope,
+            )?
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -1024,121 +1173,143 @@ fn narrative_state_from_request(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let (mut facts, mut facts_truncated) =
+    let (mut facts, mut facts_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::current_canon_bounded(
             connection,
             project_id,
             &entity_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    let relations = crate::repositories::narrative::NarrativeRepository::current_relations(
-        connection,
-        project_id,
-        &entity_refs,
-        100,
-    )
-    .map_err(|e| e.to_string())?;
-    let (mut knowledge, mut knowledge_truncated) =
+        ),
+        ContextHardSource::Canon,
+        &scope,
+    )?;
+    let relations = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::current_relations(
+            connection,
+            project_id,
+            &entity_refs,
+            100,
+        ),
+        ContextHardSource::Canon,
+        &scope,
+    )?;
+    let (mut knowledge, mut knowledge_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::knowledge_for_entities_bounded(
             connection,
             project_id,
             &entity_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    let mut events = chapter_id
-        .map(|chapter| {
+        ),
+        ContextHardSource::Knowledge,
+        &scope,
+    )?;
+    let mut events = if let Some(chapter) = chapter_id {
+        map_context_query(
             crate::repositories::narrative::NarrativeRepository::canon_events(
                 connection, project_id, chapter, 100,
-            )
-        })
-        .transpose()
-        .map_err(|e| e.to_string())?
-        .unwrap_or_default();
+            ),
+            ContextHardSource::Canon,
+            &scope,
+        )?
+    } else {
+        Vec::new()
+    };
     let mut events_truncated = false;
-    let relations_truncated =
+    let relations_truncated = map_context_query(
         crate::repositories::narrative::NarrativeRepository::has_more_relations(
             connection,
             project_id,
             &entity_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    events_truncated = events_truncated
-        || chapter_id
-            .map(|chapter| {
-                crate::repositories::narrative::NarrativeRepository::has_more_events(
-                    connection, project_id, chapter, 100,
-                )
-            })
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(false);
+        ),
+        ContextHardSource::Canon,
+        &scope,
+    )?;
+    if let Some(chapter) = chapter_id {
+        events_truncated = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::has_more_events(
+                connection, project_id, chapter, 100,
+            ),
+            ContextHardSource::Canon,
+            &scope,
+        )?;
+    }
     if !previous_chapter_refs.is_empty() {
-        let (prior_facts, prior_facts_truncated) =
+        let (prior_facts, prior_facts_truncated) = map_context_query(
             crate::repositories::narrative::NarrativeRepository::canon_facts_for_chapters_bounded(
                 connection,
                 project_id,
                 &previous_chapter_refs,
                 100,
-            )
-            .map_err(|e| e.to_string())?;
+            ),
+            ContextHardSource::Canon,
+            &scope,
+        )?;
         facts.extend(prior_facts);
         let mut fact_ids = BTreeSet::new();
         facts.retain(|fact| fact_ids.insert(fact.fact_id.clone()));
         facts_truncated = facts_truncated || prior_facts_truncated;
 
-        let (prior_knowledge, prior_knowledge_truncated) =
+        let (prior_knowledge, prior_knowledge_truncated) = map_context_query(
             crate::repositories::narrative::NarrativeRepository::knowledge_for_chapters_bounded(
                 connection,
                 project_id,
                 &previous_chapter_refs,
                 100,
-            )
-            .map_err(|e| e.to_string())?;
+            ),
+            ContextHardSource::Knowledge,
+            &scope,
+        )?;
         knowledge.extend(prior_knowledge);
         let mut knowledge_ids = BTreeSet::new();
         knowledge.retain(|item| knowledge_ids.insert(item.knowledge_id.clone()));
         knowledge_truncated = knowledge_truncated || prior_knowledge_truncated;
 
-        let (prior_events, prior_events_truncated) =
+        let (prior_events, prior_events_truncated) = map_context_query(
             crate::repositories::narrative::NarrativeRepository::canon_events_for_chapters_bounded(
                 connection,
                 project_id,
                 &previous_chapter_refs,
                 100,
-            )
-            .map_err(|e| e.to_string())?;
+            ),
+            ContextHardSource::Canon,
+            &scope,
+        )?;
         events.extend(prior_events);
         let mut event_ids = BTreeSet::new();
         events.retain(|event| event_ids.insert(event.event_id.clone()));
         events_truncated = events_truncated || prior_events_truncated;
     }
-    let obligations_truncated =
+    let obligations_truncated = map_context_query(
         crate::repositories::narrative::NarrativeRepository::has_more_obligations(
             connection,
             project_id,
             &entity_refs,
             &reference_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    let obligations =
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let obligations = map_context_query(
         crate::repositories::narrative::NarrativeRepository::active_obligations_for_relevance(
             connection,
             project_id,
             &entity_refs,
             &reference_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(CurrentNarrativeStateView::from_records(
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let entity_ids_truncated = entity_ids.len() > 100;
+    let mut state = CurrentNarrativeStateView::from_records(
         RuntimeBounds {
             project_id: project_id.into(),
             entity_ids,
             volume_id: request
                 .get("volumeId")
+                .or_else(|| request.get("currentVolumeId"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
             chapter_id: chapter_id.map(ToOwned::to_owned),
@@ -1149,12 +1320,22 @@ fn narrative_state_from_request(
         knowledge,
         events,
         obligations,
-        facts_truncated
-            || knowledge_truncated
-            || relations_truncated
-            || events_truncated
-            || obligations_truncated,
-    ))
+        false,
+    );
+    for (source, truncated) in [
+        (
+            ContextHardSource::Canon,
+            facts_truncated || relations_truncated || events_truncated,
+        ),
+        (ContextHardSource::Knowledge, knowledge_truncated),
+        (ContextHardSource::Continuity, obligations_truncated),
+        (ContextHardSource::Canon, entity_ids_truncated),
+    ] {
+        if truncated {
+            state.mark_truncated(source);
+        }
+    }
+    Ok(state)
 }
 
 fn continuity_from_request(
@@ -1162,6 +1343,7 @@ fn continuity_from_request(
     request: &Value,
     project_id: &str,
 ) -> Result<Vec<crate::narrative::ContinuityThreadView>, String> {
+    let scope = context_scope(request, project_id);
     let state = narrative_state_from_request(connection, request, project_id)?;
     let chapter_refs = request
         .get("chapterId")
@@ -1171,26 +1353,35 @@ fn continuity_from_request(
     let chapter_refs = chapter_refs.iter().map(String::as_str).collect::<Vec<_>>();
     let refs = request_strings(request, "references");
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let foreshadows = crate::repositories::narrative::NarrativeRepository::active_foreshadows(
-        connection,
-        project_id,
-        &chapter_refs,
-        &refs,
-        100,
-    )
-    .map_err(|e| e.to_string())?;
-    let mysteries = crate::repositories::narrative::NarrativeRepository::open_mysteries(
-        connection, project_id, &refs, 100,
-    )
-    .map_err(|e| e.to_string())?;
-    let evidence = crate::repositories::narrative::NarrativeRepository::recent_evidence(
-        connection,
-        project_id,
-        &chapter_refs,
-        &refs,
-        100,
-    )
-    .map_err(|e| e.to_string())?;
+    let foreshadows = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::active_foreshadows(
+            connection,
+            project_id,
+            &chapter_refs,
+            &refs,
+            100,
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let mysteries = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::open_mysteries(
+            connection, project_id, &refs, 100,
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let evidence = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::recent_evidence(
+            connection,
+            project_id,
+            &chapter_refs,
+            &refs,
+            100,
+        ),
+        ContextHardSource::Evidence,
+        &scope,
+    )?;
     build_continuity_threads(
         &state.active_responsibilities,
         &foreshadows,
@@ -1204,8 +1395,15 @@ fn continuity_from_request_bounded(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
     project_id: &str,
-) -> Result<(Vec<crate::narrative::ContinuityThreadView>, bool), String> {
+) -> Result<
+    (
+        Vec<crate::narrative::ContinuityThreadView>,
+        BTreeSet<ContextHardSource>,
+    ),
+    String,
+> {
     let threads = continuity_from_request(connection, request, project_id)?;
+    let scope = context_scope(request, project_id);
     let entity_ids = request_strings(request, "entityIds");
     let entity_refs = entity_ids.iter().map(String::as_str).collect::<Vec<_>>();
     let references = request_strings(request, "references");
@@ -1216,40 +1414,57 @@ fn continuity_from_request_bounded(
         .map(|id| vec![id.to_owned()])
         .unwrap_or_default();
     let chapter_refs = chapters.iter().map(String::as_str).collect::<Vec<_>>();
-    let (_, evidence_truncated) =
+    let (_, evidence_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::recent_evidence_bounded(
             connection,
             project_id,
             &chapter_refs,
             &reference_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
-    let truncated = crate::repositories::narrative::NarrativeRepository::has_more_obligations(
-        connection,
-        project_id,
-        &entity_refs,
-        &reference_refs,
-        100,
-    )
-    .map_err(|e| e.to_string())?
-        || crate::repositories::narrative::NarrativeRepository::has_more_foreshadows(
+        ),
+        ContextHardSource::Evidence,
+        &scope,
+    )?;
+    let obligations_truncated = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::has_more_obligations(
+            connection,
+            project_id,
+            &entity_refs,
+            &reference_refs,
+            100,
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let foreshadows_truncated = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::has_more_foreshadows(
             connection,
             project_id,
             &chapter_refs,
             &reference_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?
-        || crate::repositories::narrative::NarrativeRepository::has_more_mysteries(
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let mysteries_truncated = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::has_more_mysteries(
             connection,
             project_id,
             &reference_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?
-        || evidence_truncated;
-    Ok((threads, truncated))
+        ),
+        ContextHardSource::Continuity,
+        &scope,
+    )?;
+    let mut truncated_sources = BTreeSet::new();
+    if obligations_truncated || foreshadows_truncated || mysteries_truncated {
+        truncated_sources.insert(ContextHardSource::Continuity);
+    }
+    if evidence_truncated {
+        truncated_sources.insert(ContextHardSource::Evidence);
+    }
+    Ok((threads, truncated_sources))
 }
 
 pub(crate) fn context_input_from_authority(
@@ -1262,6 +1477,8 @@ pub(crate) fn context_input_from_authority(
     // entity allow-list.  Derive a bounded set from the immediately previous
     // committed chapters so the compiler cannot silently produce an empty
     // authority context after Reality changes.
+    let scope = context_scope(request, project_id);
+    let mut derived_entities_truncated = false;
     let request_with_scope;
     let request = if request.get("executionMode").and_then(Value::as_str) == Some("LONG_FORM")
         && request_strings(request, "entityIds").is_empty()
@@ -1270,11 +1487,14 @@ pub(crate) fn context_input_from_authority(
             request.get("volumeId").and_then(Value::as_str),
             request.get("chapterId").and_then(Value::as_str),
         ) {
-            let entity_ids =
-                crate::repositories::narrative::NarrativeRepository::recent_chapter_entity_ids(
+            let (entity_ids, was_truncated) = map_context_query(
+                crate::repositories::narrative::NarrativeRepository::recent_chapter_entity_ids_bounded(
                     connection, project_id, volume_id, chapter_id, 100,
-                )
-                .map_err(|error| error.to_string())?;
+                ),
+                ContextHardSource::Canon,
+                &scope,
+            )?;
+            derived_entities_truncated = was_truncated;
             request_with_scope = {
                 let mut value = request.clone();
                 value["entityIds"] = json!(entity_ids);
@@ -1293,68 +1513,96 @@ pub(crate) fn context_input_from_authority(
             project_id,
             context_ref,
         )
-        .map_err(|error| error.to_string())?
+        .map_err(|_error| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CANON|scope={scope}"))?
         {
             return Err("CONTEXT_STALE:RECOMPILE_REQUIRED".into());
         }
     }
     let state = narrative_state_from_request(connection, request, project_id)?;
-    let (threads, continuity_truncated) =
+    let (threads, continuity_truncated_sources) =
         continuity_from_request_bounded(connection, request, project_id)?;
     let volume_id = request
         .get("volumeId")
         .or_else(|| request.get("currentVolumeId"))
         .and_then(Value::as_str);
-    let goal_contract_refs = if let Some(volume_id) = volume_id {
-        crate::repositories::narrative::NarrativeRepository::goal_contract_refs_for_volume(
-            connection, project_id, volume_id, 100,
-        )
+    let (goal_contract_refs, contracts_truncated) = if let Some(volume_id) = volume_id {
+        map_context_query(
+            crate::repositories::narrative::NarrativeRepository::goal_contract_refs_for_volume_bounded(
+                connection, project_id, volume_id, 100,
+            ),
+            ContextHardSource::Contract,
+            &scope,
+        )?
     } else {
-        crate::repositories::narrative::NarrativeRepository::goal_contract_refs(
-            connection, project_id, 100,
-        )
-    }
-    .map_err(|e| e.to_string())?;
+        map_context_query(
+            crate::repositories::narrative::NarrativeRepository::goal_contract_refs_bounded(
+                connection, project_id, 100,
+            ),
+            ContextHardSource::Contract,
+            &scope,
+        )?
+    };
     let opening_bootstrap =
         request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
-    let (task_states, task_truncated) =
-        if let Some(volume_id) = volume_id.filter(|_| !opening_bootstrap) {
-            let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+    let (task_states, task_truncated) = if let Some(volume_id) =
+        volume_id.filter(|_| !opening_bootstrap)
+    {
+        let route = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::volume_plan_route(
                 connection, project_id, volume_id,
-            )
-            .map_err(|e| e.to_string())?;
-            let refs = if let Some(route) = route {
-                let payload =
-                    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                        connection, project_id, &route,
-                    )
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or(Value::Null);
-                payload
-                    .get("tasks")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| item.get("taskId").and_then(Value::as_str))
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>()
+            ),
+            ContextHardSource::Task,
+            &scope,
+        )?;
+        if let Some(route) = route {
+            let payload = map_context_query(
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    connection, project_id, &route,
+                ),
+                ContextHardSource::Task,
+                &scope,
+            )?
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
+            let tasks = payload
+                .get("tasks")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
+            if tasks.len() > 100 {
+                // Reject the aggregate route scope before reading any Task Reality rows.
+                (Vec::new(), true)
             } else {
-                Vec::new()
-            };
-            let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-            (
-                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-                    connection, project_id, &refs, 100,
-                )
-                .map_err(|e| e.to_string())?,
-                false,
-            )
+                let refs = tasks
+                    .iter()
+                    .map(|item| {
+                        item.get("taskId")
+                            .and_then(Value::as_str)
+                            .filter(|task_id| !task_id.trim().is_empty())
+                            .ok_or_else(|| {
+                                format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let states = map_context_query(
+                    crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                        connection, project_id, &refs, 100,
+                    ),
+                    ContextHardSource::Task,
+                    &scope,
+                )?;
+                (states, false)
+            }
         } else {
+            (Vec::new(), false)
+        }
+    } else {
+        map_context_query(
             crate::repositories::narrative::NarrativeRepository::task_states_bounded(
                 connection, project_id, 100,
-            )
-            .map_err(|e| e.to_string())?
-        };
+            ),
+            ContextHardSource::Task,
+            &scope,
+        )?
+    };
     let active_task_refs = task_states
         .into_iter()
         .filter(|task| {
@@ -1367,21 +1615,27 @@ pub(crate) fn context_input_from_authority(
         .collect();
     let mut future_reservation_refs = Vec::new();
     let volume_intent = if let Some(volume_id) = volume_id {
-        crate::repositories::narrative::NarrativeRepository::artifact_payload(
-            connection,
-            project_id,
-            "VolumeIntent",
-            volume_id,
-        )
-        .map_err(|e| e.to_string())?
+        map_context_query(
+            crate::repositories::narrative::NarrativeRepository::artifact_payload(
+                connection,
+                project_id,
+                "VolumeIntent",
+                volume_id,
+            ),
+            ContextHardSource::Reservation,
+            &scope,
+        )?
     } else {
         None
     };
     for payload in [
-        crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
-            connection, project_id, "BookPlan",
-        )
-        .map_err(|e| e.to_string())?,
+        map_context_query(
+            crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
+                connection, project_id, "BookPlan",
+            ),
+            ContextHardSource::Reservation,
+            &scope,
+        )?,
         volume_intent,
     ]
     .into_iter()
@@ -1405,25 +1659,32 @@ pub(crate) fn context_input_from_authority(
         .iter()
         .map(|item| item.ref_.as_str())
         .collect::<Vec<_>>();
-    let (mut evidence, mut evidence_truncated) =
+    let (mut evidence, mut evidence_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::evidence_for_refs_bounded(
             connection,
             project_id,
             &authority_refs,
             100,
-        )
-        .map_err(|e| e.to_string())?;
+        ),
+        ContextHardSource::Evidence,
+        &scope,
+    )?;
     // A newly committed Reality fact may not yet be reachable through the
     // bounded source-ref projection (for example when the current plan has
     // no entity allow-list). Select the latest authoritative evidence instead
     // of persisting an empty ContextManifest evidence set.
     if evidence.is_empty() {
-        let all = crate::repositories::narrative::NarrativeRepository::recent_evidence_complete(
-            connection, project_id,
-        )
-        .map_err(|e| e.to_string())?;
-        evidence_truncated = all.len() > 100;
-        evidence = all.into_iter().take(100).collect();
+        (evidence, evidence_truncated) = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::recent_evidence_bounded(
+                connection,
+                project_id,
+                &[],
+                &[],
+                100,
+            ),
+            ContextHardSource::Evidence,
+            &scope,
+        )?;
     }
     let selected_evidence = evidence
         .into_iter()
@@ -1451,9 +1712,22 @@ pub(crate) fn context_input_from_authority(
         Vec::new()
     };
     let mut state = state;
-    state.truncated =
-        state.truncated || task_truncated || evidence_truncated || continuity_truncated;
-    Ok(crate::narrative::ContextCompilerInput {
+    if derived_entities_truncated {
+        state.mark_truncated(ContextHardSource::Canon);
+    }
+    for source in continuity_truncated_sources {
+        state.mark_truncated(source);
+    }
+    for (source, truncated) in [
+        (ContextHardSource::Contract, contracts_truncated),
+        (ContextHardSource::Task, task_truncated),
+        (ContextHardSource::Evidence, evidence_truncated),
+    ] {
+        if truncated {
+            state.mark_truncated(source);
+        }
+    }
+    let mut input = crate::narrative::ContextCompilerInput {
         execution_mode: request
             .get("executionMode")
             .and_then(Value::as_str)
@@ -1467,9 +1741,12 @@ pub(crate) fn context_input_from_authority(
         future_reservation_refs,
         selected_evidence,
         omitted_soft_sources,
-        hard_tokens: 1024,
+        hard_tokens: 0,
         soft_tokens: 0,
-    })
+    };
+    input.hard_tokens = crate::narrative::measure_context_hard_budget(&input)?.estimated_tokens;
+    crate::narrative::validate_context_hard_completeness(&input)?;
+    Ok(input)
 }
 
 pub fn query_narrative_state_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -1500,10 +1777,10 @@ pub fn query_continuity_impl(state: &KernelState, request: Value) -> Result<Valu
     state
         .manager
         .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
-            let (threads, truncated) = continuity_from_request_bounded(connection, &request, project_id)
+            let (threads, truncated_sources) = continuity_from_request_bounded(connection, &request, project_id)
                 .map_err(ManagerError::ProjectCommand)?;
             serde_json::to_value(
-                json!({"projectId":project_id,"projectRevision":revision,"threads":threads,"truncated":truncated}),
+                json!({"projectId":project_id,"projectRevision":revision,"threads":threads,"truncated":!truncated_sources.is_empty()}),
             )
             .map_err(|e| ManagerError::ProjectCommand(e.to_string()))
         })
@@ -2112,15 +2389,16 @@ fn query_b14_skill_runtime(
     let read =
         crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
             .map_err(|error| error.to_string())?;
-    let selection = crate::creative_skills::select_creative_skills(
-        crate::creative_skills::SkillSelectionRequest {
-            primary: skill_id.into(),
-            support: Vec::new(),
-            budget_reason: None,
-            context_tokens: 1200,
-            model_calls: 1,
-        },
-    )?;
+    let selection =
+        state
+            .skill_bundle_loader
+            .select(crate::creative_skills::SkillSelectionRequest {
+                primary: skill_id.into(),
+                support: Vec::new(),
+                budget_reason: None,
+                context_tokens: 1200,
+                model_calls: 1,
+            })?;
     let required_resources = if skill_id == "S44" {
         vec![
             "resources/operating_method.md".to_string(),
@@ -2132,11 +2410,11 @@ fn query_b14_skill_runtime(
             "resources/eval_rubric.md".to_string(),
         ]
     };
-    let loader = crate::creative_skills::SkillBundleLoader::tracked_package();
-    let (loaded_skills, loaded_resources, loading) =
-        loader.load_selected(&selection, &required_resources)?;
+    let loaded = state
+        .skill_bundle_loader
+        .load_selected(&selection, &required_resources)?;
     let method_guidance =
-        crate::creative_skills::build_method_guidance(&loaded_skills, &loaded_resources);
+        crate::creative_skills::build_method_guidance(&loaded.skill_texts, &loaded.resources);
     let guidance_digest = sha256_canonical(&json!({"guidance":method_guidance}))
         .map_err(|error| error.to_string())?;
     let endgame_payload = json!({
@@ -2199,10 +2477,11 @@ fn query_b14_skill_runtime(
         "skillId":selection.primary.id,
         "skillVersion":selection.primary.version,
         "bundleDigest":selection.primary.bundle_digest,
-        "loadedSkillRefs":loaded_skills.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
-        "resourceDigests":loaded_resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+        "loadedSkillRefs":loaded.skill_texts.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
+        "resourceDigests":loaded.resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+        "assetIdentity":loaded.identity,
         "guidanceDigest":guidance_digest,
-        "skillLoading":loading,
+        "skillLoading":loaded.loading,
         "skillTaskContext":skill_context,
         "projectId":project_id,
         "projectRevision":read.revision,
@@ -2241,8 +2520,11 @@ fn query_b14_skill_runtime(
             "skillId":skill_id,
             "skillVersion":selection.primary.version,
             "bundleDigest":selection.primary.bundle_digest,
-            "loadedSkillRefs":loaded_skills.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
-            "resourceDigests":loaded_resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+            "loadedSkillRefs":loaded.skill_texts.iter().map(|skill| skill.reference.clone()).collect::<Vec<_>>(),
+            "resourceDigests":loaded.resources.iter().map(|resource| json!({"ref":resource.reference,"digest":resource.digest})).collect::<Vec<_>>(),
+            "sourceArchiveSha256":loaded.identity.source_archive_sha256,
+            "deployedManifestDigest":loaded.identity.deployed_manifest_digest,
+            "selectedFileDigests":loaded.identity.selected_file_digests,
             "guidanceDigest":guidance_digest,
             "skillTaskContextDigest":skill_context.context_digest,
             "modelRunId":model_run_id,
@@ -2777,9 +3059,9 @@ impl ReadCapabilityAdapter for RepositoryReadAdapter<'_> {
                 serde_json::to_value(records).map_err(|e| e.to_string())?
             }
             "query_continuity" => {
-                let (threads, was_truncated) =
+                let (threads, truncated_sources) =
                     continuity_from_request_bounded(self.connection, input, self.project_id)?;
-                truncated = was_truncated;
+                truncated = !truncated_sources.is_empty();
                 serde_json::to_value(threads).map_err(|e| e.to_string())?
             }
             "query_context_manifest" => {
@@ -3714,6 +3996,188 @@ struct KernelRepairOwner<'a> {
     no_op: bool,
 }
 
+impl KernelRepairOwner<'_> {
+    fn verify_change_request_postverify(
+        &self,
+        operation: &crate::repair::RepairOperation,
+        context: &crate::repair::RepairVerificationContext<'_>,
+    ) -> Result<Value, String> {
+        let change_request_id = operation
+            .params
+            .get("changeRequestId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "H03_CHANGE_REQUEST_ID_REQUIRED".to_string())?;
+        let impact_digest = operation
+            .params
+            .get("impactDigest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "H03_CHANGE_IMPACT_DIGEST_REQUIRED".to_string())?;
+        let owner_receipt_ref = context
+            .owner_receipt_ref
+            .ok_or_else(|| "H03_B12_OWNER_RECEIPT_REQUIRED".to_string())?;
+        let command_id = operation
+            .params
+            .get("commandId")
+            .and_then(Value::as_str)
+            .unwrap_or("h03:execute-change-request");
+        let idempotency_key = operation
+            .params
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .unwrap_or(command_id);
+        let commit_receipt = crate::commit::CommitService::find_receipt(
+            self.connection,
+            self.project_id,
+            idempotency_key,
+        )
+        .map_err(|error| format!("H03_B12_RECEIPT_QUERY_FAILED:{error}"))?
+        .ok_or_else(|| "H03_B12_COMMIT_RECEIPT_NOT_FOUND".to_string())?;
+
+        let receipt_binding_matches = context.project_id == self.project_id
+            && commit_receipt.receipt_id == owner_receipt_ref
+            && commit_receipt.project_id == self.project_id
+            && commit_receipt.command_id == command_id
+            && commit_receipt.idempotency_key == idempotency_key
+            && commit_receipt.before_revision == context.before_revision
+            && commit_receipt.after_revision == context.after_revision;
+        if !receipt_binding_matches {
+            return Ok(json!({
+                "operation":operation.operation,
+                "kind":"b12_change_postverify",
+                "status":"FAIL",
+                "observed":false,
+                "projectId":self.project_id,
+                "changeRequestId":change_request_id,
+                "ownerReceiptRef":owner_receipt_ref,
+                "reason":"B12_COMMIT_RECEIPT_BINDING_MISMATCH"
+            }));
+        }
+
+        let mut request_payload = json!({
+            "changeRequestId":change_request_id,
+            "impactDigest":impact_digest
+        });
+        for key in ["retconPlanId", "planDigest"] {
+            if let Some(value) = operation.params.get(key) {
+                request_payload[key] = value.clone();
+            }
+        }
+        let replay = crate::change_retcon::apply_approved_on_connection(
+            self.connection,
+            self.project_id,
+            command_id,
+            idempotency_key,
+            context.before_revision,
+            self.now,
+            &json!({"payload":request_payload}),
+        )
+        .map_err(|error| format!("H03_B12_POSTVERIFY_REQUERY_FAILED:{error}"))?;
+        let replay_receipt_id = replay.get("receiptId").and_then(Value::as_str);
+        let replay_status = replay.pointer("/result/status").and_then(Value::as_str);
+        let postverify = replay
+            .get("postverify")
+            .ok_or_else(|| "H03_B12_POSTVERIFY_RESULT_MISSING".to_string())?;
+        let returned_postverify_status = postverify
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("QUERY_FAILED");
+        let status_persisted = postverify
+            .get("statusPersisted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let detail = crate::repositories::change_retcon::change_request_detail(
+            self.connection,
+            self.project_id,
+            change_request_id,
+            1,
+            0,
+        )
+        .map_err(|error| format!("H03_B12_DETAIL_QUERY_FAILED:{error}"))?
+        .ok_or_else(|| "H03_B12_CHANGE_REQUEST_NOT_FOUND".to_string())?;
+        let durable_postverify_status = detail
+            .get("postverifyStatus")
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        let expected_postcondition_matches = context
+            .expected_postcondition
+            .get("kind")
+            .and_then(Value::as_str)
+            == Some("b12_change_postverify")
+            && context
+                .expected_postcondition
+                .get("expected")
+                .and_then(Value::as_bool)
+                == Some(true);
+        let detail_binding_matches = detail.get("changeRequestId").and_then(Value::as_str)
+            == Some(change_request_id)
+            && detail.get("status").and_then(Value::as_str) == Some("APPLIED")
+            && detail.get("impactDigest").and_then(Value::as_str) == Some(impact_digest)
+            && detail.get("commitReceiptId").and_then(Value::as_str) == Some(owner_receipt_ref)
+            && detail.get("commitBeforeRevision").and_then(Value::as_i64)
+                == Some(context.before_revision)
+            && detail.get("commitAfterRevision").and_then(Value::as_i64)
+                == Some(context.after_revision);
+        let retcon_binding_matches = operation.params.get("retconPlanId").is_none_or(|plan_id| {
+            detail.get("retconPlanId") == Some(plan_id)
+                && detail
+                    .get("retconPlan")
+                    .and_then(|plan| plan.get("planDigest"))
+                    == operation.params.get("planDigest")
+                && detail
+                    .get("retconPlan")
+                    .and_then(|plan| plan.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("APPLIED")
+        });
+        if !expected_postcondition_matches
+            || replay_receipt_id != Some(owner_receipt_ref)
+            || replay_status != Some("REPLAYED")
+            || !detail_binding_matches
+            || !retcon_binding_matches
+        {
+            return Ok(json!({
+                "operation":operation.operation,
+                "kind":"b12_change_postverify",
+                "status":"FAIL",
+                "observed":false,
+                "projectId":self.project_id,
+                "changeRequestId":change_request_id,
+                "impactDigest":impact_digest,
+                "ownerReceiptRef":owner_receipt_ref,
+                "beforeRevision":context.before_revision,
+                "afterRevision":context.after_revision,
+                "postverifyStatus":durable_postverify_status,
+                "reason":"B12_POSTVERIFY_BINDING_MISMATCH"
+            }));
+        }
+
+        let postverify_matches_durable =
+            status_persisted && returned_postverify_status == durable_postverify_status;
+        let observed = postverify_matches_durable && durable_postverify_status == "VERIFIED";
+        let incomplete = !postverify_matches_durable
+            || matches!(
+                durable_postverify_status,
+                "INCOMPLETE" | "QUERY_FAILED" | "PENDING" | "UNKNOWN"
+            );
+        Ok(json!({
+            "operation":operation.operation,
+            "kind":"b12_change_postverify",
+            "status":if observed {"PASS"} else if incomplete {"REPAIR_VERIFICATION_INCOMPLETE"} else {"FAIL"},
+            "observed":observed,
+            "projectId":self.project_id,
+            "changeRequestId":change_request_id,
+            "impactDigest":impact_digest,
+            "ownerReceiptRef":owner_receipt_ref,
+            "beforeRevision":context.before_revision,
+            "afterRevision":context.after_revision,
+            "returnedPostverifyStatus":returned_postverify_status,
+            "postverifyStatus":durable_postverify_status,
+            "statusPersisted":status_persisted,
+            "userMessage":if observed {"已执行并验证"} else if incomplete {"已执行，验证不完整"} else {"已执行，结果未通过核验"}
+        }))
+    }
+}
+
 impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
     fn execute(
         &self,
@@ -4010,28 +4474,7 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
             }));
         }
         match operation.operation.as_str() {
-            "execute_change_request" => {
-                let change_request_id = operation
-                    .params
-                    .get("changeRequestId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "H03_CHANGE_REQUEST_ID_REQUIRED".to_string())?;
-                let status = crate::repositories::change_retcon::load_change_request(
-                    self.connection,
-                    self.project_id,
-                    change_request_id,
-                )
-                .map_err(|error| error.to_string())?
-                .map(|item| item.status == "APPLIED")
-                .unwrap_or(false);
-                Ok(json!({
-                    "operation":operation.operation,
-                    "kind":"b12_change_postverify",
-                    "status":if status {"PASS"} else {"FAIL"},
-                    "observed":status,
-                    "userMessage":if status {"已完成并复核"} else {"暂时无法完成复核"}
-                }))
-            }
+            "execute_change_request" => Err("H03_B12_POSTVERIFY_CONTEXT_REQUIRED".into()),
             "refresh_runtime_projection" => {
                 let updated_at = DurableJobService::runtime_projection_updated_at(
                     self.connection,
@@ -4203,6 +4646,17 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
             _ => Err("H03_POSTCONDITION_UNAVAILABLE".into()),
         }
     }
+
+    fn verify_with_context(
+        &self,
+        operation: &crate::repair::RepairOperation,
+        context: &crate::repair::RepairVerificationContext<'_>,
+    ) -> Result<Value, String> {
+        if operation.operation == "execute_change_request" {
+            return self.verify_change_request_postverify(operation, context);
+        }
+        self.verify(operation)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4314,11 +4768,35 @@ fn execute_repair_command(
                 requested_at,
             )
             .map_err(|error| error.to_string())?;
+            let owner_failed = receipt.postconditions.iter().any(|item| {
+                item.get("status").and_then(Value::as_str) == Some("OWNER_EXECUTION_FAILED")
+            });
+            let (final_status, message) = match receipt.status.as_str() {
+                "REPAIR_VERIFIED" => ("committed", "修复已执行并验证。"),
+                "REPAIR_VERIFICATION_INCOMPLETE"
+                    if receipt.owner.contains("B12::ChangeRetconOwner") =>
+                {
+                    (
+                        "blocked",
+                        "正式变更已提交，但验证不完整；可重新核对现有回执，不会再次执行变更。",
+                    )
+                }
+                "REPAIR_VERIFICATION_INCOMPLETE" => (
+                    "blocked",
+                    "修复操作已执行，但验证不完整；可重新核对现有回执，不会再次执行操作。",
+                ),
+                _ if owner_failed => ("failed", "修复执行未完成；请查看回执中的失败原因。"),
+                _ => (
+                    "failed",
+                    "修复已执行，但结果未满足预期；请查看回执中的验证项。",
+                ),
+            };
             Ok(json!({
                 "commandId":command_id,
                 "projectId":project_id,
-                "finalStatus": if receipt.status == "REPAIR_VERIFIED" { "committed" } else { "failed" },
-                "message": "H03 授权修复已执行并完成复核",
+                "finalStatus": final_status,
+                "receiptId": receipt.receipt_ref,
+                "message": message,
                 "receipt": receipt,
             }))
         }
@@ -6089,6 +6567,86 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "market_refresh" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                return Ok(replayed);
+            }
+            let revision =
+                expected_revision.ok_or_else(|| "IPC_INVALID:expectedRevision".to_string())?;
+            let snapshot = state.market_source_adapter.fetch();
+            let connection = state
+                .manager
+                .open(id, "", requested_at)
+                .map_err(|error| error.to_string())?;
+            let receipt = crate::project_entry::commit_market_refresh(
+                &connection,
+                id,
+                command_id,
+                idempotency_key,
+                revision,
+                requested_at,
+                &snapshot,
+            )?;
+            Ok(json!({
+                "commandId":receipt.command_id,
+                "projectId":receipt.project_id,
+                "finalStatus":"committed",
+                "message":if snapshot.source_status == "READY" {"市场来源已刷新；请核对证据后再选择方向。"} else {"市场来源暂不可用；本次失败状态已记录，未把旧数据标为当前。"},
+                "receiptId":receipt.receipt_id,
+                "beforeRevision":receipt.before_revision,
+                "afterRevision":receipt.after_revision,
+                "requestDigest":digest,
+                "sourceStatus":snapshot.source_status,
+                "policyStatus":snapshot.policy_status,
+                "sourceDigest":snapshot.source_digest
+            }))
+        }
+        "market_opportunity_select" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
+                return Ok(replayed);
+            }
+            let revision =
+                expected_revision.ok_or_else(|| "IPC_INVALID:expectedRevision".to_string())?;
+            let opportunity_id = required_string(
+                request.pointer("/payload").unwrap_or(&Value::Null),
+                "marketOpportunityId",
+            )?;
+            let connection = state
+                .manager
+                .open(id, "", requested_at)
+                .map_err(|error| error.to_string())?;
+            if let Some(replayed) = crate::project_entry::replay_market_opportunity_selection(
+                &connection,
+                id,
+                idempotency_key,
+                &digest,
+            )? {
+                return Ok(replayed);
+            }
+            let receipt = crate::project_entry::commit_market_opportunity_selection(
+                &connection,
+                id,
+                command_id,
+                idempotency_key,
+                revision,
+                requested_at,
+                &digest,
+                opportunity_id,
+            )?;
+            Ok(json!({
+                "commandId":receipt.command_id,
+                "projectId":receipt.project_id,
+                "finalStatus":"committed",
+                "message":"已记录你选择的市场机会；作品事实和故事方向未更改。",
+                "receiptId":receipt.receipt_id,
+                "beforeRevision":receipt.before_revision,
+                "afterRevision":receipt.after_revision,
+                "requestDigest":digest,
+                "selectedOpportunityId":opportunity_id
+            }))
+        }
         "opening_evaluate" | "signing_retry" => {
             // `signing_retry` is an INTERNAL_COMPAT alias only.  The
             // product FrontendPort exposes `opening_evaluate` as the single
@@ -6141,6 +6699,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 return crate::production::run_chapter_production(
                     &state.manager,
                     state.production_gateway.as_ref(),
+                    &state.skill_bundle_loader,
                     &request,
                 );
             }
@@ -6256,14 +6815,63 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     .pointer("/payload/idea")
                     .and_then(Value::as_str)
                     .is_some_and(|idea| !idea.trim().is_empty());
+            let mut entry_request = request.clone();
+            let selected_market_opportunity_id = request
+                .pointer("/payload/marketOpportunityId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned);
             if b11_entry {
-                crate::project_entry::validate_initial_request(&request, entry_kind)?;
+                crate::project_entry::validate_initial_request(&entry_request, entry_kind)?;
             }
             let id = stable_project_id(command_id)?;
             if let Some(replayed) = replayed_project_command(state, &id, idempotency_key, &digest)?
             {
                 return Ok(replayed);
             }
+            let market_source_snapshot = if entry_kind == crate::project_entry::EntryKind::Market {
+                if let Some(selected_id) = selected_market_opportunity_id.as_deref() {
+                    let snapshot = state.market_source_adapter.fetch();
+                    if snapshot.source_status != "READY" {
+                        return Err(format!(
+                            "MARKET_SOURCE_UNAVAILABLE:{}",
+                            snapshot
+                                .error_code
+                                .as_deref()
+                                .unwrap_or("SOURCE_UNAVAILABLE")
+                        ));
+                    }
+                    let category = snapshot
+                        .categories
+                        .iter()
+                        .find(|category| category.topic_id == selected_id)
+                        .ok_or_else(|| "MARKET_OPPORTUNITY_STALE".to_string())?;
+                    let payload = entry_request
+                        .get_mut("payload")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| "IPC_INVALID:payload".to_string())?;
+                    payload.insert("marketSource".into(), json!(snapshot.source_url));
+                    payload.insert("marketSourceDigest".into(), json!(snapshot.source_digest));
+                    if payload
+                        .get("marketMaterial")
+                        .and_then(Value::as_str)
+                        .is_none_or(|text| text.trim().is_empty())
+                    {
+                        payload.insert(
+                            "marketMaterial".into(),
+                            json!(format!(
+                                "用户明确选择了番茄官方公开出版展示中的“{}”分类。当前公开展示样本为 {} 项；该样本不是阅读量、销量、排名或商业表现。",
+                                category.category, snapshot.sample_count
+                            )),
+                        );
+                    }
+                    Some(snapshot)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let handle = match state.manager.overview(&id) {
                 Ok((existing_title, _revision, _)) if existing_title == title => state
                     .manager
@@ -6277,14 +6885,16 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 Err(error) => return Err(error.to_string()),
             };
             let entry_receipt = if b11_entry {
-                Some(crate::project_entry::commit_initial(
+                Some(crate::project_entry::commit_initial_with_market_source(
                     &handle,
                     &id,
                     command_id,
                     idempotency_key,
                     requested_at,
-                    &request,
+                    &entry_request,
                     entry_kind,
+                    market_source_snapshot.as_ref(),
+                    selected_market_opportunity_id.as_deref(),
                 )?)
             } else {
                 None
@@ -6313,6 +6923,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             if let Some(entry_receipt) = entry_receipt {
                 response["entryReceipt"] =
                     serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
+            }
+            if let Some(snapshot) = market_source_snapshot.as_ref() {
+                response["marketSourceStatus"] = json!(snapshot.source_status);
+                response["platformPolicyStatus"] = json!(snapshot.policy_status);
+                response["marketSourceDigest"] = json!(snapshot.source_digest);
             }
             Ok(response)
         }
@@ -6714,6 +7329,89 @@ pub fn query_chapter_versions(
 }
 
 #[tauri::command]
+pub fn query_export_capability(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let capability = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::export::query_capability(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(capability).map_err(|_| "EXPORT_CAPABILITY_SERIALIZE_FAILED".into())
+}
+
+fn create_export_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let request_id = required_string(&request, "requestId")?;
+    let format = request
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("TXT");
+    let project_dir = state
+        .paths
+        .project_dir(project_id)
+        .map_err(|_| "EXPORT_PROJECT_NOT_FOUND".to_string())?;
+    let receipt = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::export::create_export(connection, &project_dir, project_id, request_id, format)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(receipt).map_err(|_| "EXPORT_RECEIPT_SERIALIZE_FAILED".into())
+}
+
+#[tauri::command]
+pub async fn create_export(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || create_export_impl(&state, request))
+        .await
+        .map_err(|_| "EXPORT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
+pub fn query_export_receipt(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let request_id = required_string(&request, "requestId")?;
+    let project_dir = state
+        .paths
+        .project_dir(project_id)
+        .map_err(|_| "EXPORT_PROJECT_NOT_FOUND".to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |_| {
+            crate::export::query_receipt(&project_dir, project_id, request_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn query_latest_export_receipt(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let project_id = required_string(&request, "projectId")?;
+    let project_dir = state
+        .paths
+        .project_dir(project_id)
+        .map_err(|_| "EXPORT_PROJECT_NOT_FOUND".to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |_| {
+            crate::export::query_latest_receipt(&project_dir).map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn query_canon(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_canon_impl(&state, request)
 }
@@ -6729,6 +7427,14 @@ pub fn query_retcon_context(
 #[tauri::command]
 pub fn query_book_health(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_book_health_impl(&state, request)
+}
+
+#[tauri::command]
+pub fn query_book_health_factor_sources(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_book_health_factor_sources_impl(&state, request)
 }
 
 #[tauri::command]
@@ -6853,8 +7559,22 @@ pub fn query_completion_quality(
 }
 
 #[tauri::command]
-pub fn execute_command(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
-    execute_command_impl(&state, request)
+pub async fn execute_command(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    let is_market_command = matches!(
+        request.get("type").and_then(Value::as_str),
+        Some("market_refresh" | "project_create_from_market")
+    );
+    let result =
+        tauri::async_runtime::spawn_blocking(move || execute_command_impl(&state, request)).await;
+    match result {
+        Ok(result) => result,
+        Err(error) if is_market_command => Err(format!("MARKET_COMMAND_WORKER_FAILED:{error}")),
+        Err(_) => Err("EXECUTE_COMMAND_WORKER_FAILED".into()),
+    }
 }
 
 #[tauri::command]
@@ -6970,8 +7690,11 @@ pub fn test_provider(_state: State<'_, KernelState>, settings: Value) -> Result<
 }
 
 #[tauri::command]
-pub fn query_market_opportunities() -> Result<Value, String> {
-    Ok(json!([]))
+pub async fn query_market_opportunities(state: State<'_, KernelState>) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_market_opportunities_impl(&state))
+        .await
+        .map_err(|error| format!("MARKET_QUERY_WORKER_FAILED:{error}"))?
 }
 
 pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
@@ -6993,9 +7716,14 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_detail,
         query_decisions,
         query_chapter_versions,
+        query_export_capability,
+        create_export,
+        query_export_receipt,
+        query_latest_export_receipt,
         query_canon,
         query_retcon_context,
         query_book_health,
+        query_book_health_factor_sources,
         query_history,
         query_change_request,
         query_dependency_summary_bootstrap,

@@ -46,7 +46,10 @@ export function destinationLabel(destination: string): string {
 export function healthLevelLabel(level: LongFormHealthProjectionR1['level']): string {
   if (level === 'risk') return '需要优先处理'
   if (level === 'attention') return '总体稳定，有关注项'
-  return '状态稳定'
+  if (level === 'source_unavailable') return '检查暂不可用'
+  if (level === 'insufficient_data') return '数据仍不足'
+  if (level === 'not_evaluated') return '尚未评估'
+  return '长篇状态稳定'
 }
 
 export function issueKey(issue: HealthIssue): string {

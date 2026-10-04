@@ -38,12 +38,16 @@ test('B11 formal UI does not expose demo or engineering fallback text', () => {
   assert.doesNotMatch(page, /PLAN_STALE|RepairPlan|operationDigest|sourceRefs|IPC_UNSUPPORTED|作为 AI/)
 })
 
-test('B11 market entry uses user-provided material instead of a fake global opportunity', () => {
+test('R2-04A market entry requires an explicit live official sample or user-provided material', () => {
   const launch = read('src/ui/pages/CreationLaunch.vue')
   assert.match(launch, /marketSource/)
   assert.match(launch, /marketMaterial/)
   assert.match(launch, /project_create_from_market/)
-  assert.doesNotMatch(launch, /marketOpportunityId:selectedMarket/)
+  assert.match(launch, /selectedMarket = ref\(''\)/)
+  assert.match(launch, /marketOpportunityId = selected\.id/)
+  assert.match(launch, /marketDiscovery\.value\.status === 'READY'|\['READY', 'PARTIAL'\]/)
+  assert.match(launch, /selected\.stale !== true/)
+  assert.match(launch, /marketMaterial\.value\.trim\(\)/)
 })
 
 test('B11 decision inbox renders only backend-authorized decision actions', () => {

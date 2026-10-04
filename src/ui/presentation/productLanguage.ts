@@ -12,6 +12,10 @@ const statusLabels: Record<string, string> = {
   committed: '已完成',
   blocked: '暂时无法继续',
   failed: '未完成',
+  NOT_STARTED: '未开始',
+  SATISFIED: '已满足',
+  INVALIDATED: '已失效',
+  ABANDONED: '已放弃',
   ACTIVE: '进行中',
   RUNNING: '进行中',
   QUEUED: '等待处理',
@@ -45,6 +49,8 @@ const statusLabels: Record<string, string> = {
   NO_ACTION: '无需处理',
   VERIFIED: '已完成并核对',
   REPAIR_VERIFIED: '修复已完成并核对',
+  REPAIR_VERIFICATION_FAILED: '结果未通过核验',
+  REPAIR_VERIFICATION_INCOMPLETE: '已执行，验证不完整',
   INCOMPLETE: '尚未完成',
   PASS: '已通过',
   VALID: '有效',
@@ -62,6 +68,16 @@ const statusLabels: Record<string, string> = {
 }
 
 const errorLabels: Record<string, string> = {
+  COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
+  REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
+  CONTEXT_HARD_BUDGET_EXCEEDED: '本章必需资料超出预算，请调整当前任务范围后重新准备；不能省略硬性约束。',
+  CONTEXT_INCOMPLETE: '本章必需资料不完整，暂时不能继续生产。',
+  AUDIT_INCOMPLETE: '正文审计未完成，不能作为无变更结果提交。',
+  AUDIT_STALE: '正文已变化，需重新审计最终版本。',
+  CANON_CONFLICT: '正文与正式事实存在冲突，请核对依据并通过正式变更流程处理。',
+  FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
+  CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
+  UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
   PLAN_STALE: '当前规划已与最新内容不一致，需要重新确认或更新。',
   AUTHORIZATION_STALE: '作品状态已经变化，请重新确认修复方案。',
   EVIDENCE_GAP: '现有信息不足，暂时无法给出可靠结论。请补充对应章节或设定依据。',
@@ -92,6 +108,42 @@ const errorLabels: Record<string, string> = {
   B11_STORY_DIRECTION_FIELD_MISSING: '模型返回的故事方向缺少必要内容，请重试。',
   B11_STORY_DIRECTION_OUTPUT_MISSING: '模型没有返回故事方向，请重试。',
   B08_PROVIDER_NOT_CONFIGURED: '尚未完成模型服务配置，请先保存服务地址和访问密钥。',
+}
+
+const contextHardSourceLabels: Record<string, string> = {
+  CANON: '设定与事实',
+  CONTINUITY: '剧情线与责任',
+  CONTRACT: '创作目标与约束',
+  EVIDENCE: '依据材料',
+  KNOWLEDGE: '人物认知',
+  RESERVATION: '后续保留内容',
+  TASK: '当前任务状态',
+  UNKNOWN: '必需资料',
+}
+
+function contextBlockerMessage(raw: string): string | undefined {
+  const budget = raw.match(/CONTEXT_HARD_BUDGET_EXCEEDED\|usedTokens=(\d+)\|limitTokens=(\d+)\|serializedBytes=(\d+)\|limitBytes=(\d+)\|scope=([A-Z]+:[^"')\s}]+)/)
+  if (budget) {
+    const scope = budget[5].replace(/^[A-Z]+:/, '')
+    return `当前范围 ${scope} 的必需资料估算为 ${budget[1]} / ${budget[2]} token，序列化数据为 ${budget[3]} / ${budget[4]} 字节，超过硬性预算；请缩小范围后重新准备，不能忽略继续。`
+  }
+
+  const incomplete = raw.match(/CONTEXT_HARD_INCOMPLETE\|sources=([A-Z_,]+)\|scope=([A-Z]+:[^"')\s}]+)/)
+  if (incomplete) {
+    const sources = incomplete[1]
+      .split(',')
+      .map(source => contextHardSourceLabels[source] ?? '必需资料')
+      .join('、')
+    const scope = incomplete[2].replace(/^[A-Z]+:/, '')
+    return `必需资料未完整读取（${sources}，范围 ${scope}），不能继续；请缩小当前范围或补齐资料后重新准备。`
+  }
+
+  const unavailable = raw.match(/CONTEXT_SOURCE_UNAVAILABLE\|source=([A-Z_]+)\|scope=([A-Z]+:[^"')\s}]+)/)
+  if (unavailable) {
+    const source = contextHardSourceLabels[unavailable[1]] ?? '必需资料'
+    const scope = unavailable[2].replace(/^[A-Z]+:/, '')
+    return `暂时无法读取${source}（范围 ${scope}），请恢复该资料后重新准备；不能忽略后继续。`
+  }
 }
 
 function textOf(value: unknown): string {
@@ -126,6 +178,22 @@ export function statusLabel(value: unknown, fallback = '需要继续核对'): st
   return /[\u4e00-\u9fff]/.test(raw) && !looksInternal(raw) ? raw : fallback
 }
 
+export function repairExecutionLabel(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '结果待确认'
+  const receipt = value as Record<string, unknown>
+  const status = textOf(receipt.status).trim()
+  if (status === 'REPAIR_VERIFIED') return '已执行并验证'
+  if (status === 'REPAIR_VERIFICATION_INCOMPLETE') return '已执行，验证不完整'
+  if (status === 'REPAIR_VERIFICATION_FAILED') {
+    const postconditions = Array.isArray(receipt.postconditions) ? receipt.postconditions : []
+    const ownerFailed = postconditions.some(item =>
+      item && typeof item === 'object' && (item as Record<string, unknown>).status === 'OWNER_EXECUTION_FAILED',
+    )
+    return ownerFailed ? '执行失败' : '已执行，核验未通过'
+  }
+  return statusLabel(status, '结果待确认')
+}
+
 export function scopeLabel(value: unknown): string {
   return ({ GLOBAL: '全书范围', WIDE: '较大范围', LOCAL: '局部范围' } as Record<string, string>)[textOf(value).toUpperCase()] ?? '当前范围'
 }
@@ -145,6 +213,8 @@ export function severityLabel(value: unknown): string {
 export function productErrorMessage(value: unknown, fallback = '操作未完成，请刷新当前作品后重试。'): string {
   const raw = textOf(value).trim()
   if (!raw) return fallback
+  const contextMessage = contextBlockerMessage(raw)
+  if (contextMessage) return contextMessage
   for (const [code, message] of Object.entries(errorLabels)) {
     if (raw === code || raw.includes(code)) return message
   }

@@ -251,9 +251,17 @@ impl VolumeLifecycleOwner {
         volume_id: &str,
         now: &str,
     ) -> Result<Value, String> {
-        let projection = build_planning_state(connection, project_id, volume_id, now, None)?;
-        persist_planning_state(connection, project_id, volume_id, &projection, now)?;
-        Ok(projection)
+        VolumeLifecycleRepository::with_planning_health_refresh(connection, |connection| {
+            let projection = build_planning_state(connection, project_id, volume_id, now, None)?;
+            persist_planning_state(connection, project_id, volume_id, &projection, now)?;
+            crate::repositories::health::HealthRepository::complete_b09_rebuild_pending(
+                connection, project_id, volume_id,
+            )
+            .map_err(|error| error.to_string())?;
+            crate::repositories::health::HealthRepository::flush_dirty(connection, project_id, now)
+                .map_err(|error| error.to_string())?;
+            Ok(projection)
+        })
     }
 
     pub fn replan_volume_route(
@@ -958,6 +966,19 @@ fn build_planning_state(
     );
     let (route_ref, route) = current_route(connection, project_id, volume_id)?;
     planning::validate_volume_route(&route)?;
+    let compiled_state_digest =
+        if let Some(digest) = route.get("compiledFromStateDigest").and_then(Value::as_str) {
+            Some(digest.to_string())
+        } else {
+            VolumeLifecycleRepository::route_compiled_state_digest(
+                connection,
+                project_id,
+                volume_id,
+                &route_ref.artifact_id,
+                route_ref.version,
+            )
+            .map_err(|error| error.to_string())?
+        };
     let (intent_ref, intent) = current_intent(connection, project_id, &route)?;
     validate_route_reservations(connection, project_id, volume_id, &route, &intent)?;
     let tasks = route
@@ -972,24 +993,38 @@ fn build_planning_state(
     let states =
         NarrativeRepository::task_states_by_ids_complete(connection, project_id, &task_ids)
             .map_err(|error| error.to_string())?;
-    let state_map = states
-        .into_iter()
-        .map(|state| {
-            (
-                state.state_id,
-                state
-                    .value
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("NOT_STARTED")
-                    .to_string(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut state_map = BTreeMap::new();
+    for state in states {
+        if state
+            .value
+            .get("taskId")
+            .and_then(Value::as_str)
+            .is_some_and(|task_id| task_id != state.state_id)
+        {
+            return Err(format!(
+                "PLANNING_TASK_STATE_ID_MISMATCH:{}",
+                state.state_id
+            ));
+        }
+        let status = state
+            .value
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| {
+                matches!(
+                    *status,
+                    "NOT_STARTED" | "ACTIVE" | "BLOCKED" | "SATISFIED" | "INVALIDATED"
+                )
+            })
+            .ok_or_else(|| format!("PLANNING_TASK_STATE_STATUS_UNAVAILABLE:{}", state.state_id))?;
+        state_map.insert(state.state_id, status.to_string());
+    }
 
     let mut active_task_ids = Vec::new();
     let mut blocked_task_ids = Vec::new();
     let mut required_task_ids = Vec::new();
+    let mut health_required_task_ids = Vec::new();
+    let mut health_optional_task_ids = Vec::new();
     let mut remaining_task_ids = Vec::new();
     for task in &tasks {
         let Some(task_id) = task.get("taskId").and_then(Value::as_str) else {
@@ -1006,8 +1041,14 @@ fn build_planning_state(
         if status == "BLOCKED" {
             blocked_task_ids.push(task_id.to_string());
         }
-        if task.get("class").and_then(Value::as_str) == Some("REQUIRED") {
-            required_task_ids.push(task_id.to_string());
+        match task.get("class").and_then(Value::as_str) {
+            Some("REQUIRED") => {
+                required_task_ids.push(task_id.to_string());
+                health_required_task_ids.push(task_id.to_string());
+            }
+            Some("CLIMAX" | "RESERVED") => health_required_task_ids.push(task_id.to_string()),
+            Some("OPTIONAL" | "FLEXIBLE") => health_optional_task_ids.push(task_id.to_string()),
+            _ => {}
         }
     }
     let required_tasks_remaining = required_task_ids
@@ -1029,6 +1070,14 @@ fn build_planning_state(
                 .unwrap_or("NOT_STARTED")
                 == "BLOCKED"
         })
+        .count() as i64;
+    let health_blocked_required_tasks = health_required_task_ids
+        .iter()
+        .filter(|task_id| state_map.get(task_id.as_str()).map(String::as_str) == Some("BLOCKED"))
+        .count() as i64;
+    let health_blocked_optional_tasks = health_optional_task_ids
+        .iter()
+        .filter(|task_id| state_map.get(task_id.as_str()).map(String::as_str) == Some("BLOCKED"))
         .count() as i64;
     let exit_condition_gap = route
         .get("requiredExitConditions")
@@ -1119,6 +1168,7 @@ fn build_planning_state(
         "projectId": project_id,
         "volumeId": volume_id,
         "routeRef": route_ref,
+        "compiledStateDigest": compiled_state_digest,
         "intentRef": intent_ref,
         "volumeStatus": metadata.status,
         "committedChapters": committed_chapters,
@@ -1150,9 +1200,12 @@ fn build_planning_state(
         "activeTaskIds": active_task_ids,
         "blockedTaskIds": blocked_task_ids,
         "requiredTaskIds": required_task_ids,
+        "healthRequiredTaskIds": health_required_task_ids,
         "remainingTaskIds": remaining_task_ids,
         "requiredTasksRemaining": required_tasks_remaining,
         "blockedRequiredTasks": blocked_required_tasks,
+        "healthBlockedRequiredTasks": health_blocked_required_tasks,
+        "healthBlockedOptionalTasks": health_blocked_optional_tasks,
         "remainingChapterCapacity": remaining_chapter_capacity,
         "planningPressure": planning_pressure,
         "exitConditionGap": exit_condition_gap,

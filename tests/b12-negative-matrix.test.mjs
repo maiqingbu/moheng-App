@@ -92,10 +92,11 @@ test('NEG-16 stale decision digest is rejected before commit', () => {
   assert.match(read('src-tauri/src/change_retcon.rs'), /B12_DECISION_STALE/)
 })
 
-test('NEG-17 final response does not claim verification after incomplete postverify', () => {
+test('NEG-17 committed writes stay committed when postverify is incomplete or unavailable', () => {
   const owner = read('src-tauri/src/change_retcon.rs')
-  assert.match(owner, /暂时无法完成复核/)
-  assert.match(owner, /finalStatus.*failed/s)
+  assert.match(owner, /QUERY_FAILED/)
+  assert.match(owner, /finalStatus":"committed"/)
+  assert.match(owner, /结果待确认/)
 })
 
 test('NEG-18 stale propagation is represented by the same CommitBundle', () => {

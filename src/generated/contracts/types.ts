@@ -532,6 +532,9 @@ export interface HealthFactor {
   "summary": string
   "detail": string
   "sourceRefs": Array<HealthSourceRef>
+  "sourceRefsTotal"?: number
+  "sourceRefsTruncated"?: boolean
+  "sourceRefsNextCursor"?: string | null
   "recommendedDestination": string
 }
 
@@ -551,6 +554,13 @@ export interface HealthIssuesPage {
   "items": Array<HealthIssue>
   "nextCursor": string | null
   "total": number
+}
+
+export interface HealthSourcePage {
+  "items": Array<HealthSourceRef>
+  "total": number
+  "truncated": boolean
+  "nextCursor": string | null
 }
 
 export interface HealthCoverage {
@@ -580,6 +590,7 @@ export interface HealthProvenance {
   "bounded": boolean
   "fullManuscriptScan": boolean
   "factorSources": Record<string, Array<HealthSourceRef>>
+  "factorSourcePages"?: Record<string, HealthSourcePage>
 }
 
 export interface LongFormHealthProjectionR1 {
@@ -587,8 +598,8 @@ export interface LongFormHealthProjectionR1 {
   "projectId": string
   "projectRevision": number
   "checkedAt": string
-  "score": number
-  "level": "healthy" | "attention" | "risk"
+  "score": number | null
+  "level": "not_evaluated" | "insufficient_data" | "source_unavailable" | "healthy" | "attention" | "risk"
   "coverage": { "totalFactors": number; "evaluatedFactors": number; "insufficientFactors": number; "unavailableFactors": number }
   "factors": Array<HealthFactor>
   "issues": HealthIssuesPage

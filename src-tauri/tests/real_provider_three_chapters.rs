@@ -41,7 +41,6 @@ fn execute(state: &KernelState, request: serde_json::Value) -> serde_json::Value
 
 fn retryable_real_production_error(error: &str) -> bool {
     [
-        "B08_REALITY_DELTA_REQUIRED",
         "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
         "P01_MODEL_JSON_INVALID",
         "B08_PLANNING_CONTRACT",
@@ -72,7 +71,6 @@ fn execute_real_production(
             "chapterId":chapter_id,
             "executionMode":execution_mode,
             "skillsEnabled":false,
-            "requireRealityDelta":true,
             "targetChineseCharacters":1800,
             "chapterGoalHint":chapter_goal
         });

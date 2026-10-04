@@ -401,11 +401,25 @@ impl NarrativeRepository {
         subject_id: &str,
         predicate: &str,
     ) -> Result<Vec<SemanticCanonFactRecord>, NarrativeRepositoryError> {
+        Self::current_canon_facts_for_semantic_key_bounded(
+            connection, project_id, subject_id, predicate, 100,
+        )
+        .map(|(facts, _)| facts)
+    }
+
+    pub fn current_canon_facts_for_semantic_key_bounded(
+        connection: &Connection,
+        project_id: &str,
+        subject_id: &str,
+        predicate: &str,
+        limit: i64,
+    ) -> Result<(Vec<SemanticCanonFactRecord>, bool), NarrativeRepositoryError> {
+        let query_limit = Self::limit(limit).saturating_add(1);
         let mut statement = connection.prepare(
-            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id",
+            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id LIMIT ?4",
         )?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, subject_id, predicate],
+            libsql_rusqlite::params![project_id, subject_id, predicate, query_limit],
             |row| {
                 let object_json: String = row.get(1)?;
                 Ok(SemanticCanonFactRecord {
@@ -420,7 +434,12 @@ impl NarrativeRepository {
                 })
             },
         )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut facts = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(NarrativeRepositoryError::from)?;
+        let truncated = facts.len() > limit as usize;
+        facts.truncate(limit as usize);
+        Ok((facts, truncated))
     }
 
     pub fn goal_contract_refs(
@@ -428,18 +447,27 @@ impl NarrativeRepository {
         project_id: &str,
         limit: i64,
     ) -> Result<Vec<ArtifactRef>, NarrativeRepositoryError> {
+        Ok(Self::goal_contract_refs_bounded(connection, project_id, limit)?.0)
+    }
+
+    pub fn goal_contract_refs_bounded(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<ArtifactRef>, bool), NarrativeRepositoryError> {
+        let bound = Self::limit(limit);
         let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type IN ('StoryConstitution','BookPlan','MainContract','VolumeIntent') ORDER BY artifact_type, scope_key LIMIT ?2")?;
-        let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, Self::limit(limit)],
-            |row| {
-                Ok(ArtifactRef {
-                    artifact_id: row.get(0)?,
-                    version: row.get(1)?,
-                    payload_hash: row.get(2)?,
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| {
+            Ok(ArtifactRef {
+                artifact_id: row.get(0)?,
+                version: row.get(1)?,
+                payload_hash: row.get(2)?,
+            })
+        })?;
+        let mut refs = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = refs.len() as i64 > bound;
+        refs.truncate(bound as usize);
+        Ok((refs, truncated))
     }
 
     pub fn goal_contract_refs_for_volume(
@@ -448,10 +476,23 @@ impl NarrativeRepository {
         volume_id: &str,
         limit: i64,
     ) -> Result<Vec<ArtifactRef>, NarrativeRepositoryError> {
+        Ok(
+            Self::goal_contract_refs_for_volume_bounded(connection, project_id, volume_id, limit)?
+                .0,
+        )
+    }
+
+    pub fn goal_contract_refs_for_volume_bounded(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<ArtifactRef>, bool), NarrativeRepositoryError> {
         let canonical_scope = Self::volume_scope_key(volume_id)?;
+        let bound = Self::limit(limit);
         let mut statement = connection.prepare("SELECT artifact_id, version, payload_hash FROM canonical_heads WHERE project_id=?1 AND (artifact_type IN ('StoryConstitution','BookPlan','MainContract') OR (artifact_type='VolumeIntent' AND scope_key IN (?2, ?3))) ORDER BY artifact_type, scope_key LIMIT ?4")?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, canonical_scope, volume_id, Self::limit(limit)],
+            libsql_rusqlite::params![project_id, canonical_scope, volume_id, bound + 1],
             |row| {
                 Ok(ArtifactRef {
                     artifact_id: row.get(0)?,
@@ -460,7 +501,10 @@ impl NarrativeRepository {
                 })
             },
         )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut refs = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = refs.len() as i64 > bound;
+        refs.truncate(bound as usize);
+        Ok((refs, truncated))
     }
 
     /// Reads the bounded authority set consumed by B03's deterministic volume
@@ -649,29 +693,23 @@ impl NarrativeRepository {
         entity_ids: &[&str],
         limit: i64,
     ) -> Result<(Vec<CanonFactRecord>, bool), NarrativeRepositoryError> {
-        let mut records = Vec::new();
         let bound = Self::limit(limit);
-        for entity_id in entity_ids.iter().take(bound as usize) {
-            let remaining = bound - records.len() as i64;
-            if remaining <= 0 {
-                break;
-            }
-            let mut statement = connection.prepare("SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id=?2 AND superseded_by IS NULL ORDER BY fact_id LIMIT ?3")?;
-            let rows = statement.query_map(
-                libsql_rusqlite::params![project_id, entity_id, remaining + 1],
-                |row| {
-                    let object_json: String = row.get(3)?;
-                    Ok(CanonFactRecord {
-                        fact_id: row.get(0)?,
-                        subject_id: row.get(1)?,
-                        predicate: row.get(2)?,
-                        object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
-                        authority_level: row.get(4)?,
-                    })
-                },
-            )?;
-            records.extend(rows.collect::<Result<Vec<_>, _>>()?);
-        }
+        let entity_ids = Self::ids_json(entity_ids)?;
+        let mut statement = connection.prepare("SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id IN (SELECT value FROM json_each(?2)) AND superseded_by IS NULL ORDER BY fact_id LIMIT ?3")?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, entity_ids, bound + 1],
+            |row| {
+                let object_json: String = row.get(3)?;
+                Ok(CanonFactRecord {
+                    fact_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    predicate: row.get(2)?,
+                    object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                    authority_level: row.get(4)?,
+                })
+            },
+        )?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
         let truncated = records.len() as i64 > bound;
         records.truncate(bound as usize);
         Ok((records, truncated))
@@ -688,6 +726,19 @@ impl NarrativeRepository {
         chapter_id: &str,
         limit: i64,
     ) -> Result<Vec<String>, NarrativeRepositoryError> {
+        Ok(Self::recent_chapter_entity_ids_bounded(
+            connection, project_id, volume_id, chapter_id, limit,
+        )?
+        .0)
+    }
+
+    pub fn recent_chapter_entity_ids_bounded(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+        chapter_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<String>, bool), NarrativeRepositoryError> {
         let bound = Self::limit(limit);
         let chapter_ids = Self::ids_json(
             &Self::previous_committed_chapter_ids(connection, project_id, chapter_id, 2)?
@@ -699,10 +750,12 @@ impl NarrativeRepository {
             "SELECT entity_id FROM (SELECT subject_id AS entity_id FROM canon_facts WHERE project_id=?1 AND (source_chapter_id IN (SELECT value FROM json_each(?2)) OR valid_from_chapter_id IN (SELECT value FROM json_each(?2))) UNION SELECT subject_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT object_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT knower_id AS entity_id FROM canon_knowledge WHERE project_id=?1 AND from_chapter_id IN (SELECT value FROM json_each(?2))) WHERE entity_id IS NOT NULL ORDER BY entity_id LIMIT ?3",
         )?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, chapter_ids, bound],
+            libsql_rusqlite::params![project_id, chapter_ids, bound + 1],
             |row| row.get(0),
         )?;
-        let ids = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut ids = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = ids.len() as i64 > bound;
+        ids.truncate(bound as usize);
         // The volume argument is part of the authority boundary: a chapter
         // from another volume must never widen the continuation context.
         if ids.is_empty() {
@@ -717,7 +770,7 @@ impl NarrativeRepository {
                 ));
             }
         }
-        Ok(ids)
+        Ok((ids, truncated))
     }
 
     /// Returns only already committed chapters immediately preceding the

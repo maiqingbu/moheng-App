@@ -1,0 +1,3392 @@
+{
+  "schema": "moheng.creative-skills.deployment.v1",
+  "packageVersion": "1.2.0",
+  "sourceArchiveSha256": "a90ab6e12d82d57b32f06d5a3780d0153d6f372e1efd47df1d70ef1aebbdef8f",
+  "provenanceSourceArchiveSha256": "1aaf54cdc2bfc24fa10042a4a503549a3eaed162473bbecf7127be67f9667c03",
+  "hashAlgorithm": "SHA-256 over raw file bytes",
+  "manifestDigestAlgorithm": "SHA-256 over raw UTF-8 manifest bytes",
+  "pathEncoding": "UTF-8 POSIX relative paths",
+  "fileCount": 676,
+  "files": [
+    {
+      "path": "BUILD_PROVENANCE.json",
+      "sizeBytes": 1271,
+      "sha256": "dfde92b46d1382c76494701b3f433054f0d44b46d3589ee0fc005a89a0039f9c"
+    },
+    {
+      "path": "OPEN_QUESTIONS.md",
+      "sizeBytes": 1083,
+      "sha256": "68aa0567badc7e02d6198d0db7001da0136c221849735826e6da05939aa87b87"
+    },
+    {
+      "path": "PACKAGE_REPORT.md",
+      "sizeBytes": 1465,
+      "sha256": "46b056acd40413174708e33edf0e41fcdaf2cdcd28ba742b97224270d48b25a4"
+    },
+    {
+      "path": "SKILL_ARCHITECTURE_ALIGNMENT.md",
+      "sizeBytes": 5915,
+      "sha256": "87e7c52f867c210624766a1573a489f5523c77b06b9dcd6322acd360a8707b0a"
+    },
+    {
+      "path": "contracts/ARCHITECTURE_BOUNDARY_R1.md",
+      "sizeBytes": 2646,
+      "sha256": "5b4297c99f544e8b62ed259179f1e3b2486ba10fe926622df3a0d09c1e810973"
+    },
+    {
+      "path": "contracts/METHOD_PRECEDENCE.md",
+      "sizeBytes": 1560,
+      "sha256": "09f1a2b660fa94a7dc0b4e370b06a940389c3a7428e8cee01a36c52aef1db9a7"
+    },
+    {
+      "path": "contracts/SKILL_RUNTIME_CONTRACT.md",
+      "sizeBytes": 3216,
+      "sha256": "3067ae205c3413e8e3ce97e40ef161d6deb29c67234c0758c11a92c57c4e9482"
+    },
+    {
+      "path": "contracts/SKILL_TASK_CONTEXT.md",
+      "sizeBytes": 1087,
+      "sha256": "eddaa9c1d3f02de9608aba3d49097e248aa00cab9ff4eb0adcba7574da4f78e9"
+    },
+    {
+      "path": "coverage-matrix.md",
+      "sizeBytes": 5117,
+      "sha256": "0cf8472de6dbb1bd1851adc0e45215991d21086e83222c37bac801f92197b349"
+    },
+    {
+      "path": "eval-report.json",
+      "sizeBytes": 708,
+      "sha256": "6b8c0b6ec4cd1f5262696b039c258dc68c12f8d054f8cb4099df2203d4bae4ce"
+    },
+    {
+      "path": "protocols/SKILL_EVAL_PROTOCOL.md",
+      "sizeBytes": 1559,
+      "sha256": "c11d72b1510c637bef3ff99dc89af95f7f982a5bd11b9a35c1e9ff75b1e111fa"
+    },
+    {
+      "path": "registry.json",
+      "sizeBytes": 48485,
+      "sha256": "1c82330466e3367a1bea64ba8b6d36a84d1abe5531b4a858b7dce306e47b60ed"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/SKILL.md",
+      "sizeBytes": 3614,
+      "sha256": "9e8d64d677291c47e736ac97dd743501f3b36f850e7ee30d67cadce5296bcff6"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/evals/adversarial.jsonl",
+      "sizeBytes": 1415,
+      "sha256": "76d2d3f8f297f1229ef22b321b270c0bc31eaaf3ba583c66ac82818dbea9ae5c"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/evals/boundary.jsonl",
+      "sizeBytes": 1693,
+      "sha256": "a323bd03e2030acbd07af8ea8d07f61d19c78ac3d08be2e303b35f5aef57ca95"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/evals/negative.jsonl",
+      "sizeBytes": 2971,
+      "sha256": "93b0f0cb9734fc5c017ee3c9ad12f0d698deb4843c89e2f405c79251b7b2b1b8"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/evals/positive.jsonl",
+      "sizeBytes": 3565,
+      "sha256": "adce3e072455c6718d45055a05891d8e3bf791c2666a2024870b7edf67e5a000"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/moheng.skill.json",
+      "sizeBytes": 1056,
+      "sha256": "f673401fc6b85e447cebc8cc41b7d282bbb0360cf898d6be1144d0d19315dc36"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/provenance/source_map.jsonl",
+      "sizeBytes": 4406,
+      "sha256": "a6085f671684b15ae066ffee7ca90f661092d036253a13a763cb786fb17a25db"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/anti_patterns.md",
+      "sizeBytes": 1292,
+      "sha256": "7859b67cf980e106a18782f4f703076cbf0a1c6d6cc9570c1dfa2808f02892ba"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/decision_rules.md",
+      "sizeBytes": 3548,
+      "sha256": "89d3fca2e12c80ddfd3c082ec90396c2fbe852b922e0e492e4f61e3fe2906509"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/eval_rubric.md",
+      "sizeBytes": 1465,
+      "sha256": "f606587c52d980c0997df1bc343d42d8a9b8283988b29ccb4a97d546c34875df"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/examples.md",
+      "sizeBytes": 664,
+      "sha256": "413fcbaeaf0b57e6f3fe41486ba05ca7a0d2955335c794cbbad6dd7706f0639d"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/operating_method.md",
+      "sizeBytes": 1746,
+      "sha256": "155db58e675b474d0dadf9b0a20cdf2e46d4806bd4b48f61d0b8e275bed83278"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/resources/principles.md",
+      "sizeBytes": 4629,
+      "sha256": "6d334229309cd9e9780026c879f5c1fc6e7ee11860f79c4b42501ba3581cdd34"
+    },
+    {
+      "path": "skills/action-conflict-scene-design/schemas/output.schema.json",
+      "sizeBytes": 4097,
+      "sha256": "7ef1580794f45e9863d8081d0da31b7e1c2cccbf87adc10128fc33ff26ed7b8a"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/SKILL.md",
+      "sizeBytes": 3645,
+      "sha256": "fcb58643edbdfcfd49e097bf4dd74698c958a37863976aaee807d0c0b4983cc7"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/evals/adversarial.jsonl",
+      "sizeBytes": 1421,
+      "sha256": "2f47f238f0e7caf669de5e55ced1c26ee7ae2269d57607f2056f94ae291d0505"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/evals/boundary.jsonl",
+      "sizeBytes": 2800,
+      "sha256": "e9d045d9536ac37fda06414da0674da73df8c2a8c10a806944af00d74eb37f7f"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/evals/negative.jsonl",
+      "sizeBytes": 8656,
+      "sha256": "42cb5e95e99a0047a23691d5fe49110e4bcbad3c9b4e9a24078781cefaeb9cdb"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/evals/positive.jsonl",
+      "sizeBytes": 10588,
+      "sha256": "26e8999e9d1104a6caecffd255e944f9cd177f80b8f0027be269cde699e1467a"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/moheng.skill.json",
+      "sizeBytes": 1124,
+      "sha256": "196c82dcd5ece459ec13b9c26126fa76e07c487b56d39e088b3ec420cc0ef98d"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/provenance/source_map.jsonl",
+      "sizeBytes": 4508,
+      "sha256": "b8f83a27fc7765bdcddbb138cf1bf6f1007b399f382a0e65ac52db8bf81efff7"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/anti_patterns.md",
+      "sizeBytes": 609,
+      "sha256": "fe183e7fa5f6a451c20a1016d4a6d7596508df21542eec369206ef4ef0edaa4c"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/decision_rules.md",
+      "sizeBytes": 4449,
+      "sha256": "c91e341d8144125db7c61681f18beb78f3fe401ea6094d5645d5b2299a76d8f9"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/eval_rubric.md",
+      "sizeBytes": 1415,
+      "sha256": "d54701339c4a4b2021699d003a9fe0e1e3da75d2071b970ff1286b9a10ab48a2"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/examples.md",
+      "sizeBytes": 1098,
+      "sha256": "53850d04ca6d56f68327db958caa4500ce52921135bcbb38fa121671cc0e6222"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/operating_method.md",
+      "sizeBytes": 1799,
+      "sha256": "24b4af78727fd1a50ecbba80fa48d339284b62c1e86c5b11368076b71ce09f34"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/resources/principles.md",
+      "sizeBytes": 5890,
+      "sha256": "999c0e0ff955686316b6739a47a3acf07e5a4bedc0f1b530a3409a2d19debb9c"
+    },
+    {
+      "path": "skills/agency-reader-desire-evaluator/schemas/output.schema.json",
+      "sizeBytes": 3714,
+      "sha256": "6d643565577c97786280d844d294e01b0fc3d8ac00979276395e37c3a0554c58"
+    },
+    {
+      "path": "skills/arc-architecture/SKILL.md",
+      "sizeBytes": 3561,
+      "sha256": "0f9d9ea163ebc35e8a3e129d53da0ba47c8a53f2d32be6bf4ae65ccc483482a4"
+    },
+    {
+      "path": "skills/arc-architecture/evals/adversarial.jsonl",
+      "sizeBytes": 1379,
+      "sha256": "45b732a6cf8d522f4f52850e2ff430a26ba0695106182751882389c3ca063ce9"
+    },
+    {
+      "path": "skills/arc-architecture/evals/boundary.jsonl",
+      "sizeBytes": 1630,
+      "sha256": "961c6027bc5d5165dd415634e67cc6a3028b183cdef243077094bac5d2a0923c"
+    },
+    {
+      "path": "skills/arc-architecture/evals/negative.jsonl",
+      "sizeBytes": 2866,
+      "sha256": "5dacc54e39d9064b9ce456592abd3197e56ad36757bf08bfd41e9c3a07ec95f5"
+    },
+    {
+      "path": "skills/arc-architecture/evals/positive.jsonl",
+      "sizeBytes": 3430,
+      "sha256": "8e46bf4d965ca64dcaaaf433bb2ea3fc529a5e9e5657731b17051c0fd500d716"
+    },
+    {
+      "path": "skills/arc-architecture/moheng.skill.json",
+      "sizeBytes": 1047,
+      "sha256": "77bb93062441cf74e5aeb6f1cf8e7606724f18297cb2aa30f92babc819aaedd5"
+    },
+    {
+      "path": "skills/arc-architecture/provenance/source_map.jsonl",
+      "sizeBytes": 4485,
+      "sha256": "b1e46e261434d176a5dbceee8c3350cbce4bc79ad62ea051f4394754f748552e"
+    },
+    {
+      "path": "skills/arc-architecture/resources/anti_patterns.md",
+      "sizeBytes": 1512,
+      "sha256": "073963897fdb4aa8fc3f565fdb274e02956fc9210033c382e57e49156df5e398"
+    },
+    {
+      "path": "skills/arc-architecture/resources/decision_rules.md",
+      "sizeBytes": 3647,
+      "sha256": "1eeca967c3af547e63dc46d96c2b86ab2215c2ea2f1fa95a656212834dde80c7"
+    },
+    {
+      "path": "skills/arc-architecture/resources/eval_rubric.md",
+      "sizeBytes": 1405,
+      "sha256": "37893e73a7de2458e5b7f424d0ce40547fba1b5ae966c1489da5a0fbf3f55c0e"
+    },
+    {
+      "path": "skills/arc-architecture/resources/examples.md",
+      "sizeBytes": 298,
+      "sha256": "25dc2bd77f73375b74e0af747a1d0766dc49da42002061a292b40ba2e4b28bc6"
+    },
+    {
+      "path": "skills/arc-architecture/resources/operating_method.md",
+      "sizeBytes": 1671,
+      "sha256": "48115a16b14bc17cab901ec46fb309d202f904e3a636d7a934162d603aa074f2"
+    },
+    {
+      "path": "skills/arc-architecture/resources/principles.md",
+      "sizeBytes": 4879,
+      "sha256": "2996e6f724e13c39922bc4d4d8733e2d911ef40a22bf62727176bbc74b36f9ba"
+    },
+    {
+      "path": "skills/arc-architecture/schemas/output.schema.json",
+      "sizeBytes": 3800,
+      "sha256": "6b64e1a23f6afb8eb1c85c5facb60c83a391c31995c69271286960a9b2e75ec2"
+    },
+    {
+      "path": "skills/book-mainline-design/SKILL.md",
+      "sizeBytes": 3613,
+      "sha256": "0f2889ff4456ae33b384467a215a12659dacf2c61cf50e1451189084bb862bc1"
+    },
+    {
+      "path": "skills/book-mainline-design/evals/adversarial.jsonl",
+      "sizeBytes": 1391,
+      "sha256": "7ffcb70da975229ffcf711828af1d7dd22310a4e8d70cc44392407b7ce6c2c35"
+    },
+    {
+      "path": "skills/book-mainline-design/evals/boundary.jsonl",
+      "sizeBytes": 1667,
+      "sha256": "d25f622b4f1beb4a35d8c1e0ee1d8afac32c1af75700abb38a928cb91d73d1da"
+    },
+    {
+      "path": "skills/book-mainline-design/evals/negative.jsonl",
+      "sizeBytes": 2861,
+      "sha256": "72e464d5b721da4204d752bc5879bb0b57aac1da5c0cc0eefd4b96d3bdd6c58c"
+    },
+    {
+      "path": "skills/book-mainline-design/evals/positive.jsonl",
+      "sizeBytes": 3550,
+      "sha256": "8ab76e4a49a8f3ad1b79df0c079db4df2ed2c3011fb8823db6ab5865f0b1d204"
+    },
+    {
+      "path": "skills/book-mainline-design/moheng.skill.json",
+      "sizeBytes": 1047,
+      "sha256": "faba549f869afc669bbc4c70b5841a7966740d89f914145d5642d43fdec4db23"
+    },
+    {
+      "path": "skills/book-mainline-design/provenance/source_map.jsonl",
+      "sizeBytes": 4490,
+      "sha256": "8e6b74345224c9c7ac60c0392411362d990971f4655f6a1a7cd52f46e90123ef"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/anti_patterns.md",
+      "sizeBytes": 1584,
+      "sha256": "d9a738267ba3363730f66a075afe3d910a62ad7fd765fb47416f62b89eacaf2f"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/decision_rules.md",
+      "sizeBytes": 3778,
+      "sha256": "75659f740e473dc9eb5b82573713f98cb6f79c056cffac47cf171ac74db066c9"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/eval_rubric.md",
+      "sizeBytes": 1456,
+      "sha256": "0a5308be9f11c3745f1c445b9e7fcc5131bf987001d73285645018c231ab12b3"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/examples.md",
+      "sizeBytes": 299,
+      "sha256": "1d45c4237f24767c15dc47ae71e3fffe8774a94b994555c05e3fbc5cccdb448a"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/operating_method.md",
+      "sizeBytes": 1778,
+      "sha256": "c5514010e9fc403a61bffe9ced10e17e1298e0e06c2ee3b9b7ba209c308a5ed5"
+    },
+    {
+      "path": "skills/book-mainline-design/resources/principles.md",
+      "sizeBytes": 4820,
+      "sha256": "b8bf9612b3ad389feef4f417ba43b8aa040f341a1933eeeaa23b942be2cfebe0"
+    },
+    {
+      "path": "skills/book-mainline-design/schemas/output.schema.json",
+      "sizeBytes": 3875,
+      "sha256": "751d9f29973299e7c9930ed2d3bdcc123e3376e4be264d2941cd4a5f305b14ca"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/SKILL.md",
+      "sizeBytes": 3699,
+      "sha256": "1dc16139f7f957adee95758b4017ce31db41c1662af6a9a79ff1acadc237e4db"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/evals/adversarial.jsonl",
+      "sizeBytes": 1421,
+      "sha256": "d1af1d2e3f8c57401aca89698bb91eb11991e594f25b8438703913e61d50c6a1"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/evals/boundary.jsonl",
+      "sizeBytes": 2746,
+      "sha256": "d9c07e1c8d6639d32284ed54c78144693b3224e9416e2393f51038fcbe42f0e9"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/evals/negative.jsonl",
+      "sizeBytes": 8746,
+      "sha256": "13110c08ef92964c3eebacd3df80a08f1567bed8a6afd3bee3bbdeafb5bffc89"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/evals/positive.jsonl",
+      "sizeBytes": 10873,
+      "sha256": "637d2d150890326a413454579cd1e44225211421705580a899f81b3f8f4ab6ec"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/moheng.skill.json",
+      "sizeBytes": 1060,
+      "sha256": "cdabbdf0d41d7ad4296a119c5f7754cdf9b5417f36bf0c353d8c81dddc842bee"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/provenance/source_map.jsonl",
+      "sizeBytes": 4483,
+      "sha256": "4bcea4759c657f61432b568a49ebd1e42435ae97dada32bbb70ec7c4a325ba8a"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/anti_patterns.md",
+      "sizeBytes": 1772,
+      "sha256": "72fde8555e7e1976f675b117e2ed7909ade4e05baa24802951eaf9223a333514"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/decision_rules.md",
+      "sizeBytes": 4028,
+      "sha256": "de9a3f79a1caf56eab4b9fc19f4d1d50854c2a67905baa53ad43a4c17e9db52f"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/eval_rubric.md",
+      "sizeBytes": 1484,
+      "sha256": "963501fed0a4a93e9023e96c2fd9dc65b88eb2c24a6858addd0d5e97716cb468"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/examples.md",
+      "sizeBytes": 300,
+      "sha256": "eb1c3cb521884711c406cf4f4b9ee86841b976a7fb5d3b7840669cd34d3473bc"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/operating_method.md",
+      "sizeBytes": 1966,
+      "sha256": "eaf2d4db1aa49850db1a8faea2576a37e0702d75bcb8f6a400efd0d03a3e64f5"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/resources/principles.md",
+      "sizeBytes": 5208,
+      "sha256": "afdef73948c2dcbbc5e2cb7093a015af9d1bdf0a0a0bffeb8039082f7db65d69"
+    },
+    {
+      "path": "skills/central-conflict-stakes-design/schemas/output.schema.json",
+      "sizeBytes": 3876,
+      "sha256": "db4d130b9aa97b93d7138ceba1a91e8d64b004cd586b3aa1ce382c5c7df02c92"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/SKILL.md",
+      "sizeBytes": 3649,
+      "sha256": "b3328ebd830b0ec6a7ba77f9d44cd47e21988400373d43e86ad89781bc85db25"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/evals/adversarial.jsonl",
+      "sizeBytes": 1427,
+      "sha256": "ce846e5beebdaef4c8d6706544bb725c9f7c047a1a65b1980fd29c55789ad511"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/evals/boundary.jsonl",
+      "sizeBytes": 1675,
+      "sha256": "4d6636bd205940b767feac6a1ee1067d91cbdd5981e19ed07cb74b7f53270c6d"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/evals/negative.jsonl",
+      "sizeBytes": 2941,
+      "sha256": "d1095c4eb52cccca7b6143f2fea87d11a340295c6ad8a49224b447a4fa2c9f45"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/evals/positive.jsonl",
+      "sizeBytes": 3595,
+      "sha256": "4ce113325d3f24b67becce996bc3e9a2de5574082d21e7f78d579d2716dea27f"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/moheng.skill.json",
+      "sizeBytes": 1068,
+      "sha256": "a3005866be082295f21a560ea73446aaec032e9e90d1729347a1a27cf748c9f1"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/provenance/source_map.jsonl",
+      "sizeBytes": 4289,
+      "sha256": "03e1a5c4652a61ddc6bcde038af182476a056c61d6da060c723df0089dfb0aa8"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/anti_patterns.md",
+      "sizeBytes": 749,
+      "sha256": "865decf73b4d62fa0ca44ebe48a069f2ecb6ce5b2598f2e26450fb483769ce4a"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/decision_rules.md",
+      "sizeBytes": 3516,
+      "sha256": "f743628fcbdf34cf0481de885a853bfb2a2f9295de02c81981c13ce0469cc6d6"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/eval_rubric.md",
+      "sizeBytes": 1458,
+      "sha256": "532dc8585cf46c913b2ee6bcea04e4b5625cd4395cbd2985f3e943d4dcc345f4"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/examples.md",
+      "sizeBytes": 315,
+      "sha256": "57c96e45577b7998b1be93dba20ce2c973dcbaf9ae099d4848da6d65a69e55ec"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/operating_method.md",
+      "sizeBytes": 1871,
+      "sha256": "a535053dbeaac94fd9dccdc0b10e2dd520fc7ae1bfb2696656bbc8d71d0cf3ba"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/resources/principles.md",
+      "sizeBytes": 4338,
+      "sha256": "4c597523f6c129f5e5f4e851019012b8aa128bcaa5adf2472d5d8453c5a719b6"
+    },
+    {
+      "path": "skills/chapter-ending-next-click-design/schemas/output.schema.json",
+      "sizeBytes": 3887,
+      "sha256": "2445c7593f22da70235f0c602b4654b9518d9e81bff979c1cbbdf7019e4f3c2e"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/SKILL.md",
+      "sizeBytes": 3632,
+      "sha256": "4723e8f24bbdb790938376ffd9111722c7b290f0f24e9d7e645582d9555ff8e9"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/evals/adversarial.jsonl",
+      "sizeBytes": 1412,
+      "sha256": "6d44bb7bc98ca35c6f211817df1cc7b95eda14af926a28a5e35dc9a9c071436f"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/evals/boundary.jsonl",
+      "sizeBytes": 2729,
+      "sha256": "66b4a90e86eae9bb799ba70412a7d547264293eada7ef0487c079fe7831b90c6"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/evals/negative.jsonl",
+      "sizeBytes": 8611,
+      "sha256": "e918d4eda6988b36ca0a81d27fbcbb9f15daacb08bdaff7650815432c3001df5"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/evals/positive.jsonl",
+      "sizeBytes": 10423,
+      "sha256": "ed1f092f0062c6f429b969e2c00db6f3d74095248a3d32b9bd5bb5cbb3f6c84c"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/moheng.skill.json",
+      "sizeBytes": 1071,
+      "sha256": "687e1dc25321b41b44a90c50c329688b69a73c573cf3cea81e6933bdacab0b57"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/provenance/source_map.jsonl",
+      "sizeBytes": 4463,
+      "sha256": "0c07275e36cc5a990cee701434a055975b0d4479b73d92d4f8e19fef06193698"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/anti_patterns.md",
+      "sizeBytes": 807,
+      "sha256": "eac245bdaba5c45630989dd4d4d5b99d12177d43a1cbdf2dd8c3f12f8dcfa927"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/decision_rules.md",
+      "sizeBytes": 4310,
+      "sha256": "e2b91483c5cbb74c21f7b28507463e1b4851f11d5b506e6215e6c47b95a62748"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/eval_rubric.md",
+      "sizeBytes": 1408,
+      "sha256": "a4ca4e4cebaf8bd6d15f399167b27e292dd2f2176a7286ce12a7e2835c4fc1cd"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/examples.md",
+      "sizeBytes": 298,
+      "sha256": "42e456279907cc2a720a7de770b0c402e5820ec8b03a10f317f67b6450d85a72"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/operating_method.md",
+      "sizeBytes": 1765,
+      "sha256": "caa284449228ca2dd969bf496823942defa9198387fb077f7ed85d1cfde441db"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/resources/principles.md",
+      "sizeBytes": 5487,
+      "sha256": "4e09ad82349d89655d6a54a11e61a6473cdec46499273afcaa76ad010c7df402"
+    },
+    {
+      "path": "skills/chapter-narrative-evaluator/schemas/output.schema.json",
+      "sizeBytes": 3807,
+      "sha256": "ca60c5069c6d94e292ea2d37ebe96850f6cba00b6f992056fdf32e0d859bc127"
+    },
+    {
+      "path": "skills/chapter-plan-design/SKILL.md",
+      "sizeBytes": 3813,
+      "sha256": "2c735eecdf95269d74719a16b79e1aed0c6e8a82161b14973e16372274180a9c"
+    },
+    {
+      "path": "skills/chapter-plan-design/evals/adversarial.jsonl",
+      "sizeBytes": 1388,
+      "sha256": "baf5a7e16544325ab4214b7824c5f1f25a1d0f550d086238e6a53931a1675b24"
+    },
+    {
+      "path": "skills/chapter-plan-design/evals/boundary.jsonl",
+      "sizeBytes": 2696,
+      "sha256": "a913a57848a421640348a1e903fefd6cae6c9ef83f35ea22bd9e2ce205ae9b0c"
+    },
+    {
+      "path": "skills/chapter-plan-design/evals/negative.jsonl",
+      "sizeBytes": 8536,
+      "sha256": "90fc587ecfbdcfe184b541cf92be267bdc39de69774f82233ec9a077ae8c6835"
+    },
+    {
+      "path": "skills/chapter-plan-design/evals/positive.jsonl",
+      "sizeBytes": 10963,
+      "sha256": "5f69b8eb0ab80a19fd20b024254605adf37153ac8f8b8bfddf23a814ab186445"
+    },
+    {
+      "path": "skills/chapter-plan-design/moheng.skill.json",
+      "sizeBytes": 1060,
+      "sha256": "b9ebf3735fa60dd8c3253c9186096195b1c243ce63122efc599ed7429d47a8c5"
+    },
+    {
+      "path": "skills/chapter-plan-design/provenance/source_map.jsonl",
+      "sizeBytes": 4389,
+      "sha256": "89a3597d89bc2bf16ff7cef3b5788e9c067f9abdc4ebfd9d76a2d2c85d26731f"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/anti_patterns.md",
+      "sizeBytes": 791,
+      "sha256": "d9d86a7cd591cfed9c82bd58bcf19273ad96843e93cdcbff47adc7008a735281"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/decision_rules.md",
+      "sizeBytes": 3709,
+      "sha256": "322b84ff810527d1d61d00b6e84a8d2a8a8946095ed1de7652949aa30ab948ea"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/eval_rubric.md",
+      "sizeBytes": 1511,
+      "sha256": "839eaa37db71c5a521165703b03b544ab07a323bfa370d526e38e65855805e5f"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/examples.md",
+      "sizeBytes": 286,
+      "sha256": "e8ca330075ac2dc6f75132f3c6eaca4c4508c8a1d80144738a0797a0bf26dc9f"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/operating_method.md",
+      "sizeBytes": 1801,
+      "sha256": "69146a834a185d2b8a14eda21c7b9600d2d5a3aa94eff6eb80329fe24cde0906"
+    },
+    {
+      "path": "skills/chapter-plan-design/resources/principles.md",
+      "sizeBytes": 4788,
+      "sha256": "84dd118df46083a297a450848b99e290d7f7722b6ba605a57846c01010e7a975"
+    },
+    {
+      "path": "skills/chapter-plan-design/schemas/output.schema.json",
+      "sizeBytes": 4057,
+      "sha256": "57497039a46e85f0b74b3c0913de6b5b85f7814738e16892a878b18a74f9ef75"
+    },
+    {
+      "path": "skills/character-arc-design/SKILL.md",
+      "sizeBytes": 3736,
+      "sha256": "d6d24065e2ec6a2e6a444ba81318e19403a1d785f916f9d1f14fcd8049a6cfd0"
+    },
+    {
+      "path": "skills/character-arc-design/evals/adversarial.jsonl",
+      "sizeBytes": 1391,
+      "sha256": "8f72fea90a30a7c231bb7fb7a420f26877c3c68af07c3ffdd105334bacce4467"
+    },
+    {
+      "path": "skills/character-arc-design/evals/boundary.jsonl",
+      "sizeBytes": 1642,
+      "sha256": "b31f436e436d6f767e330199b6ea1ed9e9338d45e5e8c49cb16086290469ba4c"
+    },
+    {
+      "path": "skills/character-arc-design/evals/negative.jsonl",
+      "sizeBytes": 2846,
+      "sha256": "20475ff06c6e668719feb8408fed2841bf8d980e2b72debf3ea7b6255b40b624"
+    },
+    {
+      "path": "skills/character-arc-design/evals/positive.jsonl",
+      "sizeBytes": 3545,
+      "sha256": "b1985c8753abce1aa60992e5a838586a0f5ed526a23e3e433fdee59495b11b64"
+    },
+    {
+      "path": "skills/character-arc-design/moheng.skill.json",
+      "sizeBytes": 1140,
+      "sha256": "f9e3557575c9e34924ac513bd014c76601869d4c0a5b3cb24f65c7bafc8b7505"
+    },
+    {
+      "path": "skills/character-arc-design/provenance/source_map.jsonl",
+      "sizeBytes": 4513,
+      "sha256": "00abc68428cc6cdf5273ddc0ee5758bca0a87612487e0bc88e9fd01139bf6799"
+    },
+    {
+      "path": "skills/character-arc-design/resources/anti_patterns.md",
+      "sizeBytes": 1867,
+      "sha256": "acc69989baa49ed6a39ed438b60fa8a5d459b5a5e9161a483e94009e41e58764"
+    },
+    {
+      "path": "skills/character-arc-design/resources/decision_rules.md",
+      "sizeBytes": 4071,
+      "sha256": "cc268307158a1a0708cdd503b6b778375d64e3a529380226b661909d3e826b83"
+    },
+    {
+      "path": "skills/character-arc-design/resources/eval_rubric.md",
+      "sizeBytes": 1451,
+      "sha256": "fe51bd63cc8aa1554bcfd46f6bf497e9a78161ac506ce843b1d6ebb4c77c016d"
+    },
+    {
+      "path": "skills/character-arc-design/resources/examples.md",
+      "sizeBytes": 289,
+      "sha256": "d946f460e7f23c5894b46727acd7a2dd1f1322cb1b6bf87c05dc3b510d9a343a"
+    },
+    {
+      "path": "skills/character-arc-design/resources/operating_method.md",
+      "sizeBytes": 1894,
+      "sha256": "ec1df613d525d6e045e95fc153104bef9c00aec0383c834a48d56cf33060fcd8"
+    },
+    {
+      "path": "skills/character-arc-design/resources/principles.md",
+      "sizeBytes": 4863,
+      "sha256": "0855bee57b8aae7625619ae8cc7267a7f51b2112c0b151386389cad7655f3993"
+    },
+    {
+      "path": "skills/character-arc-design/resources/supplemental_method.md",
+      "sizeBytes": 845,
+      "sha256": "afbd4aa9743ec1dbd49a835e9c1a13a220b59f0d0b69b6077c52aae6f47c6ff9"
+    },
+    {
+      "path": "skills/character-arc-design/schemas/output.schema.json",
+      "sizeBytes": 4010,
+      "sha256": "fd48ef4660239502aef83a3d0843ae0d9baea214ccc2491e08bc53460b094d92"
+    },
+    {
+      "path": "skills/character-entrance-design/SKILL.md",
+      "sizeBytes": 3767,
+      "sha256": "357f4048e1b924d04c10a3d2fc8d43bdceb84bc0071170ba4d3f0764bad4c1ad"
+    },
+    {
+      "path": "skills/character-entrance-design/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "444845c1591e3fd01d8df989391f13cdf976e901b9322cb3ec1ab3aeaf0de087"
+    },
+    {
+      "path": "skills/character-entrance-design/evals/boundary.jsonl",
+      "sizeBytes": 2781,
+      "sha256": "f70a2a961467327930facf0f86b92c9b895076ae74c1617a9857f34a9af77747"
+    },
+    {
+      "path": "skills/character-entrance-design/evals/negative.jsonl",
+      "sizeBytes": 8671,
+      "sha256": "edf7aa54b0be41809961987b62b9c9ac642ebf142403a26f943d2a648c3bf892"
+    },
+    {
+      "path": "skills/character-entrance-design/evals/positive.jsonl",
+      "sizeBytes": 10798,
+      "sha256": "1d78696d5e946658c1232261cfdca6c20472d5a159d74d085f9ef9404ec9ce12"
+    },
+    {
+      "path": "skills/character-entrance-design/moheng.skill.json",
+      "sizeBytes": 1136,
+      "sha256": "7c7981c2a9ef615b82cf16494b791748ceaa0302007bbc163944c06b1ee3bca1"
+    },
+    {
+      "path": "skills/character-entrance-design/provenance/source_map.jsonl",
+      "sizeBytes": 4487,
+      "sha256": "a2d1198d7cad419faced62b1cade65efb4aefbcc5522164609f902ef5dab9f06"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/anti_patterns.md",
+      "sizeBytes": 2095,
+      "sha256": "ed0197928c74202bd7072b0621d1bd32688f5ec1e9b5fcd4446365e214c179ea"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/decision_rules.md",
+      "sizeBytes": 4025,
+      "sha256": "289a6eb0b791afad493651665b2f4bcc60731b0e9b18eb88c4d3b859e28deae2"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/eval_rubric.md",
+      "sizeBytes": 1433,
+      "sha256": "6235735534c1646c7f7aa1d3a095b8eb13172914f34c710aae781a82a86efbdf"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/examples.md",
+      "sizeBytes": 298,
+      "sha256": "d441f1d0a48a33d1c93923ba34ecaac0aed8e2a585ef83c05601c61e2c90e945"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/operating_method.md",
+      "sizeBytes": 1913,
+      "sha256": "d63906352178f16eeda34e3d1c7d8534f1e613e0a7fca9ea920d0f0d39019b0d"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/principles.md",
+      "sizeBytes": 5523,
+      "sha256": "2414d1e82c49a707ad294c0d3341e56d04948024b3a9a103f486e0728e7bc2c1"
+    },
+    {
+      "path": "skills/character-entrance-design/resources/supplemental_method.md",
+      "sizeBytes": 876,
+      "sha256": "346615bd0e83d2c36d627424d68a1e870d9d223c68ba8063c8b0a092c97fab7b"
+    },
+    {
+      "path": "skills/character-entrance-design/schemas/output.schema.json",
+      "sizeBytes": 3862,
+      "sha256": "f9e083a4b42716d213567e1a5160c2756d8afeb6d616ea9be7cfbce1e0c24230"
+    },
+    {
+      "path": "skills/completion-payoff-audit/SKILL.md",
+      "sizeBytes": 3897,
+      "sha256": "63bfe45deaa33389b0cce0928a7fdcd4bcaffb49ca7dc1a246a1d608d798ecf2"
+    },
+    {
+      "path": "skills/completion-payoff-audit/evals/adversarial.jsonl",
+      "sizeBytes": 1400,
+      "sha256": "96e452954817337b2532d6b2b1bc2d9a957ea9816c91ab94ec0f79d1ec7593ca"
+    },
+    {
+      "path": "skills/completion-payoff-audit/evals/boundary.jsonl",
+      "sizeBytes": 1703,
+      "sha256": "859fa23bec4bb138a9a2318d2045cd24d3884c163325d764f40c0e6b05b5bc74"
+    },
+    {
+      "path": "skills/completion-payoff-audit/evals/negative.jsonl",
+      "sizeBytes": 2961,
+      "sha256": "c17487e45268ba16a154682a1fcf6c0c1d6b3017cefa3d15338bb221bbcf81af"
+    },
+    {
+      "path": "skills/completion-payoff-audit/evals/positive.jsonl",
+      "sizeBytes": 3600,
+      "sha256": "b6bfc0e56e2f06ec77e346d5275314dbfdd58509676c0f830968b1645e2536e0"
+    },
+    {
+      "path": "skills/completion-payoff-audit/moheng.skill.json",
+      "sizeBytes": 1157,
+      "sha256": "97c8292738529b37aef39a740003d5ecbf33f29950dc66efd9a4fa2a26318331"
+    },
+    {
+      "path": "skills/completion-payoff-audit/provenance/source_map.jsonl",
+      "sizeBytes": 4215,
+      "sha256": "885357dc7a98f4ea14c1bee26074897439ec2f033b60b7a869916920cf7677bb"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/anti_patterns.md",
+      "sizeBytes": 639,
+      "sha256": "b804373488847e41f5bb50062f669cf1411a6e5c1f4bb23ba8299d2feec13e23"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/decision_rules.md",
+      "sizeBytes": 3090,
+      "sha256": "78b2e12cc1b2cfa123a4bdeb7d9874bd41fbc0403017c3b68a6fffb9c8cc91b6"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/eval_rubric.md",
+      "sizeBytes": 1392,
+      "sha256": "ff40303cac94012f9678e78c60fcaa41d4e648a6d0b75c4a43f93436e3c3c431"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/examples.md",
+      "sizeBytes": 317,
+      "sha256": "1b8d9b0a4568195be42a4c95d559da8b0b7d51d6a3f7b48852a7114ea32a9b34"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/operating_method.md",
+      "sizeBytes": 1994,
+      "sha256": "6d6a0b5c82db2f0802aa85d5bc86b926ef7486b6ba3a23adee108b8c75bb2d9e"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/principles.md",
+      "sizeBytes": 3916,
+      "sha256": "e9e16fd14ae7156c3ce7fe504e0dc3fb317b71921f7c784edbea77677dfe4956"
+    },
+    {
+      "path": "skills/completion-payoff-audit/resources/supplemental_method.md",
+      "sizeBytes": 869,
+      "sha256": "a662756ed5267cc4c7226398fb5922519279bcdf8c9e84b4db1aa496d7156f2d"
+    },
+    {
+      "path": "skills/completion-payoff-audit/schemas/output.schema.json",
+      "sizeBytes": 4070,
+      "sha256": "ce2c1e5362ec60b08cbed58cdfbb957f78a0d33a228f038a4b8d539f8ba881c5"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/SKILL.md",
+      "sizeBytes": 3823,
+      "sha256": "98c161d1b60ae4382d2392a9293e3b2375a37b93460151b53a26185d19dc8c6b"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/evals/adversarial.jsonl",
+      "sizeBytes": 1433,
+      "sha256": "8c42af251a209a35d0bbaddb3d687c17e3af6c9b4baf8ef00582ff0677c9e4ae"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/evals/boundary.jsonl",
+      "sizeBytes": 2749,
+      "sha256": "f0c536473950b740f1fc5565a6fd8b97e6fd0b31163cfa8731f8ef018c30cd93"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/evals/negative.jsonl",
+      "sizeBytes": 8851,
+      "sha256": "8e77009d3c92ee91ff263b72fa0b7056db16aefb0bdd1de6fb5e919ad997ce50"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/evals/positive.jsonl",
+      "sizeBytes": 10768,
+      "sha256": "a74e9a644b13e9069ba344761522b7b3a2229f27d44a3b6b274e6a8754991ee1"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/moheng.skill.json",
+      "sizeBytes": 1164,
+      "sha256": "0a67416a94740ee5e0e1354261b58dd0eb26695c7a19f9790795f368c1db62fd"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/provenance/source_map.jsonl",
+      "sizeBytes": 4417,
+      "sha256": "1de0398719e39189b6cd0adaec6711309453d225bacae5cd3db3ad5f33398335"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/anti_patterns.md",
+      "sizeBytes": 622,
+      "sha256": "39479021778a72e19aa58a2ec52e0b17c1800c243e3ef8b19e1d6a0aa833b5da"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/decision_rules.md",
+      "sizeBytes": 4067,
+      "sha256": "ffcb19d2c5e9e7ddf8a161fdbf76b67cd2f8267e7ad6d4ae339dfab6f7dc4ae7"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/eval_rubric.md",
+      "sizeBytes": 1474,
+      "sha256": "dedb1271ff35dd83045badbfc1feb3a6b127eef59d2d9c579d8c5c23fb3fbbd2"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/examples.md",
+      "sizeBytes": 681,
+      "sha256": "261e0df62e62d8621787995615a4e41dcbd62324803c65836d838003fb54d9bf"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/operating_method.md",
+      "sizeBytes": 2114,
+      "sha256": "f62312746433cdd5ccb37b27b62c2e98a4930dff77240eb46dd52a8ec914db75"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/principles.md",
+      "sizeBytes": 5467,
+      "sha256": "8599a221fe046bacf609c0bbee99ac15521048aa5b66e0a061f545b59c2a3535"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/resources/supplemental_method.md",
+      "sizeBytes": 917,
+      "sha256": "617af13b8ca1ad5ceec5dd7f23efdbe843684754e6ee61da74be1786fdc408ab"
+    },
+    {
+      "path": "skills/core-mechanism-power-system-design/schemas/output.schema.json",
+      "sizeBytes": 3974,
+      "sha256": "f098bcfecc1b5ea23bfe8eabfc56078ec5116515f723de87e730a71ae61758ff"
+    },
+    {
+      "path": "skills/dialogue-design/SKILL.md",
+      "sizeBytes": 3755,
+      "sha256": "dc36d933d0c8d2d9fdcc6ad8f05cf31ba8a04980bf40bcccf8880836585b6967"
+    },
+    {
+      "path": "skills/dialogue-design/evals/adversarial.jsonl",
+      "sizeBytes": 1376,
+      "sha256": "521f181ff6e1bf7e23a127020b5514e3b66b57ec1c40326715e5281facb27699"
+    },
+    {
+      "path": "skills/dialogue-design/evals/boundary.jsonl",
+      "sizeBytes": 1704,
+      "sha256": "0ddcdef64d49358648673fe6fe174e55f537f609a46b3c14ee73a02ac067922d"
+    },
+    {
+      "path": "skills/dialogue-design/evals/negative.jsonl",
+      "sizeBytes": 2936,
+      "sha256": "1e8ef4a98d7bae782f1ba0fc40a06096c1fcb2e2dd171fc01c0ba4e2837bda4f"
+    },
+    {
+      "path": "skills/dialogue-design/evals/positive.jsonl",
+      "sizeBytes": 3545,
+      "sha256": "ef74fc67d8356030cd80b7ecbfc5a0206e902610ea88b759e2113dee9bc30e6a"
+    },
+    {
+      "path": "skills/dialogue-design/moheng.skill.json",
+      "sizeBytes": 1126,
+      "sha256": "ddccad88792a3544eea31483dfdb7af71b2e5af800156573ab3cd33199d81c79"
+    },
+    {
+      "path": "skills/dialogue-design/provenance/source_map.jsonl",
+      "sizeBytes": 4527,
+      "sha256": "8dd40366765250e6acfe837ba76a3976edfde1861358c189a5bb7df7aecfe0b4"
+    },
+    {
+      "path": "skills/dialogue-design/resources/anti_patterns.md",
+      "sizeBytes": 1154,
+      "sha256": "81fb0d9d75dd3673d3ecbc3509bc2f1fb89b569bfd75954e90cf71127f064a9a"
+    },
+    {
+      "path": "skills/dialogue-design/resources/decision_rules.md",
+      "sizeBytes": 4280,
+      "sha256": "d6899d850799f7973be296b739ae4ef7dc6e23c4b07b87adb5c80925cc0c9bbd"
+    },
+    {
+      "path": "skills/dialogue-design/resources/eval_rubric.md",
+      "sizeBytes": 1435,
+      "sha256": "ee3400f6f734e5b0743a46f521bd509c5a796cb3ce3393dd1e7311b0b66a5e93"
+    },
+    {
+      "path": "skills/dialogue-design/resources/examples.md",
+      "sizeBytes": 826,
+      "sha256": "25ebbc3e3c9dbf9e71a66ede4ae455eca6e7cf06646ee159b084d2d630f4580a"
+    },
+    {
+      "path": "skills/dialogue-design/resources/operating_method.md",
+      "sizeBytes": 2042,
+      "sha256": "0a487b734a2b09e71c8010f4409cef09f299713c358a6260c09ac89cca52b80b"
+    },
+    {
+      "path": "skills/dialogue-design/resources/principles.md",
+      "sizeBytes": 5275,
+      "sha256": "3e7edb67547c7ee8fbdf830b3596da746a0d2c76ee658c87f0287a9b372f282f"
+    },
+    {
+      "path": "skills/dialogue-design/resources/supplemental_method.md",
+      "sizeBytes": 850,
+      "sha256": "d8154bf00467459065bbb758e0d5f49d6b48d7e90a622fd79b86a7bf656bfade"
+    },
+    {
+      "path": "skills/dialogue-design/schemas/output.schema.json",
+      "sizeBytes": 3816,
+      "sha256": "0247a1a8c1aa3b6cbf78b76ac489e90f4633661c6a3227fc8e30c38947b1e1cc"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/SKILL.md",
+      "sizeBytes": 3637,
+      "sha256": "de32128bad32446d984b58a180754ced5b1f6c94cea61f73dbf59f105596bdaa"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "e9eaacc705468379cac8f6d2e27f3cf5720d30b901cdc074949ebbf75961cf08"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/evals/boundary.jsonl",
+      "sizeBytes": 2743,
+      "sha256": "a7d6e8d20274de4f90b1a7bc49c32766e8a999ed32a7435f38a1229acb2f85ad"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/evals/negative.jsonl",
+      "sizeBytes": 8581,
+      "sha256": "c4a5ca5f4c95299e1e8d61e00cf54d2c06a15d7612b9f01066a852467f6e6255"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/evals/positive.jsonl",
+      "sizeBytes": 10693,
+      "sha256": "6d98a3e3648b4f5edbad0ab4c1121836368a1b3cad2098dfae91ff32fb8e16ec"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/moheng.skill.json",
+      "sizeBytes": 1049,
+      "sha256": "f32f1135d2145baa6b52f8f1652a4f4b995e351c82dddcd2a6077bf2d33621cd"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/provenance/source_map.jsonl",
+      "sizeBytes": 4473,
+      "sha256": "63e1c7a2d3555a1c98030c231d7beee3d28a7b14a51411b0f7d919145cf5e0f5"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/anti_patterns.md",
+      "sizeBytes": 1316,
+      "sha256": "9683984935ea8fbb107480fbff7904db9df5711076b32c9c9c2395fd40a4bfd3"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/decision_rules.md",
+      "sizeBytes": 3537,
+      "sha256": "31c04d656ac34405985827126235b4287f60b159922d7dd059d16b5edcf9f62a"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/eval_rubric.md",
+      "sizeBytes": 1526,
+      "sha256": "cde44dce2adbb49c7a96d67d9d2039117dde18ce2c3db9ffa22c1251954c8bef"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/examples.md",
+      "sizeBytes": 696,
+      "sha256": "76f4ee24c64c80163f151ce5bd21b9fdae42ddda8a47be07e725326482c91223"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/operating_method.md",
+      "sizeBytes": 1853,
+      "sha256": "e4430085186b7f8102ab1b91a1e02e762772f5bfb2d66d324a793c4593214454"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/resources/principles.md",
+      "sizeBytes": 5134,
+      "sha256": "898c46fe9333e6c3eeb5abede3fa69ba60995ea27c073d3114f3b23028ca28fb"
+    },
+    {
+      "path": "skills/dramatic-authoring-design/schemas/output.schema.json",
+      "sizeBytes": 4258,
+      "sha256": "1250f11fa2151a344190d2ab374a944779e96a380dfc11764f436fa72800642a"
+    },
+    {
+      "path": "skills/emotional-scene-design/SKILL.md",
+      "sizeBytes": 3635,
+      "sha256": "3c3b84d0f557de13e60ee56790d2d5b8eccfc346ad00c211b5765b4dc682ce62"
+    },
+    {
+      "path": "skills/emotional-scene-design/evals/adversarial.jsonl",
+      "sizeBytes": 1397,
+      "sha256": "e02093c28f3d4a435b0591888e59e28ddc1584e6265855f90adad8d2967fb958"
+    },
+    {
+      "path": "skills/emotional-scene-design/evals/boundary.jsonl",
+      "sizeBytes": 1683,
+      "sha256": "f861291c5e1b229e494158118422caec1ab1062fb99ee97a58c43ce757d607b7"
+    },
+    {
+      "path": "skills/emotional-scene-design/evals/negative.jsonl",
+      "sizeBytes": 2921,
+      "sha256": "fbadf3944a44f3287a376a1620bfe022c0a0802ccee77fae8c5a7517cc8883fc"
+    },
+    {
+      "path": "skills/emotional-scene-design/evals/positive.jsonl",
+      "sizeBytes": 3580,
+      "sha256": "34ff317344af2c9cd6252fe38735ea9ae499d0d70e34c9a77288d388ba5873ad"
+    },
+    {
+      "path": "skills/emotional-scene-design/moheng.skill.json",
+      "sizeBytes": 1043,
+      "sha256": "82daf79617e0a9fa0ec828ea9058524e92bc5cadef4807124c86cefd473de807"
+    },
+    {
+      "path": "skills/emotional-scene-design/provenance/source_map.jsonl",
+      "sizeBytes": 4342,
+      "sha256": "eab13b763bdce76d7b835b75723abb2898ea84a0d61f9e262a367acee67a5822"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/anti_patterns.md",
+      "sizeBytes": 1141,
+      "sha256": "ee9ddde2698abcdf920749e1b36c71810ad47d148dbbede1fd23a86f15b123cb"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/decision_rules.md",
+      "sizeBytes": 3875,
+      "sha256": "f8c8c6be3949e3c51e1ccb650043d14f25c90a8e52fe8eee721cd124b0f3d894"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/eval_rubric.md",
+      "sizeBytes": 1452,
+      "sha256": "b97029f5d934987778c3a2d3b16b9114bcfe154cd8b46f2587e7a96c47e3eb32"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/examples.md",
+      "sizeBytes": 302,
+      "sha256": "3e9a71103ddccc798b54db09ecc9885e68ca7dace5c4de49522c199e5163bf77"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/operating_method.md",
+      "sizeBytes": 1789,
+      "sha256": "9d126ab7b21f77dbcbc72baf321ee9badc7d86433e262ea11d2543a87a4842ee"
+    },
+    {
+      "path": "skills/emotional-scene-design/resources/principles.md",
+      "sizeBytes": 4874,
+      "sha256": "da73f44aaf0a849a6190ee8b7a19a649000f21c973f3de5d73a6bd3c8a462e8b"
+    },
+    {
+      "path": "skills/emotional-scene-design/schemas/output.schema.json",
+      "sizeBytes": 3859,
+      "sha256": "3202cb7e426840c73d3cd9b34c225695ba74259c9ffd81fdb3c6b0e1baa3c5d6"
+    },
+    {
+      "path": "skills/endgame-design/SKILL.md",
+      "sizeBytes": 3739,
+      "sha256": "fb98526691420bf78fb8465f4982e5e4514bebc044295830daa0e815c8d3ad19"
+    },
+    {
+      "path": "skills/endgame-design/evals/adversarial.jsonl",
+      "sizeBytes": 1373,
+      "sha256": "d89c787b9b64b9e7e4bcb0a2bb53835a397dcbec305876227f17d78b96a23986"
+    },
+    {
+      "path": "skills/endgame-design/evals/boundary.jsonl",
+      "sizeBytes": 1621,
+      "sha256": "052cebb7438f541185d35842cedc6e209fa2f649de0eb1dc017cd5da4e9273af"
+    },
+    {
+      "path": "skills/endgame-design/evals/negative.jsonl",
+      "sizeBytes": 2831,
+      "sha256": "28ac368bde217b88d396f76612faa254dfbff4f10075d840495a6daa82ffb1da"
+    },
+    {
+      "path": "skills/endgame-design/evals/positive.jsonl",
+      "sizeBytes": 3560,
+      "sha256": "c44dc4a795c32165015c3ce7b1f6e2955de1542af9321184958d6762e42ea077"
+    },
+    {
+      "path": "skills/endgame-design/moheng.skill.json",
+      "sizeBytes": 1042,
+      "sha256": "133fb48a2cdd8243397e773fc6661fc5f93c7b0354f4e8bf56a822b80a70cf84"
+    },
+    {
+      "path": "skills/endgame-design/provenance/source_map.jsonl",
+      "sizeBytes": 4385,
+      "sha256": "af675d92d396646c6471bd783d172656e2aec494e9a80f2939fbcac9924f131c"
+    },
+    {
+      "path": "skills/endgame-design/resources/anti_patterns.md",
+      "sizeBytes": 634,
+      "sha256": "b9905c6d359f66984a22bc09479af92fc965035e4b848d89e91d37f6bbeda578"
+    },
+    {
+      "path": "skills/endgame-design/resources/decision_rules.md",
+      "sizeBytes": 3974,
+      "sha256": "e301aea41e4ae4190bde2486df4b51777617591f3329b5ac4a08b43728d62eef"
+    },
+    {
+      "path": "skills/endgame-design/resources/eval_rubric.md",
+      "sizeBytes": 1431,
+      "sha256": "163b4c023daed353a6aaf4d623e3694930908014827dcff698cdfd9d73799d19"
+    },
+    {
+      "path": "skills/endgame-design/resources/examples.md",
+      "sizeBytes": 281,
+      "sha256": "0c3e364b30f4b4187b00971f145fe382bd2b64a93011116c36933397f055e0a6"
+    },
+    {
+      "path": "skills/endgame-design/resources/operating_method.md",
+      "sizeBytes": 1844,
+      "sha256": "87ed6ff4138dd05f6b829a4e73d3b93784e58529a9086b0a5cef16fb6fd00026"
+    },
+    {
+      "path": "skills/endgame-design/resources/principles.md",
+      "sizeBytes": 5002,
+      "sha256": "e59b3f32fe7faa43dbb711f68697f05316b5c6e3ac38ca7087bafcc2935b591b"
+    },
+    {
+      "path": "skills/endgame-design/schemas/output.schema.json",
+      "sizeBytes": 4091,
+      "sha256": "08b1b24d9bba2387f0445951bd8be380c55d84b378e323caaef46f7d67aa876d"
+    },
+    {
+      "path": "skills/escalation-design/SKILL.md",
+      "sizeBytes": 3651,
+      "sha256": "7d23857cc65cbcd481e16695aecb96b4961b245954efd75a4d9ea344f981866a"
+    },
+    {
+      "path": "skills/escalation-design/evals/adversarial.jsonl",
+      "sizeBytes": 1382,
+      "sha256": "0753c2dbbd1e8c6387209185aa5026e69894761bd5aab56f6edd70c5f816ba1e"
+    },
+    {
+      "path": "skills/escalation-design/evals/boundary.jsonl",
+      "sizeBytes": 1620,
+      "sha256": "6e98d433d3691cdae51a3389bb5d07ba92cedef7ec6819c9770fec9385829f36"
+    },
+    {
+      "path": "skills/escalation-design/evals/negative.jsonl",
+      "sizeBytes": 2836,
+      "sha256": "9492d9ea536b0af9d6f9a7f3a23ddc80db20f187890f713b8ff0b85589c92c6f"
+    },
+    {
+      "path": "skills/escalation-design/evals/positive.jsonl",
+      "sizeBytes": 3465,
+      "sha256": "523c19cc8a06e47e19bb5209b77b2543845f0096710af3e08a637dc9819299d6"
+    },
+    {
+      "path": "skills/escalation-design/moheng.skill.json",
+      "sizeBytes": 1059,
+      "sha256": "47d07f8bc8f6cde71e250aee675ad4345532889e03ed6c3ab5fa97115f2d50a9"
+    },
+    {
+      "path": "skills/escalation-design/provenance/source_map.jsonl",
+      "sizeBytes": 4511,
+      "sha256": "cfe545a5b8760db98071d020aea47306698e1d6be905f4e32b292b03479f4a46"
+    },
+    {
+      "path": "skills/escalation-design/resources/anti_patterns.md",
+      "sizeBytes": 1860,
+      "sha256": "bb20d48023ae5b22982889d1c2023ceee450ec41caffbe20ff3d2c5791daccf1"
+    },
+    {
+      "path": "skills/escalation-design/resources/decision_rules.md",
+      "sizeBytes": 3876,
+      "sha256": "67f4d5894528039fcb9ebe324acb20563c6176f430a3bc7bf9001f2d23352cea"
+    },
+    {
+      "path": "skills/escalation-design/resources/eval_rubric.md",
+      "sizeBytes": 1446,
+      "sha256": "ad07e58cc932daba027119e70038cdc20f58ee3010fa2df87f03ace31fdeaca5"
+    },
+    {
+      "path": "skills/escalation-design/resources/examples.md",
+      "sizeBytes": 306,
+      "sha256": "7121864f6201400fe48b44967d1656b7ee3a696d0d059ccabfc183e34bf7cf38"
+    },
+    {
+      "path": "skills/escalation-design/resources/operating_method.md",
+      "sizeBytes": 1838,
+      "sha256": "19cd1bcc1c3f5a1d5f71c90c9dca7a0184832681ca001e131cbac0f4ea36e07a"
+    },
+    {
+      "path": "skills/escalation-design/resources/principles.md",
+      "sizeBytes": 5222,
+      "sha256": "68d445638ad88e87fb549e5bbdb264ad470f81120981f9a264c2f77ae3c57062"
+    },
+    {
+      "path": "skills/escalation-design/schemas/output.schema.json",
+      "sizeBytes": 3851,
+      "sha256": "2c061c5ad0821ada70a4c652f9dd9c0ff2c1ad5bf7ef5da8a44e56d2868c64e2"
+    },
+    {
+      "path": "skills/exposition-integration/SKILL.md",
+      "sizeBytes": 3627,
+      "sha256": "c5590303153e1a9511114ebd39050f4f2b2d81638df5cbb6184064ef7409a7f0"
+    },
+    {
+      "path": "skills/exposition-integration/evals/adversarial.jsonl",
+      "sizeBytes": 1397,
+      "sha256": "67521075497abc92e6c44e2c754cddbd9873250acd6247f3f63a73f6a5d3b216"
+    },
+    {
+      "path": "skills/exposition-integration/evals/boundary.jsonl",
+      "sizeBytes": 1711,
+      "sha256": "952d01b191a44b4b23fc7ca71d5dafe9c7ca9e9d9912c2fb9360cf80187d5c37"
+    },
+    {
+      "path": "skills/exposition-integration/evals/negative.jsonl",
+      "sizeBytes": 2961,
+      "sha256": "43f37174f6c591af5813b52b7ed18b0b41251757201e82af253930f84dbe639a"
+    },
+    {
+      "path": "skills/exposition-integration/evals/positive.jsonl",
+      "sizeBytes": 3520,
+      "sha256": "aebf0085c52d1af1cd747df1fe1570b9e2f993834e1c2781613ed09b5089b8a8"
+    },
+    {
+      "path": "skills/exposition-integration/moheng.skill.json",
+      "sizeBytes": 1049,
+      "sha256": "b181bbf9e4146f47bb235bd0b5452258175244c1a11798f3a8887ca33e56bc25"
+    },
+    {
+      "path": "skills/exposition-integration/provenance/source_map.jsonl",
+      "sizeBytes": 4501,
+      "sha256": "40d3025bc1172b2551e805bf4d74a548956acb6bb69ef2def72bb56bab2e12e1"
+    },
+    {
+      "path": "skills/exposition-integration/resources/anti_patterns.md",
+      "sizeBytes": 604,
+      "sha256": "5a6317fce19bc5f0fa64217c12a2dfa49bde7e37d756569658b49428a9e8382a"
+    },
+    {
+      "path": "skills/exposition-integration/resources/decision_rules.md",
+      "sizeBytes": 4533,
+      "sha256": "62f79894133304b49e8071c8a9f31edebb2e21addb61789c27658ee5f0790809"
+    },
+    {
+      "path": "skills/exposition-integration/resources/eval_rubric.md",
+      "sizeBytes": 1426,
+      "sha256": "de329437e60d16f9680046e86106b5c09efce2d92abe6885ed8521996dc89a3b"
+    },
+    {
+      "path": "skills/exposition-integration/resources/examples.md",
+      "sizeBytes": 316,
+      "sha256": "f957d56c8e97814db6b01e0e92f63ce877205477c3a267e292bb657cb830a48d"
+    },
+    {
+      "path": "skills/exposition-integration/resources/operating_method.md",
+      "sizeBytes": 1740,
+      "sha256": "91d1d1aa0e97ee5eb8990d8c1e84450efee3b99db81fa37d2dfeeb2536d93be7"
+    },
+    {
+      "path": "skills/exposition-integration/resources/principles.md",
+      "sizeBytes": 5513,
+      "sha256": "2eea5f88dfbeb08cc54b931c4096ba4a2536ba07cdf0d81c7da10a444c0fb57f"
+    },
+    {
+      "path": "skills/exposition-integration/schemas/output.schema.json",
+      "sizeBytes": 3805,
+      "sha256": "e80f597465aea21b761cdf8c082e499e611c32d72913d273d45b9073d643e850"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/SKILL.md",
+      "sizeBytes": 3601,
+      "sha256": "4c553bd22d2d5ef7a0472bf80f40326bd770ac9d046d3ba96a6a13d321aeccb8"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/evals/adversarial.jsonl",
+      "sizeBytes": 1403,
+      "sha256": "7e44cb9e4077e075eae75771789a8e60dc3f073caa61aa0c7d9ebbb5aff7c863"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/evals/boundary.jsonl",
+      "sizeBytes": 1625,
+      "sha256": "7ef8c76597f9b7a132303ca966d85cf38e0bbc4196c1fdbd02d10696820f8caf"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/evals/negative.jsonl",
+      "sizeBytes": 2871,
+      "sha256": "287a713c35d1af3c1eb09fe4fd20eb21a4f1f449bc2f68ef24d727c42f6814c3"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/evals/positive.jsonl",
+      "sizeBytes": 3485,
+      "sha256": "0c1cfe9d58c2914f51bf8431e7fc1207ee490f94a34b1594ba1e013d1fce0c79"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/moheng.skill.json",
+      "sizeBytes": 1054,
+      "sha256": "5fba1c517c64cfd4f25e8e794bc993af1db5f5abf9b8fd66d9a6e51cd872e53f"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/provenance/source_map.jsonl",
+      "sizeBytes": 4445,
+      "sha256": "e6a8d708fe3744f365501d9020b54ae90003f0b6497aaa5c75b863bc23951a2f"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/anti_patterns.md",
+      "sizeBytes": 826,
+      "sha256": "f90803fc69ed07807ad9da739b01fe67ccb8cb80b09e7cb6f129510d6a2a9072"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/decision_rules.md",
+      "sizeBytes": 4374,
+      "sha256": "5efe74d0a78ccd9bbe949e270e8ec975c529b26909e6201ed779e89b79ca86e4"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/eval_rubric.md",
+      "sizeBytes": 1429,
+      "sha256": "26a329f9ae171f64813da37966bedd2811f97cd6a6ce72398449e8c96cb37917"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/examples.md",
+      "sizeBytes": 772,
+      "sha256": "cc78e8f632cba559e2f63a54c7056d0e32a1433ab0d7f35d04608e9a43832ec8"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/operating_method.md",
+      "sizeBytes": 1796,
+      "sha256": "46364f40161189d44f1a3b0ab6210da048982fa0fa28c8627876b0fad50f0b7a"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/resources/principles.md",
+      "sizeBytes": 5506,
+      "sha256": "555d229325d7bf41aaf0281e042031ab79b865f2447f24faec4f90d6db9bf321"
+    },
+    {
+      "path": "skills/foreshadow-payoff-design/schemas/output.schema.json",
+      "sizeBytes": 3837,
+      "sha256": "847ffa075cebcd495d7c5d57a135ebb33089c31a612f97381625513edfc76cd3"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/SKILL.md",
+      "sizeBytes": 3773,
+      "sha256": "5ac56cdc5143a9cbbeb603cf888c859a72a800ca99c6057c83d43b9e1aa87a42"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/evals/adversarial.jsonl",
+      "sizeBytes": 1415,
+      "sha256": "f93ad5a573e6bfe4a62488d449dce9c82a557a2f71f88672522eba9cb7c44ce7"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/evals/boundary.jsonl",
+      "sizeBytes": 2823,
+      "sha256": "b9e8a7d9e8e4f8f333481cc13711ba787866b3341c7411e22bef977a50827892"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/evals/negative.jsonl",
+      "sizeBytes": 8821,
+      "sha256": "d30fe07cd3ea775f0be5f2d37ca3f907375393ab95081fd2876c1ed83ddf2ada"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/evals/positive.jsonl",
+      "sizeBytes": 11218,
+      "sha256": "fb2d516ee5315f2febb3fa1e386f87642192b87ccb217d9d90662d6c4958a657"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/moheng.skill.json",
+      "sizeBytes": 1049,
+      "sha256": "cbfb070efb64ac285a44745d7422370d71487018d022c2dec7d0d8cba5352ee3"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/provenance/source_map.jsonl",
+      "sizeBytes": 4310,
+      "sha256": "3084d95ed28dcff60f7d89512336db2d6efb8fbd5069d29b6a80fab5dc9aa796"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/anti_patterns.md",
+      "sizeBytes": 790,
+      "sha256": "3a2c02b190f702340536d98dcb4cd2769373dba930c57449360ed2de7102c66a"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/decision_rules.md",
+      "sizeBytes": 3874,
+      "sha256": "db696b8fc74bfa85e2fff6e652d4123dd4aab27097651cea002ffdbc6754ab2c"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/eval_rubric.md",
+      "sizeBytes": 1518,
+      "sha256": "5900ea50178633ebbfa56679f317aa1f5b897cf9fd9a7e014da7bb5716b7e64b"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/examples.md",
+      "sizeBytes": 1112,
+      "sha256": "1098ea536107ec2b8a58360910c14d763b1caa0b45426d45f7d681c59b6b0035"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/operating_method.md",
+      "sizeBytes": 2137,
+      "sha256": "fc849e1541ee0d555a2b2d7bef222338b01659b17aca0b10642a0d3a6f5c9dab"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/resources/principles.md",
+      "sizeBytes": 4757,
+      "sha256": "581de6a207fd8e507777e62c9d93a9f066e79a4fd7a908e748aba646cf5ec2bb"
+    },
+    {
+      "path": "skills/golden-three-chapters-design/schemas/output.schema.json",
+      "sizeBytes": 3925,
+      "sha256": "2066fc35287a648c449ec3ab13d9d3d1f571fe6077891704683fc06aa0c5bde9"
+    },
+    {
+      "path": "skills/hook-curiosity-design/SKILL.md",
+      "sizeBytes": 3618,
+      "sha256": "808d4a803a062311c349a1c0c474ae128c7276c035584068be779ad18a96156d"
+    },
+    {
+      "path": "skills/hook-curiosity-design/evals/adversarial.jsonl",
+      "sizeBytes": 1394,
+      "sha256": "4c7239544b7c773eddc68f75442a9775a064ed04a3a45cdceb78e8686c3f3d00"
+    },
+    {
+      "path": "skills/hook-curiosity-design/evals/boundary.jsonl",
+      "sizeBytes": 2748,
+      "sha256": "37681d30efda0960730dd80e68f5757d83ec34d1a30feabc1c625aea76aceff4"
+    },
+    {
+      "path": "skills/hook-curiosity-design/evals/negative.jsonl",
+      "sizeBytes": 8656,
+      "sha256": "34fba2397ca594c4b70c628c425adad15d567b9a50988ede6894c03d062303dd"
+    },
+    {
+      "path": "skills/hook-curiosity-design/evals/positive.jsonl",
+      "sizeBytes": 10693,
+      "sha256": "dc3ab1f178bdd4b76cea58ace9ea14c7ba56a82e813b44c6b806a5b6828f5a91"
+    },
+    {
+      "path": "skills/hook-curiosity-design/moheng.skill.json",
+      "sizeBytes": 1044,
+      "sha256": "e2d3dca8500c129e187bba473dcd49bdce3e955a972820015ad6ec6fdc33b687"
+    },
+    {
+      "path": "skills/hook-curiosity-design/provenance/source_map.jsonl",
+      "sizeBytes": 4343,
+      "sha256": "9afebccfced26b373416297ffd8741ad5604abc4bbd9e969950b5173be5fd31f"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/anti_patterns.md",
+      "sizeBytes": 620,
+      "sha256": "7753d50907da0de85379000c4f4d9a3230a2b507bf35d9ea3bee567a11fb2bba"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/decision_rules.md",
+      "sizeBytes": 3678,
+      "sha256": "829a7b5c1e6be096e62534f318a8f943506425640efdc4fdcf298df6cf309628"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/eval_rubric.md",
+      "sizeBytes": 1456,
+      "sha256": "a046beeb321ccff7e7b6dcaacdc81abec84c619db9bdfb85a035f969d1cc45c3"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/examples.md",
+      "sizeBytes": 1116,
+      "sha256": "49e3533971b127416badc5ff652cef33117bd6279b8c88688393dcaa8134f9d2"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/operating_method.md",
+      "sizeBytes": 1947,
+      "sha256": "58216bcff2e62dad783620b1b8b253a3c5abe18560850a1c241326aa5b30b6d8"
+    },
+    {
+      "path": "skills/hook-curiosity-design/resources/principles.md",
+      "sizeBytes": 4494,
+      "sha256": "e8740767763fa9062daebcab5ef8677763c7f27ff1b5fb6802adc80b2b6aa244"
+    },
+    {
+      "path": "skills/hook-curiosity-design/schemas/output.schema.json",
+      "sizeBytes": 3848,
+      "sha256": "1891f9d10190de60865bfd26cac24a6baab434d214252efe6a1b6535c113b953"
+    },
+    {
+      "path": "skills/information-reveal-design/SKILL.md",
+      "sizeBytes": 3654,
+      "sha256": "eb81a5e2ecfeb2b6d22a74afdbc15c9474c7cb442fcda82159bda8ae9623bcf0"
+    },
+    {
+      "path": "skills/information-reveal-design/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "e61b9f927277506461b55f1305e1dd7b52a7edd7785ac3b9e069ac300dc7e2b5"
+    },
+    {
+      "path": "skills/information-reveal-design/evals/boundary.jsonl",
+      "sizeBytes": 2716,
+      "sha256": "60d14cb1b680d5c30474b0593f6fc1b8450216a49871a6bc81ca5e961b9eb84c"
+    },
+    {
+      "path": "skills/information-reveal-design/evals/negative.jsonl",
+      "sizeBytes": 8536,
+      "sha256": "d3bcd11f614eaff1c6ca6a923ce05409348a2b465698c360b9080ee779dcab0e"
+    },
+    {
+      "path": "skills/information-reveal-design/evals/positive.jsonl",
+      "sizeBytes": 10423,
+      "sha256": "5993e5eda4545dc54ab2bbd36a2c66f52967ac4bf0b25a1cbb9d2c7346a7da07"
+    },
+    {
+      "path": "skills/information-reveal-design/moheng.skill.json",
+      "sizeBytes": 1049,
+      "sha256": "b87b7e623948f27fd5a1d6b404e164abbb8054f59554c21d437f63c55c9635d4"
+    },
+    {
+      "path": "skills/information-reveal-design/provenance/source_map.jsonl",
+      "sizeBytes": 4489,
+      "sha256": "79468feee8d54b8efc6787b73507371d81bf4abe0ed6cf0507f73ba772ff0bc3"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/anti_patterns.md",
+      "sizeBytes": 1935,
+      "sha256": "8d3a3a2c80726ab6dbbb4485c8552b01cfbbbba2bac8df498470afee154f45b1"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/decision_rules.md",
+      "sizeBytes": 4083,
+      "sha256": "78b26087139aea8d17702bf2bfcdabb59e6d6c83e0934279662cb73ead0fe99b"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/eval_rubric.md",
+      "sizeBytes": 1462,
+      "sha256": "85be0e4ff81abab169827615b0e5e26a1edccfdcec56423f526d20a99ea82e13"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/examples.md",
+      "sizeBytes": 751,
+      "sha256": "e86d5aaa948d437e13c475f9d38751101afda78985839b5455d5f71c75ebc743"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/operating_method.md",
+      "sizeBytes": 1946,
+      "sha256": "fd1d93dead2c42c07fc0d0d176d5c2d50ca9313c8b13633ff6e05c97e1d6d0a4"
+    },
+    {
+      "path": "skills/information-reveal-design/resources/principles.md",
+      "sizeBytes": 5383,
+      "sha256": "57c3a3cfdfa1f5eecb7ec6c48fa9ff8ccc691f75696021619a3f7757db877348"
+    },
+    {
+      "path": "skills/information-reveal-design/schemas/output.schema.json",
+      "sizeBytes": 3823,
+      "sha256": "44ec7208515d43da9f7b080db7f67854e675eada6c7db54e392b70445b46dd51"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/SKILL.md",
+      "sizeBytes": 3734,
+      "sha256": "5e3d4cc7f70eacd926e9b1fce355b1eb76df141c00b5f4756fae3859a3aecfe2"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "3ef9eec1710febc9477b0a458dbc0418403c2883afd45c829a34ec111c930ae6"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/evals/boundary.jsonl",
+      "sizeBytes": 1716,
+      "sha256": "68f2615c0efa3aaba8af2d524ce207d075c7cd1ae84a0a33ec267b926dc8a5c6"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/evals/negative.jsonl",
+      "sizeBytes": 2956,
+      "sha256": "4826c8f06890450e3568cff6627b9300ce43b84732cf55016fccbf1690e2f820"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/evals/positive.jsonl",
+      "sizeBytes": 3450,
+      "sha256": "3fc8abcb20caf66c59ad0d990158c9cf215ddcf2b072ba88db5bcd59083f953d"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/moheng.skill.json",
+      "sizeBytes": 1058,
+      "sha256": "18715cab419e20fc552685c1160049d731d91fa9d4bb42d00783af4e21e31e1b"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/provenance/source_map.jsonl",
+      "sizeBytes": 4613,
+      "sha256": "bf41a6aea07ac7b541170d8aedffc9eca1b192af5802670c27bfa6bde97d9efb"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/anti_patterns.md",
+      "sizeBytes": 1659,
+      "sha256": "42ae02e274d523a6565bae2a5debe5f32fb8f20295b3da54a4fb93228c6a5836"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/decision_rules.md",
+      "sizeBytes": 4242,
+      "sha256": "9887df692f4afe682bcb550a86ee812750c6ac947e809597cee2bdddfa64dbb3"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/eval_rubric.md",
+      "sizeBytes": 1367,
+      "sha256": "8edc3f0c7a91e4191092dfd65778b526b69030f6395c5c87da6e15cc9be547f9"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/examples.md",
+      "sizeBytes": 307,
+      "sha256": "31d2b7d3dc19cf03cd1a2103b3aab2f37b51a334bcb05074de020e085401967e"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/operating_method.md",
+      "sizeBytes": 1685,
+      "sha256": "c3fec87e1915642b473aa609e3225be6323f80feb37b621cc480e7195977cabf"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/resources/principles.md",
+      "sizeBytes": 5838,
+      "sha256": "cbfa0e7e7c7bf686ce38df1e669c7735bd60f4824f3be8c3702e00f2e5bcc24f"
+    },
+    {
+      "path": "skills/longform-health-diagnosis/schemas/output.schema.json",
+      "sizeBytes": 3817,
+      "sha256": "1f546f1a5c5f9d5408c059cd45c45683ee6562740761c5dd4cc3296e7bb06b6e"
+    },
+    {
+      "path": "skills/mystery-suspense-design/SKILL.md",
+      "sizeBytes": 3792,
+      "sha256": "364e50203642321b880742dd0d36e46e01d3db60393d45990ea0cef338e28b3e"
+    },
+    {
+      "path": "skills/mystery-suspense-design/evals/adversarial.jsonl",
+      "sizeBytes": 1400,
+      "sha256": "ff343bb009030ffcf6928e2dd5e51e02e578bf6b469d1047e8cd8d0ac03cee3b"
+    },
+    {
+      "path": "skills/mystery-suspense-design/evals/boundary.jsonl",
+      "sizeBytes": 1641,
+      "sha256": "1ef4afd221e0890ac9e34bb8cf293a6463d0361d5c86154458d634ba514e501b"
+    },
+    {
+      "path": "skills/mystery-suspense-design/evals/negative.jsonl",
+      "sizeBytes": 2911,
+      "sha256": "0040cd86e3f236f2bd92ee015a9e9744133fc1fb117d130edf13c0f1612cddc1"
+    },
+    {
+      "path": "skills/mystery-suspense-design/evals/positive.jsonl",
+      "sizeBytes": 3560,
+      "sha256": "c427f0b42e1b8b12213401aed0ac20fbc71c68f59ce513b6315b24897e9a7c9b"
+    },
+    {
+      "path": "skills/mystery-suspense-design/moheng.skill.json",
+      "sizeBytes": 1149,
+      "sha256": "730d146f1bb862e738e9e2c55963301be2719ab568926ab551b47030bf1e5fb9"
+    },
+    {
+      "path": "skills/mystery-suspense-design/provenance/source_map.jsonl",
+      "sizeBytes": 4465,
+      "sha256": "7a553919f525a15c09083f6b6d61e406a659c81790214429120cbe047cf45792"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/anti_patterns.md",
+      "sizeBytes": 1103,
+      "sha256": "0e451f5b6420f59914d067e0818dea6191a20776c2603e1901131db640342880"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/decision_rules.md",
+      "sizeBytes": 4483,
+      "sha256": "39f41d7222a7a73f8cf81515ab26fb0329e76c76aa64c79b5dfd4c0f36d954ec"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/eval_rubric.md",
+      "sizeBytes": 1444,
+      "sha256": "acaea18cd6cf9f35f6ed347d01b77bb6ee3670e1c3ad519b9b6b2d5534116845"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/examples.md",
+      "sizeBytes": 782,
+      "sha256": "7dbc3a6bb2d1d7c801cc8767957f07ba3338aee823b09b01d99b99f4b7e16487"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/operating_method.md",
+      "sizeBytes": 1926,
+      "sha256": "2a02dee1d566dcef196e469d8bb863f16c4f162e030c06b1f412767e783deeb0"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/principles.md",
+      "sizeBytes": 5834,
+      "sha256": "9b9d875646a7fc4a9fae2cb0d4e58de2439928ee98b09cacbfcf0c72acbe3c31"
+    },
+    {
+      "path": "skills/mystery-suspense-design/resources/supplemental_method.md",
+      "sizeBytes": 876,
+      "sha256": "9c3c89f2c886de188d6242126821d99e5f541c34e014ec5483fd0bc3c8af6620"
+    },
+    {
+      "path": "skills/mystery-suspense-design/schemas/output.schema.json",
+      "sizeBytes": 3857,
+      "sha256": "b574d9e34b28c993866f3e946f77c1ba5fa9093f973f7fc0e4620b3b57529bf3"
+    },
+    {
+      "path": "skills/opening-evaluator/SKILL.md",
+      "sizeBytes": 3670,
+      "sha256": "b32e8bfe6c094b1be07759d11ace99579186e1f1f68eb200a766958e2fffe2d2"
+    },
+    {
+      "path": "skills/opening-evaluator/evals/adversarial.jsonl",
+      "sizeBytes": 1382,
+      "sha256": "3288abcaa25e10c0ea105a418ea6cca8d3d64919ddc752bb36b43f6671fde0f5"
+    },
+    {
+      "path": "skills/opening-evaluator/evals/boundary.jsonl",
+      "sizeBytes": 2817,
+      "sha256": "12d8bfd5c05b4a37997ea0acb72a82d068dc348c427a96241d5e3a8b31bf484c"
+    },
+    {
+      "path": "skills/opening-evaluator/evals/negative.jsonl",
+      "sizeBytes": 8551,
+      "sha256": "90eb4f734b90ac67b5afa6c8569742d665ab0f1b201d27c15ebb9384cdceceb0"
+    },
+    {
+      "path": "skills/opening-evaluator/evals/positive.jsonl",
+      "sizeBytes": 10873,
+      "sha256": "f4afaae8e15dc0088ea0d43d6b6d450df670f169c7984491ba24d8700c4ca702"
+    },
+    {
+      "path": "skills/opening-evaluator/moheng.skill.json",
+      "sizeBytes": 1055,
+      "sha256": "7a46e7d78c1a8c4498c8675233a44eb954e263f68d2d1c4d089cb800a1fa7d70"
+    },
+    {
+      "path": "skills/opening-evaluator/provenance/source_map.jsonl",
+      "sizeBytes": 4367,
+      "sha256": "ef681fefe4c35fc7d033aa91f14d4f4fd1de54723145000b5ff817aa0cdd0419"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/anti_patterns.md",
+      "sizeBytes": 1767,
+      "sha256": "5d124cad14a5a1aa637b6b9132e2694c4b8471a620c72250c8697d30cfdad6bf"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/decision_rules.md",
+      "sizeBytes": 3690,
+      "sha256": "e1b4db5acb1f13dae7c17085554e1147ca38f2a72218fb7530a731ca6bd29799"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/eval_rubric.md",
+      "sizeBytes": 1473,
+      "sha256": "49aa3ee00b05f4749827e87ac92e2cb8c7ced4523b56422cc3cf0837f011a482"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/examples.md",
+      "sizeBytes": 310,
+      "sha256": "78a0153a31f41c141997dc5e7c2d7c62ba93aeb5e14bbaa98b8d43178fecd73f"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/operating_method.md",
+      "sizeBytes": 1864,
+      "sha256": "23fcee1bd31d8a85284fd7d64cba078212526d5b8c0c01c1582d2889b2ca07eb"
+    },
+    {
+      "path": "skills/opening-evaluator/resources/principles.md",
+      "sizeBytes": 4743,
+      "sha256": "1bc575960b3b93e65540c953a6301d43a8564bfe9c7b2f72efc61b707b1ced15"
+    },
+    {
+      "path": "skills/opening-evaluator/schemas/output.schema.json",
+      "sizeBytes": 4025,
+      "sha256": "ac1907e6a2cdb7f6753d8a1a72f4948ad441f23c287f1fd80581d1ee8bc4bda9"
+    },
+    {
+      "path": "skills/opening-strategy-search/SKILL.md",
+      "sizeBytes": 3667,
+      "sha256": "3b0ac0a54c2364add68fde1d1ed66af496c3079491a18cef3e57d5a8b21b3ac4"
+    },
+    {
+      "path": "skills/opening-strategy-search/evals/adversarial.jsonl",
+      "sizeBytes": 1400,
+      "sha256": "5a21d36b8eb9a0d37240468860b115196650ea0624702b6d20846fe9fea7839d"
+    },
+    {
+      "path": "skills/opening-strategy-search/evals/boundary.jsonl",
+      "sizeBytes": 2774,
+      "sha256": "3da54bd5ed7dc733678271d5e3d3d19f3fe9e91ca8ad961facd6db23a8335497"
+    },
+    {
+      "path": "skills/opening-strategy-search/evals/negative.jsonl",
+      "sizeBytes": 8686,
+      "sha256": "9553e3d4f591748ea3c73fbb91b4426a8b16bcc38810605d05d05fb9e325c042"
+    },
+    {
+      "path": "skills/opening-strategy-search/evals/positive.jsonl",
+      "sizeBytes": 10633,
+      "sha256": "4d1d0b222b2d3edf7d1bf2e77ef419b44212b51a15ee8e9587a0cdd413cdf7e5"
+    },
+    {
+      "path": "skills/opening-strategy-search/moheng.skill.json",
+      "sizeBytes": 1041,
+      "sha256": "6305da724181541006c874f71d0177cc6597edbb68e1c9e9e69b656d43edfa18"
+    },
+    {
+      "path": "skills/opening-strategy-search/provenance/source_map.jsonl",
+      "sizeBytes": 4319,
+      "sha256": "e7775afc8e45f78ea2ab8a32010c8598d81933a653e0bbd8553527c9360e2a43"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/anti_patterns.md",
+      "sizeBytes": 616,
+      "sha256": "59cc64975449da82a522d4efb84663fc3287481bee7a9dc19e348c8f78990ee4"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/decision_rules.md",
+      "sizeBytes": 3934,
+      "sha256": "f5e2b042a03c864a79312371e3a85d16b9857736bc084aa731773c664686fcfa"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/eval_rubric.md",
+      "sizeBytes": 1421,
+      "sha256": "64c3258bc080efa78350053c03ffd2fe2452e2aa7175eb582af58dc1565874d5"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/examples.md",
+      "sizeBytes": 1102,
+      "sha256": "41763e8f5fe024c392052caa43ba2fdff64ea866a37d8c62fb9b1a6c2bb9ea29"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/operating_method.md",
+      "sizeBytes": 2096,
+      "sha256": "670c88696e2a21a5bb73ee6851ae29e7e57842ee1c6cd66b4983f55aba2ccac9"
+    },
+    {
+      "path": "skills/opening-strategy-search/resources/principles.md",
+      "sizeBytes": 4742,
+      "sha256": "6d34dc0240b65743c1979f6b3eaee6d8d3cf5ada652dce04d2af009537220afb"
+    },
+    {
+      "path": "skills/opening-strategy-search/schemas/output.schema.json",
+      "sizeBytes": 3692,
+      "sha256": "1e5f85a8452fdfc04366a7fc7463f536f8701c46ad4f4aff57195bc04a51e043"
+    },
+    {
+      "path": "skills/outline-evaluator/SKILL.md",
+      "sizeBytes": 3735,
+      "sha256": "5390b88aac6efcc230a4ad04e0bc33633ad85780557dd11439f7d2cde2352dd9"
+    },
+    {
+      "path": "skills/outline-evaluator/evals/adversarial.jsonl",
+      "sizeBytes": 1382,
+      "sha256": "cdaf60b5d5e0e483fa8a20801b21963a4a73d36f0e258b8be1ef2beadaef4d7c"
+    },
+    {
+      "path": "skills/outline-evaluator/evals/boundary.jsonl",
+      "sizeBytes": 3013,
+      "sha256": "db8a28994cc23234a75771c1db1656de0aac5369c8f49f8913b6bb15f3cf011f"
+    },
+    {
+      "path": "skills/outline-evaluator/evals/negative.jsonl",
+      "sizeBytes": 8731,
+      "sha256": "8698d234c0c1194be3c9d7646f3ebef62e23086732ed68b5bd2d255aa41c4360"
+    },
+    {
+      "path": "skills/outline-evaluator/evals/positive.jsonl",
+      "sizeBytes": 10663,
+      "sha256": "730bcfa4f2d9b94683b9f12e10341d0dfe0d40092956d736d1e5f69f3b62a4aa"
+    },
+    {
+      "path": "skills/outline-evaluator/moheng.skill.json",
+      "sizeBytes": 1062,
+      "sha256": "cf6483205e27c7a28eb103a2b3fc8e4254beab07f58e39cdc4cbf298b073ed08"
+    },
+    {
+      "path": "skills/outline-evaluator/provenance/source_map.jsonl",
+      "sizeBytes": 4523,
+      "sha256": "d20c7f44ae5976d4763a9f4ccce130128ecaf0f994ac116d883cc63b4a44ff76"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/anti_patterns.md",
+      "sizeBytes": 2064,
+      "sha256": "2119148f802fdbc9f1c67b6c9a8529448429ebcaf293f990d8ffed6e6c3d6e5b"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/decision_rules.md",
+      "sizeBytes": 3965,
+      "sha256": "83b6a4bce9e6e354232d14f4bf28aebbd4f2f1a93d15ba968e4dc9b9fe07c76a"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/eval_rubric.md",
+      "sizeBytes": 1421,
+      "sha256": "5b8aaa8e772983b35bec7f970240e8227ea032daaf15c18a947396a5d05612b6"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/examples.md",
+      "sizeBytes": 343,
+      "sha256": "4e74ca6ecac826f7d9a391e3491cecf3b9a218c3df3a6a67546acd42c20239f6"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/operating_method.md",
+      "sizeBytes": 1792,
+      "sha256": "2c01119859c89f845f3fac0ad595623d8a78f022163d6c61da3b5bb09a2aa80d"
+    },
+    {
+      "path": "skills/outline-evaluator/resources/principles.md",
+      "sizeBytes": 5255,
+      "sha256": "cd44e6e90b90ba74f4c9082f506f2cc244983b507b04033be7b5f0a5e4b24353"
+    },
+    {
+      "path": "skills/outline-evaluator/schemas/output.schema.json",
+      "sizeBytes": 3690,
+      "sha256": "61c4bac135cc48b0102c8812711719a6235592c24070380ecaaad8cae27c18ba"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/SKILL.md",
+      "sizeBytes": 3626,
+      "sha256": "c44374f9cec4aae0f5f3cdaa5899916a87d176720692277eeae478938d2f1bc1"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/evals/adversarial.jsonl",
+      "sizeBytes": 1391,
+      "sha256": "149b9c9973e12bc41104509dcf6222ad509eabb59e7e65bf50bc137f6f1e1a32"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/evals/boundary.jsonl",
+      "sizeBytes": 1664,
+      "sha256": "80582b848099235bc3696555869dd06c142551c49335119e6c5b2203f029889d"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/evals/negative.jsonl",
+      "sizeBytes": 2856,
+      "sha256": "05631611a4124ee68cf6d08c326d343cadc0361d81411442e49658681cd95339"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/evals/positive.jsonl",
+      "sizeBytes": 3530,
+      "sha256": "fb21d2ba7336e9c2c81781adc6163287b71fe3413ecd6ac96c408d1caca7f72f"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/moheng.skill.json",
+      "sizeBytes": 1050,
+      "sha256": "8ee5673ee4697fbce80ecb1ec0601dbd7086ff8fdac3ce9a601d2fb29270e2d3"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/provenance/source_map.jsonl",
+      "sizeBytes": 4311,
+      "sha256": "38ef35cd9d7372cdc62945c4ab1615486cd45cf0b1c5812504009b13d88f918f"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/anti_patterns.md",
+      "sizeBytes": 758,
+      "sha256": "dce48104b32f375aa271be76709ae524ffc7664db604d5c5b41d74fe30a075c4"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/decision_rules.md",
+      "sizeBytes": 4006,
+      "sha256": "6981c5f6e668dc5413f74f4d873984873f44448c7d2061b297a9bed6b2e1879e"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/eval_rubric.md",
+      "sizeBytes": 1448,
+      "sha256": "e3e8826eb6a6bd11ad36e3b7a16fa97552fe157975a6ab9bead97caab646b811"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/examples.md",
+      "sizeBytes": 294,
+      "sha256": "e4e6c4d3665e3c0da5fd6b282f434f6a8c5c278c9cd83f962078e29605aa1e4f"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/operating_method.md",
+      "sizeBytes": 1795,
+      "sha256": "519f18781c6904d0444ae480a78545d6873aa0b4741469dbc51ae2c75f6c4ef2"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/resources/principles.md",
+      "sizeBytes": 4999,
+      "sha256": "c5f69f2fca92ef589bd4ab2d2de37f15c336bee8143b0de79605dcb0851c2ee8"
+    },
+    {
+      "path": "skills/pacing-rhythm-design/schemas/output.schema.json",
+      "sizeBytes": 3869,
+      "sha256": "d513dac6faf83f03c6732e8bff3b56fe45f9ce3bfa66a6c492f568485713ab51"
+    },
+    {
+      "path": "skills/payoff-reward-design/SKILL.md",
+      "sizeBytes": 3593,
+      "sha256": "c4dc6187e0ff27331eb5caf333f166ef2878893c78c6b18c2c3e5e06e9efa4b4"
+    },
+    {
+      "path": "skills/payoff-reward-design/evals/adversarial.jsonl",
+      "sizeBytes": 1391,
+      "sha256": "8fc525d36fd5e1179d4b14051a27750ecf2346043b94751c40b982f05904787b"
+    },
+    {
+      "path": "skills/payoff-reward-design/evals/boundary.jsonl",
+      "sizeBytes": 1605,
+      "sha256": "02b5c96b4e375d623dfab676c3ed67c0c75e8c748e63b152047dc965aafb9580"
+    },
+    {
+      "path": "skills/payoff-reward-design/evals/negative.jsonl",
+      "sizeBytes": 2851,
+      "sha256": "2ffd9832adc8bf563891e76ca6e90386469504e76dd62debf96a664f320b732b"
+    },
+    {
+      "path": "skills/payoff-reward-design/evals/positive.jsonl",
+      "sizeBytes": 3420,
+      "sha256": "395a332f56d8fa3fe0b12e0730ce609a0da3c6b1333f0fce914c4c5dbc6aed5d"
+    },
+    {
+      "path": "skills/payoff-reward-design/moheng.skill.json",
+      "sizeBytes": 1050,
+      "sha256": "9377a20b77a16d9e0ab198641f83d8a7937375de52f881be2c6bf4edf6dc25ad"
+    },
+    {
+      "path": "skills/payoff-reward-design/provenance/source_map.jsonl",
+      "sizeBytes": 4367,
+      "sha256": "65d62b21fd51642b6bae44d44036a0ca938a8ccb2e8280999fcbd74115bd632b"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/anti_patterns.md",
+      "sizeBytes": 834,
+      "sha256": "3ca6cd39de382bd9736c1bd06aa4535b8eabaa6e7b7b0964d2085144e5bb7191"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/decision_rules.md",
+      "sizeBytes": 3738,
+      "sha256": "b31df7c211686b60d387e5c7f88bc5c576e3652089b99de45f0144e82701e80a"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/eval_rubric.md",
+      "sizeBytes": 1425,
+      "sha256": "be386e34df8075fb3d27b5e1a71dee1f8d4a62d84599b563dc6225b9a16fc400"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/examples.md",
+      "sizeBytes": 293,
+      "sha256": "257abbc26ab6482209ef3892a408c6d7fbfbed52015a24440f49c3ec12c0cff9"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/operating_method.md",
+      "sizeBytes": 1786,
+      "sha256": "0f9c458eedafd8fb13c705e076d761a5c043888df805e56c7251dde0918c27f8"
+    },
+    {
+      "path": "skills/payoff-reward-design/resources/principles.md",
+      "sizeBytes": 4361,
+      "sha256": "2def077d3817a7557374e1d7018b31c727b713d17e9218379e10407535765433"
+    },
+    {
+      "path": "skills/payoff-reward-design/schemas/output.schema.json",
+      "sizeBytes": 3806,
+      "sha256": "7eced8b976990947ae756e088ec834df50aaa9772a5d80441316ffb4b3200b13"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/SKILL.md",
+      "sizeBytes": 3614,
+      "sha256": "92a17e813c2493ed42706be32cce1ec7cbefa319fe5bbf5afc5ba5121a76b70e"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/evals/adversarial.jsonl",
+      "sizeBytes": 1412,
+      "sha256": "3b9ac495c1a4a57ec646a0ed34d0d8c24c1b51b34cf6522053d94a58255214f5"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/evals/boundary.jsonl",
+      "sizeBytes": 1627,
+      "sha256": "3e1ef637cd7a075d4051a0bbe941d38b36bed90e8d67f9955fbc637d1f919420"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/evals/negative.jsonl",
+      "sizeBytes": 2881,
+      "sha256": "c187aff09b66ff22695a4af501735e3e71432d69f6da639c1a0254314b67f67c"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/evals/positive.jsonl",
+      "sizeBytes": 3515,
+      "sha256": "c08976dc3480bf7bf6e5a5cc30c7f48f9ffb864a0d972a49d937366ab4739ece"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/moheng.skill.json",
+      "sizeBytes": 1055,
+      "sha256": "263c3a8dc25a820906890336c726601e7d974e8d29c48ccb9885d37fca50a3d0"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/provenance/source_map.jsonl",
+      "sizeBytes": 4506,
+      "sha256": "c79f99ed8f16765cdfbdcf8851ceaf286b8015dbdc90c6489a37675c4d432912"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/anti_patterns.md",
+      "sizeBytes": 1883,
+      "sha256": "f7b62742d777969f21d19b1e7805195fb131ecb872601f3a3c8399c6cf883d58"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/decision_rules.md",
+      "sizeBytes": 3850,
+      "sha256": "91b4861ed45b158022283ed67966230a5b36b071d5aa020fdaafcbf577e052ac"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/eval_rubric.md",
+      "sizeBytes": 1449,
+      "sha256": "65b99bf67c833832dda1550f3d702d436008cda1b939d47dea785480120956f8"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/examples.md",
+      "sizeBytes": 812,
+      "sha256": "9aa93aaf539e468123fb7cfa73baf12050293d68e6a2f9c18630a92e98bf2156"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/operating_method.md",
+      "sizeBytes": 1766,
+      "sha256": "ade55186f6e228c93fe6e2d6c7db8de1485f5a253a6232ef7affdd89f51ac677"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/resources/principles.md",
+      "sizeBytes": 5704,
+      "sha256": "af75ec189b1fe4dc16c18646f923e957d51c578b6d4413512abf2f0255d7b7bf"
+    },
+    {
+      "path": "skills/pov-psychic-distance-design/schemas/output.schema.json",
+      "sizeBytes": 3856,
+      "sha256": "36cec9e392240c30adabb6ffabc3b27b580d3748827375624a1bedf4b1a5e934"
+    },
+    {
+      "path": "skills/project-premise-design/SKILL.md",
+      "sizeBytes": 3903,
+      "sha256": "b9b01c0a60597008ae4c1013c326c31c3a369a0984b9637493e1f9b5e9cbd40a"
+    },
+    {
+      "path": "skills/project-premise-design/evals/adversarial.jsonl",
+      "sizeBytes": 1397,
+      "sha256": "34095d483c3193a89ff68f904293f87ee8e06a5c4bae43bac8cb41ac4ef4e178"
+    },
+    {
+      "path": "skills/project-premise-design/evals/boundary.jsonl",
+      "sizeBytes": 3009,
+      "sha256": "9876fff2921e6cd4a97a9904736294bde6d82883fde5c784be86c388dc29bc41"
+    },
+    {
+      "path": "skills/project-premise-design/evals/negative.jsonl",
+      "sizeBytes": 8731,
+      "sha256": "4547500b53e9cf5ac7f773acefb19ee44f6a7ecafc6d2cc3f24a20610e6451e2"
+    },
+    {
+      "path": "skills/project-premise-design/evals/positive.jsonl",
+      "sizeBytes": 10798,
+      "sha256": "de8c380cbdcc61325d75220f32333ed9f6c495037f0ebb3331cd2fd2abcac66c"
+    },
+    {
+      "path": "skills/project-premise-design/moheng.skill.json",
+      "sizeBytes": 1154,
+      "sha256": "10adc34623920a1277e967b4d70da61f024bca6736abd29398a7656e54c95d94"
+    },
+    {
+      "path": "skills/project-premise-design/provenance/source_map.jsonl",
+      "sizeBytes": 4413,
+      "sha256": "3931879f6581e91592de1df9d0bb8732cf8b2aa3932cb46a687e0d1ef28da364"
+    },
+    {
+      "path": "skills/project-premise-design/resources/anti_patterns.md",
+      "sizeBytes": 807,
+      "sha256": "3e46e4c6c4005164a8645a50ae7fadbabbdf89ad91a64e6630af232092c34803"
+    },
+    {
+      "path": "skills/project-premise-design/resources/decision_rules.md",
+      "sizeBytes": 3803,
+      "sha256": "6a211cb04effdab857cc5173f5fc0804ebbc8daa7fe946746ffc29998d79f916"
+    },
+    {
+      "path": "skills/project-premise-design/resources/eval_rubric.md",
+      "sizeBytes": 1468,
+      "sha256": "221653b6b3e2f416dd89904346e290ebfc00c65d7e3a7c5cdecb3c2cbd7f9cd1"
+    },
+    {
+      "path": "skills/project-premise-design/resources/examples.md",
+      "sizeBytes": 337,
+      "sha256": "155cf7d24f82b4ad4e23714c9d4ca99c2dd823b3bf4af6c9d0d5cfb1470bca42"
+    },
+    {
+      "path": "skills/project-premise-design/resources/operating_method.md",
+      "sizeBytes": 2267,
+      "sha256": "1eefb8d8e28838acf1fe62731da11a047724cf64ddc62ddbf4f0048437a83591"
+    },
+    {
+      "path": "skills/project-premise-design/resources/principles.md",
+      "sizeBytes": 4772,
+      "sha256": "50b8b063bda20b1a8aab003b7a4ef96b1a41c2bcabb1e197dd483d1a7370f6a8"
+    },
+    {
+      "path": "skills/project-premise-design/resources/supplemental_method.md",
+      "sizeBytes": 996,
+      "sha256": "4fa3a1e8e616c2b80ef9dd4bf3257268c02fa1865ebb95ca22c417a5cf7daab1"
+    },
+    {
+      "path": "skills/project-premise-design/schemas/output.schema.json",
+      "sizeBytes": 3862,
+      "sha256": "90e4777c88f7537ff934a91108b31934cd1198d8c3d13f16066b00e63d5e4584"
+    },
+    {
+      "path": "skills/prose-voice-design/SKILL.md",
+      "sizeBytes": 3820,
+      "sha256": "4c2c57d24ad86073895bdce82f6328b3d45debb6f157a034fda59fa405901320"
+    },
+    {
+      "path": "skills/prose-voice-design/evals/adversarial.jsonl",
+      "sizeBytes": 1385,
+      "sha256": "da6dd8fcb954b749ce811e53d02eb6c07b3c8bf0f716a010d0e25649f1aa0730"
+    },
+    {
+      "path": "skills/prose-voice-design/evals/boundary.jsonl",
+      "sizeBytes": 2720,
+      "sha256": "ead5f39e43b1f5f798618ef09e878d03056fd89de6fdc961b212bcc65d8bb0c7"
+    },
+    {
+      "path": "skills/prose-voice-design/evals/negative.jsonl",
+      "sizeBytes": 8476,
+      "sha256": "21339b0befac4479b66101bbe86571cc538dc0960cb793fdfeb58bb6a61d84ce"
+    },
+    {
+      "path": "skills/prose-voice-design/evals/positive.jsonl",
+      "sizeBytes": 10678,
+      "sha256": "5a8e29a2c060c494e1a83dd6b53121302f3f1eb375081eb8185ffa01650b8478"
+    },
+    {
+      "path": "skills/prose-voice-design/moheng.skill.json",
+      "sizeBytes": 1144,
+      "sha256": "8485cccd322e189fba053d8f38bed0401411af1f9d078e1a10fae8f7af2215d9"
+    },
+    {
+      "path": "skills/prose-voice-design/provenance/source_map.jsonl",
+      "sizeBytes": 4496,
+      "sha256": "fe26777cffcfdacd125a8b2e0b792c6c39f13eab9465c7d7c23e30bc06ffe17e"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/anti_patterns.md",
+      "sizeBytes": 1582,
+      "sha256": "572815e6117e9bc71ee19f3c608aca8cffac2925478a85c2dabcba830c3ec373"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/decision_rules.md",
+      "sizeBytes": 4301,
+      "sha256": "3d56bad0d8c057826c2bc963692e5738841d0a7fc3f218dac8e6eaddd6bdc248"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/eval_rubric.md",
+      "sizeBytes": 1481,
+      "sha256": "6fd447b62f8ab6c0f7bdb0d47bbc57119e7f2e9af4197c6e923a58005c4b947e"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/examples.md",
+      "sizeBytes": 306,
+      "sha256": "46154f1eeec3d5a23ec9f83dd5a55440cb72fa3f139f1dc354a53135b4ceb6b7"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/operating_method.md",
+      "sizeBytes": 2078,
+      "sha256": "ed4228d56f0186fb5ac4e4cdc6856eba8323642c746af9cd9d8d9fa760ea46ff"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/principles.md",
+      "sizeBytes": 6002,
+      "sha256": "6607635c4618774d30c252501a97bd9b6684520bdba6bf03872e3bd4d0a9ebff"
+    },
+    {
+      "path": "skills/prose-voice-design/resources/supplemental_method.md",
+      "sizeBytes": 929,
+      "sha256": "8ad7e4d86c787bd316888b7e54e89ebf8d4d33bf96333d934933f89695a3d38a"
+    },
+    {
+      "path": "skills/prose-voice-design/schemas/output.schema.json",
+      "sizeBytes": 4011,
+      "sha256": "c9d3afb813bd69dbcdd0741527762bd84e49075660714656a7530b141dd4275c"
+    },
+    {
+      "path": "skills/protagonist-design/SKILL.md",
+      "sizeBytes": 3828,
+      "sha256": "93d51b455d78fd2d9f72a71efe374d59541e921bbbf80123245619838cafe67c"
+    },
+    {
+      "path": "skills/protagonist-design/evals/adversarial.jsonl",
+      "sizeBytes": 1385,
+      "sha256": "47d486cf9e699425d5d055540588262489458c3ea6ea7ebba58a1a98f2755943"
+    },
+    {
+      "path": "skills/protagonist-design/evals/boundary.jsonl",
+      "sizeBytes": 2720,
+      "sha256": "9ec3e2a810206cb9ece2701d5269f713d9c016a18b5c8f05541f322dab7b17fd"
+    },
+    {
+      "path": "skills/protagonist-design/evals/negative.jsonl",
+      "sizeBytes": 8536,
+      "sha256": "da563c370143482cdb2bcc9c6f9d104329fa1e0ec492585885c2f5f52c33227e"
+    },
+    {
+      "path": "skills/protagonist-design/evals/positive.jsonl",
+      "sizeBytes": 10723,
+      "sha256": "254b02c2a3ec434b2d4e56ad9804f02ee7ffc676933af8e7a0fd9087b9fc483c"
+    },
+    {
+      "path": "skills/protagonist-design/moheng.skill.json",
+      "sizeBytes": 1129,
+      "sha256": "82b21a47ba880a9826fa2a9af9e0c97cfee3c8ed66a0862976ecde2364b9a6cb"
+    },
+    {
+      "path": "skills/protagonist-design/provenance/source_map.jsonl",
+      "sizeBytes": 4508,
+      "sha256": "d6bbfd24b0ff28b21e4c7bdc6293105fb0c695f72e37a3fddb5248c4a83c46c5"
+    },
+    {
+      "path": "skills/protagonist-design/resources/anti_patterns.md",
+      "sizeBytes": 1912,
+      "sha256": "82654243587f57d9fc4f6fca188bbacb52bb25cbdef1301c910ed592da064b55"
+    },
+    {
+      "path": "skills/protagonist-design/resources/decision_rules.md",
+      "sizeBytes": 3919,
+      "sha256": "55881cbfbfd69eff9bd75d29dc04a85f6bffafeb504f94c1e22fe88e1746c4bc"
+    },
+    {
+      "path": "skills/protagonist-design/resources/eval_rubric.md",
+      "sizeBytes": 1517,
+      "sha256": "b0c43b9efb9ef9b3aa5333eaf500ec866225eeb31cc60e483f8563893f16bb35"
+    },
+    {
+      "path": "skills/protagonist-design/resources/examples.md",
+      "sizeBytes": 283,
+      "sha256": "fffbc0e88d9101bd7ad2a852f355a6ef4f0712c45104880378c60682c4d3cde8"
+    },
+    {
+      "path": "skills/protagonist-design/resources/operating_method.md",
+      "sizeBytes": 2204,
+      "sha256": "605fdb51dcea388bca59c718d4c6dee3b990e7e80dfec46fb8e3fcd22b129ef3"
+    },
+    {
+      "path": "skills/protagonist-design/resources/principles.md",
+      "sizeBytes": 4860,
+      "sha256": "9c3d0b04e27a86650f20cf994725e8d7dce8a07017804b5dbf3f3f847d1db56e"
+    },
+    {
+      "path": "skills/protagonist-design/resources/supplemental_method.md",
+      "sizeBytes": 959,
+      "sha256": "16bcdcff0de806691af77a246b87a8c7298f515e5a4f1d943bff6fb4107e7cdf"
+    },
+    {
+      "path": "skills/protagonist-design/schemas/output.schema.json",
+      "sizeBytes": 4125,
+      "sha256": "2cd440d81daffc06d43689401fb953e2e5d89b9841563353bd03efcf39562c12"
+    },
+    {
+      "path": "skills/reader-promise-design/SKILL.md",
+      "sizeBytes": 3663,
+      "sha256": "afb1b4cc6a70d810b45152dbf027e21157aa611cc0651079b198badd85210390"
+    },
+    {
+      "path": "skills/reader-promise-design/evals/adversarial.jsonl",
+      "sizeBytes": 1394,
+      "sha256": "0542fb5f9ab1342c566e978e27c4f3412e7eda2a10fed4d8b4cbe2e8ffecb330"
+    },
+    {
+      "path": "skills/reader-promise-design/evals/boundary.jsonl",
+      "sizeBytes": 2743,
+      "sha256": "d81232b55548c8a62b35e63a953b65fffea5e91c1981c95821d3331b519065dd"
+    },
+    {
+      "path": "skills/reader-promise-design/evals/negative.jsonl",
+      "sizeBytes": 8521,
+      "sha256": "2686b911626daf66ef9ba41115451c4954500e97161b557e7641be6128468801"
+    },
+    {
+      "path": "skills/reader-promise-design/evals/positive.jsonl",
+      "sizeBytes": 10408,
+      "sha256": "5ddde53f6945a48fafca3dadd5549bd336b59394b0fcfa88681835544c540ca0"
+    },
+    {
+      "path": "skills/reader-promise-design/moheng.skill.json",
+      "sizeBytes": 1051,
+      "sha256": "460e137b45cb76be32ad712aed6c875ee4db2a00a2ec3e6f177df8c60c257bd6"
+    },
+    {
+      "path": "skills/reader-promise-design/provenance/source_map.jsonl",
+      "sizeBytes": 4427,
+      "sha256": "3c4b070bddba0f324e1e1fb9988bea6f84dfcf0cd41e9bba75b20eea22b777fb"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/anti_patterns.md",
+      "sizeBytes": 782,
+      "sha256": "fa4e3efb6d9a08f25cff1616b2cc34d98f98fb1c7d78f65227ed387d4a4cd0b3"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/decision_rules.md",
+      "sizeBytes": 4269,
+      "sha256": "1a21cad81766dd5248067c4f6eaa5b6c8cd8d9da35eb9f629110d112b18d16bd"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/eval_rubric.md",
+      "sizeBytes": 1423,
+      "sha256": "251a3c2253ef89805a071ea7476e1869f62283ad66f05bbede15752f91122e06"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/examples.md",
+      "sizeBytes": 294,
+      "sha256": "af0519099deeef66808200e966c693877f5964efdab1b67aaabb9dea18aad6ed"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/operating_method.md",
+      "sizeBytes": 2041,
+      "sha256": "80268a379d9dc45a0b77269c73148d8b3e1fd728a7f235fa9d305eb0b0bc29fa"
+    },
+    {
+      "path": "skills/reader-promise-design/resources/principles.md",
+      "sizeBytes": 5254,
+      "sha256": "604dea99631a1f003062aa9956b975c0797aae2d1ef12a1a6623deb3d3543389"
+    },
+    {
+      "path": "skills/reader-promise-design/schemas/output.schema.json",
+      "sizeBytes": 3687,
+      "sha256": "fb08079897b84a27f2553c2dc7796a3d0b17c4564e433b4737a5283fac48fc77"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/SKILL.md",
+      "sizeBytes": 3789,
+      "sha256": "1a2fa9412935cdb579d42c7dd80f4d60a633053f61a2ae1e072613032bdf4b29"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/evals/adversarial.jsonl",
+      "sizeBytes": 1415,
+      "sha256": "246f02fe5e914d7767157b2fdfd3b18516dd6896d133bccdeff87b8debae9c83"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/evals/boundary.jsonl",
+      "sizeBytes": 1706,
+      "sha256": "d60fe423bdb81ce92f659963073219ab295d24969591b51283c2cce4b0b8054e"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/evals/negative.jsonl",
+      "sizeBytes": 2966,
+      "sha256": "dc4b66ce6194cba684c2ed38e75b1a2933f26a98b4ae9b7296bfb9058f9ff62a"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/evals/positive.jsonl",
+      "sizeBytes": 3610,
+      "sha256": "3907c049a5bf2e433d60837660a3ea090679b71e2ca5ed746db71e66328ba13c"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/moheng.skill.json",
+      "sizeBytes": 1151,
+      "sha256": "321dc79bc986fb05e8e1f1d119c5df4d70bd075446cf7fcda25940d8584f6c9a"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/provenance/source_map.jsonl",
+      "sizeBytes": 4507,
+      "sha256": "cf3412bc390bfe74a3525f11ac912a94617530037c336af44b7e2bedd407b6f1"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/anti_patterns.md",
+      "sizeBytes": 1856,
+      "sha256": "4fee1d27d4ac9498a07be86ee8f47ddd095c7f0ca8ce31847a122b939257a5d0"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/decision_rules.md",
+      "sizeBytes": 3997,
+      "sha256": "da55d35d1dba16d5cbe4664b60b46d51fc235e18bffe6372355ba6b20ca7f622"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/eval_rubric.md",
+      "sizeBytes": 1452,
+      "sha256": "3593217ca89d59ff2cabb7409e6be3490b4bb3860be672a17ee01ca8f0ddd5de"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/examples.md",
+      "sizeBytes": 315,
+      "sha256": "39cb29d7b4e8000fdeef2c70e17bad97ac18bfa79add16e8252020ef5ccee97f"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/operating_method.md",
+      "sizeBytes": 1949,
+      "sha256": "a29d0803f4c15e2921d4d614eeb1d3895dd00c574bd406b6b275457db609e602"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/principles.md",
+      "sizeBytes": 4879,
+      "sha256": "05cde2c65e4b9f8bd09724473018678fb1e268cc5737dff69f2b9fa352306561"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/resources/supplemental_method.md",
+      "sizeBytes": 899,
+      "sha256": "405f9ca6d76e42029dcd348f0b77e5281d65983ef1de9c9e47227e0e3d545e9a"
+    },
+    {
+      "path": "skills/relationship-dynamics-design/schemas/output.schema.json",
+      "sizeBytes": 3862,
+      "sha256": "b9dc02af939265b04290722c45769e79dad161d36506f60ea51986d24a31215a"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/SKILL.md",
+      "sizeBytes": 3607,
+      "sha256": "2133c7d3890d7aaa620be9b3c097064862a235ef97a775fa619ba523a2912c34"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/evals/adversarial.jsonl",
+      "sizeBytes": 1415,
+      "sha256": "35f45770d9c3887da57a1f7318222f98f977e89637525b2a9de4ed23d835f427"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/evals/boundary.jsonl",
+      "sizeBytes": 1690,
+      "sha256": "8ec7366604139bc17eb6e478e28c8e699fcc77b4fc4bc8fda4167a8634de90dd"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/evals/negative.jsonl",
+      "sizeBytes": 2886,
+      "sha256": "189dacb3414649037552e76c5c07bdf5650499ba325c27d2362513ab9145eb49"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/evals/positive.jsonl",
+      "sizeBytes": 3435,
+      "sha256": "99c86e528377433355767a08ae8aebd4f3ac22bc07e61107f6c773b785100e70"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/moheng.skill.json",
+      "sizeBytes": 1069,
+      "sha256": "b9d8d3ea0b94018e301a864d283b39b2b5149762001c31174bb4c5234f720b1d"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/provenance/source_map.jsonl",
+      "sizeBytes": 4420,
+      "sha256": "b9f37241efe9c0accde66ae0d5908f1d07c12784199723ef75e68761479b4568"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/anti_patterns.md",
+      "sizeBytes": 1697,
+      "sha256": "c1c1bcee56a266fea04ca17fd7c4dcd980431fda16c3fabfdf7524b82dc510be"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/decision_rules.md",
+      "sizeBytes": 3583,
+      "sha256": "134d81c6167706dafe2cc1bb109b72d3fda42e0b803951bf4ac18850984febba"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/eval_rubric.md",
+      "sizeBytes": 1383,
+      "sha256": "5b0d36c674cb3632cd547f7f0030796bae916bc2c057d616cfc4d3697c9c20c1"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/examples.md",
+      "sizeBytes": 302,
+      "sha256": "198ba289cbf3022aa3ce4f119972b069a28014747196f249d76c8722e5de2ec5"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/operating_method.md",
+      "sizeBytes": 1715,
+      "sha256": "8e243bd03fa929c15473c2542d0865f069891f4b6c3f8ba507f16a667c186308"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/resources/principles.md",
+      "sizeBytes": 4435,
+      "sha256": "418cdbccf5880e2725792b34a2eba2c52ee7345861a375058de6e05bea497eaf"
+    },
+    {
+      "path": "skills/repetition-fatigue-evaluator/schemas/output.schema.json",
+      "sizeBytes": 3670,
+      "sha256": "d76beb1be308089f547878cf6294cf8e1b05688051bf7ee7e85919c4478b0d4f"
+    },
+    {
+      "path": "skills/replan-escalation/SKILL.md",
+      "sizeBytes": 3869,
+      "sha256": "d7dd5ef5ab38ddfe7961c8e5d58344a59587d9ac09a2a065b2f740677ab0b467"
+    },
+    {
+      "path": "skills/replan-escalation/evals/adversarial.jsonl",
+      "sizeBytes": 1382,
+      "sha256": "c89d116abdaf3c1caa6e3795a1c60b4bd1e9fdaa621b41ea5b08de55d78a9583"
+    },
+    {
+      "path": "skills/replan-escalation/evals/boundary.jsonl",
+      "sizeBytes": 2740,
+      "sha256": "f879205db71564d517cf96aa33757575daaaf44091e050569ec29b347581548e"
+    },
+    {
+      "path": "skills/replan-escalation/evals/negative.jsonl",
+      "sizeBytes": 8596,
+      "sha256": "80bdae564d6722a697c5f840c5f1a96bd1a70077819c91b5d0a3a9cdca5494c4"
+    },
+    {
+      "path": "skills/replan-escalation/evals/positive.jsonl",
+      "sizeBytes": 10363,
+      "sha256": "7cea1128c771a5014ecf738a570333e4ca34f71b47946b3b59003221995f25d2"
+    },
+    {
+      "path": "skills/replan-escalation/moheng.skill.json",
+      "sizeBytes": 1156,
+      "sha256": "d4256e3092de4481419ac349e176b4660ed7d85fb840d33363c058b8f6e65c14"
+    },
+    {
+      "path": "skills/replan-escalation/provenance/source_map.jsonl",
+      "sizeBytes": 4498,
+      "sha256": "838756a36cf7fa7fc0109e60f0ad7dd77adc9bd39eb4e7063fc595c83febfec8"
+    },
+    {
+      "path": "skills/replan-escalation/resources/anti_patterns.md",
+      "sizeBytes": 2279,
+      "sha256": "f4e0af88d46c12cda5c8db58b44c85749c3ce01fda2f6f94f6f75ff8dba595f7"
+    },
+    {
+      "path": "skills/replan-escalation/resources/decision_rules.md",
+      "sizeBytes": 3862,
+      "sha256": "eb90a5876da2fd71024adc3e820edbc1576cdc9c4eecde9cd7b75f37b10cd00b"
+    },
+    {
+      "path": "skills/replan-escalation/resources/eval_rubric.md",
+      "sizeBytes": 1433,
+      "sha256": "061c395a2c82774168424ccbb60b7f9a2841267d191dfd4bbd85f307b5c8e39c"
+    },
+    {
+      "path": "skills/replan-escalation/resources/examples.md",
+      "sizeBytes": 307,
+      "sha256": "bee66dd49d7b73854cbe7fbea5a66983d878e1ee0481ffabb165a7454b87b70c"
+    },
+    {
+      "path": "skills/replan-escalation/resources/operating_method.md",
+      "sizeBytes": 2187,
+      "sha256": "7e5695d19b250db5a2d9a9140b7a414a3f8bdfa652e6bb7ea8e3c46faeb6b4e8"
+    },
+    {
+      "path": "skills/replan-escalation/resources/principles.md",
+      "sizeBytes": 5054,
+      "sha256": "109d1b466892763eccc2d1f3026413c557524cacf8b89a95c63351614fecfc89"
+    },
+    {
+      "path": "skills/replan-escalation/resources/supplemental_method.md",
+      "sizeBytes": 891,
+      "sha256": "b0111bc8e152f6f627d53c745ca9afb21f6ccb645a864f9b4114141f06d09f73"
+    },
+    {
+      "path": "skills/replan-escalation/schemas/output.schema.json",
+      "sizeBytes": 4298,
+      "sha256": "154a1939c66bb712df2966e7627f8e01f2c79cd5ed807f46c85b9dd366b19511"
+    },
+    {
+      "path": "skills/rolling-longform-planning/SKILL.md",
+      "sizeBytes": 3775,
+      "sha256": "b137e6cbd8c6ef1b7e1f488c5472f2398dd6c16dcb8387e7566b089ed82ebe3c"
+    },
+    {
+      "path": "skills/rolling-longform-planning/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "f141f3fc3218a209712dc508e2014e5810a432efea5ad27803f7f50a84feffd8"
+    },
+    {
+      "path": "skills/rolling-longform-planning/evals/boundary.jsonl",
+      "sizeBytes": 1599,
+      "sha256": "5cdb540296fbc3712d3595bca0dd8f85efc5e6ea4e568587931ffe3dccc3df58"
+    },
+    {
+      "path": "skills/rolling-longform-planning/evals/negative.jsonl",
+      "sizeBytes": 2901,
+      "sha256": "8576b79de9c2820baaead6cd3f84049c10ebee982525c6876e9bb4e28406da26"
+    },
+    {
+      "path": "skills/rolling-longform-planning/evals/positive.jsonl",
+      "sizeBytes": 3455,
+      "sha256": "1c503705e92d42e99c2a09ab6008de73b42dca950a73676a69c42b623cc402a8"
+    },
+    {
+      "path": "skills/rolling-longform-planning/moheng.skill.json",
+      "sizeBytes": 1053,
+      "sha256": "e1093451770a1dafe8c930778828ca4deb47bfb177081986ba32baf5eefe8dcf"
+    },
+    {
+      "path": "skills/rolling-longform-planning/provenance/source_map.jsonl",
+      "sizeBytes": 4508,
+      "sha256": "61e9897e93ce8bfe1aea05f93d0a446ce76d445cabd0b293dde319bb9b4e5850"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/anti_patterns.md",
+      "sizeBytes": 601,
+      "sha256": "7d61519e0b6ad6d6dab318b0142f429baca91dd34c8054a540f5fd58473da2f5"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/decision_rules.md",
+      "sizeBytes": 4288,
+      "sha256": "8dc031e61b043eabe55b5fc6e55b991493c6b16bd5f5351d909a99bdf46bf068"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/eval_rubric.md",
+      "sizeBytes": 1397,
+      "sha256": "606a22adb921cb73f93789e11b2ec98857d60149091f8ba6064b4d93d01d3d08"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/examples.md",
+      "sizeBytes": 290,
+      "sha256": "d4633ddf2b340de9dadcdb24e170ae930379ab93ace1b107f5ead56c0f6268e0"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/operating_method.md",
+      "sizeBytes": 1748,
+      "sha256": "1ea156a03426f863faceb387f567fc8bd6f06179d204d8aaa406f3c5cc440602"
+    },
+    {
+      "path": "skills/rolling-longform-planning/resources/principles.md",
+      "sizeBytes": 6411,
+      "sha256": "59e0698a08bec504ffe4358f5b74c5077a21996d95f622040a20ea54c763b4ae"
+    },
+    {
+      "path": "skills/rolling-longform-planning/schemas/output.schema.json",
+      "sizeBytes": 4048,
+      "sha256": "94b5115f0d7ca72e4573397025ab6db9f07e8642101be29ef6498d9f22a24b57"
+    },
+    {
+      "path": "skills/scene-contract-design/SKILL.md",
+      "sizeBytes": 3844,
+      "sha256": "fe44d4051643b6a3595ebd6c9a73a17eb8cd0552e2d402a314e32c6e5476a3d2"
+    },
+    {
+      "path": "skills/scene-contract-design/evals/adversarial.jsonl",
+      "sizeBytes": 1394,
+      "sha256": "16f7fbde94f2c47bd9a9b1bd0825e4609af80dd56e45a108fe6fc132c3a7ff7c"
+    },
+    {
+      "path": "skills/scene-contract-design/evals/boundary.jsonl",
+      "sizeBytes": 2724,
+      "sha256": "025dc5c3ac48b0296138ff5969b000c5b21a1d716c7b079a88e3f7d43506dea9"
+    },
+    {
+      "path": "skills/scene-contract-design/evals/negative.jsonl",
+      "sizeBytes": 8656,
+      "sha256": "70048dfe7b5dda7ee7d9f9d66dbdc594834964ec63c34551f38b178e90b995d3"
+    },
+    {
+      "path": "skills/scene-contract-design/evals/positive.jsonl",
+      "sizeBytes": 10993,
+      "sha256": "d7efe272f16bfa6374eda17d90ef5449d9aa80ecf5f900eb844550e51bd1adea"
+    },
+    {
+      "path": "skills/scene-contract-design/moheng.skill.json",
+      "sizeBytes": 1136,
+      "sha256": "8a8e1ea67b8d60d332afe961ecd76e4c989b74508e384c23b49cb6647f583d0b"
+    },
+    {
+      "path": "skills/scene-contract-design/provenance/source_map.jsonl",
+      "sizeBytes": 4497,
+      "sha256": "ea7ca9ae7a6375914ba11fc8ff24a62de705281bcd0d2d3187a4005ecee6fd2d"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/anti_patterns.md",
+      "sizeBytes": 1877,
+      "sha256": "c75b7cadc7fb333a4fd9ba1f7800ee269719bcc27a81b9b6c5bff65eedc21115"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/decision_rules.md",
+      "sizeBytes": 4244,
+      "sha256": "7b3250742aea95587d653e9d07e1400714b96a26be6a422aec8a5c56aea6de8d"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/eval_rubric.md",
+      "sizeBytes": 1470,
+      "sha256": "7be1618b1c00de993bd6b7c1d93989057bb90ddfbd63be868f719190444a5146"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/examples.md",
+      "sizeBytes": 296,
+      "sha256": "8af1ad84e03561505f43c4b6e6480cd2d12240ccb3402162e515b4102e27b07d"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/operating_method.md",
+      "sizeBytes": 1961,
+      "sha256": "0bea5baf8de7e9207c99fce371e4acf6de54ac485f75e6254be064230ce51518"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/principles.md",
+      "sizeBytes": 5280,
+      "sha256": "ace15287fcc137eb3a5d2294884ef350203349a00f3fc7d2403de2bab9c55fd4"
+    },
+    {
+      "path": "skills/scene-contract-design/resources/supplemental_method.md",
+      "sizeBytes": 882,
+      "sha256": "e83b786e251e228f1c0702d19a58209e4daf690d9b8626eb0c0c1515e507daef"
+    },
+    {
+      "path": "skills/scene-contract-design/schemas/output.schema.json",
+      "sizeBytes": 4032,
+      "sha256": "6332d120c1bc9ce5b2a46a80809a6c590df5cf18115fd2947f344d50d541ded7"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/SKILL.md",
+      "sizeBytes": 3836,
+      "sha256": "beb3ee3e84bc9d22cfce1cc6e9d1b2ab8761afd72c31decf42f808a1eeb8fa4b"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/evals/adversarial.jsonl",
+      "sizeBytes": 1415,
+      "sha256": "6af8a20d79959fb6db2a77e698467f64ad77ddad431223635da456cafc0c0e7a"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/evals/boundary.jsonl",
+      "sizeBytes": 2828,
+      "sha256": "544e219572d2156c85e3cf420704df9a517abeeafc8f1f77183a5a0329632bc8"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/evals/negative.jsonl",
+      "sizeBytes": 8956,
+      "sha256": "c617dbe51df1ae665ed4d7ec1e5420095dd93af665be8ac2140f67e9ed0b9870"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/evals/positive.jsonl",
+      "sizeBytes": 11443,
+      "sha256": "c3cbaf79656aa8fb810e3626ce6ad96140622b65e0d83cc35cc07c1679c5ae8c"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/moheng.skill.json",
+      "sizeBytes": 1073,
+      "sha256": "fbc39d6fb8b8ce5be7d89d332a69845e201d9ef04cf0db193c72f804fa87e3b4"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/provenance/source_map.jsonl",
+      "sizeBytes": 4450,
+      "sha256": "20f7328119a8cd78807b88747e027574f7820ab04365dd6b76ffce4468c1918c"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/anti_patterns.md",
+      "sizeBytes": 660,
+      "sha256": "ff7adae35d9e32b6579da35eb61787b76e1d11edeb3d85ea1127c7c83cce927f"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/decision_rules.md",
+      "sizeBytes": 4286,
+      "sha256": "01c46e79982315bffb568fc655210bb0f0d6de205803a107d63fd7f15548bb96"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/eval_rubric.md",
+      "sizeBytes": 1551,
+      "sha256": "72b7ec9183622d37a0a56358484bcc492e9f26e6b64847a8755efbc362200e13"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/examples.md",
+      "sizeBytes": 325,
+      "sha256": "145f5d941bd04e042fb468aa02d89a6fd1df50983b2f6600347f4a4fd4f6f014"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/operating_method.md",
+      "sizeBytes": 2203,
+      "sha256": "10e011a60d5cb4652a727a3facdb6b933237e68c21f3b6bfa723af970239f317"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/resources/principles.md",
+      "sizeBytes": 6286,
+      "sha256": "a6fda459738b6efca2e48b7061a24b5d6555b62b871ee40e86bf26a4dbac0985"
+    },
+    {
+      "path": "skills/story-architecture-synthesis/schemas/output.schema.json",
+      "sizeBytes": 4087,
+      "sha256": "ba8ad3b99ac6b3278844f74734d97a47c82dfebf3d0f92ac1713ad5cda2348ef"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/SKILL.md",
+      "sizeBytes": 3622,
+      "sha256": "4a9a519ad9ec3fa329d689b7dd55aa4299ab8108f60bc8a05d5f44826c94f35a"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/evals/adversarial.jsonl",
+      "sizeBytes": 1430,
+      "sha256": "0f0abaaca36d3d38ad738fdd4d140efaac32f7cfe3aed634beff8a2f8a3d0c7c"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/evals/boundary.jsonl",
+      "sizeBytes": 1695,
+      "sha256": "1ad5798f03d5f1264575be3a76d7af79a677029b8e9b21021c9a40f286e60dc0"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/evals/negative.jsonl",
+      "sizeBytes": 3041,
+      "sha256": "883114efc878db446c242fa2ab572e905f9a465ccf8f735bd4c9455a0fa23aa7"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/evals/positive.jsonl",
+      "sizeBytes": 3620,
+      "sha256": "26f59a8b17b8679c586f40183a3948ebef775d68cce4a1f61fc808ab615e4439"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/moheng.skill.json",
+      "sizeBytes": 1065,
+      "sha256": "6fb347e3703b01ffc4077467610e926b2232e6b732f4b3119faf5a4ef5090ab5"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/provenance/source_map.jsonl",
+      "sizeBytes": 4505,
+      "sha256": "c957cb1c57bebe068f1e5ee091a0516a9779b5d5935d149dc42bfc05265d1f0a"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/anti_patterns.md",
+      "sizeBytes": 1352,
+      "sha256": "77ea5f2ef86c8479177ef43094c44f80c52af4badfacff655b53c3887c524b22"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/decision_rules.md",
+      "sizeBytes": 4568,
+      "sha256": "4d4f51ea375aa92d059606464d774ecc4f323bc62565de55facc8341d2a2410c"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/eval_rubric.md",
+      "sizeBytes": 1422,
+      "sha256": "494cb26ff30979e910dd2bfef826eeb2749a2d1c5ea1ddab91c0b0a2176462c2"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/examples.md",
+      "sizeBytes": 324,
+      "sha256": "ec8747d405c22a453b79fdf8d82520d4e822ec68625bb55a92dcb08de5716aa8"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/operating_method.md",
+      "sizeBytes": 1728,
+      "sha256": "b6b6bc44c7557df02902b4d5bc988436a36e245bb4a2c617f675fe25c98ff8ba"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/resources/principles.md",
+      "sizeBytes": 5337,
+      "sha256": "70f1aa166df20f27a9ac5fdbbac471eeaac4f9ee1d068d5662b6f53b330aeee4"
+    },
+    {
+      "path": "skills/summary-montage-transition-design/schemas/output.schema.json",
+      "sizeBytes": 3833,
+      "sha256": "0b1a116c7cfe2c9af585a0a785ed4f5296dc88b8abbfb7053289b4fa36af751e"
+    },
+    {
+      "path": "skills/supporting-cast-design/SKILL.md",
+      "sizeBytes": 3835,
+      "sha256": "ffee33d21b55d5fa90c96016d3000eb967ad483d3806d4ef88ae3be9c99db081"
+    },
+    {
+      "path": "skills/supporting-cast-design/evals/adversarial.jsonl",
+      "sizeBytes": 1397,
+      "sha256": "24af1b34da2d9950bac10e1d62dea19361b84888dd5a115a00c96877e729022d"
+    },
+    {
+      "path": "skills/supporting-cast-design/evals/boundary.jsonl",
+      "sizeBytes": 1660,
+      "sha256": "7bb5b88fb558984a0f6014fc25eeed935e0a65ed9c1acef187c469bc9dd015f3"
+    },
+    {
+      "path": "skills/supporting-cast-design/evals/negative.jsonl",
+      "sizeBytes": 2916,
+      "sha256": "0ffa6f1cf637ae556b5c8d020af8fd3260761967627149e85fa78701e3790c50"
+    },
+    {
+      "path": "skills/supporting-cast-design/evals/positive.jsonl",
+      "sizeBytes": 3580,
+      "sha256": "91b3de1e20cb3d6c76eb06c4ddc4a3335124d0753f3faf9371d979b52f8a4b5b"
+    },
+    {
+      "path": "skills/supporting-cast-design/moheng.skill.json",
+      "sizeBytes": 1139,
+      "sha256": "f80f91c1aa7b163c3a0c0a81016d93fdf2ff4632060978ee9d7e8cc1a0706564"
+    },
+    {
+      "path": "skills/supporting-cast-design/provenance/source_map.jsonl",
+      "sizeBytes": 4502,
+      "sha256": "14c044db3663b19e59db71fb4d03f2eb9a1617a0bd3dbb8fa0996004ba6f7c14"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/anti_patterns.md",
+      "sizeBytes": 1606,
+      "sha256": "ffeafdc2dd226e755d7ea34d1e2af7eb67a963f049e924a61c6996a9bf93bce2"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/decision_rules.md",
+      "sizeBytes": 4466,
+      "sha256": "8a664b193ebb4592c2e971ca4d21fa38f2bb6d2c2959737a304bf610386279db"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/eval_rubric.md",
+      "sizeBytes": 1476,
+      "sha256": "387b1ef84e95752f81b6272801034f41f1347fdc961b7720421c2a11d1f132ab"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/examples.md",
+      "sizeBytes": 297,
+      "sha256": "019928be11f9d510ce8635dc1d672b13ade507f2bcf50a55fc73e792f6fd8f3b"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/operating_method.md",
+      "sizeBytes": 2035,
+      "sha256": "fc611ebd5c6873e9d2b9b3b198d2fa8f93aa1115e8a730a07ba0e56e4efbcfca"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/principles.md",
+      "sizeBytes": 5807,
+      "sha256": "23879439a51e70b5d2335ad4e16092550b5dbe04be2b73abfc85733a8f399f62"
+    },
+    {
+      "path": "skills/supporting-cast-design/resources/supplemental_method.md",
+      "sizeBytes": 887,
+      "sha256": "160b5aed6e291c6fc817616c9c020960b4e459887823af42bb6e9ec7dcbb6ce8"
+    },
+    {
+      "path": "skills/supporting-cast-design/schemas/output.schema.json",
+      "sizeBytes": 3862,
+      "sha256": "ca290119c7d99e371a73ac3a723f1b396e10e26eff83bd45dc972e126ec2b45b"
+    },
+    {
+      "path": "skills/surgical-repair/SKILL.md",
+      "sizeBytes": 3933,
+      "sha256": "6edf83a71a9f9a8ad7ef5b1b7b7785f580846ab5c57522c146bf8d3bce2dde9f"
+    },
+    {
+      "path": "skills/surgical-repair/evals/adversarial.jsonl",
+      "sizeBytes": 1376,
+      "sha256": "5bdfba7fa3325dbcdf1da0b1a25922f88f8e0da13e77fa09437ff83fae0c42d1"
+    },
+    {
+      "path": "skills/surgical-repair/evals/boundary.jsonl",
+      "sizeBytes": 2720,
+      "sha256": "c3052f904e9cec322ba1024b5dd5c41c8e0d0e41209c5e12a971a1ab1793a4f8"
+    },
+    {
+      "path": "skills/surgical-repair/evals/negative.jsonl",
+      "sizeBytes": 8716,
+      "sha256": "66ddc4b4d81c2dc25de2d37c7f38cf965f8def36132cd24d66e6024582cb60f8"
+    },
+    {
+      "path": "skills/surgical-repair/evals/positive.jsonl",
+      "sizeBytes": 10813,
+      "sha256": "fa3153f083232ff47adc5dbb0d229aef0192b89cdad6e562edca55e63760b1f1"
+    },
+    {
+      "path": "skills/surgical-repair/moheng.skill.json",
+      "sizeBytes": 1067,
+      "sha256": "2f667c6943912505f01a581adaa5d48bb6bd7c408999c5bcfa0e991c87cc25f3"
+    },
+    {
+      "path": "skills/surgical-repair/provenance/source_map.jsonl",
+      "sizeBytes": 4506,
+      "sha256": "ffdae0c1a8ec5de6a47b1510eb776c6d05360b7ecf701b6578e24d3fd73149ec"
+    },
+    {
+      "path": "skills/surgical-repair/resources/anti_patterns.md",
+      "sizeBytes": 2184,
+      "sha256": "9589b474c9994985682c5f69be642d40bb26f34dea9aa9868a2e267fa335ed94"
+    },
+    {
+      "path": "skills/surgical-repair/resources/decision_rules.md",
+      "sizeBytes": 4590,
+      "sha256": "ef96a06a256ae4cb8c79734120dd0c7be49735f4a112ae3352ab6f8a6aaa64bb"
+    },
+    {
+      "path": "skills/surgical-repair/resources/eval_rubric.md",
+      "sizeBytes": 1429,
+      "sha256": "3f2c943fad49a767759ae628f08360e58edbf99196050612dc1a2f090ba7664c"
+    },
+    {
+      "path": "skills/surgical-repair/resources/examples.md",
+      "sizeBytes": 298,
+      "sha256": "38a984a96bf85481276da1ad70f8398072b231afc817893d64587ca5057d3070"
+    },
+    {
+      "path": "skills/surgical-repair/resources/operating_method.md",
+      "sizeBytes": 1738,
+      "sha256": "28fb72d7b2d86126d11f3b54c6b975ebc75a79dc0a1b398a8cc019caf6eb8486"
+    },
+    {
+      "path": "skills/surgical-repair/resources/principles.md",
+      "sizeBytes": 5681,
+      "sha256": "61c4a796465c2c63d5e717accf2a292aa5a1cc32ab4c6e373b95323e748a2e09"
+    },
+    {
+      "path": "skills/surgical-repair/schemas/output.schema.json",
+      "sizeBytes": 3840,
+      "sha256": "0f602bfb4dd78ce034ee715bb0637d2c1cd80f5d9b136c4fcc37cf2f730e703f"
+    },
+    {
+      "path": "skills/volume-architecture/SKILL.md",
+      "sizeBytes": 3937,
+      "sha256": "b0d757bbf203fedb26f6cb1585d94b01ae8f55d3137372ce16e097cf2fba37b6"
+    },
+    {
+      "path": "skills/volume-architecture/evals/adversarial.jsonl",
+      "sizeBytes": 1388,
+      "sha256": "57b2a85e67de2aaee08d42b9fbe1717e310fac8f3499b6029a2302e184e0bcf1"
+    },
+    {
+      "path": "skills/volume-architecture/evals/boundary.jsonl",
+      "sizeBytes": 1637,
+      "sha256": "4d6180e3c5ce73fbc014b86155a80cff49b7600e83949563a4efdaa398bbb9b6"
+    },
+    {
+      "path": "skills/volume-architecture/evals/negative.jsonl",
+      "sizeBytes": 2871,
+      "sha256": "8274f32db492a1d3c5e32fb31378a15b9915f4c5a6d3ea4bb23fe7febeedec1a"
+    },
+    {
+      "path": "skills/volume-architecture/evals/positive.jsonl",
+      "sizeBytes": 3550,
+      "sha256": "53358a23f11684e6e92f068f518c546b4430f26398d993e66dd44490bfa4fc14"
+    },
+    {
+      "path": "skills/volume-architecture/moheng.skill.json",
+      "sizeBytes": 1075,
+      "sha256": "657aa4e766a2dd30f8a49eedaba2b24261c1336f74e9027d9b242ca0ee2bf121"
+    },
+    {
+      "path": "skills/volume-architecture/provenance/source_map.jsonl",
+      "sizeBytes": 4394,
+      "sha256": "cfa536e6d1c92ea4436944d4e22366c5f63330c2ee344f749063c8ff5a574afe"
+    },
+    {
+      "path": "skills/volume-architecture/resources/anti_patterns.md",
+      "sizeBytes": 647,
+      "sha256": "0ed73fb067f166283550391e2d02d7bcc8aeef29e5b04837df85eb63182fb0c1"
+    },
+    {
+      "path": "skills/volume-architecture/resources/decision_rules.md",
+      "sizeBytes": 3859,
+      "sha256": "81e30a9cd7a9dad09b907d61b0d5c46cf66e9ec91b57b57125b4d14e213aabef"
+    },
+    {
+      "path": "skills/volume-architecture/resources/eval_rubric.md",
+      "sizeBytes": 1459,
+      "sha256": "64a22afeca7071b3b06bc16b8d7ee33137e6abd51e041d17525a0c57fc3c40fb"
+    },
+    {
+      "path": "skills/volume-architecture/resources/examples.md",
+      "sizeBytes": 294,
+      "sha256": "acea0b7121884b4d542b34bde649e0c98363e0ef68d28f68af997403bcffc61b"
+    },
+    {
+      "path": "skills/volume-architecture/resources/operating_method.md",
+      "sizeBytes": 1743,
+      "sha256": "1404c30d91562184a816a836b083029285174f63ca6fd6b369bf5ceab49b6154"
+    },
+    {
+      "path": "skills/volume-architecture/resources/principles.md",
+      "sizeBytes": 4772,
+      "sha256": "c0e266a57064a52053e171b1961845c4d37389ac4757a2ac8c5f2bdcca5eea9f"
+    },
+    {
+      "path": "skills/volume-architecture/schemas/output.schema.json",
+      "sizeBytes": 4039,
+      "sha256": "4b032c9f5512455546e5340e6cb9ea0d15225f443dcbc057d1fa302d911d62ae"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/SKILL.md",
+      "sizeBytes": 3670,
+      "sha256": "c04fce2de1d57abc9edec8d00d20c652dff762ffadcd12ba9bd8e8eacb78cd5f"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/evals/adversarial.jsonl",
+      "sizeBytes": 1406,
+      "sha256": "b4e05f8c5ea0d2467e43acefbc35543f7a7a4cef55b7d41142faaae1b75cb847"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/evals/boundary.jsonl",
+      "sizeBytes": 2803,
+      "sha256": "d8a4c090b2c448e9439ea55c7eb20cdd8c381347e93a87ab7aa5b521a815d064"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/evals/negative.jsonl",
+      "sizeBytes": 8641,
+      "sha256": "b9f66ea75d4d5d41fe4a6e57ca2e94fd22605cd59c404317a48ec6ab496e1fa8"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/evals/positive.jsonl",
+      "sizeBytes": 10783,
+      "sha256": "41e662cf018ee320faf37df605a3375bff1365225fd11f9a8f26eab84b536ced"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/moheng.skill.json",
+      "sizeBytes": 1055,
+      "sha256": "7d4ba6b545bd40b39e856acb82c3ca444cc5a3b1db2382d2588c517d824a32a9"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/provenance/source_map.jsonl",
+      "sizeBytes": 4451,
+      "sha256": "0b77b9389958c03d63052a1cc2b6140ef231a722a6d94dd565788340f863b5bb"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/anti_patterns.md",
+      "sizeBytes": 819,
+      "sha256": "b7534bcb3fa92f1080f22de98caf5b4ed62e1142d9e83641a8014d1a79fdc1bd"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/decision_rules.md",
+      "sizeBytes": 4212,
+      "sha256": "c68d79dddd1fc80d8b748edd4047d85e3ccca9bcfcae6eaa057da61131cbe881"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/eval_rubric.md",
+      "sizeBytes": 1504,
+      "sha256": "458158ee1a7f593516da83a77de63c6a3ea68f09b31673276d253046fb26933e"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/examples.md",
+      "sizeBytes": 298,
+      "sha256": "c764382a073f453d642cfca5106717bea4e2f1a590537efb09e27a474717831b"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/operating_method.md",
+      "sizeBytes": 1987,
+      "sha256": "0c67cd00be1ba33a4affa4b2e434638da01e1c6343a8d3d2bec65a25d43b4a29"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/resources/principles.md",
+      "sizeBytes": 5477,
+      "sha256": "92a201a69ff0cb36f31242ab02aa85a06a3fada9af034acff9e327f13a528e52"
+    },
+    {
+      "path": "skills/worldbuilding-rule-design/schemas/output.schema.json",
+      "sizeBytes": 4006,
+      "sha256": "8b6b68842e9e3f85dff82f2f6ab498255ef286c865b1af41723a9c68dd8e709e"
+    },
+    {
+      "path": "sources/articles/01-世界观深化技巧.md",
+      "sizeBytes": 12310,
+      "sha256": "275a2ed7aff70ea55eee4866ac71fa6bf4774839c3e4f27bdb5a0bc1447fc654"
+    },
+    {
+      "path": "sources/articles/02-修改润色技巧.md",
+      "sizeBytes": 10064,
+      "sha256": "2aeb518352583fd7586b993dabe4110d17dfa64e5ef83d3627256267bddef828"
+    },
+    {
+      "path": "sources/articles/03-冲突升级技巧.md",
+      "sizeBytes": 9522,
+      "sha256": "cca012b5623dc8d13fea5755e17f4327b0d6769661fe8d2dc16829f11f937624"
+    },
+    {
+      "path": "sources/articles/04-场景转换艺术.md",
+      "sizeBytes": 8847,
+      "sha256": "685891b038aa231de168cc4cbbc7ff2e5cf4c1ea2d09b5875e84b4fc8b893fdf"
+    },
+    {
+      "path": "sources/articles/05-多线叙事技巧.md",
+      "sizeBytes": 11182,
+      "sha256": "e840829ccef6115348c881f2da52285c37ed034cff1dd7dfbb09cc310526941e"
+    },
+    {
+      "path": "sources/articles/06-多视角叙事技巧.md",
+      "sizeBytes": 11230,
+      "sha256": "18d17ff8ca7dbdd8114bd0721514f21a8437131ac3d172cb78bd7724aa7c139b"
+    },
+    {
+      "path": "sources/articles/07-大纲方法.md",
+      "sizeBytes": 8028,
+      "sha256": "a4f09a1555cab0ecddf3adeda79dc92095e3b320f3560ec4ffcc02bc85682279"
+    },
+    {
+      "path": "sources/articles/08-套路与爽点.md",
+      "sizeBytes": 8127,
+      "sha256": "418d3c5582b66b88ca3395439581477db41836cc713016a9b0b8fe98d01faab8"
+    },
+    {
+      "path": "sources/articles/09-平台选择与签约.md",
+      "sizeBytes": 8985,
+      "sha256": "80c820837eca8e8cec2bba5b0ee2113704e4bd3738be34d9d33ed2c475133d73"
+    },
+    {
+      "path": "sources/articles/10-幽默喜剧写作技巧.md",
+      "sizeBytes": 9680,
+      "sha256": "0e597adf57cb9b855223c301634fba55bff33d00473ddcc51f13a8e794244723"
+    },
+    {
+      "path": "sources/articles/11-开头技巧.md",
+      "sizeBytes": 8365,
+      "sha256": "07b76726be7c0dfce846106e11c453abc50c38cad749cc7faf15b7809148adb5"
+    },
+    {
+      "path": "sources/articles/12-情感冲击力写作技巧.md",
+      "sizeBytes": 11062,
+      "sha256": "bfbdc61b5b95c2960d91ee09b9598f4d57bac75c42f77fbb573c7f3003284c8e"
+    },
+    {
+      "path": "sources/articles/13-成为顶级作者之路.md",
+      "sizeBytes": 8922,
+      "sha256": "3f03389f5b03f6bb01a1f8720e20fd6401492a887ef63da13c1a301fa00131fd"
+    },
+    {
+      "path": "sources/articles/14-收入模式详解.md",
+      "sizeBytes": 10626,
+      "sha256": "e243a05186f8f3439edfebc63229dcdc716811bc3a437ee99582c42ab97a74cf"
+    },
+    {
+      "path": "sources/articles/15-时间线处理技巧.md",
+      "sizeBytes": 11421,
+      "sha256": "f6425686130bbc9f19decd3eb520450cf802fd4f046128e281ee70a5a68f235b"
+    },
+    {
+      "path": "sources/articles/16-节奏控制.md",
+      "sizeBytes": 7079,
+      "sha256": "bace4bb8b1a86cd8137bece748601e2b57f9c9978a11b5d7203b9f9819faa4eb"
+    },
+    {
+      "path": "sources/articles/17-读者粘性培养技巧.md",
+      "sizeBytes": 10678,
+      "sha256": "f88307b5bcd0fe01f1628f36c48f10a1158582c0721d8e7d1e0227668715e67b"
+    },
+    {
+      "path": "sources/articles/18-长篇架构设计.md",
+      "sizeBytes": 13270,
+      "sha256": "0fe16593dfa417a712e4e9ddc57d5d8ce4176f3de25f4d0dfc5fd8f11e73655c"
+    },
+    {
+      "path": "sources/articles/19-长篇连载管理技巧.md",
+      "sizeBytes": 10586,
+      "sha256": "884e06acf7b22c33317d437277bb987c6626bd4d3e5d58db5546ec5101f730e5"
+    },
+    {
+      "path": "sources/articles/20-高潮设计.md",
+      "sizeBytes": 7023,
+      "sha256": "64674136f9742a71f9059392a791ec7d718fa1a2a3776334907b2f60176ea2e6"
+    },
+    {
+      "path": "sources/source-index.jsonl",
+      "sizeBytes": 433913,
+      "sha256": "09af047ba2b58ad4ce697476697524f2eee6f6fbb6a7e33c11166877e50d620b"
+    }
+  ]
+}

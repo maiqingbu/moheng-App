@@ -687,8 +687,8 @@ fn final_response(
         "commandId":receipt.command_id,
         "projectId":receipt.project_id,
         "resultProjectId":receipt.project_id,
-        "finalStatus":if verified {"committed"} else {"failed"},
-        "message":if verified {message} else {"变更已提交，但复核未达到预期。"},
+        "finalStatus":"committed",
+        "message":if verified {message} else {"正式提交已有回执，复核结果待确认；请先重新读取状态，不要重复提交。"},
         "receiptId":receipt.receipt_id,
         "beforeRevision":receipt.before_revision,
         "afterRevision":receipt.after_revision,
@@ -696,6 +696,18 @@ fn final_response(
         "result":result,
         "postverify":postverify
     })
+}
+
+fn postverify_response(query: Result<Value, String>, receipt_id: &str) -> Value {
+    match query {
+        Ok(value) => value,
+        Err(_) => json!({
+            "status":"QUERY_FAILED",
+            "userMessage":"提交已完成，复核查询失败，结果待确认。",
+            "receiptId":receipt_id,
+            "typedRequery":true
+        }),
+    }
 }
 
 fn preflight(
@@ -1511,7 +1523,7 @@ fn decide(
     )
 }
 
-fn postverify_normal(
+fn postverify_normal_query(
     manager: &ProjectManager,
     project_id: &str,
     change_id: &str,
@@ -1556,6 +1568,254 @@ fn postverify_normal(
         .map_err(normalize_owner_error)
 }
 
+fn finalize_normal_postverify(
+    manager: &ProjectManager,
+    project_id: &str,
+    change_id: &str,
+    receipt_id: &str,
+    now: &str,
+    queried: Result<Value, String>,
+) -> Value {
+    let mut postverify = postverify_response(queried, receipt_id);
+    persist_postverify_status(
+        manager,
+        project_id,
+        change_id,
+        receipt_id,
+        now,
+        &mut postverify,
+    );
+    postverify
+}
+
+fn postverify_normal(
+    manager: &ProjectManager,
+    project_id: &str,
+    change_id: &str,
+    impact_id: &str,
+    receipt_id: &str,
+    idempotency_key: &str,
+    now: &str,
+) -> Result<Value, String> {
+    let queried = postverify_normal_query(
+        manager,
+        project_id,
+        change_id,
+        impact_id,
+        receipt_id,
+        idempotency_key,
+        now,
+    );
+    Ok(finalize_normal_postverify(
+        manager, project_id, change_id, receipt_id, now, queried,
+    ))
+}
+
+fn postverify_normal_on_connection(
+    connection: &Connection,
+    project_id: &str,
+    change_id: &str,
+    impact_id: &str,
+    receipt_id: &str,
+    idempotency_key: &str,
+    now: &str,
+) -> Value {
+    let query = (|| {
+        let change = repository::load_change_request(connection, project_id, change_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        let impact = repository::load_impact_set(connection, project_id, change_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        let has_state =
+            repository::state_exists(connection, project_id, &format!("change-state:{change_id}"))
+                .map_err(|error| format!("B12_DB:{error}"))?;
+        let receipt_ok = CommitService::find_receipt(connection, project_id, idempotency_key)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|receipt| receipt.receipt_id == receipt_id);
+        let observed = change.as_ref().is_some_and(|item| item.status == "APPLIED")
+            && impact
+                .as_ref()
+                .is_some_and(|item| item.impact_set_id == impact_id && item.status == "COMPLETED")
+            && has_state
+            && receipt_ok;
+        Ok(json!({
+            "status":if observed {"VERIFIED"} else {"INCOMPLETE"},
+            "userMessage":if observed {"已完成并复核"} else {"已提交，复核尚未完成，结果待确认。"},
+            "receiptId":receipt_id,
+            "authorityChecked":observed,
+            "staleChecked":observed,
+            "typedRequery":true
+        }))
+    })();
+    let mut response = postverify_response(query, receipt_id);
+    let persisted = repository::set_postverify_status(
+        connection,
+        project_id,
+        change_id,
+        receipt_id,
+        response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("QUERY_FAILED"),
+        now,
+    )
+    .is_ok();
+    response["statusPersisted"] = json!(persisted);
+    response
+}
+
+fn persist_postverify_status(
+    manager: &ProjectManager,
+    project_id: &str,
+    change_id: &str,
+    receipt_id: &str,
+    now: &str,
+    response: &mut Value,
+) {
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("QUERY_FAILED");
+    let persisted = manager
+        .open(project_id, "", now)
+        .and_then(|connection| {
+            repository::set_postverify_status(
+                &connection,
+                project_id,
+                change_id,
+                receipt_id,
+                status,
+                now,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
+        })
+        .is_ok();
+    response["statusPersisted"] = json!(persisted);
+}
+
+fn postverify_retcon(
+    manager: &ProjectManager,
+    project_id: &str,
+    change_id: &str,
+    old_fact_id: &str,
+    new_fact_id: &str,
+    receipt_id: &str,
+    now: &str,
+) -> Value {
+    let queried = manager.with_read_connection(project_id, now, |connection| {
+        let current = repository::current_fact(connection, project_id, old_fact_id)
+            .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+        let new_current = repository::current_fact(connection, project_id, new_fact_id)
+            .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+        let observed = current.as_ref().and_then(|item| item.get("supersededBy")).and_then(Value::as_str) == Some(new_fact_id)
+            && new_current.is_some()
+            && repository::state_exists(connection, project_id, &format!("change-state:{change_id}"))
+                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
+        Ok(json!({
+            "status":if observed {"VERIFIED"} else {"INCOMPLETE"},
+            "userMessage":if observed {"已完成并复核"} else {"已提交，复核尚未完成，结果待确认。"},
+            "receiptId":receipt_id,
+            "oldFactPreserved":current.is_some(),
+            "newFactCurrent":new_current.is_some(),
+            "versionedAuthority":observed,
+            "typedRequery":true
+        }))
+    }).map_err(normalize_owner_error);
+    let mut response = postverify_response(queried, receipt_id);
+    let persistence = manager
+        .open(project_id, "", now)
+        .and_then(|connection| {
+            repository::set_postverify_status(
+                &connection,
+                project_id,
+                change_id,
+                receipt_id,
+                response
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("QUERY_FAILED"),
+                now,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))
+        })
+        .is_ok();
+    response["statusPersisted"] = json!(persistence);
+    response
+}
+
+fn postverify_retcon_on_connection(
+    connection: &Connection,
+    project_id: &str,
+    change_id: &str,
+    old_fact_id: &str,
+    new_fact_id: &str,
+    receipt_id: &str,
+    now: &str,
+) -> Value {
+    let query = (|| {
+        let current = repository::current_fact(connection, project_id, old_fact_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        let new_current = repository::current_fact(connection, project_id, new_fact_id)
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        let verified = current
+            .as_ref()
+            .and_then(|item| item.get("supersededBy"))
+            .and_then(Value::as_str)
+            == Some(new_fact_id)
+            && new_current.is_some()
+            && repository::state_exists(
+                connection,
+                project_id,
+                &format!("change-state:{change_id}"),
+            )
+            .map_err(|error| format!("B12_DB:{error}"))?;
+        Ok(json!({
+            "status":if verified {"VERIFIED"} else {"INCOMPLETE"},
+            "userMessage":if verified {"已完成并复核"} else {"已提交，复核尚未完成，结果待确认。"},
+            "receiptId":receipt_id,
+            "oldFactPreserved":current.is_some(),
+            "newFactCurrent":new_current.is_some(),
+            "versionedAuthority":verified,
+            "typedRequery":true
+        }))
+    })();
+    let mut response = postverify_response(query, receipt_id);
+    let persisted = repository::set_postverify_status(
+        connection,
+        project_id,
+        change_id,
+        receipt_id,
+        response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("QUERY_FAILED"),
+        now,
+    )
+    .is_ok();
+    response["statusPersisted"] = json!(persisted);
+    response
+}
+
+fn postverify_failed_on_connection(
+    connection: &Connection,
+    project_id: &str,
+    change_id: &str,
+    receipt_id: &str,
+    now: &str,
+) -> Value {
+    let mut response = postverify_response(Err("B12_POSTVERIFY_QUERY_FAILED".into()), receipt_id);
+    let persisted = repository::set_postverify_status(
+        connection,
+        project_id,
+        change_id,
+        receipt_id,
+        "QUERY_FAILED",
+        now,
+    )
+    .is_ok();
+    response["statusPersisted"] = json!(persisted);
+    response
+}
+
 fn apply_change(
     manager: &ProjectManager,
     project_id: &str,
@@ -1566,6 +1826,44 @@ fn apply_change(
     request: &Value,
     request_digest: &str,
 ) -> Result<Value, String> {
+    apply_change_with_postverify_query(
+        manager,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        request,
+        request_digest,
+        |manager, project_id, change_id, impact_id, receipt_id, idempotency_key, now| {
+            postverify_normal_query(
+                manager,
+                project_id,
+                change_id,
+                impact_id,
+                receipt_id,
+                idempotency_key,
+                now,
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_change_with_postverify_query<F>(
+    manager: &ProjectManager,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: Option<i64>,
+    now: &str,
+    request: &Value,
+    request_digest: &str,
+    postverify_query: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(&ProjectManager, &str, &str, &str, &str, &str, &str) -> Result<Value, String>,
+{
     let input = payload(request)?;
     let change_id = required_string(input, "changeRequestId")?.to_owned();
     let handle = manager.open(project_id, "", now).map_err(manager_error)?;
@@ -1737,7 +2035,7 @@ fn apply_change(
         })
         .map_err(|error| error.to_string())?;
     drop(handle);
-    let postverify = postverify_normal(
+    let queried = postverify_query(
         manager,
         project_id,
         &change_id,
@@ -1745,7 +2043,15 @@ fn apply_change(
         &receipt.receipt_id,
         idempotency_key,
         now,
-    )?;
+    );
+    let postverify = finalize_normal_postverify(
+        manager,
+        project_id,
+        &change_id,
+        &receipt.receipt_id,
+        now,
+        queried,
+    );
     Ok(final_response(
         &receipt,
         json!({"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"requestDigest":request_digest,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"authorityMutation":target_type.is_some(),"semanticOwnerReceipt":target_owner_receipt}),
@@ -1775,9 +2081,125 @@ pub fn apply_approved_on_connection(
     if let Some(previous) = CommitService::find_receipt(connection, project_id, idempotency_key)
         .map_err(|error| error.to_string())?
     {
-        return Ok(
-            json!({"receiptId":previous.receipt_id,"receipt":previous,"result":{"status":"REPLAYED","changeRequestId":change_id},"postverify":{"status":"VERIFIED","userMessage":"已完成并复核","typedRequery":true}}),
-        );
+        let change = match repository::load_change_request(connection, project_id, &change_id) {
+            Ok(Some(change)) => change,
+            Ok(None) | Err(_) => {
+                return Ok(json!({
+                    "receiptId":previous.receipt_id,
+                    "receipt":previous,
+                    "result":{"status":"REPLAYED","changeRequestId":change_id},
+                    "postverify":postverify_failed_on_connection(
+                        connection, project_id, &change_id, &previous.receipt_id, now,
+                    )
+                }));
+            }
+        };
+        let (postverify, retcon_plan_id) = if change.change_type == "RETCON" {
+            let plan_id = change
+                .impact_seed
+                .get("retconPlanId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if let Some(plan_id) = plan_id {
+                let plan = repository::load_retcon_plan(connection, project_id, &plan_id);
+                let plan = match plan {
+                    Ok(Some(plan)) => plan,
+                    Ok(None) | Err(_) => {
+                        let postverify = postverify_failed_on_connection(
+                            connection,
+                            project_id,
+                            &change_id,
+                            &previous.receipt_id,
+                            now,
+                        );
+                        return Ok(json!({
+                            "receiptId":previous.receipt_id,
+                            "receipt":previous,
+                            "result":{"status":"REPLAYED","changeRequestId":change_id,"retconPlanId":plan_id},
+                            "postverify":postverify
+                        }));
+                    }
+                };
+                let old_fact_id = plan
+                    .target_fact
+                    .get("old")
+                    .and_then(|item| item.get("factId"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                if let Some(old_fact_id) = old_fact_id {
+                    let new_fact_id = format!("{old_fact_id}:retcon:{plan_id}");
+                    (
+                        postverify_retcon_on_connection(
+                            connection,
+                            project_id,
+                            &change_id,
+                            &old_fact_id,
+                            &new_fact_id,
+                            &previous.receipt_id,
+                            now,
+                        ),
+                        Some(plan_id),
+                    )
+                } else {
+                    (
+                        postverify_failed_on_connection(
+                            connection,
+                            project_id,
+                            &change_id,
+                            &previous.receipt_id,
+                            now,
+                        ),
+                        Some(plan_id),
+                    )
+                }
+            } else {
+                (
+                    postverify_failed_on_connection(
+                        connection,
+                        project_id,
+                        &change_id,
+                        &previous.receipt_id,
+                        now,
+                    ),
+                    None,
+                )
+            }
+        } else {
+            match repository::load_impact_set(connection, project_id, &change_id) {
+                Ok(Some(impact)) => (
+                    postverify_normal_on_connection(
+                        connection,
+                        project_id,
+                        &change_id,
+                        &impact.impact_set_id,
+                        &previous.receipt_id,
+                        idempotency_key,
+                        now,
+                    ),
+                    None,
+                ),
+                Ok(None) | Err(_) => (
+                    postverify_failed_on_connection(
+                        connection,
+                        project_id,
+                        &change_id,
+                        &previous.receipt_id,
+                        now,
+                    ),
+                    None,
+                ),
+            }
+        };
+        let mut result = json!({"status":"REPLAYED","changeRequestId":change_id});
+        if let Some(plan_id) = retcon_plan_id {
+            result["retconPlanId"] = json!(plan_id);
+        }
+        return Ok(json!({
+            "receiptId":previous.receipt_id,
+            "receipt":previous,
+            "result":result,
+            "postverify":postverify
+        }));
     }
     let change = repository::load_change_request(connection, project_id, &change_id)
         .map_err(|error| format!("B12_DB:{error}"))?
@@ -1907,16 +2329,20 @@ pub fn apply_approved_on_connection(
             })
         })
         .map_err(|error| error.to_string())?;
-    let verified = repository::load_change_request(connection, project_id, &change_id)
-        .map_err(|error| format!("B12_DB:{error}"))?
-        .is_some_and(|item| item.status == "APPLIED")
-        && repository::state_exists(connection, project_id, &format!("change-state:{change_id}"))
-            .map_err(|error| format!("B12_DB:{error}"))?;
+    let postverify = postverify_normal_on_connection(
+        connection,
+        project_id,
+        &change_id,
+        &impact_id,
+        &receipt.receipt_id,
+        idempotency_key,
+        now,
+    );
     Ok(json!({
         "receiptId":receipt.receipt_id,
         "receipt":receipt,
         "result":{"status":"APPLIED","changeRequestId":change_id,"impactSetId":impact_id,"authorityType":target_type.clone(),"targetClass":target_class(target_type.as_deref()),"authorityOwner":target_owner_name,"semanticOwnerReceipt":target_owner_receipt},
-        "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"typedRequery":true}
+        "postverify":postverify
     }))
 }
 
@@ -2262,6 +2688,33 @@ fn apply_retcon(
     let plan = repository::load_retcon_plan(&handle, project_id, &plan_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_RETCON_PLAN_NOT_FOUND".to_string())?;
+    if let Some(previous) = CommitService::find_receipt(&handle, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    {
+        let old_fact_id = plan
+            .target_fact
+            .get("old")
+            .and_then(|fact| fact.get("factId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let new_fact_id = format!("{old_fact_id}:retcon:{plan_id}");
+        drop(handle);
+        let postverify = postverify_retcon(
+            manager,
+            project_id,
+            &change_id,
+            old_fact_id,
+            &new_fact_id,
+            &previous.receipt_id,
+            now,
+        );
+        return Ok(final_response(
+            &previous,
+            json!({"status":"REPLAYED","changeRequestId":change_id,"retconPlanId":plan_id}),
+            postverify,
+            "事实修订已按原回执恢复。",
+        ));
+    }
     if change.status != "APPROVED" || plan.status != "APPROVED" {
         return Err("B12_USER_DECISION_REQUIRED".into());
     }
@@ -2431,34 +2884,15 @@ fn apply_retcon(
         })
         .map_err(|error| error.to_string())?;
     drop(handle);
-    let postverify = manager
-        .with_read_connection(project_id, now, |connection| {
-            let current = repository::current_fact(connection, project_id, &old_fact_id)
-                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
-            let new_current = repository::current_fact(connection, project_id, &new_fact_id)
-                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
-            let observed = current
-                .as_ref()
-                .and_then(|item| item.get("supersededBy"))
-                .and_then(Value::as_str)
-                == Some(new_fact_id.as_str())
-                && new_current.is_some()
-                && repository::state_exists(
-                    connection,
-                    project_id,
-                    &format!("change-state:{change_id}"),
-                )
-                .map_err(|error| ManagerError::ProjectCommand(format!("B12_DB:{error}")))?;
-            Ok(json!({
-                "status":if observed {"VERIFIED"} else {"INCOMPLETE"},
-                "userMessage":if observed {"已完成并复核"} else {"暂时无法完成复核"},
-                "oldFactPreserved":current.is_some(),
-                "newFactCurrent":new_current.is_some(),
-                "versionedAuthority":observed,
-                "typedRequery":true
-            }))
-        })
-        .map_err(manager_error)?;
+    let postverify = postverify_retcon(
+        manager,
+        project_id,
+        &change_id,
+        &old_fact_id,
+        &new_fact_id,
+        &receipt.receipt_id,
+        now,
+    );
     Ok(final_response(
         &receipt,
         json!({"status":"APPLIED","changeRequestId":change_id,"retconPlanId":plan_id,"oldFactId":old_fact_id,"newFactId":new_fact_id,"signingImpact":plan.downstream_impact.get("signingImpact").cloned().unwrap_or(json!(false))}),
@@ -2480,22 +2914,38 @@ pub fn apply_retcon_on_connection(
     let change_id = required_string(input, "changeRequestId")?.to_owned();
     let plan_id = required_string(input, "retconPlanId")?.to_owned();
     let supplied_digest = required_string(input, "impactDigest")?.to_owned();
+    let plan = repository::load_retcon_plan(connection, project_id, &plan_id)
+        .map_err(|error| format!("B12_DB:{error}"))?
+        .ok_or_else(|| "B12_RETCON_PLAN_NOT_FOUND".to_string())?;
     if let Some(previous) = CommitService::find_receipt(connection, project_id, idempotency_key)
         .map_err(|error| error.to_string())?
     {
+        let old_fact_id = plan
+            .target_fact
+            .get("old")
+            .and_then(|fact| fact.get("factId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let new_fact_id = format!("{old_fact_id}:retcon:{plan_id}");
+        let postverify = postverify_retcon_on_connection(
+            connection,
+            project_id,
+            &change_id,
+            old_fact_id,
+            &new_fact_id,
+            &previous.receipt_id,
+            now,
+        );
         return Ok(json!({
             "receiptId":previous.receipt_id,
             "receipt":previous,
             "result":{"status":"REPLAYED","changeRequestId":change_id,"retconPlanId":plan_id},
-            "postverify":{"status":"VERIFIED","userMessage":"已完成并复核","typedRequery":true}
+            "postverify":postverify
         }));
     }
     let change = repository::load_change_request(connection, project_id, &change_id)
         .map_err(|error| format!("B12_DB:{error}"))?
         .ok_or_else(|| "B12_CHANGE_REQUEST_NOT_FOUND".to_string())?;
-    let plan = repository::load_retcon_plan(connection, project_id, &plan_id)
-        .map_err(|error| format!("B12_DB:{error}"))?
-        .ok_or_else(|| "B12_RETCON_PLAN_NOT_FOUND".to_string())?;
     if change.status != "APPROVED" || plan.status != "APPROVED" {
         return Err("B12_USER_DECISION_REQUIRED".into());
     }
@@ -2647,23 +3097,20 @@ pub fn apply_retcon_on_connection(
             })
         })
         .map_err(|error| error.to_string())?;
-    let current = repository::current_fact(connection, project_id, &old_fact_id)
-        .map_err(|error| format!("B12_DB:{error}"))?;
-    let new_current = repository::current_fact(connection, project_id, &new_fact_id)
-        .map_err(|error| format!("B12_DB:{error}"))?;
-    let verified = current
-        .as_ref()
-        .and_then(|item| item.get("supersededBy"))
-        .and_then(Value::as_str)
-        == Some(new_fact_id.as_str())
-        && new_current.is_some()
-        && repository::state_exists(connection, project_id, &format!("change-state:{change_id}"))
-            .map_err(|error| format!("B12_DB:{error}"))?;
+    let postverify = postverify_retcon_on_connection(
+        connection,
+        project_id,
+        &change_id,
+        &old_fact_id,
+        &new_fact_id,
+        &receipt.receipt_id,
+        now,
+    );
     Ok(json!({
         "receiptId":receipt.receipt_id,
         "receipt":receipt,
         "result":{"status":"APPLIED","changeRequestId":change_id,"retconPlanId":plan_id,"oldFactId":old_fact_id,"newFactId":new_fact_id},
-        "postverify":{"status":if verified {"VERIFIED"} else {"INCOMPLETE"},"userMessage":if verified {"已完成并复核"} else {"暂时无法完成复核"},"oldFactPreserved":current.is_some(),"newFactCurrent":new_current.is_some(),"versionedAuthority":verified,"typedRequery":true}
+        "postverify":postverify
     }))
 }
 
@@ -2807,5 +3254,190 @@ pub fn execute(
             request,
         ),
         _ => Err(format!("B12_UNSUPPORTED_COMMAND:{command_type}")),
+    }
+}
+
+#[cfg(test)]
+mod postverify_contract_tests {
+    use super::{
+        apply_change_with_postverify_query, final_response, postverify_response, project_revision,
+        repository,
+    };
+    use crate::commands::{execute_command_impl, KernelState};
+    use crate::commit::CommitService;
+    use crate::generated::types::CommitReceipt;
+    use crate::production::UnavailableProductionGateway;
+    use crate::project_db::paths::AppPaths;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    const NOW: &str = "2026-09-24T00:00:00Z";
+
+    fn state(project_id: &str) -> KernelState {
+        let temp = tempfile::tempdir().unwrap();
+        let root = Box::leak(Box::new(temp)).path().to_path_buf();
+        let state = KernelState::with_production_gateway(
+            AppPaths::new(root),
+            Arc::new(UnavailableProductionGateway),
+        );
+        state
+            .manager
+            .create(project_id, "B12 postverify fault", NOW)
+            .unwrap();
+        state
+    }
+
+    fn command(
+        state: &KernelState,
+        project_id: &str,
+        kind: &str,
+        id: &str,
+        payload: Value,
+    ) -> Value {
+        execute_command_impl(
+            state,
+            json!({
+                "type":kind,
+                "commandId":id,
+                "idempotencyKey":format!("{id}:key"),
+                "projectId":project_id,
+                "expectedRevision":0,
+                "requestedAt":NOW,
+                "payload":payload
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn committed_receipt_stays_committed_when_postverify_query_fails() {
+        let receipt: CommitReceipt = serde_json::from_value(json!({
+            "receiptId":"receipt:b12:test",
+            "commitId":"commit:b12:test",
+            "projectId":"project:b12:test",
+            "commandId":"command:b12:test",
+            "idempotencyKey":"key:b12:test",
+            "beforeRevision":7,
+            "afterRevision":8,
+            "bundleDigest":"a".repeat(64),
+            "committedArtifactRefs":[],
+            "headChanges":[],
+            "appliedDeltaCounts":{},
+            "gateCertificateRefs":[],
+            "committedAt":"2026-09-24T00:00:00Z",
+            "receiptDigest":"b".repeat(64)
+        }))
+        .expect("fixture matches the current receipt contract");
+        let postverify =
+            postverify_response(Err("injected readback failure".into()), &receipt.receipt_id);
+        let response = final_response(&receipt, json!({"status":"APPLIED"}), postverify, "done");
+        assert_eq!(response["finalStatus"], "committed");
+        assert_eq!(response["postverify"]["status"], "QUERY_FAILED");
+        assert_eq!(response["receiptId"], receipt.receipt_id);
+        assert_eq!(response["beforeRevision"], 7);
+        assert_eq!(response["afterRevision"], 8);
+        assert!(response["message"].as_str().unwrap().contains("结果待确认"));
+        println!("B12_POSTVERIFY_QUERY_FAILURE_RESULT committed=PASS receipt=PASS revisions=PASS retryForbidden=PASS status=PASS");
+    }
+
+    #[test]
+    fn incomplete_postverify_does_not_claim_write_failure() {
+        let value: Value = json!({"status":"INCOMPLETE","userMessage":"已提交，复核尚未完成"});
+        let postverify = postverify_response(Ok(value), "receipt:b12:incomplete");
+        assert_eq!(postverify["status"], "INCOMPLETE");
+        println!("B12_POSTVERIFY_INCOMPLETE_RESULT status=PASS");
+    }
+
+    #[test]
+    fn first_change_commit_with_injected_postverify_failure_keeps_receipt_and_replays_once() {
+        let state = state("p-b12-first-postverify-fault");
+        let project_id = "p-b12-first-postverify-fault";
+        let change_id = "change:b12:first-postverify-fault";
+        command(
+            &state,
+            project_id,
+            "change_request_create",
+            "cmd:b12:first-fault:create",
+            json!({"changeRequestId":change_id,"changeType":"CHANGE","scope":"PROJECT","summary":"先提交再注入读回失败","requestedChange":{"target":"项目策略"},"sourceRefs":[]}),
+        );
+        let preflight = command(
+            &state,
+            project_id,
+            "impact_preflight",
+            "cmd:b12:first-fault:preflight",
+            json!({"changeRequestId":change_id}),
+        );
+        let impact_digest = preflight["result"]["impactDigest"].as_str().unwrap();
+        command(
+            &state,
+            project_id,
+            "change_request_decide",
+            "cmd:b12:first-fault:decision",
+            json!({"changeRequestId":change_id,"decision":"APPROVE","impactDigest":impact_digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
+        );
+
+        let command_id = "cmd:b12:first-fault:apply";
+        let idempotency_key = "cmd:b12:first-fault:apply:key";
+        let request = json!({"payload":{"changeRequestId":change_id,"impactDigest":impact_digest}});
+        let first = apply_change_with_postverify_query(
+            &state.manager,
+            project_id,
+            command_id,
+            idempotency_key,
+            Some(0),
+            NOW,
+            &request,
+            &"d".repeat(64),
+            |_, _, _, _, _, _, _| Err("injected first postverify read failure".into()),
+        )
+        .expect("commit success must return an unknown-result receipt after injected read failure");
+        assert_eq!(first["finalStatus"], "committed");
+        assert_eq!(first["postverify"]["status"], "QUERY_FAILED");
+        assert_eq!(first["postverify"]["statusPersisted"], true);
+        assert_eq!(first["beforeRevision"], 0);
+        assert_eq!(first["afterRevision"], 1);
+        assert_eq!(first["result"]["authorityMutation"], false);
+
+        let replay = command(
+            &state,
+            project_id,
+            "change_request_apply",
+            command_id,
+            json!({"changeRequestId":change_id,"impactDigest":impact_digest}),
+        );
+        assert_eq!(replay["finalStatus"], "committed");
+        assert_eq!(replay["result"]["status"], "REPLAYED");
+        assert_eq!(replay["receiptId"], first["receiptId"]);
+        assert_eq!(replay["postverify"]["status"], "VERIFIED");
+
+        state
+            .manager
+            .with_read_connection(project_id, NOW, |connection| {
+                let receipt = CommitService::find_receipt(connection, project_id, idempotency_key)
+                    .unwrap()
+                    .expect("one durable receipt remains for this logical apply");
+                let revision = project_revision(connection, project_id).unwrap();
+                let stale =
+                    repository::state_exists(connection, project_id, &format!("stale:{change_id}"))
+                        .unwrap();
+                let applied = repository::state_exists(
+                    connection,
+                    project_id,
+                    &format!("change-state:{change_id}"),
+                )
+                .unwrap();
+                let detail =
+                    repository::change_request_detail(connection, project_id, change_id, 100, 0)
+                        .unwrap()
+                        .expect("change detail remains available");
+                assert_eq!(receipt.receipt_id, first["receiptId"]);
+                assert_eq!(revision, 1);
+                assert!(stale);
+                assert!(applied);
+                assert_eq!(detail["postverifyStatus"], "VERIFIED");
+                Ok::<_, crate::project_db::ManagerError>(())
+            })
+            .unwrap();
+        println!("B12_FIRST_APPLY_POSTVERIFY_FAULT_RESULT commit=PASS committed=PASS queryFailed=PASS receipt=PASS revision=PASS stale=PASS authority=PASS safeReplay=PASS status=PASS");
     }
 }

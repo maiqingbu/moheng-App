@@ -298,6 +298,11 @@ fn dispatch(state: &KernelState, command: &str, body: Value) -> Result<Value, St
         "query_volume_list" => query_volume_list_impl(state, request),
         "query_reader_volumes" => query_volume_list_impl(state, request),
         "query_book_health" => query_book_health_impl(state, request),
+        "query_book_health_factor_sources" => {
+            ai_novel_production_system_core::commands::query_book_health_factor_sources_impl(
+                state, request,
+            )
+        }
         "query_market_opportunities" => Ok(json!([])),
         "support_session" => support_session_impl(state, request),
         "query_assistant_repair_plan" => query_assistant_repair_plan_impl(state, request),

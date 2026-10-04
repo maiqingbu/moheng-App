@@ -217,6 +217,18 @@
       "write_owner": "MaintenanceService"
     },
     {
+      "authoritative_table": "health_b09_rebuild_pending",
+      "authority_key": "health_b09_rebuild_pending",
+      "projection_only": 1,
+      "write_owner": "B08::B09ProjectionCoordinator"
+    },
+    {
+      "authoritative_table": "health_issue_projection",
+      "authority_key": "health_issue_projection",
+      "projection_only": 1,
+      "write_owner": "B13::HealthProjectionMaintenance"
+    },
+    {
       "authoritative_table": "impact_frontier",
       "authority_key": "impact_frontier",
       "projection_only": 0,
@@ -711,6 +723,42 @@
       "family": "receipt",
       "retention_class": "PERMANENT",
       "table_name": "gc_receipts"
+    },
+    {
+      "authority_key": "health_b09_rebuild_pending",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "health_b09_rebuild_pending"
+    },
+    {
+      "authority_key": "health_issue_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "health_issue_projection"
+    },
+    {
+      "authority_key": "health_issue_projection",
+      "family": "health_projection_dirty",
+      "retention_class": "POLICY",
+      "table_name": "health_projection_dirty"
+    },
+    {
+      "authority_key": "health_issue_projection",
+      "family": "health_projection_state",
+      "retention_class": "POLICY",
+      "table_name": "health_projection_state"
+    },
+    {
+      "authority_key": "health_issue_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "health_route_scope_projection"
+    },
+    {
+      "authority_key": "health_issue_projection",
+      "family": "health_projection",
+      "retention_class": "POLICY",
+      "table_name": "health_task_scope_index"
     },
     {
       "authority_key": "impact_frontier",

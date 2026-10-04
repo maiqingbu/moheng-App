@@ -251,6 +251,12 @@ impl ProjectManager {
             (|| -> Result<(), ManagerError> {
                 let connection = open_connection(&database, false)?;
                 migrate_project(&connection, project_id, &normalized_title, now)?;
+                crate::repositories::health::HealthRepository::ensure_current(
+                    &connection,
+                    project_id,
+                    now,
+                )
+                .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 record_runtime_profile(&connection, project_id, now)
                     .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
                 crate::repositories::ops::SearchService::ensure_projection(
@@ -368,6 +374,12 @@ impl ProjectManager {
                 }
                 return Err(error.into());
             }
+            crate::repositories::health::HealthRepository::ensure_current(
+                &connection,
+                project_id,
+                now,
+            )
+            .map_err(|error| DatabaseError::Integrity(error.to_string()))?;
             if ensure_projection {
                 record_runtime_profile(&connection, project_id, now).map_err(|error| {
                     ManagerError::Database(DatabaseError::Integrity(error.to_string()))

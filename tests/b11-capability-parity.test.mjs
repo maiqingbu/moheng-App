@@ -21,9 +21,14 @@ test('b11_future_route_hidden', () => {
   assert.deepEqual(report.futureRouteLeaks, [])
 })
 
-test('b11_market_refresh_truthfulness', () => {
+test('r2_04a_market_actions_have_a_formal_owner_and_no_unsupported_pulse_action', () => {
   const report = inspectB11CapabilityParity()
   assert.deepEqual(report.unsupportedMarketActions, [])
+  assert.deepEqual(report.missingMarketActionOwners, [])
+  assert.deepEqual(report.authorizedMarketActions, {
+    marketRefresh: true,
+    marketOpportunitySelect: true,
+  })
 })
 
 test('b11_frozen_ia_routes_preserved', () => {

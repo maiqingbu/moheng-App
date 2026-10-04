@@ -769,8 +769,8 @@ fn repeated_open_does_not_repeat_migration_or_backup_storm() {
             })
             .unwrap();
         assert_eq!(
-            max_version, 12,
-            "schema version must settle at B13 v12 and not grow"
+            max_version, 14,
+            "schema version must settle at B-R2-03 v14 and not grow"
         );
         drop(conn);
     }

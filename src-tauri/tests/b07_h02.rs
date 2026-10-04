@@ -116,18 +116,14 @@ fn b07_volume_intent_and_route_query_use_commit_bundle_authority() {
     assert_eq!(query["routeVersion"], 1);
     assert_eq!(query["tasks"].as_array().unwrap().len(), 100);
     assert_eq!(query["truncated"], true);
-    let context = query_context_manifest_impl(
+    let context_error = query_context_manifest_impl(
         &state,
         json!({"projectId":"p1","volumeId":volume_id,"chapterId":"chapter:1","scope":"VOLUME","entityIds":[],"references":[]}),
     )
-    .unwrap();
-    assert!(context["goalContractRefs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|reference| reference["artifactId"] == format!("plan:volumeintent:{volume_id}")));
+    .unwrap_err();
+    assert!(context_error.contains("CONTEXT_HARD_INCOMPLETE|sources=TASK|scope=CHAPTER:chapter:1"));
     println!("B07_INTENT_RESULT malformed_rejected=PASS valid_commit=PASS");
-    println!("B07_ROUTE_RESULT volume_scope=PASS task_reality=PASS h02_query=PASS truncation=PASS status=PASS");
+    println!("B07_ROUTE_RESULT volume_scope=PASS h02_query=PASS truncation=PASS context_over_bound=BLOCKED status=PASS");
     let connection = state
         .manager
         .open("p1", "", "2026-08-30T00:00:02Z")

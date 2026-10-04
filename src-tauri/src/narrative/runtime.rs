@@ -13,6 +13,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ContextHardSource {
+    Canon,
+    Continuity,
+    Contract,
+    Evidence,
+    Knowledge,
+    Reservation,
+    Task,
+    Unknown,
+}
+
+impl ContextHardSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Canon => "CANON",
+            Self::Continuity => "CONTINUITY",
+            Self::Contract => "CONTRACT",
+            Self::Evidence => "EVIDENCE",
+            Self::Knowledge => "KNOWLEDGE",
+            Self::Reservation => "RESERVATION",
+            Self::Task => "TASK",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeBounds {
@@ -35,6 +63,8 @@ pub struct CurrentNarrativeStateView {
     pub world_time: Option<String>,
     pub source_refs: Vec<SourceRef>,
     pub truncated: bool,
+    #[serde(skip)]
+    pub truncated_sources: BTreeSet<ContextHardSource>,
 }
 
 impl CurrentNarrativeStateView {
@@ -67,6 +97,11 @@ impl CurrentNarrativeStateView {
         for obligation in &active_responsibilities {
             source_refs.insert(obligation.obligation_id.clone());
         }
+        let truncated_sources = if truncated {
+            [ContextHardSource::Unknown].into_iter().collect()
+        } else {
+            BTreeSet::new()
+        };
         Self {
             bounds,
             facts,
@@ -83,7 +118,13 @@ impl CurrentNarrativeStateView {
                 })
                 .collect(),
             truncated,
+            truncated_sources,
         }
+    }
+
+    pub fn mark_truncated(&mut self, source: ContextHardSource) {
+        self.truncated = true;
+        self.truncated_sources.insert(source);
     }
 }
 
@@ -333,7 +374,69 @@ pub struct ContextCompilerInput {
     pub soft_tokens: i64,
 }
 
+pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 1024;
+pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 8192;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextHardBudgetUsage {
+    pub estimated_tokens: i64,
+    pub serialized_bytes: usize,
+}
+
+/// Measures the full HARD input payload deterministically. The provider may
+/// use a model-specific tokenizer, so admission uses a stable estimate: one
+/// unit per non-ASCII scalar and three ASCII bytes per token unit.
+pub fn measure_context_hard_budget(
+    input: &ContextCompilerInput,
+) -> Result<ContextHardBudgetUsage, String> {
+    let mut hard_input = input.clone();
+    hard_input.hard_tokens = 0;
+    hard_input.soft_tokens = 0;
+    hard_input.omitted_soft_sources.clear();
+    let serialized = serde_json::to_string(&hard_input).map_err(|error| error.to_string())?;
+    let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+    let non_ascii_scalars = serialized
+        .chars()
+        .filter(|character| !character.is_ascii())
+        .count();
+    let estimated_tokens = (ascii_bytes.div_ceil(3) + non_ascii_scalars) as i64;
+    Ok(ContextHardBudgetUsage {
+        estimated_tokens,
+        serialized_bytes: serialized.len(),
+    })
+}
+
+pub fn validate_context_hard_budget(
+    input: &ContextCompilerInput,
+) -> Result<ContextHardBudgetUsage, String> {
+    let usage = measure_context_hard_budget(input)?;
+    if usage.estimated_tokens > CONTEXT_HARD_TOKEN_LIMIT
+        || usage.serialized_bytes > CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+    {
+        let scope = context_scope(&input.state.bounds);
+        return Err(format!(
+            "CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens={}|limitTokens={}|serializedBytes={}|limitBytes={}|scope={scope}",
+            usage.estimated_tokens,
+            CONTEXT_HARD_TOKEN_LIMIT,
+            usage.serialized_bytes,
+            CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+        ));
+    }
+    Ok(usage)
+}
+
+fn context_scope(bounds: &RuntimeBounds) -> String {
+    if let Some(chapter_id) = bounds.chapter_id.as_deref() {
+        format!("CHAPTER:{chapter_id}")
+    } else if let Some(volume_id) = bounds.volume_id.as_deref() {
+        format!("VOLUME:{volume_id}")
+    } else {
+        format!("PROJECT:{}", bounds.project_id)
+    }
+}
+
 pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, String> {
+    validate_context_hard_completeness(input)?;
     let mut goal_contract_refs = input.goal_contract_refs.clone();
     goal_contract_refs.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
     let mut facts = input.state.facts.clone();
@@ -354,6 +457,8 @@ pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, Str
 pub fn compile_context_manifest(
     mut input: ContextCompilerInput,
 ) -> Result<ContextManifestR1, String> {
+    validate_context_hard_completeness(&input)?;
+    let hard_budget_usage = measure_context_hard_budget(&input)?;
     input
         .goal_contract_refs
         .sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
@@ -388,11 +493,37 @@ pub fn compile_context_manifest(
         hard_source_count,
         omitted_soft_sources: input.omitted_soft_sources,
         budget: ContextManifestR1Budget {
-            hard_tokens: input.hard_tokens.max(0),
+            hard_tokens: hard_budget_usage.estimated_tokens,
             soft_tokens: input.soft_tokens.max(0),
-            total_tokens: input.hard_tokens.max(0) + input.soft_tokens.max(0),
+            total_tokens: hard_budget_usage.estimated_tokens + input.soft_tokens.max(0),
         },
     })
+}
+
+pub fn validate_context_hard_completeness(input: &ContextCompilerInput) -> Result<(), String> {
+    let mut sources = input.state.truncated_sources.clone();
+    if input.state.truncated && sources.is_empty() {
+        sources.insert(ContextHardSource::Unknown);
+    }
+    if sources.is_empty() {
+        validate_context_hard_budget(input)?;
+        return Ok(());
+    }
+    let sources = sources
+        .into_iter()
+        .map(ContextHardSource::code)
+        .collect::<Vec<_>>()
+        .join(",");
+    let scope = if let Some(chapter_id) = input.state.bounds.chapter_id.as_deref() {
+        format!("CHAPTER:{chapter_id}")
+    } else if let Some(volume_id) = input.state.bounds.volume_id.as_deref() {
+        format!("VOLUME:{volume_id}")
+    } else {
+        format!("PROJECT:{}", input.state.bounds.project_id)
+    };
+    Err(format!(
+        "CONTEXT_HARD_INCOMPLETE|sources={sources}|scope={scope}"
+    ))
 }
 
 /// B06's persisted opening context owner. Callers provide only a typed

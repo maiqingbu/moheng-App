@@ -304,6 +304,17 @@ fn b13_r3_task_reality_is_complete_for_b09_and_b13_health() {
         .unwrap();
     assert_eq!(page_one["counters"]["blockedRequiredTasks"], 1);
     assert_eq!(h04["severity"], "risk");
+    assert!(
+        page_one["issues"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| {
+                issue["issueId"] == format!("health:task:{}", fixture.task_ids[500])
+                    && issue["sourceRefs"][0]["ref"] == fixture.task_ids[500]
+            }),
+        "blocked task 501 must remain reachable beyond the 201-row detail sample"
+    );
     assert_eq!(page_one["level"], page_fifty["level"]);
     assert_eq!(page_one["score"], page_fifty["score"]);
     assert_eq!(page_one["counters"], page_fifty["counters"]);
@@ -336,12 +347,20 @@ fn b13_r3_task_reality_is_complete_for_b09_and_b13_health() {
     print_query_plan(
         "formal_route_source",
         FORMAL_ROUTE_ROWS_SQL,
-        explain_with_params(&fixture.connection, FORMAL_ROUTE_ROWS_SQL, [PROJECT_ID]),
+        explain_with_params(
+            &fixture.connection,
+            FORMAL_ROUTE_ROWS_SQL,
+            libsql_rusqlite::params![PROJECT_ID, 101],
+        ),
     );
     print_query_plan(
         "planning_state_projection_lookup",
         FORMAL_ROUTE_ROWS_SQL,
-        explain_with_params(&fixture.connection, FORMAL_ROUTE_ROWS_SQL, [PROJECT_ID]),
+        explain_with_params(
+            &fixture.connection,
+            FORMAL_ROUTE_ROWS_SQL,
+            libsql_rusqlite::params![PROJECT_ID, 101],
+        ),
     );
     print_query_plan(
         "volume_plan_payload_lookup",

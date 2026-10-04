@@ -12,6 +12,8 @@ export function inspectB10Architecture(projectRoot = root) {
   const creativeTs = readFrom('src/production/skills/runtime.ts')
   const production = readFrom('src-tauri/src/production.rs')
   const commands = readFrom('src-tauri/src/commands.rs')
+  const desktopEntry = readFrom('src-tauri/src/main.rs')
+  const buildScript = readFrom('src-tauri/build.rs')
   const repair = readFrom('src-tauri/src/repair.rs')
   const harness = readFrom('src-tauri/src/harness/mod.rs')
   const projection = readFrom('src-tauri/src/repositories/production.rs')
@@ -41,8 +43,15 @@ export function inspectB10Architecture(projectRoot = root) {
     noCommandsPersistenceSql: !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(commands),
     noProductionPersistenceSql: !/\bSELECT\s+|\bINSERT\s+|\bUPDATE\s+|\bDELETE\s+/.test(production),
     repairOwnerRemainsExplicit: /TypedRepairOwner|repair_authorize|repair_execute/.test(repair),
-    formalSkillLoader: /enrich_chapter_with_policy/.test(production) && /SkillBundleLoader::tracked_package/.test(creativeRust) && /load_selected/.test(creativeRust),
-    formalMethodConsumed: /enrich_chapter_with_policy/.test(production) && /build_method_guidance/.test(creativeRust) && /method_guidance/.test(creativeRust) && /loaded_skill_texts/.test(creativeRust),
+    formalSkillLoader: /enrich_chapter_with_loader/.test(production)
+      && /state\.skill_bundle_loader/.test(commands)
+      && /from_application_package_root/.test(desktopEntry)
+      && /verify_source_package/.test(buildScript)
+      && /load_selected/.test(creativeRust),
+    formalMethodConsumed: /enrich_chapter_with_loader/.test(production)
+      && /build_method_guidance/.test(creativeRust)
+      && /method_guidance/.test(creativeRust)
+      && /loaded_skill_texts/.test(creativeRust),
     productionRepairIntegration: /creative_skills::repair_candidate/.test(production) && /creative_skills::recheck_affected_dimensions/.test(production),
     semanticQualityEvaluator: /count_any|duplicate_sentence_count|dialogue_count|repeated_sentences/.test(creativeRust) && !/length_score/.test(creativeRust),
   }

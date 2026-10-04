@@ -1,4 +1,6 @@
-use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_production_center_impl, KernelState,
+};
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
@@ -352,6 +354,18 @@ fn b12_retcon_creates_versioned_canon_and_preserves_old_fact_history() {
     .unwrap();
     assert_eq!(applied["finalStatus"], "committed");
     assert_eq!(applied["postverify"]["status"], "VERIFIED");
+    let replayed = command(
+        &state,
+        "p-b12-retcon",
+        "retcon_apply",
+        "cmd:b12:retcon:apply",
+        0,
+        json!({"changeRequestId":"change:b12:retcon","retconPlanId":"retcon-plan:b12:father","impactDigest":digest}),
+    )
+    .expect("same logical Retcon retry must replay its durable receipt");
+    assert_eq!(replayed["finalStatus"], "committed");
+    assert_eq!(replayed["result"]["status"], "REPLAYED");
+    assert_eq!(replayed["receiptId"], applied["receiptId"]);
 
     state
         .manager
@@ -364,9 +378,26 @@ fn b12_retcon_creates_versioned_canon_and_preserves_old_fact_history() {
                 .unwrap();
             assert_eq!(old_superseded, "fact:b12:father:retcon:retcon-plan:b12:father");
             assert_eq!(new_count, 1);
+            let receipt_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b12-retcon' AND idempotency_key='cmd:b12:retcon:apply:key'", [], |row| row.get(0))
+                .unwrap();
+            let revision: i64 = connection
+                .query_row("SELECT revision FROM project_meta WHERE project_id='p-b12-retcon'", [], |row| row.get(0))
+                .unwrap();
+            let stale_delta_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM state_deltas WHERE project_id='p-b12-retcon' AND state_id='stale:change:b12:retcon'", [], |row| row.get(0))
+                .unwrap();
+            let postverify_status: String = connection
+                .query_row("SELECT json_extract(impact_seed_json,'$.postverifyStatus') FROM change_requests WHERE project_id='p-b12-retcon' AND change_request_id='change:b12:retcon'", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(receipt_count, 1);
+            assert_eq!(revision, 1);
+            assert_eq!(stale_delta_count, 1);
+            assert_eq!(postverify_status, "VERIFIED");
             Ok::<_, ai_novel_production_system_core::project_db::ManagerError>(())
         })
         .unwrap();
+    println!("B12_RETCON_REPLAY_RUNTIME_RESULT receipt=PASS revision=PASS canon=PASS stale=PASS status=PASS");
 }
 
 #[test]
@@ -522,12 +553,165 @@ fn b12_h03_execute_change_request_uses_one_time_p3_and_the_same_typed_owner() {
         "type":"repair_authorize","commandId":"cmd:b12:h03:auth","idempotencyKey":"key:b12:h03:auth","projectId":"p-b12-h03","expectedRevision":0,"requestedAt":NOW,
         "payload":{"authorization":authorization}
     })).unwrap();
+    let fault = state.manager.open("p-b12-h03", "", NOW).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER force_b12_h03_incomplete_postverify
+         AFTER UPDATE OF impact_seed_json ON change_requests
+         WHEN NEW.project_id='p-b12-h03'
+           AND NEW.status='APPLIED'
+           AND json_extract(NEW.impact_seed_json,'$.postverifyStatus')='VERIFIED'
+         BEGIN
+           UPDATE change_requests
+           SET impact_seed_json=json_set(NEW.impact_seed_json,'$.postverifyStatus','INCOMPLETE')
+           WHERE project_id=NEW.project_id AND change_request_id=NEW.change_request_id;
+         END;",
+        )
+        .unwrap();
+    drop(fault);
     let executed = execute_command_impl(&state, json!({
         "type":"repair_execute","commandId":"cmd:b12:h03:execute","idempotencyKey":"key:b12:h03:execute","projectId":"p-b12-h03","requestedAt":NOW,
         "payload":{"repairPlanId":"repair-plan:b12:h03","authorizationId":"repair-auth:b12:h03"}
     })).unwrap();
-    assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");
+    let first_h03_status = executed["receipt"]["status"].as_str().unwrap().to_owned();
+    let red_probe = state.manager.open("p-b12-h03", "", NOW).unwrap();
+    let red_persisted_postverify: String = red_probe.query_row(
+        "SELECT json_extract(impact_seed_json,'$.postverifyStatus') FROM change_requests WHERE project_id='p-b12-h03' AND change_request_id='change:b12:h03'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    drop(red_probe);
+    println!("B_R2_02_NORMAL_INITIAL_RESULT h03_status={first_h03_status} final_status={} persisted_b12_status={red_persisted_postverify}", executed["finalStatus"]);
+    assert_eq!(executed["finalStatus"], "blocked");
+    assert!(executed["message"]
+        .as_str()
+        .unwrap()
+        .contains("不会再次执行变更"));
+    let incomplete_postcondition = &executed["receipt"]["postconditions"][0];
+    assert_eq!(
+        incomplete_postcondition["status"],
+        "REPAIR_VERIFICATION_INCOMPLETE"
+    );
+    assert_eq!(incomplete_postcondition["projectId"], "p-b12-h03");
+    assert_eq!(
+        incomplete_postcondition["changeRequestId"],
+        "change:b12:h03"
+    );
+    assert_eq!(
+        incomplete_postcondition["ownerReceiptRef"],
+        executed["receipt"]["ownerReceiptRef"]
+    );
+    assert_eq!(incomplete_postcondition["beforeRevision"], 0);
+    assert_eq!(incomplete_postcondition["afterRevision"], 1);
+    assert_eq!(incomplete_postcondition["postverifyStatus"], "INCOMPLETE");
+    let faulted = state.manager.open("p-b12-h03", "", NOW).unwrap();
+    let persisted_postverify: String = faulted.query_row(
+        "SELECT json_extract(impact_seed_json,'$.postverifyStatus') FROM change_requests WHERE project_id='p-b12-h03' AND change_request_id='change:b12:h03'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let pending_projection =
+        query_production_center_impl(&state, json!({"projectId":"p-b12-h03"})).unwrap();
+    assert_eq!(
+        pending_projection["repair"]["status"],
+        "REPAIR_VERIFICATION_INCOMPLETE"
+    );
+    assert_eq!(
+        pending_projection["repair"]["executionReceipt"]["status"],
+        "REPAIR_VERIFICATION_INCOMPLETE"
+    );
+    assert_eq!(
+        pending_projection["repair"]["executionReceipt"]["ownerReceiptRef"],
+        executed["receipt"]["ownerReceiptRef"]
+    );
+    faulted
+        .execute_batch("DROP TRIGGER force_b12_h03_incomplete_postverify;")
+        .unwrap();
+    drop(faulted);
+    let recovered = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_execute","commandId":"cmd:b12:h03:reverify","idempotencyKey":"key:b12:h03:reverify","projectId":"p-b12-h03","requestedAt":NOW,
+            "payload":{"repairPlanId":"repair-plan:b12:h03","authorizationId":"repair-auth:b12:h03"}
+        }),
+    );
+    let recovered_status = recovered
+        .as_ref()
+        .ok()
+        .and_then(|value| value.pointer("/receipt/status"))
+        .and_then(Value::as_str)
+        .unwrap_or("REVERIFY_REJECTED");
+    println!("B_R2_02_NORMAL_POSTVERIFY_RESULT first_h03_status={first_h03_status} persisted_b12_status={persisted_postverify} recovered_h03_status={recovered_status}");
+    assert_eq!(persisted_postverify, "INCOMPLETE");
+    assert_eq!(first_h03_status, "REPAIR_VERIFICATION_INCOMPLETE");
+    assert_eq!(recovered_status, "REPAIR_VERIFIED");
+    let recovered = recovered.unwrap();
+    assert_eq!(recovered["finalStatus"], "committed");
+    assert_eq!(
+        recovered["receipt"]["receiptRef"],
+        executed["receipt"]["receiptRef"]
+    );
+    assert_eq!(recovered["receipt"]["postconditions"][0]["status"], "PASS");
+    assert_eq!(
+        recovered["receipt"]["postconditions"][0]["postverifyStatus"],
+        "VERIFIED"
+    );
+    let recovered_projection =
+        query_production_center_impl(&state, json!({"projectId":"p-b12-h03"})).unwrap();
+    assert_eq!(recovered_projection["repair"]["status"], "REPAIR_VERIFIED");
+    assert_eq!(
+        recovered_projection["repair"]["executionReceipt"]["status"],
+        "REPAIR_VERIFIED"
+    );
+    assert_eq!(
+        recovered_projection["repair"]["executionReceipt"]["ownerReceiptRef"],
+        executed["receipt"]["ownerReceiptRef"]
+    );
+    let recovered_handle = state.manager.open("p-b12-h03", "", NOW).unwrap();
+    let h03_receipt_count: i64 = recovered_handle
+        .query_row(
+            "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id='p-b12-h03' AND authorization_id='repair-auth:b12:h03'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let b12_receipt_count: i64 = recovered_handle
+        .query_row(
+            "SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b12-h03' AND idempotency_key='h03:b12:apply:key'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let consumed_authorization_count: i64 = recovered_handle
+        .query_row(
+            "SELECT COUNT(*) FROM repair_authorizations WHERE project_id='p-b12-h03' AND authorization_id='repair-auth:b12:h03' AND consumed_at IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recovered_revision: i64 = recovered_handle
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id='p-b12-h03'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stale_activation_count: i64 = recovered_handle
+        .query_row(
+            "SELECT COUNT(*) FROM state_deltas WHERE project_id='p-b12-h03' AND state_id='stale:change:b12:h03'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    println!("B_R2_02_NORMAL_RECOVERY_BINDING_RESULT h03_receipts={h03_receipt_count} b12_receipts={b12_receipt_count} consumed_authorizations={consumed_authorization_count} revision={recovered_revision} stale_activations={stale_activation_count}");
+    assert_eq!(h03_receipt_count, 1);
+    assert_eq!(b12_receipt_count, 1);
+    assert_eq!(consumed_authorization_count, 1);
+    assert_eq!(recovered_revision, 1);
+    assert_eq!(stale_activation_count, 1);
+    drop(recovered_handle);
     assert_eq!(executed["receipt"]["owner"], "B12::ChangeRetconOwner");
+    println!("B12_H03_CHANGE_RECOVERY_RESULT postverify=VERIFIED h03_receipts=1 b12_receipts=1 revision=1 stale_activations=1 noDuplicate=PASS status=PASS");
 }
 
 #[test]

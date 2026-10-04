@@ -233,6 +233,8 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
     let mut durations = Vec::with_capacity(30);
     let mut hard_serialized_bytes_max = 0_usize;
     let mut bounded_query_ok = true;
+    let mut hard_budget_blocked_samples = 0_usize;
+    let mut observed_budget_blocker = None::<String>;
     for _ in 0..30 {
         let started = Instant::now();
         manager.with_read_connection("p1", "2026-08-29T00:00:00Z", |read| {
@@ -246,8 +248,17 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
             bounded_query_ok &= facts.len() <= 100 && relations.len() <= 100 && knowledge.len() <= 100 && events.len() <= 100 && obligations.len() <= 100 && evidence.len() <= 10;
             let state = ai_novel_production_system_core::narrative::CurrentNarrativeStateView::from_records(ai_novel_production_system_core::narrative::RuntimeBounds { project_id:"p1".into(), entity_ids:vec![entity_id.clone()], volume_id:Some(volume_id.clone()), chapter_id:Some(chapter_id.clone()), limit:100 }, facts, relations, knowledge, events, obligations.clone(), false);
             let threads = ai_novel_production_system_core::narrative::build_continuity_threads(&obligations, &[], &[], &evidence, &Default::default()).unwrap();
-            let context = ai_novel_production_system_core::narrative::compile_context_manifest(ai_novel_production_system_core::narrative::ContextCompilerInput { execution_mode:"LONG_FORM".into(), project_revision:0, goal_contract_refs:Vec::new(), state, continuity_threads:threads, active_task_refs:Vec::new(), future_reservation_refs:Vec::new(), selected_evidence:Vec::new(), omitted_soft_sources:Vec::new(), hard_tokens:1024, soft_tokens:256 }).unwrap();
-            hard_serialized_bytes_max = hard_serialized_bytes_max.max(serde_json::to_vec(&context).unwrap().len());
+            let input = ai_novel_production_system_core::narrative::ContextCompilerInput { execution_mode:"LONG_FORM".into(), project_revision:0, goal_contract_refs:Vec::new(), state, continuity_threads:threads, active_task_refs:Vec::new(), future_reservation_refs:Vec::new(), selected_evidence:Vec::new(), omitted_soft_sources:Vec::new(), hard_tokens:1024, soft_tokens:256 };
+            let usage = ai_novel_production_system_core::narrative::measure_context_hard_budget(&input).unwrap();
+            hard_serialized_bytes_max = hard_serialized_bytes_max.max(usage.serialized_bytes);
+            let blocker = ai_novel_production_system_core::narrative::compile_context_manifest(input).unwrap_err();
+            assert!(blocker.starts_with("CONTEXT_HARD_BUDGET_EXCEEDED"));
+            if let Some(previous) = &observed_budget_blocker {
+                assert_eq!(previous, &blocker, "the same 10M context must block deterministically");
+            } else {
+                observed_budget_blocker = Some(blocker);
+            }
+            hard_budget_blocked_samples += 1;
             Ok::<(), ai_novel_production_system_core::project_db::ManagerError>(())
         }).unwrap();
         durations.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -256,22 +267,26 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
     let p50 = percentile(&durations, 0.50);
     let p95 = percentile(&durations, 0.95);
     let max = *durations.last().unwrap();
-    let hard_context_bounded = hard_serialized_bytes_max <= 8192;
-    assert!(p95 <= 300.0 && bounded_query_ok && hard_context_bounded);
+    let hard_budget_enforced = hard_budget_blocked_samples == 30
+        && hard_serialized_bytes_max
+            > ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+        && observed_budget_blocker.is_some();
+    assert!(p95 <= 300.0 && bounded_query_ok && hard_budget_enforced);
     drop(connection);
     let kernel = KernelState::new(paths.clone());
-    let context_result = query_context_manifest_impl(&kernel, json!({"projectId":"p1","volumeId":volume_id,"chapterId":chapter_id,"entityIds":[entity_id],"references":["fact:b06-scale-identity","event:b06-scale-promise","artifact:b06-scale-evidence"],"includeSoftSources":true})).unwrap();
-    assert_eq!(
-        context_result["futureReservationRefs"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+    let context_error = query_context_manifest_impl(&kernel, json!({"projectId":"p1","volumeId":volume_id,"chapterId":chapter_id,"entityIds":[entity_id],"references":["fact:b06-scale-identity","event:b06-scale-promise","artifact:b06-scale-evidence"],"includeSoftSources":true})).unwrap_err();
+    let context_blocked_by_hard_gate = context_error.contains("CONTEXT_HARD_BUDGET_EXCEEDED")
+        || context_error.contains("CONTEXT_HARD_INCOMPLETE")
+        || context_error.contains("CONTEXT_SOURCE_UNAVAILABLE");
+    assert!(
+        context_blocked_by_hard_gate,
+        "10M formal Context must fail closed with a typed HARD reason: {context_error}"
     );
-    assert_eq!(
-        context_result["selectedEvidence"].as_array().unwrap().len(),
-        1
-    );
+    let context_manifest_count: i64 = kernel.manager.with_read_connection("p1", "2026-08-29T00:00:00Z", |read| {
+        read.query_row("SELECT COUNT(*) FROM artifacts WHERE project_id='p1' AND artifact_type='ContextManifest'", [], |row| row.get(0))
+            .map_err(|error| ai_novel_production_system_core::project_db::ManagerError::ProjectCommand(error.to_string()))
+    }).unwrap();
+    assert_eq!(context_manifest_count, 0);
     let progress = query_volume_progress_impl(
         &kernel,
         json!({"projectId":"p1","volumeId":volume_id,"currentChapter":1}),
@@ -326,7 +341,7 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
     let db_bytes = std::fs::metadata(&database_path).unwrap().len();
     let topology = json!({"promiseRows":1,"knowledgeRows":1,"eventRows":1,"evidenceRows":1,"taskRows":1,"volumePlanRows":1});
     let digest = sha256_canonical(&json!({"seed":manifest.seed,"counts":manifest.counts,"targetWords":manifest.target_words,"topology":topology})).unwrap();
-    let report = json!({"fixture":"LONG_BOOK_10M","fixtureDigest":digest,"dbBytes":db_bytes,"compilerSamples":30,"compilerP50Ms":p50,"compilerP95Ms":p95,"compilerMaxMs":max,"hardSerializedBytesMax":hard_serialized_bytes_max,"fullCanonScan":full_canon_scan,"fullThreadScan":full_thread_scan,"fullEvidenceDump":full_evidence_dump,"queryPlanMeasured":query_plan_measured,"h01BoundedQuery":bounded_query_ok,"hardContextBounded":hard_context_bounded,"materializedFinalBodyChars":final_body_chars,"initialBackfill":initial_backfill,"searchHitCount":search.total,"topology":topology,"standardPerformance":standard,"searchPerformance":search_report,"integrity":integrity,"status":"PASS"});
+    let report = json!({"fixture":"LONG_BOOK_10M","fixtureDigest":digest,"dbBytes":db_bytes,"compilerSamples":30,"compilerP50Ms":p50,"compilerP95Ms":p95,"compilerMaxMs":max,"hardSerializedBytesMax":hard_serialized_bytes_max,"hardBudgetBlockedSamples":hard_budget_blocked_samples,"hardBudgetBlocker":observed_budget_blocker,"formalContextBlocker":context_error,"formalContextManifestCount":context_manifest_count,"fullCanonScan":full_canon_scan,"fullThreadScan":full_thread_scan,"fullEvidenceDump":full_evidence_dump,"queryPlanMeasured":query_plan_measured,"h01BoundedQuery":bounded_query_ok,"hardBudgetEnforced":hard_budget_enforced,"formalContextBlockedByHardGate":context_blocked_by_hard_gate,"materializedFinalBodyChars":final_body_chars,"initialBackfill":initial_backfill,"searchHitCount":search.total,"topology":topology,"standardPerformance":standard,"searchPerformance":search_report,"integrity":integrity,"status":"PASS"});
     if let Some(dir) = std::env::var_os("B06_H01_EVIDENCE_DIR") {
         std::fs::write(
             std::path::Path::new(&dir).join("b06_h01_scale.json"),
@@ -334,5 +349,5 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
         )
         .unwrap();
     }
-    println!("B06_SCALE_RESULT fixture=LONG_BOOK_10M books={} volumes={} chapters={} artifacts={} canon_facts={} dependencies={} model_runs={} compiler_samples=30 compiler_p50_ms={:.3} compiler_p95_ms={:.3} compiler_max_ms={:.3} hard_serialized_bytes_max={} full_canon_scan={} full_thread_scan={} full_evidence_dump={} query_plan_measured={} h01_bounded_query={} hard_context_bounded={} promise_rows=1 knowledge_rows=1 event_rows=1 evidence_rows=1 task_rows=1 volume_plan_rows=1 db_bytes={} status=PASS", manifest.counts.books, manifest.counts.volumes, manifest.counts.chapters, manifest.counts.artifacts, manifest.counts.canon_facts, manifest.counts.dependencies, manifest.counts.model_runs, p50, p95, max, hard_serialized_bytes_max, full_canon_scan, full_thread_scan, full_evidence_dump, query_plan_measured, bounded_query_ok, hard_context_bounded, db_bytes);
+    println!("B06_SCALE_RESULT fixture=LONG_BOOK_10M books={} volumes={} chapters={} artifacts={} canon_facts={} dependencies={} model_runs={} compiler_samples=30 compiler_p50_ms={:.3} compiler_p95_ms={:.3} compiler_max_ms={:.3} hard_serialized_bytes_max={} hard_budget_blocked_samples={} formal_context_manifest_count={} full_canon_scan={} full_thread_scan={} full_evidence_dump={} query_plan_measured={} h01_bounded_query={} hard_budget_enforced={} promise_rows=1 knowledge_rows=1 event_rows=1 evidence_rows=1 task_rows=1 volume_plan_rows=1 db_bytes={} status=PASS", manifest.counts.books, manifest.counts.volumes, manifest.counts.chapters, manifest.counts.artifacts, manifest.counts.canon_facts, manifest.counts.dependencies, manifest.counts.model_runs, p50, p95, max, hard_serialized_bytes_max, hard_budget_blocked_samples, context_manifest_count, full_canon_scan, full_thread_scan, full_evidence_dump, query_plan_measured, bounded_query_ok, hard_budget_enforced, db_bytes);
 }

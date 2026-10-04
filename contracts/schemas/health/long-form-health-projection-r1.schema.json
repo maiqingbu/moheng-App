@@ -8,8 +8,8 @@
     "projectId": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\s]+$" },
     "projectRevision": { "type": "integer", "minimum": 0 },
     "checkedAt": { "type": "string", "format": "date-time", "pattern": "Z$" },
-    "score": { "type": "integer", "minimum": 0, "maximum": 100 },
-    "level": { "type": "string", "enum": ["healthy", "attention", "risk"] },
+    "score": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+    "level": { "type": "string", "enum": ["not_evaluated", "insufficient_data", "source_unavailable", "healthy", "attention", "risk"] },
     "coverage": {
       "type": "object",
       "properties": {
@@ -52,6 +52,9 @@
         "summary": { "type": "string", "minLength": 1 },
         "detail": { "type": "string", "minLength": 1 },
         "sourceRefs": { "type": "array", "items": { "$ref": "#/$defs/HealthSourceRef" } },
+        "sourceRefsTotal": { "type": "integer", "minimum": 0 },
+        "sourceRefsTruncated": { "type": "boolean" },
+        "sourceRefsNextCursor": { "type": ["string", "null"] },
         "recommendedDestination": { "type": "string", "minLength": 1 }
       },
       "required": ["factorCode", "truthClass", "status", "severity", "summary", "detail", "sourceRefs", "recommendedDestination"],
@@ -81,6 +84,17 @@
         "total": { "type": "integer", "minimum": 0 }
       },
       "required": ["items", "nextCursor", "total"],
+      "additionalProperties": false
+    },
+    "HealthSourcePage": {
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/HealthSourceRef" } },
+        "total": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "nextCursor": { "type": ["string", "null"] }
+      },
+      "required": ["items", "total", "truncated", "nextCursor"],
       "additionalProperties": false
     },
     "HealthCoverage": {
@@ -119,7 +133,8 @@
         "sourceRevision": { "type": "integer", "minimum": 0 },
         "bounded": { "type": "boolean", "const": true },
         "fullManuscriptScan": { "type": "boolean", "const": false },
-        "factorSources": { "type": "object", "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/HealthSourceRef" } } }
+        "factorSources": { "type": "object", "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/HealthSourceRef" } } },
+        "factorSourcePages": { "type": "object", "additionalProperties": { "$ref": "#/$defs/HealthSourcePage" } }
       },
       "required": ["queryMode", "cacheMode", "sourceRevision", "bounded", "fullManuscriptScan", "factorSources"],
       "additionalProperties": false

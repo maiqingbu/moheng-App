@@ -161,7 +161,9 @@ impl ProductionModelGateway for B02Gateway {
                     "qualityFindings":[],
                     "canonCandidates":canon_candidates,
                     "knowledgeCandidates":knowledge_candidates,
-                    "continuityCandidates":[],"taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[]
+                    "continuityCandidates":[],"taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[],
+                    "auditCompleteness":if canon_candidates.is_empty() && knowledge_candidates.is_empty() { "COMPLETE_NO_CHANGE" } else { "COMPLETE_WITH_DELTA" },
+                    "unresolvedHard":false
                 })
             }
             other => return Err(format!("unexpected B02 capability: {other}")),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HealthIssue } from '../../src/application/contracts'
-import { healthIssueLocation } from '../../src/ui/presentation/healthLanguage'
+import { healthIssueLocation, healthLevelLabel } from '../../src/ui/presentation/healthLanguage'
 
 const issue = (location: string): HealthIssue => ({
   issueId: 'health:r1:issue',
@@ -18,6 +18,15 @@ const issue = (location: string): HealthIssue => ({
 })
 
 describe('B13 R1 health presentation', () => {
+  it('shows distinct labels for unassessed, incomplete, unavailable, and assessed states', () => {
+    expect(healthLevelLabel('not_evaluated')).toBe('尚未评估')
+    expect(healthLevelLabel('insufficient_data')).toBe('数据仍不足')
+    expect(healthLevelLabel('source_unavailable')).toBe('检查暂不可用')
+    expect(healthLevelLabel('healthy')).toBe('长篇状态稳定')
+    expect(healthLevelLabel('attention')).toBe('总体稳定，有关注项')
+    expect(healthLevelLabel('risk')).toBe('需要优先处理')
+  })
+
   it('renders backend volume display metadata while keeping opaque refs internal', () => {
     const visible = healthIssueLocation(issue('第 3 卷 · 暗潮'))
 

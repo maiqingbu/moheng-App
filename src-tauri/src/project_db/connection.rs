@@ -29,6 +29,10 @@ const B12_CHANGE_RETCON_MIGRATION: &str =
     include_str!("../../migrations/0011_b12_change_retcon_runtime.sql");
 const B13_LONGFORM_HEALTH_MIGRATION: &str =
     include_str!("../../migrations/0012_b13_longform_health_indexes.sql");
+const B_R2_03_HEALTH_ISSUE_PROJECTION_MIGRATION: &str =
+    include_str!("../../migrations/0013_b_r2_03_health_issue_projection.sql");
+const B_R2_03_B09_HEALTH_REFRESH_PENDING_MIGRATION: &str =
+    include_str!("../../migrations/0014_b_r2_03_b09_health_refresh_pending.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     let existed = path.is_file();
@@ -176,6 +180,20 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
+    let applied_v13: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 13",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let applied_v14: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 14",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(applied.is_none()
         || applied_v3.is_none()
         || applied_v4.is_none()
@@ -185,7 +203,9 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
         || applied_v8.is_none()
         || applied_v10.is_none()
         || applied_v11.is_none()
-        || applied_v12.is_none())
+        || applied_v12.is_none()
+        || applied_v13.is_none()
+        || applied_v14.is_none())
 }
 
 fn migration_recorded(connection: &Connection, version: i64) -> Result<bool, DatabaseError> {
@@ -282,6 +302,18 @@ pub fn migrate_project(
         }
         apply_numbered_migration(connection, 11, B12_CHANGE_RETCON_MIGRATION, now)?;
         apply_numbered_migration(connection, 12, B13_LONGFORM_HEALTH_MIGRATION, now)?;
+        apply_numbered_migration(
+            connection,
+            13,
+            B_R2_03_HEALTH_ISSUE_PROJECTION_MIGRATION,
+            now,
+        )?;
+        apply_numbered_migration(
+            connection,
+            14,
+            B_R2_03_B09_HEALTH_REFRESH_PENDING_MIGRATION,
+            now,
+        )?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;
         Ok::<_, DatabaseError>(())
     })();

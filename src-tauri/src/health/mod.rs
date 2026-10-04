@@ -4,12 +4,11 @@
 //! and aggregation only; all database access is delegated to
 //! `repositories::health::HealthRepository`.
 
-use crate::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use crate::repositories::health::{
-    HealthRepository, HealthRepositoryError, HealthSnapshot, QualitySample, RouteInput,
+    HealthIssueCursor, HealthIssueRow, HealthRepository, HealthRepositoryError, HealthSnapshot,
+    HealthSourcePage, QualitySample,
 };
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap};
 
 pub const FACTOR_CODES: [&str; 8] = [
     "OBLIGATION_OVERDUE",
@@ -31,6 +30,9 @@ pub struct HealthFactorResult {
     pub summary: String,
     pub detail: String,
     pub source_refs: Vec<Value>,
+    pub source_refs_total: i64,
+    pub source_refs_truncated: bool,
+    pub source_refs_next_cursor: Option<String>,
     pub recommended_destination: String,
 }
 
@@ -44,6 +46,9 @@ impl HealthFactorResult {
             summary: String::new(),
             detail: String::new(),
             source_refs: Vec::new(),
+            source_refs_total: 0,
+            source_refs_truncated: false,
+            source_refs_next_cursor: None,
             recommended_destination: "卷工作区".to_string(),
         }
     }
@@ -57,6 +62,9 @@ impl HealthFactorResult {
             summary: "数据仍在积累".to_string(),
             detail: "当前样本不足，暂不判断长期趋势。".to_string(),
             source_refs: Vec::new(),
+            source_refs_total: 0,
+            source_refs_truncated: false,
+            source_refs_next_cursor: None,
             recommended_destination: destination.to_string(),
         }
     }
@@ -70,6 +78,9 @@ impl HealthFactorResult {
             summary: "暂时无法完成这一项检查".to_string(),
             detail: "来源记录无法可靠读取，请稍后重新检查。".to_string(),
             source_refs: Vec::new(),
+            source_refs_total: 0,
+            source_refs_truncated: false,
+            source_refs_next_cursor: None,
             recommended_destination: destination.to_string(),
         }
     }
@@ -82,7 +93,20 @@ impl HealthFactorResult {
     }
 
     fn with_sources(mut self, refs: Vec<Value>) -> Self {
+        self.source_refs_total = refs.len() as i64;
         self.source_refs = refs;
+        self
+    }
+
+    fn with_source_page(mut self, page: &HealthSourcePage) -> Self {
+        self.source_refs = page
+            .items
+            .iter()
+            .map(|item| source(item.kind.as_str(), item.reference.as_str()))
+            .collect();
+        self.source_refs_total = page.total;
+        self.source_refs_truncated = page.total > self.source_refs.len() as i64;
+        self.source_refs_next_cursor = page.next_cursor.as_ref().map(encode_health_issue_cursor);
         self
     }
 
@@ -100,6 +124,9 @@ impl HealthFactorResult {
             "summary": self.summary,
             "detail": self.detail,
             "sourceRefs": self.source_refs,
+            "sourceRefsTotal": self.source_refs_total,
+            "sourceRefsTruncated": self.source_refs_truncated,
+            "sourceRefsNextCursor": self.source_refs_next_cursor,
             "recommendedDestination": self.recommended_destination,
         })
     }
@@ -111,6 +138,14 @@ pub enum HealthError {
     Repository(#[from] HealthRepositoryError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("HEALTH_FACTOR_SOURCE_CURSOR_INVALID")]
+    InvalidFactorSourceCursor,
+    #[error("HEALTH_ISSUE_CURSOR_INVALID")]
+    InvalidIssueCursor,
+    #[error("HEALTH_FACTOR_CODE_UNSUPPORTED")]
+    UnsupportedFactorCode,
+    #[error("HEALTH_SOURCE_REVISION_CHANGED_DURING_QUERY")]
+    ConcurrentMutation,
 }
 
 #[derive(Debug, Clone)]
@@ -272,90 +307,6 @@ fn parse_json(raw: &str) -> Option<Value> {
     serde_json::from_str(raw).ok()
 }
 
-fn number_from(value: &Value, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_i64)
-            .or_else(|| value.get(*key).and_then(Value::as_f64).map(|n| n as i64))
-    })
-}
-
-fn status_from_json(value: &Value) -> Option<String> {
-    value
-        .get("status")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-fn route_pressure(route: &RouteInput) -> (Option<i64>, Option<i64>) {
-    let pressure = parse_json(&route.planning_pressure_json).unwrap_or(Value::Null);
-    let capacity = route.remaining_chapter_capacity.or_else(|| {
-        number_from(
-            &pressure,
-            &["remainingChapterCapacity", "remaining_capacity"],
-        )
-    });
-    let required = number_from(
-        &pressure,
-        &["requiredTasksRemaining", "required_tasks_remaining"],
-    );
-    (capacity, required)
-}
-
-fn factor_with_sources(
-    factor_code: &str,
-    truth_class: &str,
-    severity: &str,
-    summary: &str,
-    detail: &str,
-    destination: &str,
-    refs: Vec<Value>,
-) -> HealthFactorResult {
-    HealthFactorResult::evaluated(factor_code, truth_class, severity)
-        .with_copy(summary, detail, destination)
-        .with_sources(refs)
-}
-
-fn volume_location(
-    volume_no: Option<i64>,
-    title: Option<&str>,
-    source_unavailable: bool,
-) -> String {
-    let Some(volume_no) = volume_no.filter(|number| *number > 0) else {
-        return "相关分卷".to_string();
-    };
-    let title = title.map(str::trim).filter(|value| !value.is_empty());
-    if source_unavailable {
-        return "相关分卷".to_string();
-    }
-    title.map_or_else(
-        || format!("第 {volume_no} 卷"),
-        |title| format!("第 {volume_no} 卷 · {title}"),
-    )
-}
-
-fn route_is_formally_stale(route: &RouteInput, snapshot: &HealthSnapshot) -> bool {
-    if route.formal_stale {
-        return true;
-    }
-    match (
-        route.compiled_state_digest.as_deref(),
-        route.current_state_digest.as_deref(),
-    ) {
-        (Some(compiled), Some(current)) => matches!(
-            evaluate_plan_stale(
-                route.generated_revision,
-                compiled,
-                snapshot.project_revision,
-                current,
-            ),
-            PlanStaleStatus::PlanStale
-        ),
-        _ => false,
-    }
-}
-
 fn obligation_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>) {
     let mut issues = Vec::new();
     for obligation in &snapshot.obligations {
@@ -429,13 +380,11 @@ fn obligation_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
             ),
             "卷工作区",
         )
-        .with_sources(
+        .with_source_page(
             snapshot
-                .obligations
-                .iter()
-                .take(51)
-                .map(|item| source("obligation", &item.obligation_id))
-                .collect(),
+                .factor_source_pages
+                .get("OBLIGATION_OVERDUE")
+                .unwrap_or(&HealthSourcePage::default()),
         );
     (factor, issues)
 }
@@ -517,13 +466,11 @@ fn foreshadow_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<Heal
             ),
             "卷工作区",
         )
-        .with_sources(
+        .with_source_page(
             snapshot
-                .foreshadows
-                .iter()
-                .take(51)
-                .map(|item| source("foreshadow", &item.foreshadow_id))
-                .collect(),
+                .factor_source_pages
+                .get("FORESHADOW_AGING")
+                .unwrap_or(&HealthSourcePage::default()),
         );
     (factor, issues)
 }
@@ -540,60 +487,9 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
             Vec::new(),
         );
     }
-    let mut issues = Vec::new();
-    let mut risk =
-        snapshot.route_stale_scope_count > 0 || snapshot.route_capacity_risk_scope_count > 0;
-    let mut attention =
+    let risk = snapshot.route_stale_scope_count > 0 || snapshot.route_capacity_risk_scope_count > 0;
+    let attention =
         snapshot.route_capacity_attention_scope_count > 0 || snapshot.unavailable_routes > 0;
-    let mut refs = Vec::new();
-    for route in &snapshot.routes {
-        let (capacity, required) = route_pressure(route);
-        let stale = route_is_formally_stale(route, snapshot);
-        let capacity_risk = capacity == Some(0) && required.is_some_and(|value| value > 0);
-        let capacity_attention = capacity.is_some_and(|value| value > 0 && value <= 8)
-            && required.is_some_and(|value| value > 0);
-        if route.source_unavailable || stale || capacity_risk || capacity_attention {
-            let severity = if stale || capacity_risk {
-                "risk"
-            } else {
-                "attention"
-            };
-            risk |= severity == "risk";
-            attention |= severity == "attention";
-            let detail = if route.source_unavailable {
-                "关联分卷记录暂时无法读取，未将其误判为路线风险。"
-            } else if stale {
-                "当前规划版本落后于项目最新变更，需要在卷工作区重新核对。"
-            } else if capacity_risk {
-                "剩余章节容量已用尽，但仍有必需任务未完成。"
-            } else {
-                "剩余章节容量较少，仍有必需任务需要安排。"
-            };
-            issues.push(HealthIssue {
-                issue_id: format!("health:route:{}", route.volume_id),
-                factor_code: "ROUTE_DRIFT".to_string(),
-                severity: severity.to_string(),
-                title: if route.source_unavailable {
-                    "路线来源暂不可用"
-                } else if stale {
-                    "规划路线需要重新核对"
-                } else {
-                    "卷内安排需要留出空间"
-                }
-                .to_string(),
-                detail: detail.to_string(),
-                location: volume_location(
-                    route.volume_no,
-                    route.volume_title.as_deref(),
-                    route.source_unavailable,
-                ),
-                due_chapter: capacity,
-                recommended_destination: "卷工作区".to_string(),
-                source_refs: vec![source("volume-plan", &route.volume_id)],
-            });
-        }
-        refs.push(source("volume-plan", &route.volume_id));
-    }
     let severity = if risk {
         "risk"
     } else if attention {
@@ -601,7 +497,7 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
     } else {
         "healthy"
     };
-    let mut factor = if snapshot.unavailable_routes > 0 {
+    let mut factor = if !snapshot.health_projection_ready || snapshot.unavailable_routes > 0 {
         HealthFactorResult::unavailable("ROUTE_DRIFT", "DETERMINISTIC_RUNTIME", "卷工作区")
             .with_severity(severity)
     } else {
@@ -611,7 +507,7 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
         .with_copy(
             if severity == "healthy" {
                 "规划路线与当前进度相符"
-            } else if snapshot.unavailable_routes > 0 {
+            } else if snapshot.unavailable_routes > 0 || !snapshot.health_projection_ready {
                 "部分路线来源需要核对"
             } else {
                 "规划路线需要复核"
@@ -619,88 +515,16 @@ fn route_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIss
             "这项结果只报告既有规划投影的状态，不会自动重新规划。",
             "卷工作区",
         )
-        .with_sources(refs);
-    (factor, issues)
-}
-
-#[derive(Debug, Clone)]
-struct TaskInput {
-    task_id: String,
-    class: String,
-    status: String,
-    volume_no: Option<i64>,
-    volume_title: Option<String>,
-    source_unavailable: bool,
-}
-
-fn collect_tasks(snapshot: &HealthSnapshot) -> Vec<TaskInput> {
-    let mut tasks: BTreeMap<String, TaskInput> = BTreeMap::new();
-    let mut ledger_status: HashMap<String, String> = HashMap::new();
-    for route in &snapshot.routes {
-        if let Some(Value::Object(entries)) = parse_json(&route.task_status_json) {
-            for (task_id, value) in entries {
-                let status = value
-                    .as_str()
-                    .map(ToOwned::to_owned)
-                    .or_else(|| status_from_json(&value))
-                    .unwrap_or_else(|| "NOT_STARTED".to_string());
-                ledger_status.insert(task_id, status);
-            }
-        }
-        if let Some(Value::Array(entries)) = route
-            .route_payload_json
-            .as_deref()
-            .and_then(parse_json)
-            .and_then(|value| value.get("tasks").cloned())
-        {
-            for task in entries {
-                let Some(task_id) = task.get("taskId").and_then(Value::as_str) else {
-                    continue;
-                };
-                let class = task
-                    .get("class")
-                    .and_then(Value::as_str)
-                    .unwrap_or("FLEXIBLE")
-                    .to_string();
-                tasks.insert(
-                    task_id.to_string(),
-                    TaskInput {
-                        task_id: task_id.to_string(),
-                        class,
-                        status: ledger_status
-                            .get(task_id)
-                            .cloned()
-                            .unwrap_or_else(|| "NOT_STARTED".to_string()),
-                        volume_no: route.volume_no,
-                        volume_title: route.volume_title.clone(),
-                        source_unavailable: route.source_unavailable,
-                    },
-                );
-            }
-        }
-    }
-    for reality in &snapshot.task_reality {
-        let Some(value) = parse_json(&reality.value_json) else {
-            continue;
-        };
-        let task_id = value
-            .get("taskId")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| reality.state_id.clone());
-        let status = status_from_json(&value).unwrap_or_else(|| "NOT_STARTED".to_string());
-        if let Some(task) = tasks.get_mut(&task_id) {
-            task.status = status;
-        } else {
-            // A state row without a route task is not allowed to become a hard
-            // blockage. It remains visible only after a valid route is present.
-        }
-    }
-    tasks.into_values().collect()
+        .with_source_page(
+            snapshot
+                .factor_source_pages
+                .get("ROUTE_DRIFT")
+                .unwrap_or(&HealthSourcePage::default()),
+        );
+    (factor, Vec::new())
 }
 
 fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssue>, i64, i64) {
-    let tasks = collect_tasks(snapshot);
     if snapshot.route_scope_count == 0 {
         return (
             HealthFactorResult::insufficient("TASK_BLOCKAGE", "DETERMINISTIC_RUNTIME", "卷工作区"),
@@ -709,35 +533,8 @@ fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssu
             0,
         );
     }
-    let mut issues = Vec::new();
     let blocked_required = snapshot.blocked_required_tasks;
     let blocked_optional = snapshot.blocked_optional_tasks;
-    for task in tasks.iter().filter(|task| task.status == "BLOCKED") {
-        let required = matches!(task.class.as_str(), "REQUIRED" | "CLIMAX" | "RESERVED");
-        issues.push(HealthIssue {
-            issue_id: format!("health:task:{}", task.task_id),
-            factor_code: "TASK_BLOCKAGE".to_string(),
-            severity: if required { "risk" } else { "attention" }.to_string(),
-            title: if required {
-                "必需任务被阻塞"
-            } else {
-                "可选任务被阻塞"
-            }
-            .to_string(),
-            detail: "请回到卷工作区核对任务条件与现实进度。".to_string(),
-            location: format!(
-                "{} 的卷内任务",
-                volume_location(
-                    task.volume_no,
-                    task.volume_title.as_deref(),
-                    task.source_unavailable
-                )
-            ),
-            due_chapter: None,
-            recommended_destination: "卷工作区".to_string(),
-            source_refs: vec![source("task", &task.task_id)],
-        });
-    }
     let severity = if blocked_required > 0 {
         "risk"
     } else if blocked_optional > 0 {
@@ -745,27 +542,35 @@ fn task_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<HealthIssu
     } else {
         "healthy"
     };
-    let factor = factor_with_sources(
-        "TASK_BLOCKAGE",
-        "DETERMINISTIC_RUNTIME",
-        severity,
-        if severity == "healthy" {
-            "任务推进正常"
-        } else {
-            "有任务需要解除阻塞"
-        },
-        &format!(
-            "当前发现 {} 项必需任务、{} 项可选任务处于阻塞状态。",
-            blocked_required, blocked_optional
-        ),
-        "卷工作区",
-        tasks
-            .iter()
-            .take(201)
-            .map(|task| source("task", &task.task_id))
-            .collect(),
+    let mut factor = if !snapshot.health_projection_ready || !snapshot.task_summary_available {
+        HealthFactorResult::unavailable("TASK_BLOCKAGE", "DETERMINISTIC_RUNTIME", "卷工作区")
+            .with_severity(severity)
+            .with_copy(
+                "任务状态汇总暂不可用",
+                "正式任务汇总数据不完整，当前结果不会将未知任务判断为正常。",
+                "卷工作区",
+            )
+    } else {
+        HealthFactorResult::evaluated("TASK_BLOCKAGE", "DETERMINISTIC_RUNTIME", severity).with_copy(
+            if severity == "healthy" {
+                "任务推进正常"
+            } else {
+                "有任务需要解除阻塞"
+            },
+            &format!(
+                "当前发现 {} 项必需任务、{} 项可选任务处于阻塞状态。",
+                blocked_required, blocked_optional
+            ),
+            "卷工作区",
+        )
+    };
+    factor = factor.with_source_page(
+        snapshot
+            .factor_source_pages
+            .get("TASK_BLOCKAGE")
+            .unwrap_or(&HealthSourcePage::default()),
     );
-    (factor, issues, blocked_required, blocked_optional)
+    (factor, Vec::new(), blocked_required, blocked_optional)
 }
 
 fn context_factor(snapshot: &HealthSnapshot) -> HealthFactorResult {
@@ -962,13 +767,11 @@ fn reader_desire_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<H
             ),
             "卷工作区",
         )
-        .with_sources(
+        .with_source_page(
             snapshot
-                .reader_desires
-                .iter()
-                .take(51)
-                .map(|item| source("reader-desire", &item.desire_id))
-                .collect(),
+                .factor_source_pages
+                .get("READER_DESIRE")
+                .unwrap_or(&HealthSourcePage::default()),
         );
     (factor, issues)
 }
@@ -987,19 +790,89 @@ fn sort_issues(issues: &mut [HealthIssue]) {
     });
 }
 
-fn bounded_page(issues: Vec<HealthIssue>, cursor: Option<&str>, requested_limit: u64) -> Value {
-    let start = cursor
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
+fn issue_cursor(issue: &HealthIssue, source_revision: i64) -> HealthIssueCursor {
+    HealthIssueCursor {
+        source_revision,
+        severity_rank: severity_rank(&issue.severity) as i64,
+        factor_rank: factor_rank(&issue.factor_code) as i64,
+        due_sort: issue.due_chapter.unwrap_or(i64::MAX),
+        issue_id: issue.issue_id.clone(),
+    }
+}
+
+fn encode_issue_cursor(issue: &HealthIssue, source_revision: i64) -> String {
+    encode_health_issue_cursor(&issue_cursor(issue, source_revision))
+}
+
+fn encode_health_issue_cursor(cursor: &HealthIssueCursor) -> String {
+    let issue_id = cursor
+        .issue_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "h2:{}:{}:{}:{}:{}",
+        cursor.source_revision, cursor.severity_rank, cursor.factor_rank, cursor.due_sort, issue_id
+    )
+}
+
+fn decode_issue_cursor(value: Option<&str>) -> Option<HealthIssueCursor> {
+    let mut parts = value?.splitn(6, ':');
+    if parts.next()? != "h2" {
+        return None;
+    }
+    let source_revision = parts.next()?.parse().ok()?;
+    let severity_rank = parts.next()?.parse().ok()?;
+    let factor_rank = parts.next()?.parse().ok()?;
+    let due_sort = parts.next()?.parse().ok()?;
+    let encoded_id = parts.next()?;
+    if encoded_id.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..encoded_id.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded_id[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(HealthIssueCursor {
+        source_revision,
+        severity_rank,
+        factor_rank,
+        due_sort,
+        issue_id: String::from_utf8(bytes).ok()?,
+    })
+}
+
+fn cursor_is_after(issue: &HealthIssue, cursor: &HealthIssueCursor) -> bool {
+    let key = issue_cursor(issue, cursor.source_revision);
+    (
+        key.severity_rank,
+        key.factor_rank,
+        key.due_sort,
+        key.issue_id,
+    ) > (
+        cursor.severity_rank,
+        cursor.factor_rank,
+        cursor.due_sort,
+        cursor.issue_id.clone(),
+    )
+}
+
+fn bounded_page(
+    mut issues: Vec<HealthIssue>,
+    total: i64,
+    requested_limit: u64,
+    source_revision: i64,
+) -> Value {
     let limit = if requested_limit == 0 {
         30
     } else {
         requested_limit.min(50) as usize
     };
-    let total = issues.len();
+    sort_issues(&mut issues);
+    let has_more = issues.len() > limit;
     let items = issues
         .iter()
-        .skip(start)
         .take(limit)
         .map(|issue| {
             json!({
@@ -1015,7 +888,13 @@ fn bounded_page(issues: Vec<HealthIssue>, cursor: Option<&str>, requested_limit:
             })
         })
         .collect::<Vec<_>>();
-    let next_cursor = (start + items.len() < total).then(|| (start + items.len()).to_string());
+    let next_cursor = has_more
+        .then(|| {
+            issues
+                .get(limit - 1)
+                .map(|issue| encode_issue_cursor(issue, source_revision))
+        })
+        .flatten();
     json!({"items":items,"nextCursor":next_cursor,"total":total})
 }
 
@@ -1027,7 +906,44 @@ fn factor_score(factor: &HealthFactorResult) -> Option<i64> {
     })
 }
 
-fn build_projection(snapshot: HealthSnapshot, cursor: Option<&str>, limit: u64) -> Value {
+fn overall_health_level(factors: &[HealthFactorResult], has_formal_activity: bool) -> &'static str {
+    if factors.iter().any(|factor| {
+        factor.truth_class == "DETERMINISTIC_RUNTIME"
+            && factor.status != "INSUFFICIENT_DATA"
+            && factor.severity == "risk"
+    }) {
+        return "risk";
+    }
+    if factors.iter().any(|factor| {
+        factor.status == "EVALUATED" && matches!(factor.severity.as_str(), "attention" | "risk")
+    }) {
+        return "attention";
+    }
+    if factors
+        .iter()
+        .any(|factor| factor.status == "SOURCE_UNAVAILABLE")
+    {
+        return "source_unavailable";
+    }
+    if !has_formal_activity || factors.iter().all(|factor| factor.status != "EVALUATED") {
+        return "not_evaluated";
+    }
+    if factors
+        .iter()
+        .any(|factor| factor.status == "INSUFFICIENT_DATA")
+    {
+        return "insufficient_data";
+    }
+    "healthy"
+}
+
+fn build_projection(
+    snapshot: HealthSnapshot,
+    cursor: Option<&HealthIssueCursor>,
+    issue_rows: Vec<HealthIssueRow>,
+    database_issue_total: i64,
+    limit: u64,
+) -> Value {
     let (obligation, mut obligation_issues) = obligation_factor(&snapshot);
     let (foreshadow, mut foreshadow_issues) = foreshadow_factor(&snapshot);
     let (route, mut route_issues) = route_factor(&snapshot);
@@ -1091,31 +1007,35 @@ fn build_projection(snapshot: HealthSnapshot, cursor: Option<&str>, limit: u64) 
             source_refs: cost.source_refs.clone(),
         });
     }
-    sort_issues(&mut issues);
+    issues.retain(|issue| {
+        matches!(
+            issue.factor_code.as_str(),
+            "QUALITY_DRIFT" | "CONTEXT_GROWTH" | "MODEL_COST_DRIFT"
+        )
+    });
+    let advisory_issue_total = issues.len() as i64;
+    if let Some(cursor) = cursor {
+        issues.retain(|issue| cursor_is_after(issue, cursor));
+    }
+    issues.extend(issue_rows.into_iter().map(|row| HealthIssue {
+        issue_id: row.issue_id,
+        factor_code: row.factor_code,
+        severity: row.severity,
+        title: row.title,
+        detail: row.detail,
+        location: row.location,
+        due_chapter: row.due_chapter,
+        recommended_destination: row.recommended_destination,
+        source_refs: vec![source(row.source_kind.as_str(), row.source_ref)],
+    }));
 
     let evaluated_scores = factors.iter().filter_map(factor_score).collect::<Vec<_>>();
-    let score = if evaluated_scores.is_empty() {
-        100
-    } else {
-        (evaluated_scores.iter().sum::<i64>() as f64 / evaluated_scores.len() as f64).round() as i64
-    };
-    let deterministic_risk = factors.iter().any(|factor| {
-        factor.truth_class == "DETERMINISTIC_RUNTIME"
-            && factor.status == "EVALUATED"
-            && factor.severity == "risk"
-    });
-    let attention = factors.iter().any(|factor| {
-        factor.status == "SOURCE_UNAVAILABLE"
-            || (factor.status == "EVALUATED"
-                && (factor.severity == "attention" || factor.severity == "risk"))
-    });
-    let level = if deterministic_risk {
-        "risk"
-    } else if attention {
-        "attention"
-    } else {
-        "healthy"
-    };
+    let level = overall_health_level(&factors, snapshot.has_formal_activity);
+    let score = (matches!(level, "healthy" | "attention" | "risk") && !evaluated_scores.is_empty())
+        .then(|| {
+            (evaluated_scores.iter().sum::<i64>() as f64 / evaluated_scores.len() as f64).round()
+                as i64
+        });
     let evaluated = factors
         .iter()
         .filter(|factor| factor.status == "EVALUATED")
@@ -1130,11 +1050,26 @@ fn build_projection(snapshot: HealthSnapshot, cursor: Option<&str>, limit: u64) 
         .count();
     let factor_sources = factors
         .iter()
-        .map(|factor| (factor.factor_code.clone(), factor.source_refs.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let factor_sources = factor_sources
-        .into_iter()
-        .map(|(code, refs)| (code, Value::Array(refs)))
+        .map(|factor| {
+            (
+                factor.factor_code.clone(),
+                Value::Array(factor.source_refs.clone()),
+            )
+        })
+        .collect::<Map<String, Value>>();
+    let factor_source_pages = factors
+        .iter()
+        .map(|factor| {
+            (
+                factor.factor_code.clone(),
+                json!({
+                    "items": factor.source_refs,
+                    "total": factor.source_refs_total,
+                    "truncated": factor.source_refs_truncated,
+                    "nextCursor": factor.source_refs_next_cursor,
+                }),
+            )
+        })
         .collect::<Map<String, Value>>();
 
     json!({
@@ -1146,7 +1081,12 @@ fn build_projection(snapshot: HealthSnapshot, cursor: Option<&str>, limit: u64) 
         "level": level,
         "coverage": {"totalFactors":8,"evaluatedFactors":evaluated,"insufficientFactors":insufficient,"unavailableFactors":unavailable},
         "factors": factors.iter().map(HealthFactorResult::as_value).collect::<Vec<_>>(),
-        "issues": bounded_page(issues, cursor, limit),
+        "issues": bounded_page(
+            issues,
+            database_issue_total + advisory_issue_total,
+            limit,
+            snapshot.project_revision,
+        ),
         "counters": {
             "openObligations": snapshot.open_obligations,
             "overdueObligations": snapshot.overdue_obligations,
@@ -1159,7 +1099,7 @@ fn build_projection(snapshot: HealthSnapshot, cursor: Option<&str>, limit: u64) 
             "comparableContextRuns": snapshot.context_samples.len(),
             "comparableCostRuns": snapshot.cost_samples.len()
         },
-        "provenance": {"queryMode":"ON_DEMAND","cacheMode":"PROJECTION_ONLY","sourceRevision":snapshot.project_revision,"bounded":true,"fullManuscriptScan":false,"factorSources":factor_sources}
+        "provenance": {"queryMode":"ON_DEMAND","cacheMode":"PROJECTION_ONLY","sourceRevision":snapshot.project_revision,"bounded":true,"fullManuscriptScan":false,"factorSources":factor_sources,"factorSourcePages":factor_source_pages}
     })
 }
 
@@ -1171,10 +1111,89 @@ pub fn query_book_health(
     cursor: Option<&str>,
     limit: u64,
 ) -> Result<Value, HealthError> {
+    let cursor = match cursor {
+        Some(value) => {
+            Some(decode_issue_cursor(Some(value)).ok_or(HealthError::InvalidIssueCursor)?)
+        }
+        None => None,
+    };
     let snapshot = HealthRepository::load(connection, project_id)?;
-    let mut projection = build_projection(snapshot, cursor, limit);
+    let issue_limit = if limit == 0 {
+        30
+    } else {
+        limit.min(50) as usize
+    };
+    let source_revision = snapshot.project_revision;
+    let issue_page = HealthRepository::issue_page(
+        connection,
+        project_id,
+        snapshot.current_chapter_no,
+        cursor.as_ref(),
+        issue_limit + 4,
+    )?;
+    if issue_page.source_revision != snapshot.project_revision {
+        return Err(HealthError::ConcurrentMutation);
+    }
+    if snapshot.health_projection_ready
+        && !HealthRepository::projection_is_current(connection, project_id)?
+    {
+        return Err(HealthError::ConcurrentMutation);
+    }
+    let mut projection = build_projection(
+        snapshot,
+        cursor.as_ref(),
+        issue_page.rows,
+        issue_page.total,
+        limit,
+    );
+    if HealthRepository::current_project_revision(connection, project_id)? != source_revision {
+        return Err(HealthError::ConcurrentMutation);
+    }
     projection["projectId"] = json!(project_id);
     Ok(projection)
+}
+
+/// Deterministic continuation for the bounded provenance page attached to a
+/// health factor. It reads only the selected factor's scalar issue/source rows.
+pub fn query_book_health_factor_sources(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    factor_code: &str,
+    cursor: Option<&str>,
+    limit: u64,
+) -> Result<Value, HealthError> {
+    if !FACTOR_CODES.contains(&factor_code) {
+        return Err(HealthError::UnsupportedFactorCode);
+    }
+    let current_chapter_no = HealthRepository::current_chapter_no(connection, project_id)?;
+    let cursor = match cursor {
+        Some(value) => {
+            Some(decode_issue_cursor(Some(value)).ok_or(HealthError::InvalidFactorSourceCursor)?)
+        }
+        None => None,
+    };
+    let page = HealthRepository::factor_source_page_after(
+        connection,
+        project_id,
+        current_chapter_no,
+        factor_code,
+        cursor.as_ref(),
+        limit.clamp(1, 50) as usize,
+    )?;
+    if HealthRepository::current_project_revision(connection, project_id)? != page.source_revision {
+        return Err(HealthError::ConcurrentMutation);
+    }
+    let items = page
+        .items
+        .iter()
+        .map(|item| source(item.kind.as_str(), item.reference.as_str()))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "items": items,
+        "total": page.total,
+        "truncated": page.next_cursor.is_some(),
+        "nextCursor": page.next_cursor.as_ref().map(encode_health_issue_cursor),
+    }))
 }
 
 #[cfg(test)]
@@ -1189,5 +1208,36 @@ mod tests {
         ];
         let scores = factors.iter().filter_map(factor_score).collect::<Vec<_>>();
         assert_eq!(scores, vec![100]);
+    }
+
+    #[test]
+    fn overall_status_distinguishes_unassessed_incomplete_unavailable_and_health_levels() {
+        let evaluated =
+            |severity: &str| HealthFactorResult::evaluated("A", "DETERMINISTIC_RUNTIME", severity);
+        let insufficient =
+            HealthFactorResult::insufficient("A", "DETERMINISTIC_RUNTIME", "卷工作区");
+        let unavailable = HealthFactorResult::unavailable("A", "DETERMINISTIC_RUNTIME", "卷工作区");
+
+        assert_eq!(
+            overall_health_level(std::slice::from_ref(&insufficient), false),
+            "not_evaluated"
+        );
+        assert_eq!(
+            overall_health_level(&[evaluated("healthy"), insufficient.clone()], true),
+            "insufficient_data"
+        );
+        assert_eq!(
+            overall_health_level(&[unavailable], true),
+            "source_unavailable"
+        );
+        assert_eq!(
+            overall_health_level(&[evaluated("healthy"), evaluated("attention")], true),
+            "attention"
+        );
+        assert_eq!(overall_health_level(&[evaluated("risk")], true), "risk");
+        assert_eq!(
+            overall_health_level(&[evaluated("healthy")], true),
+            "healthy"
+        );
     }
 }

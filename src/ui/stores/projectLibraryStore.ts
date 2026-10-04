@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import type {
   CommandRequest,
   CommandStatus,
-  MarketOpportunity,
+  MarketDiscoveryProjection,
   ProjectLibraryProjection,
   SettingsProjection,
   ProviderSettingsInput
@@ -28,7 +28,13 @@ function errorMessage(error: unknown): string {
 
 export const useProjectLibraryStore = defineStore('project-library-projection', () => {
   const projection = ref<ProjectLibraryProjection | null>(null)
-  const market = ref<MarketOpportunity[]>([])
+  const market = ref<MarketDiscoveryProjection>({
+    status: 'NOT_CONFIGURED',
+    policyStatus: 'NOT_CONFIGURED',
+    policyReferences: [],
+    opportunities: [],
+    limitations: []
+  })
   const globalSettings = ref<SettingsProjection | null>(null)
   const loading = ref(false)
   const marketLoading = ref(false)
@@ -77,11 +83,19 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     }
   }
 
-  async function loadMarket() {
-    if (market.value.length || marketLoading.value) return
+  async function loadMarket(force = false) {
+    if ((!force && market.value.status !== 'NOT_CONFIGURED') || marketLoading.value) return
     marketLoading.value = true
     try {
       market.value = await frontendPort.queryMarketOpportunities()
+    } catch (error) {
+      market.value = {
+        ...market.value,
+        status: 'SOURCE_UNAVAILABLE',
+        policyStatus: 'SOURCE_UNAVAILABLE',
+        opportunities: [],
+        errorCode: error instanceof Error ? error.message : 'MARKET_QUERY_FAILED'
+      }
     } finally {
       marketLoading.value = false
     }

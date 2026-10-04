@@ -75,9 +75,25 @@ pub struct OwnerExecution {
     pub owner_receipt_ref: Option<String>,
 }
 
+pub struct RepairVerificationContext<'a> {
+    pub project_id: &'a str,
+    pub before_revision: i64,
+    pub after_revision: i64,
+    pub expected_postcondition: &'a Value,
+    pub owner_receipt_ref: Option<&'a str>,
+}
+
 pub trait TypedRepairOwner {
     fn execute(&self, operation: &RepairOperation) -> Result<OwnerExecution, String>;
     fn verify(&self, operation: &RepairOperation) -> Result<Value, String>;
+
+    fn verify_with_context(
+        &self,
+        operation: &RepairOperation,
+        _context: &RepairVerificationContext<'_>,
+    ) -> Result<Value, String> {
+        self.verify(operation)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -232,6 +248,146 @@ fn stage_gate(operation: &RepairOperation) -> Result<(), RepairError> {
     }
 }
 
+fn verify_operations(
+    owner: &dyn TypedRepairOwner,
+    project_id: &str,
+    plan: &RepairPlan,
+    before_revision: i64,
+    after_revision: i64,
+    owner_receipt_refs: &[Option<String>],
+) -> Vec<Value> {
+    plan.proposed_operations
+        .iter()
+        .zip(plan.expected_postconditions.iter())
+        .enumerate()
+        .map(|(index, (operation, expected))| {
+            let owner_receipt_ref = owner_receipt_refs.get(index).and_then(Option::as_deref);
+            let context = RepairVerificationContext {
+                project_id,
+                before_revision,
+                after_revision,
+                expected_postcondition: expected,
+                owner_receipt_ref,
+            };
+            match owner.verify_with_context(operation, &context) {
+                Ok(mut value) => {
+                    let status = value.get("status").and_then(Value::as_str);
+                    let incomplete = matches!(
+                        status,
+                        Some(
+                            "INCOMPLETE"
+                                | "QUERY_FAILED"
+                                | "UNKNOWN"
+                                | "REPAIR_VERIFICATION_INCOMPLETE"
+                        )
+                    );
+                    let matches = value.get("kind") == expected.get("kind")
+                        && value.get("observed") == expected.get("expected")
+                        && status == Some("PASS");
+                    value["expectedPostcondition"] = expected.clone();
+                    value["typedRequery"] = Value::Bool(true);
+                    value["ownerReceiptRef"] = owner_receipt_ref
+                        .map(|receipt| json!(receipt))
+                        .unwrap_or(Value::Null);
+                    if incomplete {
+                        value["status"] = json!("REPAIR_VERIFICATION_INCOMPLETE");
+                    } else if !matches {
+                        value["status"] = json!("FAIL");
+                    }
+                    value
+                }
+                Err(error) => json!({
+                    "operation":operation.operation,
+                    "status":"REPAIR_VERIFICATION_INCOMPLETE",
+                    "error":error,
+                    "expectedPostcondition":expected,
+                    "typedRequery":true,
+                    "ownerReceiptRef":owner_receipt_ref
+                }),
+            }
+        })
+        .collect()
+}
+
+fn aggregate_receipt_status(postconditions: &[Value]) -> &'static str {
+    if postconditions
+        .iter()
+        .all(|item| item.get("status").and_then(Value::as_str) == Some("PASS"))
+    {
+        "REPAIR_VERIFIED"
+    } else if postconditions.iter().any(|item| {
+        item.get("status").and_then(Value::as_str) == Some("REPAIR_VERIFICATION_INCOMPLETE")
+    }) {
+        "REPAIR_VERIFICATION_INCOMPLETE"
+    } else {
+        "REPAIR_VERIFICATION_FAILED"
+    }
+}
+
+fn reverify_existing_receipt(
+    connection: &Connection,
+    owner: &dyn TypedRepairOwner,
+    project_id: &str,
+    plan: &RepairPlan,
+    receipt: ExecutionReceipt,
+) -> Result<ExecutionReceipt, RepairError> {
+    let mut owner_receipt_refs = plan
+        .proposed_operations
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            receipt
+                .postconditions
+                .get(index)
+                .and_then(|item| item.get("ownerReceiptRef"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    if owner_receipt_refs.len() == 1 && owner_receipt_refs[0].is_none() {
+        owner_receipt_refs[0] = receipt.owner_receipt_ref.clone();
+    }
+    let postconditions = verify_operations(
+        owner,
+        project_id,
+        plan,
+        receipt.before_revision,
+        receipt.after_revision,
+        &owner_receipt_refs,
+    );
+    let updated = ExecutionReceipt {
+        status: aggregate_receipt_status(&postconditions).into(),
+        postconditions,
+        ..receipt
+    };
+    match support::update_repair_execution_receipt(connection, &updated) {
+        Ok(()) => Ok(updated),
+        Err(support::SupportRepositoryError::RepairReceiptBindingChanged) => {
+            let latest = support::load_repair_execution_receipt(
+                connection,
+                project_id,
+                &updated.authorization_id,
+            )?
+            .ok_or(RepairError::AlreadyConsumed)?;
+            if latest.status == "REPAIR_VERIFIED"
+                && latest.receipt_ref == updated.receipt_ref
+                && latest.repair_plan_id == updated.repair_plan_id
+                && latest.authorization_id == updated.authorization_id
+                && latest.project_id == updated.project_id
+                && latest.before_revision == updated.before_revision
+                && latest.after_revision == updated.after_revision
+                && latest.operation_digest == updated.operation_digest
+                && latest.owner_receipt_ref == updated.owner_receipt_ref
+            {
+                Ok(latest)
+            } else {
+                Err(RepairError::AlreadyConsumed)
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn execute(
     connection: &Connection,
     owner: &dyn TypedRepairOwner,
@@ -252,11 +408,27 @@ pub fn execute(
     {
         return Err(RepairError::StaleAuthorization);
     }
-    if authorization.consumed_at.is_some() {
-        return Err(RepairError::AlreadyConsumed);
-    }
     for operation in &plan.proposed_operations {
         stage_gate(operation)?;
+    }
+    if authorization.consumed_at.is_some() {
+        let Some(receipt) =
+            support::load_repair_execution_receipt(connection, project_id, authorization_id)?
+        else {
+            return Err(RepairError::AlreadyConsumed);
+        };
+        if receipt.repair_plan_id != repair_plan_id
+            || receipt.authorization_id != authorization_id
+            || receipt.project_id != project_id
+            || receipt.operation_digest != plan.operation_digest
+            || receipt.before_revision != plan.based_on_project_revision
+        {
+            return Err(RepairError::StaleAuthorization);
+        }
+        if receipt.status == "REPAIR_VERIFICATION_INCOMPLETE" {
+            return reverify_existing_receipt(connection, owner, project_id, &plan, receipt);
+        }
+        return Err(RepairError::AlreadyConsumed);
     }
 
     let claimed = support::claim_repair_authorization(
@@ -281,64 +453,55 @@ pub fn execute(
 
     let mut owners = Vec::new();
     let mut owner_receipts = Vec::new();
+    let mut owner_receipts_by_operation = Vec::with_capacity(plan.proposed_operations.len());
     let mut postconditions = Vec::new();
     for operation in &plan.proposed_operations {
         match owner.execute(operation) {
             Ok(execution) => {
                 owners.push(execution.owner);
-                if let Some(receipt) = execution.owner_receipt_ref {
-                    owner_receipts.push(receipt);
+                if let Some(receipt) = execution.owner_receipt_ref.as_ref() {
+                    owner_receipts.push(receipt.clone());
                 }
+                owner_receipts_by_operation.push(execution.owner_receipt_ref);
             }
-            Err(error) => postconditions.push(json!({
-                "operation":operation.operation,
-                "status":"OWNER_EXECUTION_FAILED",
-                "error":error
-            })),
-        }
-    }
-    if postconditions.is_empty() {
-        for (operation, expected) in plan
-            .proposed_operations
-            .iter()
-            .zip(plan.expected_postconditions.iter())
-        {
-            match owner.verify(operation) {
-                Ok(mut value) => {
-                    let matches = value.get("kind") == expected.get("kind")
-                        && value.get("observed") == expected.get("expected")
-                        && value.get("status").and_then(Value::as_str) == Some("PASS");
-                    value["expectedPostcondition"] = expected.clone();
-                    value["typedRequery"] = Value::Bool(true);
-                    if !matches {
-                        value["status"] = Value::String("FAIL".into());
-                    }
-                    postconditions.push(value)
-                }
-                Err(error) => postconditions.push(json!({
+            Err(error) => {
+                owner_receipts_by_operation.push(None);
+                postconditions.push(json!({
                     "operation":operation.operation,
-                    "status":"REPAIR_VERIFICATION_INCOMPLETE",
+                    "status":"OWNER_EXECUTION_FAILED",
                     "error":error
-                })),
+                }));
             }
         }
     }
-    let status = if postconditions
-        .iter()
-        .all(|item| item.get("status").and_then(Value::as_str) == Some("PASS"))
-    {
-        "REPAIR_VERIFIED"
-    } else if postconditions.iter().any(|item| {
-        item.get("status").and_then(Value::as_str) == Some("REPAIR_VERIFICATION_INCOMPLETE")
-    }) {
-        "REPAIR_VERIFICATION_INCOMPLETE"
-    } else {
-        "REPAIR_VERIFICATION_FAILED"
-    };
-    let after_revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+    let mut after_revision = crate::repositories::narrative::NarrativeRepository::project_revision(
         connection, project_id,
     )
     .map_err(|error| RepairError::Invalid(error.to_string()))?;
+    if postconditions.is_empty() {
+        let revision_at_verify = after_revision;
+        postconditions = verify_operations(
+            owner,
+            project_id,
+            &plan,
+            plan.based_on_project_revision,
+            revision_at_verify,
+            &owner_receipts_by_operation,
+        );
+        after_revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+            connection, project_id,
+        )
+        .map_err(|error| RepairError::Invalid(error.to_string()))?;
+        if after_revision != revision_at_verify {
+            postconditions.push(json!({
+                "status":"REPAIR_VERIFICATION_INCOMPLETE",
+                "reason":"PROJECT_REVISION_CHANGED_DURING_POSTVERIFY",
+                "verifiedAtRevision":revision_at_verify,
+                "observedRevision":after_revision
+            }));
+        }
+    }
+    let status = aggregate_receipt_status(&postconditions);
     let receipt = ExecutionReceipt {
         receipt_ref: format!("repair-receipt:{authorization_id}"),
         repair_plan_id: repair_plan_id.into(),

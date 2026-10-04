@@ -604,6 +604,12 @@ pub struct HealthFactor {
     pub summary: String,
     pub detail: String,
     pub source_refs: Vec<HealthSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_refs_total: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_refs_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_refs_next_cursor: Option<String>,
     pub recommended_destination: String,
 }
 
@@ -629,6 +635,16 @@ pub struct HealthIssuesPage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HealthSourcePage {
+    pub items: Vec<HealthSourceRef>,
+    pub total: i64,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -664,9 +680,13 @@ pub struct HealthProvenance {
     pub bounded: bool,
     pub full_manuscript_scan: bool,
     pub factor_sources: HealthProvenanceFactorSources,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factor_source_pages: Option<HealthProvenanceFactorSourcePages>,
 }
 
 pub type HealthProvenanceFactorSources = std::collections::BTreeMap<String, Vec<HealthSourceRef>>;
+
+pub type HealthProvenanceFactorSourcePages = std::collections::BTreeMap<String, HealthSourcePage>;
 
 pub type NarrativeDefinitions = serde_json::Value;
 
@@ -1152,7 +1172,8 @@ pub struct LongFormHealthProjectionR1 {
     pub project_id: String,
     pub project_revision: i64,
     pub checked_at: String,
-    pub score: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<i64>,
     pub level: String,
     pub coverage: LongFormHealthProjectionR1Coverage,
     pub factors: Vec<HealthFactor>,

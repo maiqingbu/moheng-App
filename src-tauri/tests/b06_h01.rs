@@ -13,8 +13,8 @@ use ai_novel_production_system_core::harness::{
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
     build_continuity_threads, build_volume_progress, compile_context_manifest, evaluate_plan_stale,
-    evaluate_resume_condition, ContextCompilerInput, CurrentNarrativeStateView, PlanStaleStatus,
-    ResumeContext, RuntimeBounds, VolumeProgressInput,
+    evaluate_resume_condition, relevant_state_digest, ContextCompilerInput, ContextHardSource,
+    CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
@@ -310,8 +310,99 @@ fn b06_progress_context_digest_and_stale_evaluation_are_bounded_and_order_stable
         PlanStaleStatus::PlanStale
     );
     assert!(manifest.hard_source_count >= state.source_refs.len() as i64);
-    assert_eq!(manifest.budget.total_tokens, 140);
+    assert!(manifest.budget.hard_tokens > 0);
+    assert!(manifest.budget.hard_tokens < 1024);
+    assert_eq!(manifest.budget.soft_tokens, 40);
+    assert_eq!(
+        manifest.budget.total_tokens,
+        manifest.budget.hard_tokens + manifest.budget.soft_tokens
+    );
     println!("B06_CONTEXT_RESULT progress=PASS manifest=PASS digest_deterministic=PASS unrelated_revision_valid=PASS related_change_stale=PASS bounded_hard_context=PASS status=PASS");
+}
+
+#[test]
+fn b_r2_01_compiler_and_digest_reject_incomplete_context_before_manifest() {
+    let mut state = populated_state();
+    state.mark_truncated(ContextHardSource::Canon);
+    let input = ContextCompilerInput {
+        execution_mode: "LONG_FORM".into(),
+        project_revision: 4,
+        goal_contract_refs: vec![],
+        state,
+        continuity_threads: vec![],
+        active_task_refs: vec![],
+        future_reservation_refs: vec![],
+        selected_evidence: vec![],
+        omitted_soft_sources: vec![],
+        hard_tokens: 100,
+        soft_tokens: 0,
+    };
+    let blocker = "CONTEXT_HARD_INCOMPLETE|sources=CANON|scope=CHAPTER:chapter:21";
+
+    assert_eq!(relevant_state_digest(&input).unwrap_err(), blocker);
+    assert_eq!(compile_context_manifest(input).unwrap_err(), blocker);
+}
+
+#[test]
+fn b_r2_01_aggregate_hard_budget_counts_multiple_sources_and_future_reservations() {
+    let mut state = populated_state();
+    let fact_template = state.facts[0].clone();
+    for index in 0..60 {
+        let mut fact = fact_template.clone();
+        fact.fact_id = format!("fact:aggregate:{index}:{}", "x".repeat(24));
+        state.facts.push(fact);
+    }
+    let selected_evidence = (0..60)
+        .map(|index| {
+            serde_json::from_value(json!({
+                "artifactId":format!("evidence:aggregate:{index}:{}", "x".repeat(24)),
+                "version":1,
+                "quote":"证据摘要".repeat(80)
+            }))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut input = ContextCompilerInput {
+        execution_mode: "LONG_FORM".into(),
+        project_revision: 4,
+        goal_contract_refs: vec![],
+        state,
+        continuity_threads: vec![],
+        active_task_refs: (0..60)
+            .map(|index| format!("task:aggregate:{index}:{}", "x".repeat(24)))
+            .collect(),
+        future_reservation_refs: (0..60)
+            .map(|index| format!("reservation:aggregate:{index}:{}", "x".repeat(24)))
+            .collect(),
+        selected_evidence,
+        omitted_soft_sources: vec![],
+        hard_tokens: 1024,
+        soft_tokens: 0,
+    };
+
+    let first = compile_context_manifest(input.clone());
+    let blocker = first.err().unwrap_or_default();
+    let repeated = compile_context_manifest(input.clone()).unwrap_err();
+    let digest_result = relevant_state_digest(&input);
+    let digest_blocker = digest_result.err().unwrap_or_default();
+    println!("B_R2_01_AGGREGATE_HARD_RESULT canon=61 tasks=60 evidence=60 future_reservations=60 error={blocker}");
+    assert!(blocker.starts_with("CONTEXT_HARD_BUDGET_EXCEEDED"));
+    assert_eq!(
+        blocker, repeated,
+        "the same aggregate input must block deterministically"
+    );
+    assert_eq!(
+        blocker, digest_blocker,
+        "budget blockers must be deterministic before digest creation"
+    );
+
+    input.state.facts.truncate(1);
+    input.active_task_refs.truncate(1);
+    input.future_reservation_refs.truncate(1);
+    input.selected_evidence.clear();
+    let recovered = compile_context_manifest(input).unwrap();
+    assert!(recovered.budget.hard_tokens < 1024);
+    println!("B_R2_01_AGGREGATE_HARD_RECOVERY_RESULT reduced_scope=PASS estimated_hard_tokens={} limit=1024 status=PASS", recovered.budget.hard_tokens);
 }
 
 struct EchoAdapter;
