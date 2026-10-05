@@ -23,7 +23,7 @@ use crate::runtime::{
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -1686,16 +1686,35 @@ pub(crate) fn context_input_from_authority(
             &scope,
         )?;
     }
-    let selected_evidence = evidence
-        .into_iter()
-        .map(|item| crate::generated::types::EvidenceRef {
+    // Evidence references are HARD provenance; their historical excerpts are
+    // SOFT context under the frozen runtime architecture. Keep each unique
+    // source range in the hard projection, but do not copy prose into it.
+    let mut evidence_quotes = BTreeMap::new();
+    let mut selected_evidence = Vec::new();
+    for item in evidence {
+        let key = (
+            item.source_artifact_id.clone(),
+            item.version,
+            item.range_start,
+            item.range_end,
+        );
+        if let Some(previous_quote) = evidence_quotes.get(&key) {
+            if previous_quote != &item.quote {
+                return Err(format!(
+                    "CONTEXT_SOURCE_UNAVAILABLE|source=EVIDENCE|scope={scope}"
+                ));
+            }
+            continue;
+        }
+        evidence_quotes.insert(key, item.quote);
+        selected_evidence.push(crate::generated::types::EvidenceRef {
             artifact_id: item.source_artifact_id,
             version: item.version,
             range_start: item.range_start,
             range_end: item.range_end,
-            quote: item.quote,
-        })
-        .collect();
+            quote: None,
+        });
+    }
     let omitted_soft_sources = if request
         .get("includeSoftSources")
         .and_then(Value::as_bool)

@@ -1,6 +1,10 @@
 use ai_novel_production_system_core::commands::{
-    execute_book_plan_revise_with_observer, execute_command_impl, query_production_center_impl,
+    execute_book_plan_revise_with_observer, execute_command_impl, query_chapter_versions_impl,
+    query_history_impl, query_production_center_impl, query_single_chapter_impl,
     query_story_directions_impl, KernelState,
+};
+use ai_novel_production_system_core::narrative::{
+    measure_context_hard_budget, ContextCompilerInput,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
@@ -9,7 +13,7 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::signing::execute_opening_evaluation_with_observer;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-13T12:00:00Z";
 
@@ -169,6 +173,64 @@ impl ProductionModelGateway for B02Gateway {
             other => return Err(format!("unexpected B02 capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
+    }
+}
+
+struct LongEvidenceGateway {
+    inner: B02Gateway,
+    long_body: String,
+    render_calls: AtomicUsize,
+    audit_calls: AtomicUsize,
+    planning_contexts: Mutex<Vec<Value>>,
+}
+
+impl LongEvidenceGateway {
+    fn new() -> Self {
+        Self {
+            inner: B02Gateway::new(true, "A"),
+            long_body: "雨夜里的工作室留下了必须追查的现实痕迹。".repeat(60),
+            render_calls: AtomicUsize::new(0),
+            audit_calls: AtomicUsize::new(0),
+            planning_contexts: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ProductionModelGateway for LongEvidenceGateway {
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.inner.resolve_profile()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "PLAN_STRATEGY" {
+            self.planning_contexts
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(input["authorityContext"].clone());
+        }
+        let mut response = self.inner.invoke(capability, input)?;
+        match capability {
+            "RENDER_CHAPTER" if self.render_calls.fetch_add(1, Ordering::SeqCst) == 0 => {
+                response.output["body"] = json!(self.long_body);
+            }
+            "AUDIT_EXTRACT" if self.audit_calls.fetch_add(1, Ordering::SeqCst) == 0 => {
+                let evidence = json!({
+                    "start":0,
+                    "end":self.long_body.chars().count(),
+                    "quote":self.long_body
+                });
+                for candidate in response.output["canonCandidates"]
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                {
+                    candidate["evidence"] = evidence.clone();
+                }
+                response.output["evidenceRanges"] = json!([evidence]);
+            }
+            _ => {}
+        }
+        Ok(response)
     }
 }
 
@@ -332,6 +394,261 @@ fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
             }),
         );
     }
+}
+
+#[test]
+fn f03_formal_context_projection_carries_three_openings_through_long_form_and_reopen() {
+    let temp = tempfile::tempdir().expect("F03 app-data directory");
+    let gateway = Arc::new(LongEvidenceGateway::new());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+
+    let opening_contexts = gateway.planning_contexts.lock().unwrap();
+    assert_eq!(opening_contexts.len(), 3);
+    assert_eq!(opening_contexts[0]["selectedEvidence"], json!([]));
+    assert_eq!(
+        opening_contexts[1]["state"]["facts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let opening_two_fact_ids = opening_contexts[1]["state"]["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|fact| fact["factId"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(opening_two_fact_ids.contains("fact:b02:opening:1"));
+    assert!(opening_two_fact_ids.contains("fact:b02:guqing"));
+    assert!(opening_two_fact_ids.contains("fact:b02:relation-anchor"));
+    assert_eq!(
+        opening_contexts[1]["selectedEvidence"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        opening_contexts[1]["selectedEvidence"][0]["quote"],
+        Value::Null
+    );
+    assert_eq!(
+        opening_contexts[1]["selectedEvidence"][0]["rangeEnd"],
+        gateway.long_body.chars().count()
+    );
+    for (index, context) in opening_contexts.iter().enumerate() {
+        let input: ContextCompilerInput = serde_json::from_value(context.clone()).unwrap();
+        let usage = measure_context_hard_budget(&input).unwrap();
+        assert!(
+            usage.estimated_tokens <= 1024,
+            "opening {}: {usage:?}",
+            index + 1
+        );
+        println!(
+            "F03_OPENING_CONTEXT chapter={} estimatedTokens={} serializedBytes={}",
+            index + 1,
+            usage.estimated_tokens,
+            usage.serialized_bytes
+        );
+    }
+    drop(opening_contexts);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (stored_evidence, evidence_truncated) =
+        ai_novel_production_system_core::repositories::narrative::NarrativeRepository::
+            evidence_for_refs_bounded(
+                &connection,
+                &project_id,
+                &[
+                    "fact:b02:opening:1",
+                    "fact:b02:guqing",
+                    "fact:b02:relation-anchor",
+                ],
+                100,
+            )
+            .unwrap();
+    assert!(!evidence_truncated);
+    assert_eq!(stored_evidence.len(), 3);
+    assert!(stored_evidence
+        .iter()
+        .all(|item| item.quote.as_deref() == Some(gateway.long_body.as_str())));
+    drop(connection);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "f03:opening-evaluate",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    let approval = command(
+        &state,
+        &project_id,
+        "f03:book-plan-revise",
+        "book_plan_revise",
+        json!({}),
+    );
+    assert_eq!(approval["result"]["planningMaturity"], "APPROVED");
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let volume_id: String = connection
+        .query_row(
+            "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    command(
+        &state,
+        &project_id,
+        "f03:volume-intent",
+        "planning_create_volume_intent",
+        json!({"volumeId":volume_id}),
+    );
+    command(
+        &state,
+        &project_id,
+        "f03:volume-plan",
+        "planning_create_volume_plan",
+        json!({"volumeId":volume_id}),
+    );
+    let prepared = command(
+        &state,
+        &project_id,
+        "f03:chapter-4-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_four = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    command(
+        &state,
+        &project_id,
+        "f03:chapter-4-plan",
+        "planning_compile_chapter_plan",
+        json!({
+            "chapterId":chapter_four,
+            "chapterGoalHint":"根据前三章正式事实追查账本缺页的去向。"
+        }),
+    );
+    {
+        let contexts = gateway.planning_contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 4);
+        assert_eq!(contexts[3]["executionMode"], "LONG_FORM");
+        assert!(contexts[3]["selectedEvidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["quote"].is_null()));
+        let input: ContextCompilerInput = serde_json::from_value(contexts[3].clone()).unwrap();
+        let usage = measure_context_hard_budget(&input).unwrap();
+        assert!(usage.estimated_tokens <= 1024);
+        println!(
+            "F03_LONG_FORM_CONTEXT estimatedTokens={} serializedBytes={}",
+            usage.estimated_tokens, usage.serialized_bytes
+        );
+    }
+    let mut production_request = raw_command_request(
+        &state,
+        &project_id,
+        "f03:chapter-4-production",
+        "production_start",
+        json!({
+            "chapterId":chapter_four,
+            "volumeId":volume_id,
+            "executionMode":"LONG_FORM",
+            "skillsEnabled":false
+        }),
+    );
+    production_request["requestedAt"] = json!("2026-09-13T12:01:00Z");
+    let production = execute_command_impl(&state, production_request).unwrap();
+    assert_eq!(production["finalStatus"], "committed");
+    assert_eq!(production["stage"], "COMPLETED");
+    let commit_receipt_id = production["receipt"]["receiptId"]
+        .as_str()
+        .expect("formal commit receipt ID")
+        .to_owned();
+    let production_receipt_ref = production["receipt"]["headChanges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["artifactType"] == "ProductionReceipt")
+        .expect("production receipt head change")
+        .clone();
+    drop(state);
+
+    let reopened =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let center = query_production_center_impl(&reopened, json!({"projectId":project_id}))
+        .expect("formal production query after app-data reopen");
+    let final_ref = center["finalChapterRef"].clone();
+    assert_eq!(
+        final_ref["artifactId"],
+        production["finalChapterRef"]["artifactId"]
+    );
+    assert_eq!(
+        final_ref["version"],
+        production["finalChapterRef"]["version"]
+    );
+    assert_eq!(
+        final_ref["payloadHash"],
+        production["finalChapterRef"]["payloadHash"]
+    );
+    assert!(final_ref["payloadHash"]
+        .as_str()
+        .is_some_and(|hash| hash.len() == 64));
+    let receipt = center["artifacts"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["id"] == production_receipt_ref["artifactId"])
+        .expect("registered query exposes ProductionReceipt artifact");
+    assert_eq!(receipt["title"], "ProductionReceipt");
+    assert!(receipt["summary"]
+        .as_str()
+        .unwrap()
+        .contains(production_receipt_ref["payloadHash"].as_str().unwrap()));
+    let final_chapter = query_single_chapter_impl(
+        &reopened,
+        json!({"projectId":project_id,"chapterId":chapter_four}),
+    )
+    .unwrap();
+    assert_eq!(final_chapter["status"], "official");
+    assert_eq!(final_chapter["version"], "v1");
+    assert!(final_chapter["content"][0]
+        .as_str()
+        .is_some_and(|body| body.contains("第4章")));
+    let versions = query_chapter_versions_impl(
+        &reopened,
+        json!({"projectId":project_id,"chapterId":chapter_four,"pageSize":20}),
+    )
+    .unwrap();
+    assert!(versions["items"].as_array().unwrap().iter().any(|item| {
+        item["id"] == format!("{}:v1", final_ref["artifactId"].as_str().unwrap())
+            && item["current"] == true
+    }));
+    let history = query_history_impl(
+        &reopened,
+        json!({"projectId":project_id,"kind":"VERSION","pageSize":100}),
+    )
+    .unwrap();
+    assert!(history["entries"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| { item["id"] == commit_receipt_id && item["receipt"] == commit_receipt_id }));
+    println!(
+        "F03_CHAIN opening=3 openingEvaluation=PASS longForm=1 finalArtifact={} version={} payloadHash={} productionReceipt={} reopen=PASS",
+        final_ref["artifactId"],
+        final_ref["version"],
+        final_ref["payloadHash"],
+        receipt["id"]
+    );
 }
 
 #[test]
