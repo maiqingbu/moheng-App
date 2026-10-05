@@ -683,7 +683,7 @@ fn b_r2_01_long_form_route_task_total_over_bound_blocks_before_state_reads_and_m
 }
 
 #[test]
-fn b_r2_01_long_form_aggregate_hard_budget_blocks_large_evidence_before_model() {
+fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-context-aggregate-budget";
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
@@ -710,18 +710,43 @@ fn b_r2_01_long_form_aggregate_hard_budget_blocks_large_evidence_before_model() 
     let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap();
     let query_request = json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:b04:lead"],"references":[]});
     let query_result = query_context_manifest_impl(&state, query_request.clone());
-    let query_budget_blocked = query_result
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"));
+    let context_manifest = query_result.expect("historical excerpt is excluded from HARD context");
+    assert!(context_manifest["budget"]["hardTokens"].as_i64().unwrap() <= 1024);
+    assert_eq!(
+        context_manifest["selectedEvidence"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(context_manifest["selectedEvidence"][0]["quote"].is_null());
+    assert_eq!(
+        context_manifest["selectedEvidence"][0]["artifactId"],
+        "authority:book"
+    );
+    assert_eq!(context_manifest["selectedEvidence"][0]["version"], 1);
+    assert_eq!(context_manifest["selectedEvidence"][0]["rangeStart"], 0);
+    assert_eq!(
+        context_manifest["selectedEvidence"][0]["rangeEnd"],
+        quote.chars().count()
+    );
+    assert_eq!(
+        gateway.calls.load(Ordering::SeqCst),
+        0,
+        "the registered context query is local"
+    );
+    let (stored_evidence, stored_truncated) =
+        ai_novel_production_system_core::repositories::narrative::NarrativeRepository::
+            evidence_for_refs_bounded(&state.manager.open(project_id, "", NOW).unwrap(), project_id, &["fact:b04:reality"], 100)
+                .unwrap();
+    assert!(!stored_truncated);
+    assert_eq!(stored_evidence.len(), 1);
+    assert_eq!(stored_evidence[0].quote.as_deref(), Some(quote.as_str()));
     let planning_result = execute_command_impl(
         &state,
         json!({"type":"planning_compile_chapter_plan","commandId":"compile-budget","idempotencyKey":"compile-budget-key","projectId":project_id,"expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id}}),
     );
-    let planning_budget_blocked = planning_result
-        .as_ref()
-        .err()
-        .is_some_and(|error| error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"));
+    assert_eq!(planning_result.unwrap()["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "", NOW).unwrap();
     let context_count: i64 = connection
         .query_row(
@@ -730,17 +755,9 @@ fn b_r2_01_long_form_aggregate_hard_budget_blocks_large_evidence_before_model() 
             |row| row.get(0),
         )
         .unwrap();
-    println!("B_R2_01_AGGREGATE_BUDGET_RESULT evidence_rows=1 quote_chars=12000 query_blocked={query_budget_blocked} planning_blocked={planning_budget_blocked} model_calls={} context_manifest_count={context_count}", gateway.calls.load(Ordering::SeqCst));
-    assert!(
-        query_budget_blocked,
-        "one oversized Evidence source must hit the aggregate HARD budget"
-    );
-    assert!(
-        planning_budget_blocked,
-        "planning must propagate the real aggregate budget blocker"
-    );
-    assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(context_count, 0);
+    println!("B_R2_01_HISTORICAL_EVIDENCE_RESULT evidence_rows=1 quote_chars=12000 hard_reference_preserved=true quote_in_hard_input=false original_quote_retrievable=true planning_committed=true model_calls={} context_manifest_count={context_count}", gateway.calls.load(Ordering::SeqCst));
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(context_count, 1);
 
     connection
         .execute(
