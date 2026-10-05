@@ -1290,6 +1290,91 @@ fn b08_invalid_or_over_budget_gate_policy_blocks_before_provider_calls() {
 }
 
 #[test]
+fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-policy-contract-size";
+    let gateway = CapturingAuditPolicyGateway::default();
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let connection = state
+        .manager
+        .create(project_id, "B08 policy contract size", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_with_policy(
+        &connection,
+        project_id,
+        json!({
+            "payloadSchema":"gate-policy.r1",
+            "policyId":"budget-counterexample",
+            "rules":["candidate-audit","chapter-final"],
+            "canonSemantics":{
+                "policyVersion":"v".repeat(2800),
+                "rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}]
+            }
+        }),
+    );
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:policy-contract-size","idempotencyKey":"key:b08:policy-contract-size",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+        }),
+    );
+
+    if let Some(input) = gateway.audit_inputs.lock().unwrap().first() {
+        let contract = json!({
+            "gatePolicyRef":input["gatePolicyRef"].clone(),
+            "gatePolicyPayloadHash":input["gatePolicyPayloadHash"].clone(),
+            "canonSemanticPolicyVersion":input["canonSemanticPolicyVersion"].clone(),
+            "canonSemanticPolicy":input["canonSemanticPolicy"].clone()
+        });
+        let serialized = serde_json::to_string(&contract).unwrap();
+        let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+        let non_ascii_scalars = serialized
+            .chars()
+            .filter(|character| !character.is_ascii())
+            .count();
+        let estimated_tokens = ascii_bytes.div_ceil(3) + non_ascii_scalars;
+        println!(
+            "F02_R2_ACTUAL_CONTRACT_COUNTEREXAMPLE={}",
+            json!({
+                "policyVersionChars":input["canonSemanticPolicyVersion"].as_str().unwrap().chars().count(),
+                "contractBytes":serialized.len(),
+                "estimatedTokens":estimated_tokens,
+                "limitTokens":ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+                "limitBytes":ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+                "gatewayCapabilities":gateway.capabilities.lock().unwrap().clone()
+            })
+        );
+    }
+    let error =
+        result.expect_err("oversized actual Audit contract must stop before any model stage");
+    assert!(
+        error.starts_with("B08_GATE_POLICY_HARD_BUDGET_EXCEEDED"),
+        "{error}"
+    );
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+    let connection = state
+        .manager
+        .open(project_id, "B08 policy contract size", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
 fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
