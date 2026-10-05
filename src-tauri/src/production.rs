@@ -949,30 +949,53 @@ fn audit_policy_contract(
             .ok_or("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")?
     });
 
-    let serialized = serde_json::to_string(&canon_semantics).map_err(|error| error.to_string())?;
+    let audit_policy_contract = json!({
+        "gatePolicyRef":policy_ref,
+        "gatePolicyPayloadHash":policy_ref.payload_hash.clone(),
+        "canonSemanticPolicyVersion":policy.version.clone(),
+        "canonSemanticPolicy":canon_semantics
+    });
+    validate_audit_policy_contract_size(
+        &audit_policy_contract,
+        crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+        crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+    )?;
+    Ok(audit_policy_contract)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuditPolicyContractSize {
+    estimated_tokens: usize,
+    serialized_bytes: usize,
+}
+
+fn audit_policy_contract_size(contract: &Value) -> Result<AuditPolicyContractSize, String> {
+    let serialized = serde_json::to_string(contract).map_err(|error| error.to_string())?;
     let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
     let non_ascii_scalars = serialized
         .chars()
         .filter(|character| !character.is_ascii())
         .count();
-    let estimated_tokens = ascii_bytes.div_ceil(3) + non_ascii_scalars;
-    let serialized_bytes = serialized.len();
-    if estimated_tokens as i64 > crate::narrative::CONTEXT_HARD_TOKEN_LIMIT
-        || serialized_bytes > crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
-    {
+    Ok(AuditPolicyContractSize {
+        estimated_tokens: ascii_bytes.div_ceil(3) + non_ascii_scalars,
+        serialized_bytes: serialized.len(),
+    })
+}
+
+fn validate_audit_policy_contract_size(
+    contract: &Value,
+    token_limit: i64,
+    byte_limit: usize,
+) -> Result<AuditPolicyContractSize, String> {
+    let size = audit_policy_contract_size(contract)?;
+    if size.estimated_tokens as i64 > token_limit || size.serialized_bytes > byte_limit {
         return Err(format!(
-            "B08_GATE_POLICY_HARD_BUDGET_EXCEEDED|usedTokens={estimated_tokens}|limitTokens={}|serializedBytes={serialized_bytes}|limitBytes={}",
-            crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            "B08_GATE_POLICY_HARD_BUDGET_EXCEEDED|scope=AUDIT_POLICY_CONTRACT|usedTokens={}|limitTokens={token_limit}|serializedBytes={}|limitBytes={byte_limit}",
+            size.estimated_tokens,
+            size.serialized_bytes,
         ));
     }
-
-    Ok(json!({
-        "gatePolicyRef":policy_ref,
-        "gatePolicyPayloadHash":policy_ref.payload_hash.clone(),
-        "canonSemanticPolicyVersion":policy.version,
-        "canonSemanticPolicy":canon_semantics
-    }))
+    Ok(size)
 }
 
 fn existing_canon_semantic_keys(authority_context: &Value) -> Value {
@@ -1953,7 +1976,7 @@ fn run_chapter_production_inner(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"gatePolicyRef":audit_contract["gatePolicyRef"].clone(),"gatePolicyPayloadHash":audit_contract["gatePolicyPayloadHash"].clone(),"canonSemanticPolicyVersion":audit_contract["canonSemanticPolicyVersion"].clone(),"canonSemanticPolicy":audit_contract["canonSemanticPolicy"].clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"existingCanonSemanticKeys":existing_canon_semantic_keys,"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
@@ -2939,6 +2962,122 @@ fn knowledge_authority_is_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_audit_policy_contract(artifact_id: String, policy_version: String) -> Value {
+        json!({
+            "gatePolicyRef":{"artifactId":artifact_id,"version":1,"payloadHash":"a".repeat(64)},
+            "gatePolicyPayloadHash":"a".repeat(64),
+            "canonSemanticPolicyVersion":policy_version.clone(),
+            "canonSemanticPolicy":{"policyVersion":policy_version,"rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}]}
+        })
+    }
+
+    fn contract_with_exact_serialized_bytes(target_bytes: usize) -> Value {
+        for artifact_id_length in 1..=200 {
+            let artifact_id = "x".repeat(artifact_id_length);
+            let base = synthetic_audit_policy_contract(artifact_id.clone(), String::new());
+            let base_bytes = audit_policy_contract_size(&base).unwrap().serialized_bytes;
+            let Some(extra_bytes) = target_bytes.checked_sub(base_bytes) else {
+                continue;
+            };
+            if extra_bytes % 2 != 0 {
+                continue;
+            }
+            let version = "v".repeat(extra_bytes / 2);
+            let contract = synthetic_audit_policy_contract(artifact_id, version);
+            if audit_policy_contract_size(&contract)
+                .is_ok_and(|size| size.serialized_bytes == target_bytes)
+            {
+                return contract;
+            }
+        }
+        panic!("could not build the requested serialized byte boundary")
+    }
+
+    #[test]
+    fn audit_policy_contract_token_limit_accepts_equal_and_rejects_next_value() {
+        let exact = (0..=3000)
+            .find_map(|length| {
+                let contract =
+                    synthetic_audit_policy_contract("gate:test".into(), "v".repeat(length));
+                let size = audit_policy_contract_size(&contract).unwrap();
+                (size.estimated_tokens == crate::narrative::CONTEXT_HARD_TOKEN_LIMIT as usize
+                    && size.serialized_bytes
+                        <= crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT)
+                    .then_some((length, contract, size))
+            })
+            .expect("ASCII policy version can reach the exact token threshold");
+        assert_eq!(
+            validate_audit_policy_contract_size(
+                &exact.1,
+                crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+                crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            )
+            .unwrap(),
+            exact.2
+        );
+
+        let over = (exact.0 + 1..=3000)
+            .find_map(|length| {
+                let contract =
+                    synthetic_audit_policy_contract("gate:test".into(), "v".repeat(length));
+                let size = audit_policy_contract_size(&contract).unwrap();
+                (size.estimated_tokens > crate::narrative::CONTEXT_HARD_TOKEN_LIMIT as usize)
+                    .then_some((contract, size))
+            })
+            .expect("the next token boundary must be reachable");
+        let error = validate_audit_policy_contract_size(
+            &over.0,
+            crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+        )
+        .unwrap_err();
+        assert!(error.contains(&format!("usedTokens={}", over.1.estimated_tokens)));
+        assert!(error.contains("limitTokens=1024"));
+    }
+
+    #[test]
+    fn audit_policy_contract_byte_limit_accepts_equal_and_rejects_next_byte() {
+        let exact = contract_with_exact_serialized_bytes(
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+        );
+        let exact_size = audit_policy_contract_size(&exact).unwrap();
+        assert_eq!(
+            exact_size.serialized_bytes,
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+        );
+        validate_audit_policy_contract_size(&exact, 4096, 8192).unwrap();
+
+        let over = contract_with_exact_serialized_bytes(
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT + 1,
+        );
+        let over_size = audit_policy_contract_size(&over).unwrap();
+        assert_eq!(
+            over_size.serialized_bytes,
+            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT + 1
+        );
+        let error = validate_audit_policy_contract_size(&over, 4096, 8192).unwrap_err();
+        assert!(error.contains("serializedBytes=8193"));
+        assert!(error.contains("limitBytes=8192"));
+    }
+
+    #[test]
+    fn audit_policy_contract_size_uses_json_escaped_and_utf8_bytes() {
+        let contract =
+            synthetic_audit_policy_contract("gate:策略\\\"ref".into(), "版本\\\"策略\n🌟".into());
+        let serialized = serde_json::to_string(&contract).unwrap();
+        assert!(serialized.contains("\\\\\\\""));
+        assert!(serialized.contains("\\n"));
+        let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+        let non_ascii_scalars = serialized
+            .chars()
+            .filter(|character| !character.is_ascii())
+            .count();
+        let expected_tokens = ascii_bytes.div_ceil(3) + non_ascii_scalars;
+        let measured = audit_policy_contract_size(&contract).unwrap();
+        assert_eq!(measured.estimated_tokens, expected_tokens);
+        assert_eq!(measured.serialized_bytes, serialized.len());
+    }
 
     #[test]
     fn provider_payload_parser_accepts_a_json_code_fence_without_accepting_extra_text() {

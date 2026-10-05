@@ -630,6 +630,22 @@ fn seed_chapter_and_gate_with_policy(
     project_id: &str,
     policy_payload: Value,
 ) -> String {
+    let policy_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
+    seed_chapter_and_gate_with_policy_and_artifact_id(
+        connection,
+        project_id,
+        policy_payload,
+        policy_id,
+    )
+}
+
+fn seed_chapter_and_gate_with_policy_and_artifact_id(
+    connection: &Connection,
+    project_id: &str,
+    policy_payload: Value,
+    policy_id: String,
+) -> String {
     let book_id = StableIdentityFactory::from_command(StableIdKind::Book, "b08-book").unwrap();
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
@@ -644,8 +660,6 @@ fn seed_chapter_and_gate_with_policy(
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
 
     let policy_hash = sha256_canonical(&policy_payload).unwrap();
-    let policy_id =
-        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
     let scope = "{\"level\":\"PROJECT\"}";
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'GatePolicy','PROJECT',?3,1,'b08.artifact.r1','COMMITTED',?4,'{}',?5,?5)", libsql_rusqlite::params![policy_id, project_id, scope, policy_hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![policy_id, policy_payload.to_string(), policy_hash]).unwrap();
@@ -968,13 +982,14 @@ fn b08_audit_provider_request_uses_the_registered_gate_policy_and_receipt_bindin
         .expect("production owner must send AUDIT_EXTRACT");
     let expected_ref =
         json!({"artifactId":artifact_id,"version":version,"payloadHash":payload_hash});
-    assert_eq!(captured["gatePolicyRef"], expected_ref);
+    let captured_contract = &captured["auditPolicyContract"];
+    assert_eq!(captured_contract["gatePolicyRef"], expected_ref);
     assert_eq!(
-        captured["canonSemanticPolicyVersion"],
+        captured_contract["canonSemanticPolicyVersion"],
         canon_semantics["policyVersion"]
     );
-    assert_eq!(captured["gatePolicyPayloadHash"], payload_hash);
-    assert_eq!(captured["canonSemanticPolicy"], canon_semantics);
+    assert_eq!(captured_contract["gatePolicyPayloadHash"], payload_hash);
+    assert_eq!(captured_contract["canonSemanticPolicy"], canon_semantics);
 
     let connection = state
         .manager
@@ -1070,24 +1085,28 @@ fn b08_audit_request_uses_each_projects_current_updated_gate_policy() {
 
     let requests = gateway.audit_inputs.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
-    assert_ne!(requests[0]["gatePolicyRef"], requests[1]["gatePolicyRef"]);
     assert_ne!(
-        requests[0]["canonSemanticPolicy"],
-        requests[1]["canonSemanticPolicy"]
+        requests[0]["auditPolicyContract"]["gatePolicyRef"],
+        requests[1]["auditPolicyContract"]["gatePolicyRef"]
+    );
+    assert_ne!(
+        requests[0]["auditPolicyContract"]["canonSemanticPolicy"],
+        requests[1]["auditPolicyContract"]["canonSemanticPolicy"]
     );
     for ((project_id, expected_ref, expected_semantics), request) in
         expected.iter().zip(requests.iter())
     {
-        assert_eq!(request["gatePolicyRef"], *expected_ref);
+        let contract = &request["auditPolicyContract"];
+        assert_eq!(contract["gatePolicyRef"], *expected_ref);
         assert_eq!(
-            request["gatePolicyPayloadHash"],
+            contract["gatePolicyPayloadHash"],
             expected_ref["payloadHash"]
         );
         assert_eq!(
-            request["canonSemanticPolicyVersion"],
+            contract["canonSemanticPolicyVersion"],
             expected_semantics["policyVersion"]
         );
-        assert_eq!(request["canonSemanticPolicy"], *expected_semantics);
+        assert_eq!(contract["canonSemanticPolicy"], *expected_semantics);
         let connection = state
             .manager
             .open(project_id, "B08 policy-specific", NOW)
@@ -1106,6 +1125,147 @@ fn b08_audit_request_uses_each_projects_current_updated_gate_policy() {
             expected_semantics["policyVersion"]
         );
     }
+}
+
+#[test]
+fn b08_audit_contract_preserves_max_length_ref_and_escaped_unicode_policy_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-policy-serialized-values";
+    let gateway = CapturingAuditPolicyGateway::default();
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let policy_version = "策略\"\\段\nv2";
+    let special_predicate = "见证\"\\关系";
+    let rules = json!([
+        {"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+        {"predicate":special_predicate,"cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"equivalenceSets":[["事实","证据"]]}
+    ]);
+    let policy_payload = json!({
+        "payloadSchema":"gate-policy.r1",
+        "policyId":"serialized-values",
+        "rules":["candidate-audit","chapter-final"],
+        "canonSemantics":{"policyVersion":policy_version,"rules":rules}
+    });
+    let artifact_id = "g".repeat(200);
+    let connection = state
+        .manager
+        .create(project_id, "B08 policy serialized values", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id(
+        &connection,
+        project_id,
+        policy_payload.clone(),
+        artifact_id.clone(),
+    );
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:policy-serialized-values","idempotencyKey":"key:b08:policy-serialized-values",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+
+    let request = gateway.audit_inputs.lock().unwrap()[0].clone();
+    let contract = &request["auditPolicyContract"];
+    assert_eq!(contract["gatePolicyRef"]["artifactId"], artifact_id);
+    assert_eq!(
+        contract["gatePolicyRef"]["payloadHash"],
+        sha256_canonical(&policy_payload).unwrap()
+    );
+    assert_eq!(contract["canonSemanticPolicyVersion"], policy_version);
+    assert_eq!(
+        contract["canonSemanticPolicy"]["policyVersion"],
+        policy_version
+    );
+    assert_eq!(contract["canonSemanticPolicy"]["rules"], rules);
+    let serialized = serde_json::to_string(contract).unwrap();
+    let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+    let non_ascii_scalars = serialized
+        .chars()
+        .filter(|character| !character.is_ascii())
+        .count();
+    assert!(ascii_bytes.div_ceil(3) + non_ascii_scalars <= 1024);
+    assert!(serialized.len() <= 8192);
+    assert!(serialized.contains("\\\""));
+    assert!(serialized.contains("\\\\"));
+    assert!(serialized.contains("\\n"));
+    assert!(serialized.contains("策略"));
+}
+
+#[test]
+fn b08_context_and_policy_hard_scopes_are_bounded_in_the_same_audit_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-context-policy-scopes";
+    let gateway = CapturingAuditPolicyGateway::default();
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let connection = state
+        .manager
+        .create(project_id, "B08 context and policy scopes", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_with_policy(
+        &connection,
+        project_id,
+        json!({
+            "payloadSchema":"gate-policy.r1",
+            "policyId":"context-policy-scope-boundary",
+            "rules":["candidate-audit","chapter-final"],
+            "canonSemantics":{
+                "policyVersion":"p".repeat(1100),
+                "rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}]
+            }
+        }),
+    );
+    drop(connection);
+
+    let mut entity_ids = vec!["entity:actual:linzhou".to_string()];
+    entity_ids.extend(
+        (0..26).map(|index| format!("entity:context-padding-{index:02}-{}", "x".repeat(56))),
+    );
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:context-policy-scopes","idempotencyKey":"key:b08:context-policy-scopes",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":entity_ids,"skillsEnabled":false}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+
+    let request = gateway.audit_inputs.lock().unwrap()[0].clone();
+    let context: ai_novel_production_system_core::narrative::ContextCompilerInput =
+        serde_json::from_value(request["authorityContext"].clone()).unwrap();
+    let context_usage =
+        ai_novel_production_system_core::narrative::measure_context_hard_budget(&context).unwrap();
+    let contract = &request["auditPolicyContract"];
+    let serialized_contract = serde_json::to_string(contract).unwrap();
+    let contract_ascii_bytes = serialized_contract.bytes().filter(u8::is_ascii).count();
+    let contract_non_ascii_scalars = serialized_contract
+        .chars()
+        .filter(|character| !character.is_ascii())
+        .count();
+    let contract_tokens = contract_ascii_bytes.div_ceil(3) + contract_non_ascii_scalars;
+    assert!(context_usage.estimated_tokens > 700, "{context_usage:?}");
+    assert!(context_usage.estimated_tokens <= 1024, "{context_usage:?}");
+    assert!(contract_tokens > 700, "contractTokens={contract_tokens}");
+    assert!(contract_tokens <= 1024, "contractTokens={contract_tokens}");
+    assert!(
+        context_usage.estimated_tokens as usize + contract_tokens > 1024,
+        "both hard-owned objects are in the same provider request: context={context_usage:?}, contractTokens={contract_tokens}"
+    );
+    assert!(context_usage.serialized_bytes <= 8192);
+    assert!(serialized_contract.len() <= 8192);
+    println!(
+        "F02_R2_SAME_REQUEST_HARD_SCOPES={}",
+        json!({
+            "contextInput":{"estimatedTokens":context_usage.estimated_tokens,"serializedBytes":context_usage.serialized_bytes,"limitTokens":1024,"limitBytes":8192},
+            "auditPolicyContract":{"estimatedTokens":contract_tokens,"serializedBytes":serialized_contract.len(),"limitTokens":1024,"limitBytes":8192},
+            "combinedNamedHardScopesTokens":context_usage.estimated_tokens as usize + contract_tokens,
+            "requestContainsBoth":request.get("authorityContext").is_some() && request.get("auditPolicyContract").is_some()
+        })
+    );
 }
 
 #[test]
@@ -1183,11 +1343,12 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
     })).unwrap_err();
     assert_eq!(error, "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS");
     let request = gateway.audit_inputs.lock().unwrap()[0].clone();
+    let contract = &request["auditPolicyContract"];
     assert_eq!(
-        request["canonSemanticPolicy"]["rules"][0]["predicate"],
+        contract["canonSemanticPolicy"]["rules"][0]["predicate"],
         "opened"
     );
-    assert!(request["canonSemanticPolicy"]["rules"]
+    assert!(contract["canonSemanticPolicy"]["rules"]
         .as_array()
         .unwrap()
         .iter()
@@ -1313,6 +1474,13 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
             }
         }),
     );
+    let canon_facts_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(connection);
 
     let result = execute_command_impl(
@@ -1325,12 +1493,17 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
     );
 
     if let Some(input) = gateway.audit_inputs.lock().unwrap().first() {
-        let contract = json!({
-            "gatePolicyRef":input["gatePolicyRef"].clone(),
-            "gatePolicyPayloadHash":input["gatePolicyPayloadHash"].clone(),
-            "canonSemanticPolicyVersion":input["canonSemanticPolicyVersion"].clone(),
-            "canonSemanticPolicy":input["canonSemanticPolicy"].clone()
-        });
+        let contract = input
+            .get("auditPolicyContract")
+            .cloned()
+            .unwrap_or_else(|| {
+                json!({
+                    "gatePolicyRef":input["gatePolicyRef"].clone(),
+                    "gatePolicyPayloadHash":input["gatePolicyPayloadHash"].clone(),
+                    "canonSemanticPolicyVersion":input["canonSemanticPolicyVersion"].clone(),
+                    "canonSemanticPolicy":input["canonSemanticPolicy"].clone()
+                })
+            });
         let serialized = serde_json::to_string(&contract).unwrap();
         let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
         let non_ascii_scalars = serialized
@@ -1341,7 +1514,7 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
         println!(
             "F02_R2_ACTUAL_CONTRACT_COUNTEREXAMPLE={}",
             json!({
-                "policyVersionChars":input["canonSemanticPolicyVersion"].as_str().unwrap().chars().count(),
+                "policyVersionChars":contract["canonSemanticPolicyVersion"].as_str().unwrap().chars().count(),
                 "contractBytes":serialized.len(),
                 "estimatedTokens":estimated_tokens,
                 "limitTokens":ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
@@ -1352,10 +1525,28 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
     }
     let error =
         result.expect_err("oversized actual Audit contract must stop before any model stage");
+    let used_tokens = error
+        .split('|')
+        .find_map(|field| field.strip_prefix("usedTokens="))
+        .and_then(|value| value.parse::<i64>().ok())
+        .expect("the budget rejection reports the actual contract token count");
+    let serialized_bytes = error
+        .split('|')
+        .find_map(|field| field.strip_prefix("serializedBytes="))
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("the budget rejection reports the actual contract byte count");
+    println!("F02_R2_FULL_CONTRACT_REJECTED={error}");
+    assert!(used_tokens > ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT);
+    assert!(
+        serialized_bytes
+            <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+    );
     assert!(
         error.starts_with("B08_GATE_POLICY_HARD_BUDGET_EXCEEDED"),
         "{error}"
     );
+    assert!(error.contains("scope=AUDIT_POLICY_CONTRACT"), "{error}");
+    assert!(error.contains("limitTokens=1024"), "{error}");
     assert!(gateway.capabilities.lock().unwrap().is_empty());
     let connection = state
         .manager
@@ -1372,6 +1563,29 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
         0
     );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        canon_facts_before
+    );
+    let job_id =
+        StableIdentityFactory::from_command(StableIdKind::Job, "cmd:b08:policy-contract-size")
+            .unwrap();
+    let (job_status, current_stage, failure_code): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status,current_stage,error_code FROM jobs WHERE project_id=?1 AND job_id=?2",
+            libsql_rusqlite::params![project_id, job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(job_status, "FAILED");
+    assert_eq!(current_stage, "CONTEXT");
+    assert_eq!(failure_code.as_deref(), Some(error.as_str()));
 }
 
 #[test]
