@@ -124,6 +124,7 @@ fn existing_lifecycle_receipt(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lifecycle_commit_bundle(
     project_id: &str,
     command_id: &str,
