@@ -218,6 +218,8 @@ struct W13AuditGateway {
     variant: &'static str,
     database: PathBuf,
     canonical_heads_at_audit: Arc<Mutex<Option<String>>>,
+    revision_at_audit: Arc<Mutex<Option<i64>>>,
+    audit_inputs: Arc<Mutex<Vec<Value>>>,
 }
 
 impl ProductionModelGateway for W13AuditGateway {
@@ -238,6 +240,21 @@ impl ProductionModelGateway for W13AuditGateway {
                 .canonical_heads_at_audit
                 .lock()
                 .map_err(|error| error.to_string())? = Some(heads);
+            let revision = connection
+                .query_row(
+                    "SELECT revision FROM project_meta WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1)",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            *self
+                .revision_at_audit
+                .lock()
+                .map_err(|error| error.to_string())? = Some(revision);
+            self.audit_inputs
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(input.clone());
         }
         AuditVariantGateway {
             variant: self.variant,
@@ -347,6 +364,13 @@ impl TypedRepairOwner for RecheckingOwner {
 impl ProductionModelGateway for AuditVariantGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "PLAN_STRATEGY" && self.variant == "actual-reveal-after-foreshadow" {
+            response.output["reservationRefs"] = json!(["reservation:future:1"]);
+            response.output["sceneExecution"] = json!([{
+                "action":"FORESHADOW",
+                "reservationRef":"reservation:future:1"
+            }]);
+        }
         if capability == "AUDIT_EXTRACT" {
             match self.variant {
                 "actual-reveal-after-foreshadow" => {
@@ -2293,7 +2317,7 @@ fn b10_production_repair_limit_stops_before_a_final_commit_and_marks_escalation(
                 |row| row.get(0)
             )
             .unwrap(),
-        "FAILED"
+        "COMPLETED"
     );
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b10-limit' AND capability='RENDER_CHAPTER'",
@@ -2473,10 +2497,19 @@ fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
 fn plan_foreshadow_actual_reveal_is_blocked() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-actual-reveal";
+    let paths = AppPaths::new(temp.path());
+    let database = paths.project_dir(project_id).unwrap().join("project.db");
+    let canonical_heads_at_audit = Arc::new(Mutex::new(None));
+    let revision_at_audit = Arc::new(Mutex::new(None));
+    let audit_inputs = Arc::new(Mutex::new(Vec::new()));
     let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(AuditVariantGateway {
+        paths,
+        Arc::new(W13AuditGateway {
             variant: "actual-reveal-after-foreshadow",
+            database,
+            canonical_heads_at_audit: canonical_heads_at_audit.clone(),
+            revision_at_audit: revision_at_audit.clone(),
+            audit_inputs: audit_inputs.clone(),
         }),
     );
     let connection = state
@@ -2500,7 +2533,112 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         .manager
         .open(project_id, "B08 actual reveal", NOW)
         .unwrap();
+    let input = audit_inputs.lock().unwrap()[0].clone();
+    assert!(input.get("existingCanonSemanticKeys").is_none());
+    assert!(input
+        .pointer("/authorityContext/state/facts")
+        .and_then(Value::as_array)
+        .is_some_and(|facts| !facts.is_empty()));
+    let heads_after: String = connection
+        .query_row(
+            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        heads_after,
+        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        revision_at_audit.lock().unwrap().unwrap()
+    );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [project_id], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-reported-canon-conflict";
+    let paths = AppPaths::new(temp.path());
+    let database = paths.project_dir(project_id).unwrap().join("project.db");
+    let canonical_heads_at_audit = Arc::new(Mutex::new(None));
+    let revision_at_audit = Arc::new(Mutex::new(None));
+    let audit_inputs = Arc::new(Mutex::new(Vec::new()));
+    let state = KernelState::with_production_gateway(
+        paths,
+        Arc::new(W13AuditGateway {
+            variant: "canon-semantic-conflict",
+            database,
+            canonical_heads_at_audit: canonical_heads_at_audit.clone(),
+            revision_at_audit: revision_at_audit.clone(),
+            audit_inputs: audit_inputs.clone(),
+        }),
+    );
+    let connection = state.manager.create(project_id, "B08 canon conflict", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:reported-canon-conflict",
+            "idempotencyKey":"key:b08:reported-canon-conflict","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
+    );
+
+    let input = audit_inputs.lock().unwrap()[0].clone();
+    assert!(input.get("existingCanonSemanticKeys").is_none());
+    let facts = input
+        .pointer("/authorityContext/state/facts")
+        .and_then(Value::as_array)
+        .expect("audit input must retain authority facts for comparison");
+    assert!(facts.iter().any(|fact| {
+        fact["subjectId"] == "entity:actual:linzhou"
+            && fact["predicate"] == "location"
+            && fact["objectJson"]["place"] == "stone-door"
+    }), "authority facts: {facts:?}");
+
+    let connection = state.manager.open(project_id, "B08 canon conflict", NOW).unwrap();
+    let heads_after: String = connection
+        .query_row(
+            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        heads_after,
+        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        revision_at_audit.lock().unwrap().unwrap()
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
 
 #[test]
@@ -2690,6 +2828,8 @@ fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
                 variant,
                 database,
                 canonical_heads_at_audit: canonical_heads_at_audit.clone(),
+                revision_at_audit: Arc::new(Mutex::new(None)),
+                audit_inputs: Arc::new(Mutex::new(Vec::new())),
             }),
         );
         let connection = state
