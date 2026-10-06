@@ -1,6 +1,7 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_book_health_impl, KernelState, RepositoryReadAdapter,
 };
+use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::harness::{
     check_checkpoint_resume, registry_digest_map, BoundedCapabilityExecutor,
     CapabilityCallEnvelope, CapabilityRegistry, RequestedBounds, SupportCheckpoint,
@@ -787,6 +788,16 @@ fn b09_route_replan_commits_new_version_with_reason_evidence_and_idempotent_repl
         VolumeLifecycleOwner::replan_volume_route(&fixture.connection, request.clone()).unwrap();
     assert_eq!(first["replayed"], false);
     assert_eq!(first["routeVersion"], 2);
+    let commit_receipt =
+        CommitService::find_receipt(&fixture.connection, "p-b09", "key:b09-replan-1")
+            .unwrap()
+            .expect("route replan must write a CommitReceipt");
+    assert_eq!(first["receiptId"], commit_receipt.receipt_id);
+    assert!(fixture
+        ._manager
+        .find_project_command_receipt("p-b09", "key:b09-replan-1")
+        .unwrap()
+        .is_none());
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT version FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", &fixture.volume_id)))], |row| row.get(0)).unwrap(), 2);
     assert_eq!(fixture.connection.query_row::<String, _, _>("SELECT reason FROM volume_route_replans WHERE project_id='p-b09' AND replan_id='b09-replan-1'", [], |row| row.get(0)).unwrap(), "容量与退出缺口需要重新规划");
     let input_json: String = fixture
@@ -1237,6 +1248,16 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     )
     .unwrap();
     assert_eq!(closed["nextVolumeEligibility"], "ELIGIBLE");
+    let close_receipt =
+        CommitService::find_receipt(&fixture.connection, "p-b09", "key:b09-close-ok")
+            .unwrap()
+            .expect("volume close must write a CommitReceipt");
+    assert_eq!(closed["receiptId"], close_receipt.receipt_id);
+    assert!(fixture
+        ._manager
+        .find_project_command_receipt("p-b09", "key:b09-close-ok")
+        .unwrap()
+        .is_none());
     let exit_payload: String = fixture.connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.artifact_type='VolumeExitState'", [], |row| row.get(0)).unwrap();
     let exit_payload: Value = serde_json::from_str(&exit_payload).unwrap();
     assert_eq!(
@@ -1272,6 +1293,16 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     )
     .unwrap();
     assert_eq!(handoff["eligibility"], "ELIGIBLE");
+    let handoff_receipt =
+        CommitService::find_receipt(&fixture.connection, "p-b09", "key:b09-handoff-2")
+            .unwrap()
+            .expect("volume handoff must write a CommitReceipt");
+    assert_eq!(handoff["receiptId"], handoff_receipt.receipt_id);
+    assert!(fixture
+        ._manager
+        .find_project_command_receipt("p-b09", "key:b09-handoff-2")
+        .unwrap()
+        .is_none());
     assert_eq!(
         fixture
             .connection
@@ -1286,6 +1317,65 @@ fn b09_volume_close_is_atomic_and_unlocks_next_volume_handoff() {
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumeIntent' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     assert_eq!(fixture.connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE artifact_type='VolumePlan' AND scope_key=?1", [scope("VOLUME", Some(("volumeId", "volume:b09:2")))], |row| row.get(0)).unwrap(), 1);
     println!("B09_CLOSE_RESULT blocked_atomic=PASS close=PASS exit_snapshot=PASS eligibility=PASS handoff=PASS status=PASS");
+}
+
+#[cfg(feature = "e2e-test")]
+#[test]
+fn rv20_volume_close_fault_via_formal_command_rolls_back_commit_bundle_and_post_apply() {
+    let fixture = fixture();
+    fixture
+        .connection
+        .execute(
+            "UPDATE state_deltas SET value_json=?1 WHERE state_id='task:b09:required'",
+            [json!({"taskId":"task:b09:required","status":"SATISFIED","evidenceRefs":[],"remainingConditions":[]}).to_string()],
+        )
+        .unwrap();
+    let state = KernelState::new(AppPaths::new(fixture._temp.path()));
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"volume_close",
+            "commandId":"rv20-close-fault",
+            "idempotencyKey":"key:rv20-close-fault",
+            "projectId":"p-b09",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"volumeId":fixture.volume_id,"reason":"fault after VolumeExitState","faultInjection":"after_exit_artifact"}
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("VOLUME_CLOSE_FAULT_INJECTED"));
+    assert_eq!(
+        fixture
+            .connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM volumes WHERE project_id='p-b09' AND volume_id='volume:b09:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "PLANNING"
+    );
+    assert_eq!(fixture.connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b09' AND artifact_type='VolumeExitState'",
+        [],
+        |row| row.get(0),
+    ).unwrap(), 0);
+    assert_eq!(fixture.connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b09' AND artifact_type='VolumeExitState'",
+        [],
+        |row| row.get(0),
+    ).unwrap(), 0);
+    assert_eq!(fixture.connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM commit_receipts WHERE project_id='p-b09' AND idempotency_key='key:rv20-close-fault'",
+        [],
+        |row| row.get(0),
+    ).unwrap(), 0);
+    assert_eq!(fixture.connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM project_command_receipts WHERE project_id='p-b09' AND idempotency_key='key:rv20-close-fault'",
+        [],
+        |row| row.get(0),
+    ).unwrap(), 0);
 }
 
 #[test]
