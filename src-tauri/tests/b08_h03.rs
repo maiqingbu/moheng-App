@@ -1,4 +1,6 @@
-use ai_novel_production_system_core::commands::{execute_command_impl, KernelState};
+use ai_novel_production_system_core::commands::{
+    execute_command_impl, query_command_receipt_impl, KernelState,
+};
 use ai_novel_production_system_core::commands::{
     query_book_health_impl, query_context_manifest_impl, query_production_center_impl,
     query_project_overview_impl,
@@ -2221,6 +2223,53 @@ fn rv11_rejects_a_long_form_chapter_skip_before_model_runs() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn rv23_command_receipt_read_uses_project_and_original_idempotency_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv23-receipt";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(
+        state
+            .manager
+            .create(project_id, "RV-23 receipt", NOW)
+            .unwrap(),
+    );
+    state
+        .manager
+        .commit_project_command(
+            ai_novel_production_system_core::project_db::ProjectCommandSpec {
+                project_id,
+                result_project_id: project_id,
+                command_id: "cmd:rv23:receipt",
+                idempotency_key: "key:rv23:receipt",
+                command_type: "production_start",
+                request_digest: "rv23-receipt-request-digest",
+                expected_revision: Some(0),
+                now: NOW,
+                advance_revision: false,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    let receipt = query_command_receipt_impl(
+        &state,
+        json!({"request":{"projectId":project_id,"idempotencyKey":"key:rv23:receipt"}}),
+    )
+    .unwrap();
+    assert_eq!(receipt["commandId"], "cmd:rv23:receipt");
+    assert_eq!(receipt["idempotencyKey"], "key:rv23:receipt");
+    assert_eq!(receipt["receiptId"], "project-receipt:cmd:rv23:receipt");
+    assert_eq!(receipt["finalStatus"], "committed");
+
+    let missing = query_command_receipt_impl(
+        &state,
+        json!({"request":{"projectId":project_id,"idempotencyKey":"key:rv23:missing"}}),
+    )
+    .unwrap();
+    assert!(missing.is_null());
 }
 
 #[test]
