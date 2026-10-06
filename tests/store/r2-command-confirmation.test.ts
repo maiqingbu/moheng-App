@@ -75,6 +75,49 @@ describe('R2 正式回执后的查询失败', () => {
     expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
   })
 
+  it('Given a formal worker error When the write may already have committed Then confirm only by the original receipt key', async () => {
+    const commandReceipt = {
+      commandId: 'plan-command-1',
+      projectId: 'p',
+      idempotencyKey: 'plan-key-1',
+      finalStatus: 'committed' as const,
+      receiptId: 'receipt:plan:1',
+      message: '计划已提交。',
+      acceptedAt: '2026-10-07T00:00:00Z',
+    }
+    holder.port = {
+      queryProjectOverview: vi.fn(async () => ({ project: { id: 'p', revision: 1 }, recentChapters: [] })),
+      queryProjectLibrary: vi.fn(async () => ({ projects: [], totals: {} })),
+      queryCommandReceipt: vi.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(commandReceipt),
+      executeCommand: vi.fn(async () => { throw new Error('EXECUTE_COMMAND_WORKER_FAILED') }),
+    }
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+    await store.openProject('p')
+    const request: CommandRequest = {
+      type: 'planning_compile_chapter_plan',
+      projectId: 'p',
+      commandId: 'plan-command-1',
+      idempotencyKey: 'plan-key-1',
+      payload: { chapterId: 'chapter:1' },
+    }
+
+    await expect(store.runCommand('plan-compile', request)).rejects.toThrow('EXECUTE_COMMAND_WORKER_FAILED')
+    expect(store.commandState('plan-compile')).toMatchObject({ status: 'processing', confirmation: 'pending' })
+    await expect(store.runCommand('plan-compile', request)).rejects.toThrow('COMMAND_RESULT_UNCONFIRMED')
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+
+    await store.confirmCommandResult('plan-compile')
+    expect(store.commandState('plan-compile')).toMatchObject({ status: 'processing', confirmation: 'pending' })
+    await store.confirmCommandResult('plan-compile')
+    expect(store.commandState('plan-compile')).toMatchObject({ status: 'committed', confirmation: 'confirmed', receiptId: 'receipt:plan:1' })
+    expect(holder.port.queryCommandReceipt).toHaveBeenNthCalledWith(1, { projectId: 'p', idempotencyKey: 'plan-key-1' })
+    expect(holder.port.queryCommandReceipt).toHaveBeenNthCalledWith(2, { projectId: 'p', idempotencyKey: 'plan-key-1' })
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+  })
+
   it('Given retcon_apply transport loss When rereading Then it never resubmits the historical fact write', async () => {
     const request: CommandRequest = {
       type: 'retcon_apply',
