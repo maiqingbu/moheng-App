@@ -6535,9 +6535,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
     let command_type = required_string(&request, "type")?;
     #[cfg(not(feature = "e2e-test"))]
     {
-        if command_type == "repair_execute"
-            && request.pointer("/payload/testOnlyNoop").is_some()
-        {
+        if command_type == "repair_execute" && request.pointer("/payload/testOnlyNoop").is_some() {
             return Err("IPC_INVALID:testOnlyNoop".into());
         }
         if command_type == "volume_close" && request.pointer("/payload/faultInjection").is_some() {

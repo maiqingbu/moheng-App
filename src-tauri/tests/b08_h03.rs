@@ -3408,14 +3408,7 @@ fn formal_ipc_rejects_test_only_controls_without_consuming_repair_authorization(
         },
         0,
     );
-    authorize_h03(
-        &state,
-        project_id,
-        plan_id,
-        authorization_id,
-        &digest,
-        0,
-    );
+    authorize_h03(&state, project_id, plan_id, authorization_id, &digest, 0);
 
     assert_eq!(
         execute_command_impl(
@@ -3443,21 +3436,31 @@ fn formal_ipc_rejects_test_only_controls_without_consuming_repair_authorization(
         )
         .unwrap()
         .is_none());
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
-        [project_id],
-        |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='VolumeExitState'",
         [project_id],
         |row| row.get(0)
     ).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT revision FROM project_meta WHERE project_id=?1",
-        [project_id],
-        |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
     drop(connection);
 
     let executed = execute_command_impl(
@@ -3480,11 +3483,16 @@ fn formal_ipc_rejects_test_only_controls_without_consuming_repair_authorization(
         )
         .unwrap()
         .is_some());
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
-        [project_id],
-        |row| row.get(0)
-    ).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 fn create_h03_plan(
