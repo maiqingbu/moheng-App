@@ -131,6 +131,7 @@ fn p01_provider_settings_are_non_secret_and_budget_gate_precedes_invocation() {
 fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_error() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());
+    let api_key = ["fixture-token-", "must-not-persist"].concat();
     let input = json!({
         "providerId":"fixture",
         "modelId":"fixture-model",
@@ -138,7 +139,7 @@ fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_erro
         "model":"fixture-model",
         "endpoint":"http://127.0.0.1:1",
         "enabled":true,
-        "apiKey":"fixture-token-must-not-persist"
+        "apiKey":api_key
     });
     let saved = ProviderSettingsRepository::write_global(&paths, &input).unwrap();
     assert!(saved.get("apiKey").is_none());

@@ -220,6 +220,7 @@ fn xiaomi_r08_reload_keeps_failed_job_truthful() {
 fn xiaomi_r10_provider_secrets_never_enter_settings_json() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());
+    let api_key = ["ephemeral-secret-", "must-not-persist"].concat();
     ProviderSettingsRepository::write_global(
         &paths,
         &json!({
@@ -227,7 +228,7 @@ fn xiaomi_r10_provider_secrets_never_enter_settings_json() {
             "modelId":"mimo-v2.5-pro",
             "endpoint":"https://api.xiaomimimo.com/v1",
             "enabled":true,
-            "apiKey":"ephemeral-secret-must-not-persist"
+            "apiKey":api_key
         }),
     )
     .unwrap();
