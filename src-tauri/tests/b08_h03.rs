@@ -2118,6 +2118,7 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open("p-b10-root", "B10", NOW).unwrap();
+    let expected_render_body = "林舟推开石门，实际只推进了任务，没有完成它。";
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='NarrativeQualityReport'",
         [], |row| row.get(0)
@@ -2130,6 +2131,14 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         "SELECT json_array_length(json_extract(p.payload_json,'$.invocationProvenance')) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
         [], |row| row.get(0)
     ).unwrap(), 2);
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",
+        [], |row| row.get(0)
+    ).unwrap(), expected_render_body);
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='FinalChapter'",
+        [], |row| row.get(0)
+    ).unwrap(), expected_render_body);
     let projection =
         query_production_center_impl(&state, json!({"projectId":"p-b10-root"})).unwrap();
     assert_eq!(projection["creativeSkills"]["packageVersion"], "1.2.0");
@@ -2164,15 +2173,16 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     assert_eq!(projection["quality"]["softOnly"], true);
     assert_eq!(
         projection["quality"]["modelProvenance"]["evaluatorCalls"],
-        1
+        0
     );
-    assert_eq!(projection["quality"]["repair"]["status"], "REPAIRED");
+    assert_eq!(projection["quality"]["evaluatorKind"], "HEURISTIC_KEYWORD");
+    assert_eq!(projection["quality"]["repair"]["status"], "ADVISORY_ESCALATION");
     assert_eq!(projection["quality"]["repair"]["transportCalls"], 0);
-    assert_eq!(projection["quality"]["recheckedDimensions"][0], "hook");
+    assert_eq!(projection["quality"]["recheckedDimensions"], json!([]));
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch.status')='CANDIDATE'",
         [], |row| row.get(0)
-    ).unwrap(), 1);
+    ).unwrap(), 0);
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT json_extract(p.payload_json,'$.candidateRef.version') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ReviewReport'",
         [], |row| row.get(0)
@@ -2288,7 +2298,7 @@ fn b10_production_no_repair_path_is_explicit_and_does_not_create_a_patch() {
 }
 
 #[test]
-fn b10_production_repair_limit_stops_before_a_final_commit_and_marks_escalation() {
+fn b10_production_repair_limit_marks_advisory_and_keeps_rendered_body() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
@@ -2298,15 +2308,23 @@ fn b10_production_repair_limit_stops_before_a_final_commit_and_marks_escalation(
     let chapter_id = seed_chapter_and_gate(&connection, "p-b10-limit");
     drop(connection);
 
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b10:limit","idempotencyKey":"key:b10:limit",
         "projectId":"p-b10-limit","expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":1}
-    })).unwrap_err();
-    assert_eq!(error, "B10_REPAIR_LIMIT_REACHED:ESCALATE");
+    })).unwrap();
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open("p-b10-limit", "B10", NOW).unwrap();
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-limit' AND artifact_type='FinalChapter'",
+        [], |row| row.get(0)
+    ).unwrap(), 1);
+    assert_eq!(connection.query_row::<String, _, _>(
+        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='NarrativeQualityReport'",
+        [], |row| row.get(0)
+    ).unwrap(), "ADVISORY_ESCALATION");
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
         [], |row| row.get(0)
     ).unwrap(), 0);
     assert_eq!(

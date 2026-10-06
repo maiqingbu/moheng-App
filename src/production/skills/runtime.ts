@@ -562,6 +562,7 @@ export interface QualityReport {
   repairableDimensions: string[]
   runtimeChecks: RuntimeCheckRequest[]
   softAssessment: { readerDesire: 'SOFT'; qualityScore: number }
+  evaluatorKind: 'HEURISTIC_KEYWORD'
   modelProvenance: { evaluator: string; evaluatorCalls: number; provider: string; model: string }
   invocationRefs: string[]
   recheckedDimensions: string[]
@@ -648,7 +649,8 @@ export function evaluateNarrativeQuality(input: {
     repairableDimensions: findings.filter(finding => finding.repairable).map(finding => finding.dimension),
     runtimeChecks: [],
     softAssessment: { readerDesire: 'SOFT' as const, qualityScore },
-    modelProvenance: { evaluator: 'B10::MergedNarrativeEvaluator', evaluatorCalls: 1, provider: 'deterministic', model: 'quality-rules-v1' },
+    evaluatorKind: 'HEURISTIC_KEYWORD' as const,
+    modelProvenance: { evaluator: 'HEURISTIC_KEYWORD', evaluatorCalls: 0, provider: 'none', model: 'none' },
     invocationRefs: [...input.invocationRefs],
     recheckedDimensions: [],
     softOnly: true as const,

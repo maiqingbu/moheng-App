@@ -549,6 +549,7 @@ export interface NarrativeQualityProjection {
   dimensions?: Record<string, { score: number; severity: string; evidence: string[] }>
   findings?: Array<{ findingId: string; dimension: string; severity: string; evidence: string[]; repairable: boolean }>
   repairableDimensions?: string[]
+  evaluatorKind?: string
   modelProvenance?: { evaluator?: string; evaluatorCalls?: number; provider?: string; model?: string }
   softAssessment?: { readerDesire?: string; qualityScore?: number }
   invocationProvenance?: CreativeSkillsProjection['invocations']

@@ -463,14 +463,14 @@ async function reverifyRepair() {
       </div>
       <div v-if="production.quality" class="task-row">
         <strong>读者期待：{{ production.quality.softAssessment?.readerDesire || '等待评估' }}</strong>
-        <small class="muted">当前偏好版本已记录 · 本次评估 {{ production.quality.modelProvenance?.evaluatorCalls || 0 }} 次</small>
+        <small class="muted">当前偏好版本已记录 · 评估方式 {{ production.quality.evaluatorKind === 'HEURISTIC_KEYWORD' ? '关键词启发式' : '待确认' }}</small>
       </div>
       <div v-if="production.quality?.repair" class="task-row">
-        <strong>局部修订 {{ production.quality.repair.run }}/{{ production.quality.repair.limit }}</strong>
-        <small class="muted">影响范围：{{ qualityRepairScope.map(scopeLabel).join('、') || '无' }} · {{ detailLabel(production.quality.repair.escalation, '未升级') }}</small>
+        <strong>{{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '质量提示待复核' : `局部修订 ${production.quality.repair.run}/${production.quality.repair.limit}` }}</strong>
+        <small class="muted">影响范围：{{ qualityRepairScope.map(scopeLabel).join('、') || '无' }} · {{ production.quality.repair.status === 'ADVISORY_ESCALATION' ? '正文未修改，建议进一步复核' : detailLabel(production.quality.repair.escalation, '未升级') }}</small>
       </div>
       <div v-for="finding in qualityFindings" :key="finding.findingId" class="task-row">
-        <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '可以做局部修订' : '仅供查看' }}</small>
+        <strong>{{ dimensionLabel(finding.dimension) }}</strong><small class="muted">{{ finding.repairable ? '建议复核' : '仅供查看' }}</small>
       </div>
     </section>
 

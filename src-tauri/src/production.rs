@@ -1132,32 +1132,6 @@ fn block_for_recompile(
         .map_err(|error| error.to_string())
 }
 
-fn b10_repair_target(body: &str, repairable_dimensions: &[String]) -> Option<(String, String)> {
-    if repairable_dimensions
-        .iter()
-        .any(|dimension| dimension == "hook")
-    {
-        return Some(("hook".into(), "门后传来一声轻响。".into()));
-    }
-    if repairable_dimensions
-        .iter()
-        .any(|dimension| dimension == "dialogue")
-    {
-        return Some(("dialogue".into(), "“你还要继续吗？”他问。".into()));
-    }
-    if repairable_dimensions
-        .iter()
-        .any(|dimension| dimension == "exposition")
-    {
-        return Some((
-            "exposition".into(),
-            "他停了一下，把解释留到行动之后。".into(),
-        ));
-    }
-    let _ = body;
-    None
-}
-
 /// Execute one formal B08 chapter production run. Any error after a durable
 /// job has been created is reflected in that job's FAILED state so a caller
 /// may safely submit a retry with explicit lineage.
@@ -1725,9 +1699,8 @@ fn run_chapter_production_inner(
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
     let original_candidate_ref = reference(&candidate);
-    let mut effective_candidate = candidate.clone();
-    let mut effective_body = body.clone();
-    let mut repaired_candidate = None;
+    let effective_candidate = candidate.clone();
+    let effective_body = body.clone();
     let mut quality_report = None;
     let mut repair_evidence = Value::Null;
     if let Some(enrichment) = creative_enrichment.as_ref() {
@@ -1748,134 +1721,40 @@ fn run_chapter_production_inner(
             .pointer("/payload/repairRunLimit")
             .and_then(Value::as_i64)
             .unwrap_or(enrichment.context.budget.repair_runs);
-        if let Some((dimension, replacement)) =
-            b10_repair_target(&body, &initial_report.repairable_dimensions)
-        {
-            let patch = crate::creative_skills::repair_candidate(
-                crate::creative_skills::RepairCandidateRequest {
-                    candidate_ref: candidate.artifact_id.clone(),
-                    candidate_status: "CANDIDATE".into(),
-                    body: body.clone(),
-                    finding_refs: initial_report
-                        .findings
-                        .iter()
-                        .map(|finding| finding.finding_id.clone())
-                        .collect(),
-                    affected_dimensions: vec![dimension.clone()],
-                    start: body.chars().count(),
-                    end: body.chars().count(),
-                    replacement,
-                    skill_id: "S40".into(),
-                    skill_version: crate::creative_skills::CREATIVE_SKILLS_VERSION.into(),
-                    model: "deterministic-candidate-repair".into(),
-                    repair_run: 1,
-                    repair_run_limit: repair_limit,
-                    context_tokens: enrichment.context.budget.context_tokens,
-                    model_calls: 0,
-                },
-            )
-            .map_err(|error| format!("B10_CANDIDATE_REPAIR:{error}"))?;
-            if patch.status == "ADVISORY_ESCALATION" {
-                let _ = DurableJobService::transition_for_worker(
-                    connection,
-                    &project_id,
-                    &job_id,
-                    "FAILED",
-                    worker_id,
-                    &now,
-                );
-                let _ = DurableJobService::release_lease(connection, &project_id, &job_id, &now);
-                return Err("B10_REPAIR_LIMIT_REACHED:ESCALATE".into());
-            }
-            effective_body = patch.body.clone();
-            let mut repaired_payload = candidate.payload.clone();
-            repaired_payload["body"] = Value::String(effective_body.clone());
-            repaired_payload["bodyDigest"] = Value::String(
-                sha256_canonical(&json!(effective_body)).map_err(|error| error.to_string())?,
-            );
-            repaired_payload["candidatePatch"] = json!({
-                "kind":"CandidatePatch",
-                "status":"CANDIDATE",
-                "originalCandidateRef":original_candidate_ref.clone(),
-                "findingRefs":patch.finding_refs,
-                "affectedDimensions":[dimension.clone()],
-                "repairRun":patch.repair_run,
-                "repairRunLimit":patch.repair_run_limit,
-                "transportCalls":patch.transport_calls,
-                "owner":"B10::CandidateRepairOwner"
-            });
-            let repaired_candidate_id = StableIdentityFactory::from_command(
-                StableIdKind::Artifact,
-                &format!("{command_id}:candidate-repair:1"),
-            )?;
-            let mut repaired = artifact(
-                &project_id,
-                repaired_candidate_id,
-                ArtifactType::ChapterCandidate,
-                &chapter_id,
-                repaired_payload,
-                &command_id,
-                &job_id,
-                Some(&render_run_id),
-                &now,
-                vec![original_candidate_ref.clone()],
-            )?;
-            repaired.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
-            effective_candidate = repaired.clone();
-            repaired_candidate = Some(repaired);
-            let mut rechecked = crate::creative_skills::recheck_affected_dimensions(
-                &initial_report,
-                &effective_body,
-                &enrichment.taste_profile,
-                vec![dimension.clone()],
-            )
-            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
-            let effective_ref = reference(&effective_candidate);
-            crate::creative_skills::rebind_quality_candidate(
-                &mut rechecked,
-                effective_ref.clone(),
-            )?;
-            rechecked.repair = Some(json!({
-                "status":"REPAIRED",
-                "run":patch.repair_run,
-                "limit":patch.repair_run_limit,
-                "transportCalls":patch.transport_calls,
-                "candidateBefore":original_candidate_ref.clone(),
-                "candidateAfter":effective_ref,
-                "affectedDimensions":[dimension.clone()],
-                "recheckedDimensions":rechecked.rechecked_dimensions.clone(),
-                "escalation":Value::Null
-            }));
-            crate::creative_skills::rebind_quality_candidate(
-                &mut rechecked,
-                reference(&effective_candidate),
-            )?;
-            quality_report = Some(rechecked);
-            repair_evidence = json!({
-                "status":"REPAIRED",
-                "run":patch.repair_run,
-                "limit":patch.repair_run_limit,
-                "transportCalls":patch.transport_calls,
-                "effectiveCandidateRef":reference(&effective_candidate),
-                "affectedDimensions":[dimension.clone()]
-            });
+        let affected_dimensions = initial_report.repairable_dimensions.clone();
+        let status = if affected_dimensions.is_empty() {
+            "NO_REPAIR"
         } else {
-            let mut report = initial_report;
-            report.repair = Some(json!({
-                "status":"NO_REPAIR",
-                "run":0,
-                "limit":repair_limit,
-                "transportCalls":0,
-                "candidateBefore":original_candidate_ref.clone(),
-                "candidateAfter":original_candidate_ref.clone(),
-                "affectedDimensions":[],
-                "recheckedDimensions":[],
-                "escalation":Value::Null
-            }));
-            quality_report = Some(report);
-            repair_evidence =
-                json!({"status":"NO_REPAIR","run":0,"limit":repair_limit,"transportCalls":0});
-        }
+            "ADVISORY_ESCALATION"
+        };
+        let escalation = if status == "ADVISORY_ESCALATION" {
+            json!("S40_REPAIR_NOT_IMPLEMENTED")
+        } else {
+            Value::Null
+        };
+        let mut report = initial_report;
+        report.repair = Some(json!({
+            "status":status,
+            "run":0,
+            "limit":repair_limit,
+            "transportCalls":0,
+            "candidateBefore":original_candidate_ref.clone(),
+            "candidateAfter":original_candidate_ref.clone(),
+            "affectedDimensions":affected_dimensions,
+            "scope":affected_dimensions,
+            "recheckedDimensions":[],
+            "escalation":escalation
+        }));
+        quality_report = Some(report);
+        repair_evidence = json!({
+            "status":status,
+            "run":0,
+            "limit":repair_limit,
+            "transportCalls":0,
+            "effectiveCandidateRef":original_candidate_ref,
+            "affectedDimensions":affected_dimensions,
+            "escalation":escalation
+        });
     }
     let effective_candidate_ref = reference(&effective_candidate);
     let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
@@ -2296,9 +2175,6 @@ fn run_chapter_production_inner(
     bundle_artifacts.push(candidate);
     if let Some(taste) = taste_artifact {
         bundle_artifacts.push(taste);
-    }
-    if let Some(repaired) = repaired_candidate {
-        bundle_artifacts.push(repaired);
     }
     if let Some(quality) = quality_artifact {
         bundle_artifacts.push(quality);

@@ -174,7 +174,8 @@ describe('B10 Creative Skill Runtime', () => {
     })
     expect(Object.keys(report.dimensions)).toEqual(expect.arrayContaining(['agency', 'desire', 'hook', 'pacing', 'voice', 'dialogue', 'subtext', 'repetition', 'exposition', 'emotionalPayoff']))
     expect(report.softOnly).toBe(true)
-    expect(report.modelProvenance.evaluatorCalls).toBe(1)
+    expect(report.evaluatorKind).toBe('HEURISTIC_KEYWORD')
+    expect(report.modelProvenance.evaluatorCalls).toBe(0)
   })
 
   it('rechecks only the affected quality dimensions after a CandidatePatch', () => {
@@ -186,7 +187,8 @@ describe('B10 Creative Skill Runtime', () => {
     const rechecked = recheckAffectedDimensions(report, '他停在门前，听见门后的脚步声。', tasteProfile, ['hook'])
     expect(rechecked.recheckedDimensions).toEqual(['hook'])
     expect(rechecked.softOnly).toBe(true)
-    expect(rechecked.modelProvenance.evaluatorCalls).toBe(1)
+    expect(rechecked.evaluatorKind).toBe('HEURISTIC_KEYWORD')
+    expect(rechecked.modelProvenance.evaluatorCalls).toBe(0)
   })
 
   it('lets HARD gate state dominate quality without turning quality into a hard gate', () => {
