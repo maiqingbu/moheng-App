@@ -39,6 +39,18 @@ const state = computed(() => store.commandState('history-create'))
 const impactState = computed(() => store.commandState('history-impact'))
 const decisionState = computed(() => store.commandState('history-decision'))
 const applyState = computed(() => store.commandState('history-apply'))
+const retconPlanState = computed(() => store.commandState('retcon-plan'))
+const retconDecisionState = computed(() => store.commandState('retcon-decision'))
+const retconApplyState = computed(() => store.commandState('retcon-apply'))
+const formalWriteOutcomePending = computed(() => [
+  state.value,
+  impactState.value,
+  decisionState.value,
+  applyState.value,
+  retconPlanState.value,
+  retconDecisionState.value,
+  retconApplyState.value,
+].some(command => command.confirmation === 'pending'))
 const activeChange = ref<{ id: string; type: 'CHANGE' | 'RETCON'; digest: string; scope: string; status: string; expandedEdges: number; totalEdges: number; source?: string; preflightPending?: boolean; targetFactId?: string; replacement?: string; evidenceRef?: string; evidenceVersion?: number; evidencePayloadHash?: string; planId?: string; planDigest?: string; plan?: RetconPlanView } | null>(null)
 const impactItems = ref<string[]>([])
 const actionMessage = ref('')
@@ -492,8 +504,10 @@ async function approveAndApply() {
         <div class="task-row"><strong>开篇 / 签约影响</strong><span>{{ activeChange.plan.signingImpact ? '需要重新核对' : '未发现' }}</span></div>
       </div>
       <p v-if="actionMessage" class="banner warning">{{ actionMessage }}</p>
-      <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="continueImpact">继续分析影响</button><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="cancelImpact">取消分析</button><button class="btn small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="rejectChange">{{ readerProposalOnly ? '拒绝建议' : '拒绝方案' }}</button><button v-if="!readerProposalOnly" class="btn primary small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="approveAndApply">{{ activeChange.type === 'RETCON' && !activeChange.plan ? '生成事实修订方案' : activeChange.type === 'RETCON' ? '确认执行事实修订' : '确认并执行' }}</button></div>
-      <CommandFeedback :state="impactState" /><CommandFeedback :state="decisionState" /><CommandFeedback :state="applyState" />
+      <div v-if="!formalWriteOutcomePending" class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="continueImpact">继续分析影响</button><button class="btn small" :disabled="activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED'" @click="cancelImpact">取消分析</button><button class="btn small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="rejectChange">{{ readerProposalOnly ? '拒绝建议' : '拒绝方案' }}</button><button v-if="!readerProposalOnly" class="btn primary small" :disabled="!activeChange.digest || activeChange.status === 'APPLIED' || activeChange.status === 'CANCELLED' || activeChange.status === 'REJECTED' || activeChange.expandedEdges < activeChange.totalEdges" @click="approveAndApply">{{ activeChange.type === 'RETCON' && !activeChange.plan ? '生成事实修订方案' : activeChange.type === 'RETCON' ? '确认执行事实修订' : '确认并执行' }}</button></div>
+      <p v-else class="banner warning">正式写入结果待确认；请只重新读取现有回执，系统不会再次提交。</p>
+      <CommandFeedback :state="impactState" @confirm="store.confirmCommandResult('history-impact')" /><CommandFeedback :state="decisionState" @confirm="store.confirmCommandResult('history-decision')" /><CommandFeedback :state="applyState" @confirm="store.confirmCommandResult('history-apply')" />
+      <CommandFeedback :state="retconPlanState" @confirm="store.confirmCommandResult('retcon-plan')" /><CommandFeedback :state="retconDecisionState" @confirm="store.confirmCommandResult('retcon-decision')" /><CommandFeedback :state="retconApplyState" @confirm="store.confirmCommandResult('retcon-apply')" />
     </section>
 
     <div v-if="history && !historyFilterLoading" style="display:grid;gap:10px;margin-top:14px">
@@ -526,7 +540,7 @@ async function approveAndApply() {
         <div class="field"><span class="field-label">这条事实的原始依据</span><div class="chip-row" role="listbox" aria-label="这条事实的原始依据"><button v-for="(item, index) in retconEvidenceOptions" :key="evidenceSelector(item)" type="button" class="chip" :class="{ active: retconEvidenceRef === evidenceSelector(item) }" role="option" :aria-selected="retconEvidenceRef === evidenceSelector(item)" @click="retconEvidenceRef = evidenceSelector(item)">{{ evidenceDisplayLabel(item, index) }}</button><span v-if="!retconEvidenceOptions.length" class="help">暂无可用依据</span></div></div>
       </template>
       <CommandFeedback :state="state" />
-      <template #footer><button class="btn" @click="modal = null">取消</button><button class="btn primary" :disabled="!requestText.trim() || (modal === 'retcon' && (!retconTargetRef.trim() || !retconReplacement.trim() || !retconEvidenceRef.trim()))" @click="create">开始影响分析</button></template>
+      <template #footer><button class="btn" @click="modal = null">取消</button><button v-if="state.confirmation !== 'pending'" class="btn primary" :disabled="!requestText.trim() || (modal === 'retcon' && (!retconTargetRef.trim() || !retconReplacement.trim() || !retconEvidenceRef.trim()))" @click="create">开始影响分析</button></template>
     </BaseModal>
   </div>
 </template>

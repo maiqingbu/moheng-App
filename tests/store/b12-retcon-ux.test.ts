@@ -33,10 +33,10 @@ describe('B12 Retcon product flow', () => {
   it('labels a committed Retcon with incomplete verification as pending and forbids repeat submission', () => {
     const history = fs.readFileSync(new URL('../../src/ui/pages/HistoryCenter.vue', import.meta.url), 'utf8')
     expect(history).toContain('事实修订已提交，结果待确认。请重新读取状态，不要重复提交。')
-    expect(history).toContain('事实修订提交结果待确认。请先重新读取作品状态；如需重试，系统会使用同一操作编号')
+    expect(history).toContain('事实修订提交结果待确认。请只重新读取现有正式状态；系统不会重新提交。')
   })
 
-  it('does not auto-resubmit after an unknown Retcon result and keeps the manual retry identity', async () => {
+  it('derives stable Retcon command identities for exact receipt lookup', async () => {
     const calls: CommandRequest[] = []
     let loseFirstResponse = true
     const execute = vi.fn(async (_key: string, request: CommandRequest) => {

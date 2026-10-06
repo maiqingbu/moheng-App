@@ -75,6 +75,32 @@ describe('R2 正式回执后的查询失败', () => {
     expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
   })
 
+  it('Given retcon_apply transport loss When rereading Then it never resubmits the historical fact write', async () => {
+    const request: CommandRequest = {
+      type: 'retcon_apply',
+      projectId: 'p',
+      commandId: 'retcon-command-1',
+      idempotencyKey: 'retcon-key-1',
+      payload: { changeRequestId: 'change:1', retconPlanId: 'retcon:1', planDigest: 'digest:1' },
+    }
+    holder.port = {
+      queryProjectOverview: vi.fn(async () => ({ project: { id: 'p', revision: 1 }, recentChapters: [] })),
+      queryProjectLibrary: vi.fn(async () => ({ projects: [], totals: {} })),
+      queryCommandReceipt: vi.fn(async () => null),
+      executeCommand: vi.fn(async () => { throw new Error('transport response lost') }),
+    }
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+    await store.openProject('p')
+
+    await expect(store.runCommand('history-retcon-apply', request)).rejects.toThrow('transport response lost')
+    expect(store.commandState('history-retcon-apply')).toMatchObject({ status: 'processing', confirmation: 'pending' })
+    await expect(store.runCommand('history-retcon-apply', request)).rejects.toThrow('COMMAND_RESULT_UNCONFIRMED')
+    await store.confirmCommandResult('history-retcon-apply')
+    expect(holder.port.queryCommandReceipt).toHaveBeenCalledWith({ projectId: 'p', idempotencyKey: 'retcon-key-1' })
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+  })
+
   it('does not render the production submit action while its outcome is pending', () => {
     const page = fs.readFileSync(new URL('../../src/ui/pages/ProductionCenter.vue', import.meta.url), 'utf8')
     expect(page).toMatch(/<button v-if="canStartProduction && productionStartState\.confirmation !== 'pending'"/)
