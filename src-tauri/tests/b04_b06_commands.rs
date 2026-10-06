@@ -15,6 +15,7 @@ use ai_novel_production_system_core::production::{
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::repositories::health::HealthRepository;
+use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
@@ -768,4 +769,81 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
     drop(connection);
     let recovered = query_context_manifest_impl(&state, query_request).unwrap();
     assert_eq!(recovered["payloadSchema"], "context-manifest.r1");
+}
+
+#[test]
+fn b_r2_01_context_manifest_and_evidence_are_project_scoped() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let manager = ProjectManager::new(paths.clone());
+    let projects = [
+        ("p-context-isolation-a", "PROJECT_A_ONLY", "甲项目证据"),
+        ("p-context-isolation-b", "PROJECT_B_ONLY", "乙项目证据"),
+    ];
+    let mut scopes = Vec::new();
+    for (project_id, marker, quote) in projects {
+        let connection = manager
+            .create(project_id, "Context project isolation", NOW)
+            .unwrap();
+        let (volume_id, chapter_id) = seed_authority(&connection, project_id);
+        connection
+            .execute(
+                "UPDATE canon_facts SET object_json=?1 WHERE project_id=?2 AND fact_id='fact:b04:reality'",
+                libsql_rusqlite::params![json!({"projectMarker":marker}).to_string(), project_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:project-isolation',?1,'fact:b04:reality','chapter:b04:1','authority:book',1,'FINAL_CHAPTER',?2,0,?3,?4)",
+                libsql_rusqlite::params![project_id, quote, quote.chars().count() as i64, NOW],
+            )
+            .unwrap();
+        scopes.push((project_id, marker, quote, volume_id, chapter_id));
+    }
+    let state = KernelState::new(paths);
+    let context = |project_id: &str, volume_id: &str, chapter_id: &str| {
+        query_context_manifest_impl(
+            &state,
+            json!({
+                "projectId":project_id,
+                "volumeId":volume_id,
+                "chapterId":chapter_id,
+                "executionMode":"OPENING_BOOTSTRAP",
+                "entityIds":["entity:b04:lead"],
+                "references":["fact:b04:reality"],
+                "includeSoftSources":true
+            }),
+        )
+        .unwrap()
+    };
+    let first = context(scopes[0].0, &scopes[0].3, &scopes[0].4);
+    let second = context(scopes[1].0, &scopes[1].3, &scopes[1].4);
+    for projection in [&first, &second] {
+        assert_eq!(projection["selectedEvidence"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projection["selectedEvidence"][0]["artifactId"],
+            "authority:book"
+        );
+        assert!(projection["selectedEvidence"][0]["quote"].is_null());
+    }
+    assert_ne!(
+        first["compiledFromStateDigest"],
+        second["compiledFromStateDigest"]
+    );
+    for (project_id, _, quote, _, _) in scopes {
+        let connection = manager
+            .open(project_id, "Context project isolation query", NOW)
+            .unwrap();
+        let (evidence, truncated) = NarrativeRepository::evidence_for_refs_bounded(
+            &connection,
+            project_id,
+            &["fact:b04:reality"],
+            10,
+        )
+        .unwrap();
+        assert!(!truncated);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].quote.as_deref(), Some(quote));
+    }
+    println!("B_R2_01_CONTEXT_PROJECT_ISOLATION_RESULT sharedArtifactId=true localFacts=PASS localEvidence=PASS digestSeparated=true status=PASS");
 }
