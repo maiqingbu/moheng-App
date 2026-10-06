@@ -561,7 +561,7 @@ export interface NarrativeQualityProjection {
   softAssessment?: { readerDesire?: string; qualityScore?: number }
   invocationProvenance?: CreativeSkillsProjection['invocations']
   methodInjectionProvenance?: CreativeSkillsProjection['methodInjectionProvenance']
-  repair?: { run: number; limit: number; scope: string[]; escalation: string | null }
+  repair?: { status?: string; run: number; limit: number; scope: string[]; escalation: string | null }
 }
 
 export interface NarrativeTasteProjection {

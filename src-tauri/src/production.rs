@@ -1793,8 +1793,7 @@ fn run_chapter_production_inner(
             let mut quality_payload = report_value;
             quality_payload["payloadSchema"] = json!("narrative-quality-report.r1");
             quality_payload["invocationProvenance"] = json!([]);
-            quality_payload["methodInjectionProvenance"] =
-                method_injection_provenance.clone();
+            quality_payload["methodInjectionProvenance"] = method_injection_provenance.clone();
             quality_payload["skillSelection"] = serde_json::to_value(&enrichment.selection)
                 .map_err(|error| format!("B10_SELECTION_PAYLOAD:{error}"))?;
             quality_payload["repairEvidence"] = repair_evidence.clone();

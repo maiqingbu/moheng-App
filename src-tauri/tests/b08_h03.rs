@@ -2194,7 +2194,10 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         0
     );
     assert_eq!(projection["quality"]["evaluatorKind"], "HEURISTIC_KEYWORD");
-    assert_eq!(projection["quality"]["repair"]["status"], "ADVISORY_ESCALATION");
+    assert_eq!(
+        projection["quality"]["repair"]["status"],
+        "ADVISORY_ESCALATION"
+    );
     assert_eq!(projection["quality"]["repair"]["transportCalls"], 0);
     assert_eq!(projection["quality"]["recheckedDimensions"], json!([]));
     assert_eq!(connection.query_row::<i64, _, _>(
