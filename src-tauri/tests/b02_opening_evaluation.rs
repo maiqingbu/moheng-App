@@ -3,6 +3,9 @@ use ai_novel_production_system_core::commands::{
     query_history_impl, query_production_center_impl, query_single_chapter_impl,
     query_story_directions_impl, KernelState,
 };
+use ai_novel_production_system_core::commit::CommitService;
+use ai_novel_production_system_core::generated::types::ArtifactRef;
+use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
     measure_context_hard_budget, ContextCompilerInput,
 };
@@ -10,6 +13,7 @@ use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::signing::execute_opening_evaluation_with_observer;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -372,6 +376,14 @@ fn create_opening_project(state: &KernelState) -> String {
 }
 
 fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
+    let _ = commit_three_opening_chapters_with_outputs(state, project_id);
+}
+
+fn commit_three_opening_chapters_with_outputs(
+    state: &KernelState,
+    project_id: &str,
+) -> Vec<(String, Value)> {
+    let mut productions = Vec::with_capacity(3);
     for chapter_no in 1..=3 {
         let center = query_production_center_impl(
             state,
@@ -379,7 +391,11 @@ fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
         )
         .expect("production center");
         assert_eq!(center["nextChapter"]["number"], chapter_no);
-        command(
+        let chapter_id = center["nextChapter"]["id"]
+            .as_str()
+            .expect("next chapter id")
+            .to_owned();
+        let production = command(
             state,
             project_id,
             &format!("b02:production:{chapter_no}"),
@@ -393,7 +409,312 @@ fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
                 "skillsEnabled":false
             }),
         );
+        productions.push((chapter_id, production));
     }
+    productions
+}
+
+#[derive(Clone, Copy)]
+struct ReopenedReceiptBinding<'a> {
+    project_id: &'a str,
+    chapter_id: &'a str,
+    job_id: &'a str,
+    commit_receipt_id: &'a str,
+    receipt_ref: &'a Value,
+    canonical_receipt_ref: &'a Value,
+    receipt_payload: &'a Value,
+    final_ref: &'a Value,
+    final_payload: &'a Value,
+    audit_ref: &'a Value,
+    audit_payload: &'a Value,
+    commit_receipt: &'a Value,
+    history_entry: &'a Value,
+}
+
+fn validate_reopened_receipt_binding(evidence: &ReopenedReceiptBinding<'_>) -> Result<(), String> {
+    if evidence.receipt_ref != evidence.canonical_receipt_ref {
+        return Err("ProductionReceipt header differs from reopened canonical head".into());
+    }
+    for (label, payload) in [
+        ("ProductionReceipt", evidence.receipt_payload),
+        ("FinalChapter", evidence.final_payload),
+        ("Audit", evidence.audit_payload),
+    ] {
+        let payload_ref = match label {
+            "ProductionReceipt" => evidence.receipt_ref,
+            "FinalChapter" => evidence.final_ref,
+            _ => evidence.audit_ref,
+        };
+        let actual_hash = sha256_canonical(payload).map_err(|error| error.to_string())?;
+        if payload_ref["payloadHash"].as_str() != Some(actual_hash.as_str()) {
+            return Err(format!(
+                "{label} payload hash differs from its exact reference"
+            ));
+        }
+    }
+    if evidence.receipt_payload["projectId"].as_str() != Some(evidence.project_id)
+        || evidence.receipt_payload["chapterId"].as_str() != Some(evidence.chapter_id)
+        || evidence.receipt_payload["jobId"].as_str() != Some(evidence.job_id)
+    {
+        return Err("ProductionReceipt project/chapter/job binding differs".into());
+    }
+    if evidence.receipt_payload["finalChapterRef"] != *evidence.final_ref {
+        return Err("ProductionReceipt finalChapterRef differs from committed FinalChapter".into());
+    }
+    if evidence.receipt_payload["auditRef"] != *evidence.audit_ref
+        || evidence.final_payload["auditRef"] != *evidence.audit_ref
+    {
+        return Err(
+            "ProductionReceipt and FinalChapter do not share the exact Audit reference".into(),
+        );
+    }
+    if evidence.final_payload["chapterId"].as_str() != Some(evidence.chapter_id)
+        || evidence.final_payload["body"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err("FinalChapter payload is not the expected chapter or has no body".into());
+    }
+    if evidence.audit_payload["candidateRef"] != evidence.final_payload["candidateRef"] {
+        return Err("Audit payload is not bound to the FinalChapter candidate".into());
+    }
+    if evidence.commit_receipt["receiptId"].as_str() != Some(evidence.commit_receipt_id)
+        || evidence.commit_receipt["projectId"].as_str() != Some(evidence.project_id)
+    {
+        return Err("formal commit receipt identity or project differs".into());
+    }
+    for reference in [evidence.receipt_ref, evidence.final_ref, evidence.audit_ref] {
+        if !evidence.commit_receipt["committedArtifactRefs"]
+            .as_array()
+            .is_some_and(|references| references.iter().any(|item| item == reference))
+        {
+            return Err("formal commit receipt does not include the referenced artifact".into());
+        }
+    }
+    for (artifact_type, reference) in [
+        ("ProductionReceipt", evidence.receipt_ref),
+        ("FinalChapter", evidence.final_ref),
+    ] {
+        let matched = evidence.commit_receipt["headChanges"]
+            .as_array()
+            .is_some_and(|changes| {
+                changes.iter().any(|change| {
+                    change["artifactType"].as_str() == Some(artifact_type)
+                        && change["artifactId"] == reference["artifactId"]
+                        && change["version"] == reference["version"]
+                        && change["payloadHash"] == reference["payloadHash"]
+                })
+            });
+        if !matched {
+            return Err(format!(
+                "formal commit receipt does not advance {artifact_type}"
+            ));
+        }
+    }
+    if evidence.history_entry["id"].as_str() != Some(evidence.commit_receipt_id)
+        || evidence.history_entry["receipt"].as_str() != Some(evidence.commit_receipt_id)
+    {
+        return Err("reopened History entry differs from the formal commit receipt".into());
+    }
+    Ok(())
+}
+
+fn artifact_payload_after_reopen(
+    state: &KernelState,
+    project_id: &str,
+    reference: &Value,
+) -> Option<Value> {
+    let reference: ArtifactRef = serde_json::from_value(reference.clone())
+        .expect("artifact reference uses the versioned ArtifactRef contract");
+    state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            Ok(
+                NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
+                    .expect("scoped artifact repository read"),
+            )
+        })
+        .expect("reopened project read connection")
+}
+
+fn assert_reopened_production_receipt_binding(
+    state: &KernelState,
+    project_id: &str,
+    chapter_id: &str,
+    production: &Value,
+    history: &Value,
+) {
+    let commit_receipt_id = production["receipt"]["receiptId"]
+        .as_str()
+        .expect("formal commit receipt ID");
+    let receipt_ref = production["receipt"]["headChanges"]
+        .as_array()
+        .and_then(|changes| {
+            changes
+                .iter()
+                .find(|change| change["artifactType"] == "ProductionReceipt")
+        })
+        .map(|change| {
+            json!({
+                "artifactId":change["artifactId"],
+                "version":change["version"],
+                "payloadHash":change["payloadHash"]
+            })
+        })
+        .expect("formal ProductionReceipt head change");
+    let canonical_scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    let canonical_receipt_ref = state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            Ok(NarrativeRepository::canonical_head_ref(
+                connection,
+                project_id,
+                "ProductionReceipt",
+                &canonical_scope,
+            )
+            .expect("ProductionReceipt canonical head read")
+            .map(|reference| serde_json::to_value(reference).expect("serialize ArtifactRef")))
+        })
+        .expect("reopened ProductionReceipt head")
+        .expect("ProductionReceipt remains canonical after reopen");
+    let final_ref = production["finalChapterRef"].clone();
+    let final_payload = artifact_payload_after_reopen(state, project_id, &final_ref)
+        .expect("exact FinalChapter ref resolves after reopen");
+    let queried_chapter = query_single_chapter_impl(
+        state,
+        json!({"projectId":project_id,"chapterId":chapter_id}),
+    )
+    .expect("registered chapter query after reopen");
+    assert_eq!(queried_chapter["status"], "official");
+    assert_eq!(queried_chapter["version"], "v1");
+    assert!(queried_chapter["content"][0]
+        .as_str()
+        .is_some_and(|body| body == final_payload["body"].as_str().unwrap_or_default()));
+    let versions = query_chapter_versions_impl(
+        state,
+        json!({"projectId":project_id,"chapterId":chapter_id,"pageSize":20}),
+    )
+    .expect("registered chapter-version query after reopen");
+    assert!(versions["items"].as_array().unwrap().iter().any(|item| {
+        item["id"] == format!("{}:v1", final_ref["artifactId"].as_str().unwrap())
+            && item["current"] == true
+    }));
+    let audit_ref = final_payload["auditRef"].clone();
+    let audit_payload = artifact_payload_after_reopen(state, project_id, &audit_ref)
+        .expect("exact Audit ref resolves after reopen");
+    let receipt_payload = artifact_payload_after_reopen(state, project_id, &receipt_ref)
+        .expect("exact ProductionReceipt ref resolves after reopen");
+    let commit_idempotency_key = production["receipt"]["idempotencyKey"]
+        .as_str()
+        .expect("formal commit receipt idempotency key");
+    let commit_receipt = state
+        .manager
+        .with_read_connection(project_id, NOW, |connection| {
+            let receipt =
+                CommitService::find_receipt(connection, project_id, commit_idempotency_key)
+                    .expect("reopened formal commit receipt and digest")
+                    .expect("formal commit receipt remains persisted");
+            Ok(serde_json::to_value(receipt).expect("serialize formal CommitReceipt"))
+        })
+        .expect("reopened formal commit receipt query");
+    assert_eq!(commit_receipt, production["receipt"]);
+    let history_entry = history["entries"]["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["id"] == commit_receipt_id))
+        .expect("registered History query returns this commit receipt")
+        .clone();
+    let evidence = ReopenedReceiptBinding {
+        project_id,
+        chapter_id,
+        job_id: production["jobId"]
+            .as_str()
+            .expect("formal production job ID"),
+        commit_receipt_id,
+        receipt_ref: &receipt_ref,
+        canonical_receipt_ref: &canonical_receipt_ref,
+        receipt_payload: &receipt_payload,
+        final_ref: &final_ref,
+        final_payload: &final_payload,
+        audit_ref: &audit_ref,
+        audit_payload: &audit_payload,
+        commit_receipt: &commit_receipt,
+        history_entry: &history_entry,
+    };
+    validate_reopened_receipt_binding(&evidence)
+        .unwrap_or_else(|error| panic!("reopened receipt binding failed: {error}"));
+
+    let rejects_payload = |payload: &Value| {
+        validate_reopened_receipt_binding(&ReopenedReceiptBinding {
+            receipt_payload: payload,
+            ..evidence
+        })
+        .is_err()
+    };
+    for (path, replacement) in [
+        ("/finalChapterRef/artifactId", json!("artifact:wrong-final")),
+        ("/auditRef/artifactId", json!("artifact:wrong-audit")),
+        ("/auditRef/version", json!(999)),
+        ("/auditRef/payloadHash", json!("0".repeat(64))),
+        ("/projectId", json!("project:wrong")),
+        ("/chapterId", json!("chapter:wrong")),
+    ] {
+        let mut mutant = receipt_payload.clone();
+        *mutant
+            .pointer_mut(path)
+            .expect("mutation target exists in ProductionReceipt") = replacement;
+        assert!(
+            rejects_payload(&mutant),
+            "mutation must be rejected: {path}"
+        );
+        if path.starts_with("/auditRef/") || path.starts_with("/finalChapterRef/") {
+            let reference_path = if path.starts_with("/auditRef/") {
+                "/auditRef"
+            } else {
+                "/finalChapterRef"
+            };
+            assert!(artifact_payload_after_reopen(
+                state,
+                project_id,
+                mutant.pointer(reference_path).expect("mutated reference")
+            )
+            .is_none());
+        }
+    }
+    let wrong_history = json!({"id":"receipt:wrong","receipt":"receipt:wrong"});
+    assert!(validate_reopened_receipt_binding(&ReopenedReceiptBinding {
+        history_entry: &wrong_history,
+        ..evidence
+    })
+    .is_err());
+    let mut wrong_commit_receipt = commit_receipt.clone();
+    wrong_commit_receipt["receiptId"] = json!("receipt:wrong-commit");
+    assert!(validate_reopened_receipt_binding(&ReopenedReceiptBinding {
+        commit_receipt: &wrong_commit_receipt,
+        ..evidence
+    })
+    .is_err());
+    for (field, replacement) in [
+        ("artifactId", json!("artifact:wrong-receipt")),
+        ("version", json!(999)),
+        ("payloadHash", json!("0".repeat(64))),
+    ] {
+        let mut wrong_receipt_header = receipt_ref.clone();
+        wrong_receipt_header[field] = replacement;
+        assert!(validate_reopened_receipt_binding(&ReopenedReceiptBinding {
+            receipt_ref: &wrong_receipt_header,
+            ..evidence
+        })
+        .is_err());
+        assert!(artifact_payload_after_reopen(state, project_id, &wrong_receipt_header).is_none());
+    }
+    println!(
+        "F03_RECEIPT_BINDING chapter={} commitReceipt={} final={} audit={} productionReceipt={} reopen=PASS mutants=11_REJECTED",
+        chapter_id,
+        commit_receipt_id,
+        final_ref["artifactId"],
+        audit_ref["artifactId"],
+        receipt_ref["artifactId"]
+    );
 }
 
 #[test]
@@ -402,7 +723,7 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
     let gateway = Arc::new(LongEvidenceGateway::new());
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = create_opening_project(&state);
-    commit_three_opening_chapters(&state, &project_id);
+    let opening_productions = commit_three_opening_chapters_with_outputs(&state, &project_id);
 
     let opening_contexts = gateway.planning_contexts.lock().unwrap();
     assert_eq!(opening_contexts.len(), 3);
@@ -637,13 +958,28 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         json!({"projectId":project_id,"kind":"VERSION","pageSize":100}),
     )
     .unwrap();
+    let first_opening = &opening_productions[0];
+    assert_reopened_production_receipt_binding(
+        &reopened,
+        &project_id,
+        &first_opening.0,
+        &first_opening.1,
+        &history,
+    );
+    assert_reopened_production_receipt_binding(
+        &reopened,
+        &project_id,
+        &chapter_four,
+        &production,
+        &history,
+    );
     assert!(history["entries"]["items"]
         .as_array()
         .unwrap()
         .iter()
         .any(|item| { item["id"] == commit_receipt_id && item["receipt"] == commit_receipt_id }));
     println!(
-        "F03_CHAIN opening=3 openingEvaluation=PASS longForm=1 finalArtifact={} version={} payloadHash={} productionReceipt={} reopen=PASS",
+        "F03_CHAIN opening=3 openingEvaluation=PASS longForm=1 finalArtifact={} version={} payloadHash={} productionReceipt={} reopen=PASS receiptBindings=2",
         final_ref["artifactId"],
         final_ref["version"],
         final_ref["payloadHash"],

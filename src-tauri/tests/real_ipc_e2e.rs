@@ -1192,32 +1192,55 @@ fn r2_runtime_canary() -> String {
     format!("MOHENG_SECRET_CANARY_{}", hex::encode(random))
 }
 
-fn r2_read_http_request(stream: &mut TcpStream) -> Option<(String, Value)> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+fn r2_read_http_request(stream: &mut TcpStream) -> Result<(String, Value), String> {
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("set_blocking_read:{:?}", error.kind()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("set_read_timeout:{:?}", error.kind()))?;
     let mut request = Vec::new();
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = stream.read(&mut buffer).ok()?;
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("read:{:?}", error.kind()))?;
         if read == 0 {
-            return None;
+            return Err(format!(
+                "eof_before_complete:received_bytes={}",
+                request.len()
+            ));
         }
         request.extend_from_slice(&buffer[..read]);
         let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
             continue;
         };
         let header_text = String::from_utf8_lossy(&request[..header_end]).into_owned();
-        let content_length = header_text
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-            .unwrap_or(0);
+        let content_length = header_text.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        let Some(content_length) = content_length else {
+            let header_names = header_text
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    line.split_once(':')
+                        .map(|(name, _)| name.trim().to_ascii_lowercase())
+                })
+                .collect::<Vec<_>>();
+            return Err(format!(
+                "missing_content_length:header_names={header_names:?}"
+            ));
+        };
         if request.len() >= header_end + 4 + content_length {
             let body = &request[header_end + 4..header_end + 4 + content_length];
-            return Some((header_text, serde_json::from_slice(body).ok()?));
+            let body = serde_json::from_slice(body).map_err(|error| {
+                format!("invalid_json_body:bytes={content_length}:error={error}")
+            })?;
+            return Ok((header_text, body));
         }
     }
 }
@@ -1296,8 +1319,10 @@ struct R2LocalProviderServer {
     endpoint: String,
     stop: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
+    accepted_connections: Arc<AtomicUsize>,
+    incomplete_requests: Arc<AtomicUsize>,
+    request_errors: Arc<Mutex<Vec<String>>>,
     auth_matches: Arc<AtomicUsize>,
-    process_matches: Arc<AtomicUsize>,
     worker: thread::JoinHandle<()>,
 }
 
@@ -1311,12 +1336,16 @@ fn r2_spawn_local_provider_server(
     listener.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let requests = Arc::new(AtomicUsize::new(0));
+    let accepted_connections = Arc::new(AtomicUsize::new(0));
+    let incomplete_requests = Arc::new(AtomicUsize::new(0));
+    let request_errors = Arc::new(Mutex::new(Vec::new()));
     let auth_matches = Arc::new(AtomicUsize::new(0));
-    let process_canary_matches = Arc::new(AtomicUsize::new(0));
     let stop_worker = Arc::clone(&stop);
     let requests_worker = Arc::clone(&requests);
+    let accepted_worker = Arc::clone(&accepted_connections);
+    let incomplete_worker = Arc::clone(&incomplete_requests);
+    let errors_worker = Arc::clone(&request_errors);
     let auth_worker = Arc::clone(&auth_matches);
-    let process_worker = Arc::clone(&process_canary_matches);
     let worker = thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while requests_worker.load(Ordering::SeqCst) < expected_requests
@@ -1331,22 +1360,21 @@ fn r2_spawn_local_provider_server(
                 }
                 Err(_) => break,
             };
-            let Some((headers, body)) = r2_read_http_request(&mut stream) else {
-                continue;
+            accepted_worker.fetch_add(1, Ordering::SeqCst);
+            let (headers, body) = match r2_read_http_request(&mut stream) {
+                Ok(request) => request,
+                Err(error) => {
+                    incomplete_worker.fetch_add(1, Ordering::SeqCst);
+                    if let Ok(mut errors) = errors_worker.lock() {
+                        errors.push(error);
+                    }
+                    continue;
+                }
             };
             requests_worker.fetch_add(1, Ordering::SeqCst);
             let expected_header = format!("authorization: bearer {}", canary.to_ascii_lowercase());
             if headers.to_ascii_lowercase().contains(&expected_header) {
                 auth_worker.fetch_add(1, Ordering::SeqCst);
-            }
-            if let Ok(processes) = ProcessCommand::new("/bin/ps")
-                .args(["-eww", "-axo", "pid=,ppid=,command="])
-                .output()
-            {
-                let canary_matches = String::from_utf8_lossy(&processes.stdout)
-                    .matches(&canary)
-                    .count();
-                process_worker.fetch_add(canary_matches, Ordering::SeqCst);
             }
             let system_prompt = body
                 .pointer("/messages/0/content")
@@ -1377,10 +1405,26 @@ fn r2_spawn_local_provider_server(
         endpoint: format!("http://{address}"),
         stop,
         requests,
+        accepted_connections,
+        incomplete_requests,
+        request_errors,
         auth_matches,
-        process_matches: process_canary_matches,
         worker,
     }
+}
+
+fn r2_process_canary_matches(canary: &str) -> usize {
+    let processes = ProcessCommand::new("/bin/ps")
+        .args(["-eww", "-axo", "pid=,ppid=,command="])
+        .output()
+        .expect("inspect process command lines for the isolated canary");
+    assert!(
+        processes.status.success(),
+        "process command-line scan succeeds"
+    );
+    String::from_utf8_lossy(&processes.stdout)
+        .matches(canary)
+        .count()
 }
 
 fn r2_bounded_invoke(
@@ -1752,15 +1796,17 @@ fn r2_seed_planning_project(
 fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
     let _provider_test_guard = R2_REGISTERED_PROVIDER_TEST_LOCK
         .lock()
-        .expect("registered Provider E2E lock is not poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
     let expected_requests = 4;
     let R2LocalProviderServer {
         endpoint,
         stop,
         requests,
+        accepted_connections,
+        incomplete_requests,
+        request_errors,
         auth_matches,
-        process_matches,
         worker: server,
     } = r2_spawn_local_provider_server(canary.clone(), "task:actual".into(), expected_requests);
     let secret_store = MemorySecretStore::new();
@@ -2079,6 +2125,22 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
                 |row| row.get(0),
             )
             .expect("query persisted usage token total");
+        let mut statement = connection
+            .prepare("SELECT model_run_id,capability,status,attempt_no FROM model_runs WHERE project_id=?1 ORDER BY created_at,model_run_id")
+            .expect("prepare model-run diagnostic query");
+        let model_run_rows = statement
+            .query_map([&project_id], |row| {
+                Ok(json!({
+                    "modelRunId":row.get::<_,String>(0)?,
+                    "capability":row.get::<_,String>(1)?,
+                    "status":row.get::<_,String>(2)?,
+                    "attemptNo":row.get::<_,i64>(3)?
+                }))
+            })
+            .expect("query persisted model-run diagnostics")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect persisted model-run diagnostics");
+        let open_unknown_decisions = count("SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome='OPEN'");
         (
             completed_model_runs,
             raw_response_rows,
@@ -2087,14 +2149,22 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             settled_budget_rows,
             command_receipt_rows,
             total_usage_tokens,
+            model_run_rows,
+            open_unknown_decisions,
         )
     };
     let parent_environment_match = std::env::vars().any(|(_, value)| value.contains(&canary));
     stop.store(true, Ordering::SeqCst);
     let server_finished = server.join().is_ok();
     let server_requests = requests.load(Ordering::SeqCst);
+    let server_accepted_connections = accepted_connections.load(Ordering::SeqCst);
+    let server_incomplete_requests = incomplete_requests.load(Ordering::SeqCst);
+    let server_request_errors = request_errors
+        .lock()
+        .map(|errors| errors.clone())
+        .unwrap_or_default();
     let authorized_requests = auth_matches.load(Ordering::SeqCst);
-    let process_canary_matches = process_matches.load(Ordering::SeqCst);
+    let process_canary_matches = r2_process_canary_matches(&canary);
     println!(
         "R2_F01_F02_FORMAL_RUNTIME={}",
         json!({
@@ -2104,6 +2174,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             "productionIpcOutcome": production_ipc_outcome,
             "productionErrorClass": r2_safe_error_class(production.as_ref().err()),
             "productionErrorDetail": r2_safe_error_detail(production.as_ref().err(), &canary),
+            "nextPlanErrorDetail": r2_safe_error_detail(next_plan.as_ref().err(), &canary),
             "productionCompleted": production_ok,
             "exportCompleted": export_ok,
             "exportReceiptQueryMatches": export_receipt_query_matches,
@@ -2115,15 +2186,20 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             "nextChapterPrepared": next_chapter_prepared,
             "nextChapterPlanCommitted": next_plan_committed,
             "serverRequests": server_requests,
+            "serverAcceptedConnections": server_accepted_connections,
+            "serverIncompleteRequests": server_incomplete_requests,
+            "serverRequestErrors": server_request_errors,
             "authorizedRequests": authorized_requests,
             "completedModelRuns": persisted_metrics.0,
+            "modelRuns": persisted_metrics.7,
+            "openUnknownDecisions": persisted_metrics.8,
             "rawResponseRows": persisted_metrics.1,
             "usageRows": persisted_metrics.2,
             "actualCostRows": persisted_metrics.3,
             "settledBudgetRows": persisted_metrics.4,
             "formalCommandReceiptRows": persisted_metrics.5,
             "totalUsageTokens": persisted_metrics.6,
-            "processArgvEnvironmentCanaryMatches": process_canary_matches,
+            "processArgvCanaryMatches": process_canary_matches,
             "parentEnvironmentCanaryMatches": parent_environment_match,
             "exportCanaryMatches": exported_canary_matches,
             "receiptCanaryMatch": receipt_canary_match,
@@ -2156,8 +2232,16 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         "registered next-chapter planning owner did not commit through real Provider"
     );
     assert_eq!(server_requests, expected_requests);
+    assert_eq!(server_accepted_connections, expected_requests);
+    assert_eq!(server_incomplete_requests, 0);
+    assert!(server_request_errors.is_empty());
     assert_eq!(authorized_requests, expected_requests);
     assert_eq!(persisted_metrics.0, expected_requests as i64);
+    assert!(persisted_metrics
+        .7
+        .iter()
+        .all(|run| run["status"] == "COMPLETED"));
+    assert_eq!(persisted_metrics.8, 0);
     assert_eq!(persisted_metrics.1, expected_requests as i64);
     assert_eq!(persisted_metrics.2, expected_requests as i64);
     assert_eq!(persisted_metrics.3, expected_requests as i64);
@@ -2176,14 +2260,16 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
 fn r2_registered_next_chapter_prepare_then_compile_uses_real_async_provider() {
     let _provider_test_guard = R2_REGISTERED_PROVIDER_TEST_LOCK
         .lock()
-        .expect("registered Provider E2E lock is not poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
     let R2LocalProviderServer {
         endpoint,
         stop,
         requests,
+        accepted_connections,
+        incomplete_requests,
+        request_errors,
         auth_matches,
-        process_matches,
         worker: server,
     } = r2_spawn_local_provider_server(canary.clone(), "task:actual".into(), 1);
     let secrets = MemorySecretStore::new();
@@ -2290,8 +2376,14 @@ fn r2_registered_next_chapter_prepare_then_compile_uses_real_async_provider() {
     stop.store(true, Ordering::SeqCst);
     let server_finished = server.join().is_ok();
     let server_requests = requests.load(Ordering::SeqCst);
+    let server_accepted_connections = accepted_connections.load(Ordering::SeqCst);
+    let server_incomplete_requests = incomplete_requests.load(Ordering::SeqCst);
+    let server_request_errors = request_errors
+        .lock()
+        .map(|errors| errors.clone())
+        .unwrap_or_default();
     let authorized_requests = auth_matches.load(Ordering::SeqCst);
-    let process_canary_matches = process_matches.load(Ordering::SeqCst);
+    let process_canary_matches = r2_process_canary_matches(&canary);
     println!(
         "R2_F01_NEXT_CHAPTER_RUNTIME={}",
         json!({
@@ -2299,10 +2391,14 @@ fn r2_registered_next_chapter_prepare_then_compile_uses_real_async_provider() {
             "prepareCommitted": prepared,
             "planIpcOutcome": plan_ipc_outcome,
             "planErrorClass": r2_safe_error_class(compile.as_ref().err()),
+            "planErrorDetail": r2_safe_error_detail(compile.as_ref().err(), &canary),
             "planCommitted": compiled,
             "serverRequests": server_requests,
+            "serverAcceptedConnections": server_accepted_connections,
+            "serverIncompleteRequests": server_incomplete_requests,
+            "serverRequestErrors": server_request_errors,
             "authorizedRequests": authorized_requests,
-            "processArgvEnvironmentCanaryMatches": process_canary_matches,
+            "processArgvCanaryMatches": process_canary_matches,
             "parentEnvironmentCanaryMatches": parent_environment_match,
             "projectFilesScanned": files_scanned,
             "projectFileCategories": project_file_categories,
@@ -2323,6 +2419,9 @@ fn r2_registered_next_chapter_prepare_then_compile_uses_real_async_provider() {
         "registered planning_compile_chapter_plan did not commit through the real Provider"
     );
     assert_eq!(server_requests, 1);
+    assert_eq!(server_accepted_connections, 1);
+    assert_eq!(server_incomplete_requests, 0);
+    assert!(server_request_errors.is_empty());
     assert_eq!(authorized_requests, 1);
     assert_eq!(process_canary_matches, 0);
     assert!(!parent_environment_match);
