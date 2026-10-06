@@ -149,7 +149,8 @@ fn b10_quality_is_one_merged_soft_report_and_hard_gate_still_wins() {
     ] {
         assert!(report.dimensions.contains_key(dimension));
     }
-    assert_eq!(report.model_provenance.evaluator_calls, 1);
+    assert_eq!(report.evaluator_kind, "HEURISTIC_KEYWORD");
+    assert_eq!(report.model_provenance.evaluator_calls, 0);
     assert!(report.soft_only);
     assert_eq!(
         enforce_hard_quality_separation(&report, false, Some("RESERVATION_VIOLATION".into()))
@@ -230,7 +231,8 @@ fn b10_repair_rechecks_only_affected_dimensions_before_hard_gate() {
     .unwrap();
     assert_eq!(rechecked.rechecked_dimensions, vec!["hook"]);
     assert!(rechecked.soft_only);
-    assert_eq!(rechecked.model_provenance.evaluator_calls, 1);
+    assert_eq!(rechecked.evaluator_kind, "HEURISTIC_KEYWORD");
+    assert_eq!(rechecked.model_provenance.evaluator_calls, 0);
 }
 
 fn plan_payload() -> serde_json::Value {
