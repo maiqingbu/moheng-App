@@ -94,6 +94,13 @@ fn seed_authority_for_direction(
     seed_authority_with_options(connection, project_id, direction, 0, true)
 }
 
+fn seed_authority_with_large_world_rule(
+    connection: &Connection,
+    project_id: &str,
+    rule_characters: usize,
+) -> (String, String) {
+    seed_authority_with_options(connection, project_id, "超限方向", rule_characters, false)
+}
 
 fn seed_authority_with_options(
     connection: &Connection,
@@ -374,6 +381,78 @@ fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
     assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustAchieve.0"));
     assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustNotBreak.0"));
     assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.requiredExitConditions.0"));
+}
+
+#[test]
+fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p-b2-overflow", "B2 overflow", NOW).unwrap();
+    let (volume_id, chapter_id) =
+        seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 5000);
+    let revision_before = connection.query_row::<i64, _, _>(
+        "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    drop(connection);
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let error = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":"p-b2-overflow",
+            "volumeId":volume_id,
+            "chapterId":chapter_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:b04:lead"],
+            "references":["task:actual"]
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"));
+    assert!(error.contains("authority:story"));
+    assert!(error.contains("sourceSizes"));
+
+    let connection = state.manager.open("p-b2-overflow", "B2 overflow", NOW).unwrap();
+    let revision_after = connection.query_row::<i64, _, _>(
+        "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let context_manifests: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b2-overflow' AND artifact_type='ContextManifest'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(revision_after, revision_before);
+    assert_eq!(context_manifests, 0);
+}
+
+#[test]
+fn b2_recent_chapter_entities_are_not_promoted_to_hard_context_implicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p-b2-soft-entities", "B2 entity scope", NOW).unwrap();
+    let (volume_id, chapter_id) = seed_authority(&connection, "p-b2-soft-entities");
+    drop(connection);
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let manifest = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":"p-b2-soft-entities",
+            "volumeId":volume_id,
+            "chapterId":chapter_id,
+            "executionMode":"LONG_FORM",
+            "references":[]
+        }),
+    ).unwrap();
+    let hard_sources = manifest["narrativeStateSources"].as_array().unwrap();
+    assert!(
+        !hard_sources.iter().any(|source| source["ref"] == "fact:b04:reality"),
+        "an entity from the previous chapter must not enter HARD without a current Plan reference"
+    );
 }
 
 #[test]
