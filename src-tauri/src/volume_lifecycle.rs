@@ -5,17 +5,18 @@
 //! planning state, an authorized route replan, atomic volume close, and the
 //! next-volume handoff.
 
-use crate::commit::{CommitService, ProjectCommandOutcome, ProjectCommandSpec};
+use crate::commit::CommitService;
 use crate::generated::types::{
     ArtifactEnvelope, ArtifactEnvelopeProvenance, ArtifactRef, ArtifactScope, ArtifactScopeLevel,
-    ArtifactStatus, ArtifactType, AuthorityLevel, SemanticLifecycle,
+    ArtifactStatus, ArtifactType, AuthorityLevel, CommitBundle, DomainReceipt, HeadChange,
+    SemanticLifecycle,
 };
 use crate::hash::sha256_canonical;
 use crate::planning;
 use crate::repositories::artifacts::{scope_key, ArtifactRepository};
 use crate::repositories::narrative::NarrativeRepository;
 use crate::repositories::volume_lifecycle::VolumeLifecycleRepository;
-use libsql_rusqlite::Connection;
+use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +69,115 @@ pub struct VolumeChangeMutation {
     pub artifact: ArtifactEnvelope,
     pub head: crate::generated::types::HeadChange,
     pub owner_receipt: Value,
+}
+
+#[derive(Debug, Clone)]
+struct LifecycleReceipt {
+    receipt_id: String,
+    after_revision: i64,
+}
+
+fn existing_lifecycle_receipt(
+    connection: &Connection,
+    project_id: &str,
+    idempotency_key: &str,
+    domain: &str,
+    request_digest: &str,
+) -> Result<Option<LifecycleReceipt>, String> {
+    if let Some(receipt) = CommitService::find_receipt(connection, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    {
+        let receipt_json: String = connection
+            .query_row(
+                "SELECT receipt_json FROM domain_receipts WHERE project_id=?1 AND commit_receipt_id=?2 AND domain=?3",
+                libsql_rusqlite::params![project_id, receipt.receipt_id, domain],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "B09_LIFECYCLE_RECEIPT_BINDING_MISSING".to_string())?;
+        let domain_receipt: DomainReceipt =
+            serde_json::from_str(&receipt_json).map_err(|error| error.to_string())?;
+        if domain_receipt
+            .payload
+            .get("requestDigest")
+            .and_then(Value::as_str)
+            != Some(request_digest)
+        {
+            return Err("IDEMPOTENCY_CONFLICT".into());
+        }
+        return Ok(Some(LifecycleReceipt {
+            receipt_id: receipt.receipt_id,
+            after_revision: receipt.after_revision,
+        }));
+    }
+
+    if let Some(receipt) =
+        CommitService::find_project_command_receipt(connection, project_id, idempotency_key)
+            .map_err(|error| error.to_string())?
+    {
+        if receipt.request_digest != request_digest {
+            return Err("IDEMPOTENCY_CONFLICT".into());
+        }
+        return Ok(Some(LifecycleReceipt {
+            receipt_id: receipt.receipt_id,
+            after_revision: receipt.after_revision,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn lifecycle_commit_bundle(
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    domain: &str,
+    request_digest: &str,
+    artifacts: Vec<ArtifactEnvelope>,
+) -> Result<CommitBundle, String> {
+    let artifact_refs = artifacts.iter().map(artifact_ref).collect::<Vec<_>>();
+    let heads = artifacts
+        .iter()
+        .map(|artifact| HeadChange {
+            artifact_type: artifact.artifact_type.clone(),
+            scope: artifact.scope.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            version: artifact.version,
+            payload_hash: artifact.payload_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+    let receipt_payload = BTreeMap::from([("requestDigest".into(), json!(request_digest))]);
+    let receipt_draft = crate::generated::types::ReceiptDraft {
+        domain: domain.into(),
+        receipt_id: Some(format!("domain-receipt:{command_id}:{domain}")),
+        artifact_refs: Some(artifact_refs),
+        payload: Some(receipt_payload),
+    };
+    Ok(CommitBundle {
+        commit_id: format!("commit:{command_id}"),
+        project_id: project_id.into(),
+        command_id: command_id.into(),
+        idempotency_key: idempotency_key.into(),
+        expected_project_revision: Some(expected_revision),
+        contract_version: "m0a.v1".into(),
+        created_at: now.into(),
+        artifacts,
+        head_updates: Some(heads),
+        canon_delta: None,
+        obligation_delta: None,
+        foreshadow_delta: None,
+        knowledge_delta: None,
+        state_delta: None,
+        dependency_edges: None,
+        job_updates: None,
+        decision_updates: None,
+        reader_desire_delta: None,
+        gate_certificates: None,
+        receipt_draft: Some(receipt_draft),
+    })
 }
 
 /// B09's semantic adapter for B12 planning targets.  This validates the
@@ -299,36 +409,23 @@ impl VolumeLifecycleOwner {
             "acknowledgedResponsibilityRefs": request.acknowledged_responsibility_refs,
         }))
         .map_err(|error| error.to_string())?;
-        let spec = ProjectCommandSpec {
-            project_id: &request.project_id,
-            result_project_id: &request.project_id,
-            command_id: &request.command_id,
-            idempotency_key: &request.idempotency_key,
-            command_type: "replan_volume_route",
-            request_digest: &request_digest,
-            expected_revision: Some(request.expected_revision),
-            now: &request.now,
-            advance_revision: true,
-        };
-
-        let outcome = CommitService::commit_project_command(connection, spec, |connection| {
-            apply_route_replan(connection, &request)
-                .map_err(crate::commit::CommitError::ProjectCommandApply)
-        })
-        .map_err(|error| error.to_string())?;
-
-        match outcome {
-            ProjectCommandOutcome::Committed { value, .. } => Ok(value),
-            ProjectCommandOutcome::Replayed(receipt) => {
-                let route = current_route(connection, &request.project_id, &request.volume_id)?;
-                Ok(json!({
-                    "replayed": true,
-                    "routeVersion": route.1.get("routeVersion").cloned().unwrap_or(Value::Null),
-                    "projectRevision": receipt.after_revision,
-                    "receiptId": receipt.receipt_id,
-                }))
-            }
+        const DOMAIN: &str = "B09_VOLUME_ROUTE_REPLAN";
+        if let Some(receipt) = existing_lifecycle_receipt(
+            connection,
+            &request.project_id,
+            &request.idempotency_key,
+            DOMAIN,
+            &request_digest,
+        )? {
+            let route = current_route(connection, &request.project_id, &request.volume_id)?;
+            return Ok(json!({
+                "replayed": true,
+                "routeVersion": route.1.get("routeVersion").cloned().unwrap_or(Value::Null),
+                "projectRevision": receipt.after_revision,
+                "receiptId": receipt.receipt_id,
+            }));
         }
+        apply_route_replan(connection, &request, &request_digest)
     }
 
     pub fn close_volume(
@@ -347,41 +444,29 @@ impl VolumeLifecycleOwner {
             "reason": request.reason,
         }))
         .map_err(|error| error.to_string())?;
-        let spec = ProjectCommandSpec {
-            project_id: &request.project_id,
-            result_project_id: &request.project_id,
-            command_id: &request.command_id,
-            idempotency_key: &request.idempotency_key,
-            command_type: "volume_close",
-            request_digest: &request_digest,
-            expected_revision: Some(request.expected_revision),
-            now: &request.now,
-            advance_revision: true,
-        };
-        let outcome = CommitService::commit_project_command(connection, spec, |connection| {
-            apply_volume_close(connection, &request)
-                .map_err(crate::commit::CommitError::ProjectCommandApply)
-        })
-        .map_err(|error| error.to_string())?;
-
-        match outcome {
-            ProjectCommandOutcome::Committed { value, .. } => Ok(value),
-            ProjectCommandOutcome::Replayed(receipt) => {
-                let eligibility = VolumeLifecycleRepository::close_eligibility(
-                    connection,
-                    &request.project_id,
-                    &request.volume_id,
-                )
-                .map_err(|error| error.to_string())?
-                .unwrap_or_else(|| "BLOCKED".into());
-                Ok(json!({
-                    "replayed": true,
-                    "nextVolumeEligibility": eligibility,
-                    "projectRevision": receipt.after_revision,
-                    "receiptId": receipt.receipt_id,
-                }))
-            }
+        const DOMAIN: &str = "B09_VOLUME_CLOSE";
+        if let Some(receipt) = existing_lifecycle_receipt(
+            connection,
+            &request.project_id,
+            &request.idempotency_key,
+            DOMAIN,
+            &request_digest,
+        )? {
+            let eligibility = VolumeLifecycleRepository::close_eligibility(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+            )
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "BLOCKED".into());
+            return Ok(json!({
+                "replayed": true,
+                "nextVolumeEligibility": eligibility,
+                "projectRevision": receipt.after_revision,
+                "receiptId": receipt.receipt_id,
+            }));
         }
+        apply_volume_close(connection, &request, &request_digest)
     }
 
     pub fn handoff_next_volume(
@@ -407,32 +492,22 @@ impl VolumeLifecycleOwner {
             "targetWords": request.target_words,
         }))
         .map_err(|error| error.to_string())?;
-        let spec = ProjectCommandSpec {
-            project_id: &request.project_id,
-            result_project_id: &request.project_id,
-            command_id: &request.command_id,
-            idempotency_key: &request.idempotency_key,
-            command_type: "volume_handoff",
-            request_digest: &request_digest,
-            expected_revision: Some(request.expected_revision),
-            now: &request.now,
-            advance_revision: true,
-        };
-        let outcome = CommitService::commit_project_command(connection, spec, |connection| {
-            apply_next_volume_handoff(connection, &request)
-                .map_err(crate::commit::CommitError::ProjectCommandApply)
-        })
-        .map_err(|error| error.to_string())?;
-
-        match outcome {
-            ProjectCommandOutcome::Committed { value, .. } => Ok(value),
-            ProjectCommandOutcome::Replayed(receipt) => Ok(json!({
+        const DOMAIN: &str = "B09_VOLUME_HANDOFF";
+        if let Some(receipt) = existing_lifecycle_receipt(
+            connection,
+            &request.project_id,
+            &request.idempotency_key,
+            DOMAIN,
+            &request_digest,
+        )? {
+            return Ok(json!({
                 "replayed": true,
                 "eligibility": "ELIGIBLE",
                 "projectRevision": receipt.after_revision,
                 "receiptId": receipt.receipt_id,
-            })),
+            }));
         }
+        apply_next_volume_handoff(connection, &request, &request_digest)
     }
 }
 
@@ -1257,7 +1332,9 @@ fn persist_planning_state(
 fn apply_route_replan(
     connection: &Connection,
     request: &RouteReplanRequest,
+    request_digest: &str,
 ) -> Result<Value, String> {
+    const DOMAIN: &str = "B09_VOLUME_ROUTE_REPLAN";
     let compiled = compile_route_replan_input(connection, request)?;
     let (candidate, route_version, substantive_change) = derive_route_candidate(&compiled)?;
     let previous_ref: ArtifactRef = serde_json::from_value(
@@ -1274,68 +1351,36 @@ fn apply_route_replan(
             .ok_or("REPLAN_INTENT_REF_MISSING")?,
     )
     .map_err(|error| error.to_string())?;
-    if !substantive_change {
-        return Ok(json!({
-            "replayed": false,
-            "classification": "NO_ROUTE_CHANGE_REQUIRED",
-            "newVersion": 0,
-            "routeVersion": route_version - 1,
-            "projectRevision": request.expected_revision + 1,
-            "receiptId": format!("project-receipt:{}", request.command_id),
-            "previousRoute": previous_ref,
-            "intent": intent_ref,
-            "compiledInputDigest": compiled["compiledInputDigest"],
-            "compiledInput": compiled["compiledInput"],
-        }));
-    }
-    let artifact = make_artifact(
+    let artifact = if substantive_change {
+        Some(make_artifact(
+            &request.project_id,
+            &previous_ref.artifact_id,
+            ArtifactType::VolumePlan,
+            volume_scope(&request.volume_id),
+            previous_ref.version + 1,
+            candidate.clone(),
+            vec![intent_ref.clone()],
+            &request.command_id,
+            "B09::VolumeLifecycleOwner",
+            SemanticLifecycle::ApprovedPlan,
+            AuthorityLevel::B,
+            &request.now,
+        )?)
+    } else {
+        None
+    };
+    let new_route_ref = artifact.as_ref().map(artifact_ref);
+    let artifacts = artifact.iter().cloned().collect();
+    let bundle = lifecycle_commit_bundle(
         &request.project_id,
-        &previous_ref.artifact_id,
-        ArtifactType::VolumePlan,
-        volume_scope(&request.volume_id),
-        previous_ref.version + 1,
-        candidate.clone(),
-        vec![intent_ref.clone()],
         &request.command_id,
-        "B09::VolumeLifecycleOwner",
-        SemanticLifecycle::ApprovedPlan,
-        AuthorityLevel::B,
+        &request.idempotency_key,
+        request.expected_revision,
         &request.now,
+        DOMAIN,
+        request_digest,
+        artifacts,
     )?;
-    ArtifactRepository::insert_candidate(connection, &request.project_id, &artifact)
-        .map_err(|error| error.to_string())?;
-    ArtifactRepository::commit_candidate(
-        connection,
-        &artifact.artifact_id,
-        artifact.version,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    let new_route_ref = artifact_ref(&artifact);
-    let scope_key_value = scope_key(&artifact.scope).map_err(|error| error.to_string())?;
-    ArtifactRepository::promote_head(
-        connection,
-        &request.project_id,
-        &new_route_ref,
-        "VolumePlan",
-        "VOLUME",
-        &scope_key_value,
-    )
-    .map_err(|error| error.to_string())?;
-    let target_chapters = candidate
-        .pointer("/capacityBudget/maxChapters")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    VolumeLifecycleRepository::update_plan_index(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &artifact.artifact_id,
-        artifact.version,
-        target_chapters,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
     let input_refs = json!({
         "candidateSource": "B09::VolumeLifecycleOwner::compiled_input",
         "compiledInput": compiled["compiledInput"],
@@ -1349,42 +1394,85 @@ fn apply_route_replan(
         "previousRoute": previous_ref,
         "intent": intent_ref,
     });
-    VolumeLifecycleRepository::record_route_replan(
+    let target_chapters = candidate
+        .pointer("/capacityBudget/maxChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    let receipt = CommitService::commit_with_post_apply(
         connection,
-        &request.command_id,
-        &request.project_id,
-        &request.volume_id,
-        Some(&previous_ref.artifact_id),
-        Some(previous_ref.version),
-        &artifact.artifact_id,
-        artifact.version,
-        &request.trigger,
-        &request.reason,
-        request.expected_revision,
-        &input_refs.to_string(),
-        &format!("project-receipt:{}", request.command_id),
+        &bundle,
         &request.now,
+        |connection, receipt| {
+            let Some(artifact) = artifact.as_ref() else {
+                return Ok(());
+            };
+            VolumeLifecycleRepository::update_plan_index(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &artifact.artifact_id,
+                artifact.version,
+                target_chapters,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            VolumeLifecycleRepository::record_route_replan(
+                connection,
+                &request.command_id,
+                &request.project_id,
+                &request.volume_id,
+                Some(&previous_ref.artifact_id),
+                Some(previous_ref.version),
+                &artifact.artifact_id,
+                artifact.version,
+                &request.trigger,
+                &request.reason,
+                request.expected_revision,
+                &input_refs.to_string(),
+                &receipt.receipt_id,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            let projection = build_planning_state(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &request.now,
+                Some(receipt.after_revision),
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            persist_planning_state(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &projection,
+                &request.now,
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            Ok(())
+        },
     )
     .map_err(|error| error.to_string())?;
-    let projection = build_planning_state(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &request.now,
-        Some(request.expected_revision + 1),
-    )?;
-    persist_planning_state(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &projection,
-        &request.now,
-    )?;
+
+    if !substantive_change {
+        return Ok(json!({
+            "replayed": false,
+            "classification": "NO_ROUTE_CHANGE_REQUIRED",
+            "newVersion": 0,
+            "routeVersion": route_version - 1,
+            "projectRevision": receipt.after_revision,
+            "receiptId": receipt.receipt_id,
+            "previousRoute": previous_ref,
+            "intent": intent_ref,
+            "compiledInputDigest": compiled["compiledInputDigest"],
+            "compiledInput": compiled["compiledInput"],
+        }));
+    }
     Ok(json!({
         "replayed": false,
         "routeVersion": route_version,
-        "projectRevision": request.expected_revision + 1,
-        "receiptId": format!("project-receipt:{}", request.command_id),
+        "projectRevision": receipt.after_revision,
+        "receiptId": receipt.receipt_id,
         "routeRef": new_route_ref,
         "reason": request.reason,
         "evidenceRefs": request.evidence_refs,
@@ -1396,7 +1484,9 @@ fn apply_route_replan(
 fn apply_volume_close(
     connection: &Connection,
     request: &VolumeCloseRequest,
+    request_digest: &str,
 ) -> Result<Value, String> {
+    const DOMAIN: &str = "B09_VOLUME_CLOSE";
     let metadata = VolumeLifecycleRepository::volume_metadata(
         connection,
         &request.project_id,
@@ -1456,96 +1546,105 @@ fn apply_volume_close(
         AuthorityLevel::B,
         &request.now,
     )?;
-    ArtifactRepository::insert_candidate(connection, &request.project_id, &exit_artifact)
-        .map_err(|error| error.to_string())?;
-    if request.fault_injection.as_deref() == Some("after_exit_artifact") {
-        return Err("VOLUME_CLOSE_FAULT_INJECTED".into());
-    }
-    ArtifactRepository::commit_candidate(
-        connection,
-        &exit_artifact.artifact_id,
-        exit_artifact.version,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
     let exit_ref = artifact_ref(&exit_artifact);
-    let exit_scope_key = scope_key(&exit_artifact.scope).map_err(|error| error.to_string())?;
-    ArtifactRepository::promote_head(
-        connection,
+    let evidence_refs_json = exit_artifact
+        .payload
+        .get("handoffEvidenceRefs")
+        .cloned()
+        .unwrap_or_else(|| json!([]))
+        .to_string();
+    let bundle = lifecycle_commit_bundle(
         &request.project_id,
-        &exit_ref,
-        "VolumeExitState",
-        "VOLUME",
-        &exit_scope_key,
-    )
-    .map_err(|error| error.to_string())?;
-    if !VolumeLifecycleRepository::mark_closed(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        return Err("VOLUME_CLOSE_STATUS_UPDATE_FAILED".into());
-    }
-    VolumeLifecycleRepository::update_planning_ledger(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        "COMPLETE",
-        "NONE",
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    VolumeLifecycleRepository::record_volume_close(
-        connection,
         &request.command_id,
-        &request.project_id,
-        &request.volume_id,
-        &exit_artifact.artifact_id,
-        exit_artifact.version,
+        &request.idempotency_key,
         request.expected_revision,
-        "ELIGIBLE",
-        "[]",
-        &exit_artifact
-            .payload
-            .get("handoffEvidenceRefs")
-            .cloned()
-            .unwrap_or_else(|| json!([]))
-            .to_string(),
-        &format!("project-receipt:{}", request.command_id),
         &request.now,
+        DOMAIN,
+        request_digest,
+        vec![exit_artifact.clone()],
+    )?;
+    let receipt = CommitService::commit_with_post_apply(
+        connection,
+        &bundle,
+        &request.now,
+        |connection, receipt| {
+            if request.fault_injection.as_deref() == Some("after_exit_artifact") {
+                return Err(crate::commit::CommitError::ProjectCommandApply(
+                    "VOLUME_CLOSE_FAULT_INJECTED".into(),
+                ));
+            }
+            if !VolumeLifecycleRepository::mark_closed(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?
+            {
+                return Err(crate::commit::CommitError::ProjectCommandApply(
+                    "VOLUME_CLOSE_STATUS_UPDATE_FAILED".into(),
+                ));
+            }
+            VolumeLifecycleRepository::update_planning_ledger(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                "COMPLETE",
+                "NONE",
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            VolumeLifecycleRepository::record_volume_close(
+                connection,
+                &request.command_id,
+                &request.project_id,
+                &request.volume_id,
+                &exit_artifact.artifact_id,
+                exit_artifact.version,
+                request.expected_revision,
+                "ELIGIBLE",
+                "[]",
+                &evidence_refs_json,
+                &receipt.receipt_id,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            let closed_projection = build_planning_state(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &request.now,
+                Some(receipt.after_revision),
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            persist_planning_state(
+                connection,
+                &request.project_id,
+                &request.volume_id,
+                &closed_projection,
+                &request.now,
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            Ok(())
+        },
     )
     .map_err(|error| error.to_string())?;
-    let closed_projection = build_planning_state(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &request.now,
-        Some(request.expected_revision + 1),
-    )?;
-    persist_planning_state(
-        connection,
-        &request.project_id,
-        &request.volume_id,
-        &closed_projection,
-        &request.now,
-    )?;
     Ok(json!({
         "replayed": false,
         "volumeId": request.volume_id,
         "exitRef": exit_ref,
         "nextVolumeEligibility": "ELIGIBLE",
-        "projectRevision": request.expected_revision + 1,
-        "receiptId": format!("project-receipt:{}", request.command_id),
+        "projectRevision": receipt.after_revision,
+        "receiptId": receipt.receipt_id,
     }))
 }
 
 fn apply_next_volume_handoff(
     connection: &Connection,
     request: &NextVolumeHandoffRequest,
+    request_digest: &str,
 ) -> Result<Value, String> {
+    const DOMAIN: &str = "B09_VOLUME_HANDOFF";
     let current = VolumeLifecycleRepository::volume_metadata(
         connection,
         &request.project_id,
@@ -1661,19 +1760,6 @@ fn apply_next_volume_handoff(
         request.chapter_end,
         request.target_words,
     )?;
-    VolumeLifecycleRepository::insert_next_volume(
-        connection,
-        &request.project_id,
-        &request.next_volume_id,
-        &current.book_id,
-        current.volume_no + 1,
-        &request.title,
-        request.chapter_start,
-        request.chapter_end,
-        request.target_words,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
     let next_intent_id = format!("intent:{}", request.next_volume_id);
     let next_intent = make_artifact(
         &request.project_id,
@@ -1689,22 +1775,6 @@ fn apply_next_volume_handoff(
         AuthorityLevel::B,
         &request.now,
     )?;
-    ArtifactRepository::insert_candidate(connection, &request.project_id, &next_intent)
-        .map_err(|error| error.to_string())?;
-    ArtifactRepository::commit_candidate(
-        connection,
-        &next_intent.artifact_id,
-        next_intent.version,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    promote_volume_head(
-        connection,
-        &request.project_id,
-        &next_intent,
-        "VolumeIntent",
-    )?;
-
     let next_intent_ref = artifact_ref(&next_intent);
     let mut next_route_payload = next_route_payload;
     next_route_payload["volumeIntentRef"] =
@@ -1730,53 +1800,10 @@ fn apply_next_volume_handoff(
         AuthorityLevel::B,
         &request.now,
     )?;
-    ArtifactRepository::insert_candidate(connection, &request.project_id, &next_plan)
-        .map_err(|error| error.to_string())?;
-    ArtifactRepository::commit_candidate(
-        connection,
-        &next_plan.artifact_id,
-        next_plan.version,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    promote_volume_head(connection, &request.project_id, &next_plan, "VolumePlan")?;
     let target_chapters = next_route_payload
         .pointer("/capacityBudget/maxChapters")
         .and_then(Value::as_i64)
         .unwrap_or(1);
-    VolumeLifecycleRepository::update_plan_index(
-        connection,
-        &request.project_id,
-        &request.next_volume_id,
-        &next_plan.artifact_id,
-        next_plan.version,
-        target_chapters,
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    VolumeLifecycleRepository::update_planning_ledger(
-        connection,
-        &request.project_id,
-        &request.next_volume_id,
-        "INCOMPLETE",
-        "NONE",
-        &request.now,
-    )
-    .map_err(|error| error.to_string())?;
-    let next_projection = build_planning_state(
-        connection,
-        &request.project_id,
-        &request.next_volume_id,
-        &request.now,
-        Some(request.expected_revision + 1),
-    )?;
-    persist_planning_state(
-        connection,
-        &request.project_id,
-        &request.next_volume_id,
-        &next_projection,
-        &request.now,
-    )?;
     let next_plan_ref = artifact_ref(&next_plan);
     let input_refs = json!({
         "candidateSource": "B09::VolumeLifecycleOwner::next_volume_compiler",
@@ -1786,26 +1813,92 @@ fn apply_next_volume_handoff(
         "canonFacts": canon_facts,
         "currentPlanningState": current_planning_state,
         "inheritedRefs": {
-            "currentIntent": current_intent_ref,
-            "currentRoute": current_route_ref,
-            "currentExit": current_exit_ref,
+            "currentIntent": current_intent_ref.clone(),
+            "currentRoute": current_route_ref.clone(),
+            "currentExit": current_exit_ref.clone(),
         },
         "newIntent": next_intent_ref,
         "newRoute": next_plan_ref,
         "continuityRefs": next_intent_payload.get("crossVolumeResponsibilityRefs").cloned().unwrap_or_else(|| json!([])),
         "futureReservationRefs": next_intent_payload.get("futureReservationRefs").cloned().unwrap_or_else(|| json!([])),
     });
-    let handoff_id = request.command_id.clone();
-    VolumeLifecycleRepository::record_handoff(
-        connection,
-        &handoff_id,
+    let bundle = lifecycle_commit_bundle(
         &request.project_id,
-        &request.current_volume_id,
-        &request.next_volume_id,
-        &current_exit_ref.artifact_id,
-        &input_refs.to_string(),
-        &format!("project-receipt:{}", request.command_id),
+        &request.command_id,
+        &request.idempotency_key,
+        request.expected_revision,
         &request.now,
+        DOMAIN,
+        request_digest,
+        vec![next_intent.clone(), next_plan.clone()],
+    )?;
+    let receipt = CommitService::commit_with_post_apply(
+        connection,
+        &bundle,
+        &request.now,
+        |connection, receipt| {
+            VolumeLifecycleRepository::insert_next_volume(
+                connection,
+                &request.project_id,
+                &request.next_volume_id,
+                &current.book_id,
+                current.volume_no + 1,
+                &request.title,
+                request.chapter_start,
+                request.chapter_end,
+                request.target_words,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            VolumeLifecycleRepository::update_plan_index(
+                connection,
+                &request.project_id,
+                &request.next_volume_id,
+                &next_plan.artifact_id,
+                next_plan.version,
+                target_chapters,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            VolumeLifecycleRepository::update_planning_ledger(
+                connection,
+                &request.project_id,
+                &request.next_volume_id,
+                "INCOMPLETE",
+                "NONE",
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            let next_projection = build_planning_state(
+                connection,
+                &request.project_id,
+                &request.next_volume_id,
+                &request.now,
+                Some(receipt.after_revision),
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            persist_planning_state(
+                connection,
+                &request.project_id,
+                &request.next_volume_id,
+                &next_projection,
+                &request.now,
+            )
+            .map_err(crate::commit::CommitError::ProjectCommandApply)?;
+            VolumeLifecycleRepository::record_handoff(
+                connection,
+                &request.command_id,
+                &request.project_id,
+                &request.current_volume_id,
+                &request.next_volume_id,
+                &current_exit_ref.artifact_id,
+                &input_refs.to_string(),
+                &receipt.receipt_id,
+                &request.now,
+            )
+            .map_err(|error| crate::commit::CommitError::ProjectCommandApply(error.to_string()))?;
+            Ok(())
+        },
     )
     .map_err(|error| error.to_string())?;
     Ok(json!({
@@ -1813,8 +1906,8 @@ fn apply_next_volume_handoff(
         "eligibility": "ELIGIBLE",
         "fromVolumeId": request.current_volume_id,
         "toVolumeId": request.next_volume_id,
-        "projectRevision": request.expected_revision + 1,
-        "receiptId": format!("project-receipt:{}", request.command_id),
+        "projectRevision": receipt.after_revision,
+        "receiptId": receipt.receipt_id,
         "compiledInputDigest": compiled_input_digest,
         "inputRefs": input_refs,
     }))
@@ -2137,23 +2230,4 @@ fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
         version: artifact.version,
         payload_hash: artifact.payload_hash.clone(),
     }
-}
-
-fn promote_volume_head(
-    connection: &Connection,
-    project_id: &str,
-    artifact: &ArtifactEnvelope,
-    artifact_type: &str,
-) -> Result<(), String> {
-    let reference = artifact_ref(artifact);
-    let scope_key_value = scope_key(&artifact.scope).map_err(|error| error.to_string())?;
-    ArtifactRepository::promote_head(
-        connection,
-        project_id,
-        &reference,
-        artifact_type,
-        "VOLUME",
-        &scope_key_value,
-    )
-    .map_err(|error| error.to_string())
 }
