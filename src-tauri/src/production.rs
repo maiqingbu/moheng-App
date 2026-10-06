@@ -1625,7 +1625,7 @@ fn run_chapter_production_inner(
     } else {
         None
     };
-    let creative_enrichment_payload = creative_enrichment
+    let mut creative_enrichment_payload = creative_enrichment
         .as_ref()
         .map(serde_json::to_value)
         .transpose()
@@ -1674,6 +1674,17 @@ fn run_chapter_production_inner(
                 .map(ToOwned::to_owned)
         })
         .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+    let method_injection_provenance = creative_enrichment
+        .as_ref()
+        .map(|enrichment| {
+            crate::creative_skills::method_injection_provenance(enrichment, &render_run_id)
+        })
+        .transpose()
+        .map_err(|error| format!("B10_METHOD_INJECTION_PROVENANCE:{error}"))?
+        .unwrap_or_else(|| json!([]));
+    if let Some(enrichment_payload) = creative_enrichment_payload.as_mut() {
+        enrichment_payload["methodInjectionProvenance"] = method_injection_provenance.clone();
+    }
     let body_digest = sha256_canonical(&json!(body)).map_err(|e| e.to_string())?;
     validate_candidate_evidence_range(&body, 0, body.chars().count())?;
     update_stage(connection, &project_id, &job_id, "CANDIDATE", &now)?;
@@ -1784,8 +1795,9 @@ fn run_chapter_production_inner(
                 .map_err(|error| format!("B10_QUALITY_PAYLOAD:{error}"))?;
             let mut quality_payload = report_value;
             quality_payload["payloadSchema"] = json!("narrative-quality-report.r1");
-            quality_payload["invocationProvenance"] = serde_json::to_value(&enrichment.invocations)
-                .map_err(|error| format!("B10_INVOCATION_PAYLOAD:{error}"))?;
+            quality_payload["invocationProvenance"] = json!([]);
+            quality_payload["methodInjectionProvenance"] =
+                method_injection_provenance.clone();
             quality_payload["skillSelection"] = serde_json::to_value(&enrichment.selection)
                 .map_err(|error| format!("B10_SELECTION_PAYLOAD:{error}"))?;
             quality_payload["repairEvidence"] = repair_evidence.clone();

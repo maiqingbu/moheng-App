@@ -450,7 +450,7 @@ async function reverifyRepair() {
         <MetricCard label="创作建议状态" value="已加载" note="使用当前作品的受限建议" />
         <MetricCard label="主要建议" :value="production.creativeSkills.selection?.primary?.nameZh || '无'" note="辅助参考" />
         <MetricCard label="补充建议数" :value="String(production.creativeSkills.selection?.support?.length || 0)" note="只展示当前任务需要的内容" />
-        <MetricCard label="本次使用" :value="String(production.creativeSkills.invocations?.length || 0)" note="已记录到当前作品" />
+        <MetricCard label="方法注入" :value="String(production.creativeSkills.methodInjectionProvenance?.length || 0)" note="已关联正文生成记录" />
       </div>
       <div v-if="production.creativeSkills" class="task-row">
         <strong>当前作品版本 {{ production.creativeSkills.context?.projectRevision ?? '-' }}</strong>

@@ -1775,6 +1775,53 @@ pub struct ChapterSkillEnrichment {
     pub invocations: Vec<InvocationProvenance>,
 }
 
+pub(crate) fn method_injection_provenance(
+    enrichment: &ChapterSkillEnrichment,
+    render_model_run_id: &str,
+) -> Result<Value, String> {
+    enrichment
+        .selection
+        .selected
+        .iter()
+        .map(|skill| {
+            let loaded_text = enrichment
+                .loaded_skill_texts
+                .iter()
+                .find(|loaded| {
+                    loaded
+                        .reference
+                        .ends_with(&format!("skills/{}/SKILL.md", skill.slug))
+                })
+                .ok_or_else(|| "SKILL_LOADED_TEXT_MISSING".to_string())?;
+            let mut loaded_resources = vec![json!({
+                "reference":loaded_text.reference,
+                "digest":loaded_text.digest
+            })];
+            loaded_resources.extend(
+                enrichment
+                    .loaded_resources
+                    .iter()
+                    .filter(|resource| {
+                        resource
+                            .reference
+                            .contains(&format!("/skills/{}/", skill.slug))
+                    })
+                    .map(|resource| {
+                        json!({"reference":resource.reference,"digest":resource.digest})
+                    }),
+            );
+            Ok(json!({
+                "skillId":skill.id,
+                "version":skill.version,
+                "bundleDigest":skill.bundle_digest,
+                "loadedResources":loaded_resources,
+                "renderModelRunId":render_model_run_id
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(Value::Array)
+}
+
 /// B08 calls this pure composition step immediately before rendering. It adds
 /// bounded creative guidance to the existing render input; it does not create
 /// a ChapterPlan or perform any write.
@@ -1847,7 +1894,7 @@ pub fn enrich_chapter_with_loader(
     primary: &str,
     support: Vec<String>,
     required_resources: Vec<String>,
-    now: &str,
+    _now: &str,
     loader: &SkillBundleLoader,
 ) -> Result<ChapterSkillEnrichment, String> {
     let selection = loader.select(SkillSelectionRequest {
@@ -1873,46 +1920,6 @@ pub fn enrich_chapter_with_loader(
         "suggestions":["保留 ChapterPlan 的目标与边界；只对候选正文提供局部建议"],
         "runtimeCheckRequests":[]
     }))?;
-    let output_digest =
-        sha256_canonical(&serde_json::to_value(&proposal).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let invocations = selection
-        .selected
-        .iter()
-        .enumerate()
-        .map(|(index, skill)| {
-            let loaded_text = loaded
-                .skill_texts
-                .iter()
-                .find(|loaded| {
-                    loaded
-                        .reference
-                        .ends_with(&format!("skills/{}/SKILL.md", skill.slug))
-                })
-                .ok_or_else(|| "SKILL_LOADED_TEXT_MISSING".to_string())?;
-            let resources = loaded
-                .resources
-                .iter()
-                .filter(|resource| {
-                    resource
-                        .reference
-                        .contains(&format!("skills/{}/", skill.slug))
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            create_invocation_provenance_at(
-                &format!("inv:{chapter_id}:{}", index + 1),
-                skill,
-                &context,
-                loaded_text,
-                &resources,
-                Some(&loaded.identity),
-                vec![context_manifest_ref.into(), format!("plan:{chapter_id}")],
-                output_digest.clone(),
-                now,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(ChapterSkillEnrichment {
         package_version: CREATIVE_SKILLS_VERSION.into(),
         package_digest: loaded.identity.deployed_manifest_digest.clone(),
@@ -1927,7 +1934,7 @@ pub fn enrich_chapter_with_loader(
         loaded_resources: loaded.resources,
         loading: loaded.loading,
         method_guidance,
-        invocations,
+        invocations: Vec::new(),
     })
 }
 

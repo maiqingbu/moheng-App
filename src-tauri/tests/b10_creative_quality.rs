@@ -276,15 +276,8 @@ fn b10_formal_loader_consumes_selected_skill_text_and_keeps_unselected_loads_zer
         .loaded_skill_texts
         .iter()
         .all(|loaded| loaded.reference.ends_with("/SKILL.md") && loaded.digest.len() == 64));
-    assert!(opening.invocations.iter().all(|invocation| invocation
-        .loaded_skill_text_ref
-        .ends_with("/SKILL.md")
-        && invocation.loaded_skill_text_digest.len() == 64
-        && invocation.created_at == NOW
-        && invocation
-            .method_refs
-            .iter()
-            .any(|reference| reference.ends_with("/SKILL.md"))));
+    assert!(opening.invocations.is_empty());
+    assert!(long_form.invocations.is_empty());
     assert_ne!(opening.method_guidance, long_form.method_guidance);
 }
 
@@ -306,14 +299,11 @@ fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
     assert_eq!(enrichment.loading.selected_resource_loads, 2);
     assert_eq!(enrichment.loading.unselected_resource_loads, 0);
     assert_eq!(enrichment.loaded_resources.len(), 2);
-    assert!(enrichment.invocations.iter().all(|invocation| invocation
-        .resource_refs
-        .iter()
-        .any(|reference| reference.ends_with("resources/operating_method.md"))
-        && invocation.resource_digests.iter().all(|digest| digest
-            .get("digest")
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| value.len() == 64))));
+    assert!(enrichment.invocations.is_empty());
+    assert!(enrichment.loaded_resources.iter().all(|resource| {
+        resource.reference.ends_with("resources/operating_method.md")
+            && resource.digest.len() == 64
+    }));
     let selection = select_creative_skills(SkillSelectionRequest {
         primary: "S14".into(),
         support: vec!["S10".into()],

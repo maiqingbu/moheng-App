@@ -539,6 +539,13 @@ export interface CreativeSkillsProjection {
     model?: string
     outputDigest?: string
   }>
+  methodInjectionProvenance?: Array<{
+    skillId?: string
+    version?: string
+    bundleDigest?: string
+    loadedResources?: Array<{ reference?: string; digest?: string }>
+    renderModelRunId?: string
+  }>
   proposal?: { kind?: string; status?: string; summary?: string; suggestions?: string[] }
 }
 
@@ -553,6 +560,7 @@ export interface NarrativeQualityProjection {
   modelProvenance?: { evaluator?: string; evaluatorCalls?: number; provider?: string; model?: string }
   softAssessment?: { readerDesire?: string; qualityScore?: number }
   invocationProvenance?: CreativeSkillsProjection['invocations']
+  methodInjectionProvenance?: CreativeSkillsProjection['methodInjectionProvenance']
   repair?: { run: number; limit: number; scope: string[]; escalation: string | null }
 }
 
