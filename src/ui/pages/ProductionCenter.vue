@@ -334,7 +334,7 @@ async function reverifyRepair() {
 <template>
   <div v-if="project && production" class="page">
     <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。">
-      <button v-if="canStartProduction" class="btn primary" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? '重新生成' : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
+      <button v-if="canStartProduction && productionStartState.confirmation !== 'pending'" class="btn primary" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? '重新生成' : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_pause')">暂停</button>
       <button v-if="productionStatus === 'PAUSED'" class="btn primary" @click="controlProduction('production_resume')">恢复</button>
     </PageHeader>

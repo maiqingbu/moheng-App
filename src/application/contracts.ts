@@ -876,6 +876,7 @@ export interface ProjectBundle {
 
 export interface CommandReceipt {
   commandId: string
+  idempotencyKey?: string
   /**
    * Source project the command acted on. `resultProjectId` is the project the
    * command produced — equal for in-place commands, the new copy for a duplicate.
@@ -970,6 +971,7 @@ export interface CommandRequest {
 export interface FrontendPort {
   queryProjectLibrary(): Promise<ProjectLibraryProjection>
   queryProjectOverview(request: ProjectQueryRequest): Promise<ProjectOverviewProjection>
+  queryCommandReceipt(request: { projectId: string; idempotencyKey: string }): Promise<CommandReceipt | null>
   queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection>
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>

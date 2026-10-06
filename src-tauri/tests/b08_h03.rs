@@ -2245,7 +2245,7 @@ fn rv23_command_receipt_read_uses_project_and_original_idempotency_key() {
                 command_id: "cmd:rv23:receipt",
                 idempotency_key: "key:rv23:receipt",
                 command_type: "production_start",
-                request_digest: "rv23-receipt-request-digest",
+                request_digest: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
                 expected_revision: Some(0),
                 now: NOW,
                 advance_revision: false,

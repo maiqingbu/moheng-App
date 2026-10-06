@@ -375,6 +375,13 @@ export class BrowserDemoPort implements FrontendPort {
     })
   }
 
+  async queryCommandReceipt(request: { projectId: string; idempotencyKey: string }): Promise<CommandReceipt | null> {
+    const receipt = [...this.receipts.values()].find(item =>
+      item.projectId === request.projectId && item.idempotencyKey === request.idempotencyKey,
+    )
+    return receipt ? clone(receipt) : null
+  }
+
   async queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection> {
     await wait(45)
     const record = this.record(request.projectId)
@@ -808,7 +815,7 @@ export class BrowserDemoPort implements FrontendPort {
     // is the produced/target project. Create has no source, so this demo follows
     // the current Rust shape and uses the created project for both fields.
     const sourceProjectId = request.projectId ?? resultProjectId
-    const receipt: CommandReceipt = { commandId, projectId:sourceProjectId, resultProjectId, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId }
+    const receipt: CommandReceipt = { commandId, projectId:sourceProjectId, resultProjectId, idempotencyKey: request.idempotencyKey, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId }
     this.receipts.set(commandId, clone(receipt))
     emit(finalStatus,message)
     return receipt

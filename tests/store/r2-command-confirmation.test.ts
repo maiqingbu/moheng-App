@@ -34,6 +34,7 @@ describe('R2 正式回执后的查询失败', () => {
     const commandReceipt = {
       commandId: 'production-command-1',
       projectId: 'p',
+      idempotencyKey: 'production-key-1',
       finalStatus: 'committed' as const,
       receiptId: 'receipt:production:1',
       message: '章节已正式提交。',
@@ -91,6 +92,7 @@ describe('R2 正式回执后的查询失败', () => {
       queryCommandReceipt: vi.fn(async () => ({
         commandId: expectedCommand.commandId,
         projectId: 'p',
+        idempotencyKey: 'b12-change-apply:p:change:1',
         finalStatus: 'committed' as const,
         receiptId: 'receipt:change:1',
         message: '修改已提交。',

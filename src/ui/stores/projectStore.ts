@@ -65,6 +65,18 @@ type PendingCommandConfirmation = {
   projectId: string | null
   receipt?: CommandReceipt
   repair?: RepairOutcomeIdentity
+  commandId?: string
+  commandType?: string
+  idempotencyKey?: string
+}
+
+const isFormalWriteCommand = (type: string) =>
+  type === 'opening_ready'
+  || ['production_', 'planning_', 'opening_', 'volume_', 'change_request_', 'retcon_', 'repair_'].some(prefix => type.startsWith(prefix))
+
+const isTransportFailure = (error: unknown) => {
+  if (!(error instanceof Error) || /^IPC_(?:INVALID|UNSUPPORTED):/.test(error.message)) return false
+  return /timeout|timed out|transport|response lost|lost response|network|failed to fetch|failed to invoke|connection (?:closed|reset|lost)/i.test(error.message)
 }
 
 export const useProjectStore = defineStore('project-projection', () => {
@@ -319,7 +331,7 @@ export const useProjectStore = defineStore('project-projection', () => {
       repairOutcome: 'unknown',
       message,
     }
-    pendingConfirmations.set(key, { projectId: identity.projectId, repair: identity })
+    pendingConfirmations.set(key, { projectId: identity.projectId, repair: identity, commandType: 'repair_execute' })
     return null
   }
 
@@ -561,6 +573,63 @@ export const useProjectStore = defineStore('project-projection', () => {
       await requeryRepairOutcome(key, pending.repair)
       return
     }
+    if (pending.idempotencyKey && pending.projectId) {
+      const isCurrent = () => pendingConfirmations.get(key) === pending && pending.projectId === currentProjectId.value
+      let receipt: CommandReceipt | null = null
+      try {
+        receipt = await frontendPort.queryCommandReceipt({
+          projectId: pending.projectId,
+          idempotencyKey: pending.idempotencyKey,
+        })
+      } catch { /* projection reads below still provide current observable state */ }
+
+      if (receipt
+        && receipt.projectId === pending.projectId
+        && receipt.idempotencyKey === pending.idempotencyKey
+        && (!pending.commandId || receipt.commandId === pending.commandId)) {
+        try {
+          await refresh()
+          if (!isCurrent()) return
+          if (loadError.value) throw new Error(loadError.value)
+          await refreshLoadedWorkspaces()
+        } catch {
+          if (!isCurrent()) return
+          commandStates.value[key] = {
+            status: receipt.finalStatus,
+            commandId: receipt.commandId,
+            receiptId: receipt.receiptId,
+            confirmation: 'pending',
+            message: '正式回执已找到，但当前作品展示尚未完成重新读取；结果待确认。请只重新读取，不要重复提交。',
+          }
+          return
+        }
+        if (!isCurrent()) return
+        commandStates.value[key] = {
+          status: receipt.finalStatus,
+          commandId: receipt.commandId,
+          receiptId: receipt.receiptId,
+          confirmation: 'confirmed',
+          message: '正式回执已找到，当前作品展示已重新读取。',
+        }
+        pendingConfirmations.delete(key)
+        return
+      }
+
+      try {
+        await refresh()
+        if (!isCurrent()) return
+        await refreshLoadedWorkspaces()
+      } catch { /* leave the command pending until a read confirms its outcome */ }
+      if (!isCurrent()) return
+      commandStates.value[key] = {
+        status: pending.receipt?.finalStatus ?? 'processing',
+        commandId: pending.commandId ?? pending.receipt?.commandId,
+        receiptId: pending.receipt?.receiptId,
+        confirmation: 'pending',
+        message: '尚未找到匹配的正式回执；结果待确认。请只重新读取，系统不会再次提交。',
+      }
+      return
+    }
     if (!pending.receipt) return
     const isCurrent = () => pendingConfirmations.get(key) === pending && pending.projectId === currentProjectId.value
     try {
@@ -637,15 +706,29 @@ export const useProjectStore = defineStore('project-projection', () => {
           })
           if (recovered) return recovered
         } else {
+          pendingConfirmations.set(key, {
+            projectId: binding.sourceProjectId,
+            commandId,
+            commandType: request.type,
+            idempotencyKey: envelope.idempotencyKey,
+          })
           setStateIfCurrent({ status: 'processing', confirmation: 'pending', message: '修复执行结果待确认；请重新读取正式回执，系统不会自动再次执行。', commandId, repairOutcome: 'unknown' })
         }
         throw error
       }
-      if (request.type === 'retcon_apply' || request.type === 'change_request_apply') {
-        const message = request.type === 'retcon_apply'
-          ? '事实修订提交结果暂时无法确认。请先重新读取；若重试，将使用同一操作编号。'
-          : '普通修改结果待确认，提交状态未知。请先重新读取；若重试，将使用同一操作编号。'
-        setStateIfCurrent({ status: 'processing', confirmation: 'pending', message, commandId })
+      if (isFormalWriteCommand(request.type) && isTransportFailure(error) && binding.sourceProjectId) {
+        pendingConfirmations.set(key, {
+          projectId: binding.sourceProjectId,
+          commandId,
+          commandType: request.type,
+          idempotencyKey: envelope.idempotencyKey,
+        })
+        setStateIfCurrent({
+          status: 'processing',
+          confirmation: 'pending',
+          message: '正式写入结果待确认。请只重新读取；系统不会再次提交。',
+          commandId,
+        })
       } else {
         setStateIfCurrent({ status: 'failed', message, commandId })
       }
@@ -664,7 +747,7 @@ export const useProjectStore = defineStore('project-projection', () => {
 
     commandStates.value[key] = { status: receipt.finalStatus, message: receiptSummary(receipt).detail, commandId: receipt.commandId }
     if (receipt.finalStatus === 'committed') {
-      pendingConfirmations.set(key, { projectId: binding.sourceProjectId, receipt })
+      pendingConfirmations.set(key, { projectId: binding.sourceProjectId, receipt, commandId, commandType: request.type })
       commandStates.value[key] = { status: 'committed', message: '回执已返回，正在读取当前作品状态。', commandId: receipt.commandId, receiptId: receipt.receiptId, confirmation: 'pending' }
       await confirmCommandResult(key)
     }
@@ -708,7 +791,13 @@ export const useProjectStore = defineStore('project-projection', () => {
         }
       }
     }
-    if (pendingConfirmations.get(key)?.projectId === (request.projectId ?? currentProjectId.value)) {
+    const projectId = request.projectId ?? currentProjectId.value
+    const unresolvedWrite = isFormalWriteCommand(request.type)
+      && [...pendingConfirmations.entries()].some(([pendingKey, pending]) =>
+        pending.projectId === projectId
+        && (pendingKey === key || pending.commandType === request.type),
+      )
+    if (unresolvedWrite || pendingConfirmations.get(key)?.projectId === projectId) {
       throw new Error('COMMAND_RESULT_UNCONFIRMED')
     }
     const dedupeKey = inFlightCommandKey(request)

@@ -664,6 +664,56 @@ pub fn query_assistant_repair_plan_impl(
 /// B08 production projection.  This is a bounded read projection assembled
 /// from the authoritative job/artifact/runtime rows; it never reconstructs a
 /// candidate as a committed chapter and never trusts Vue-local state.
+pub fn query_command_receipt_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?.to_string();
+    let idempotency_key = required_string(&request, "idempotencyKey")?.to_string();
+    state
+        .manager
+        .with_read_connection(&project_id, "1970-01-01T00:00:00Z", |connection| {
+            if let Some(receipt) =
+                CommitService::find_receipt(connection, &project_id, &idempotency_key)
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            {
+                return Ok(json!({
+                    "commandId":receipt.command_id,
+                    "projectId":receipt.project_id,
+                    "idempotencyKey":receipt.idempotency_key,
+                    "acceptedAt":receipt.committed_at,
+                    "finalStatus":"committed",
+                    "message":"正式回执已找到。",
+                    "receiptId":receipt.receipt_id,
+                    "beforeRevision":receipt.before_revision,
+                    "afterRevision":receipt.after_revision,
+                    "receipt":receipt,
+                }));
+            }
+            if let Some(receipt) = CommitService::find_project_command_receipt(
+                connection,
+                &project_id,
+                &idempotency_key,
+            )
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+            {
+                return Ok(json!({
+                    "commandId":receipt.command_id,
+                    "projectId":receipt.project_id,
+                    "idempotencyKey":receipt.idempotency_key,
+                    "acceptedAt":receipt.committed_at,
+                    "finalStatus":"committed",
+                    "message":"正式回执已找到。",
+                    "receiptId":receipt.receipt_id,
+                    "beforeRevision":receipt.before_revision,
+                    "afterRevision":receipt.after_revision,
+                    "requestDigest":receipt.request_digest,
+                    "receipt":receipt,
+                }));
+            }
+            Ok(Value::Null)
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_production_center_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?.to_string();
     state
@@ -7277,6 +7327,14 @@ pub fn query_project_overview(
 }
 
 #[tauri::command]
+pub fn query_command_receipt(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_command_receipt_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_market_strategy(
     state: State<'_, KernelState>,
     request: Value,
@@ -7742,6 +7800,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
     tauri::generate_handler![
         query_project_library,
         query_project_overview,
+        query_command_receipt,
         query_market_strategy,
         query_story_directions,
         query_story_setup,

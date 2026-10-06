@@ -55,7 +55,7 @@ export interface TauriInvoke {
 const invokeQuery = <T>(ipc: TauriInvoke, command: string, args?: unknown): Promise<T> =>
   ipc.invoke<T>(command, args).catch(error => {
     const message = error instanceof Error ? error.message : String(error)
-    if (/unknown command|not found|unsupported/i.test(message)) {
+    if (/^command\s+[^\r\n]+\s+not found$/i.test(message.trim())) {
       throw new Error(`IPC_UNSUPPORTED:${command}`)
     }
     throw error
@@ -65,6 +65,7 @@ export class TauriFrontendPort implements FrontendPort {
   constructor(private readonly ipc: TauriInvoke) {}
   queryProjectLibrary(): Promise<ProjectLibraryProjection> { return invokeQuery(this.ipc, 'query_project_library') }
   queryProjectOverview(request: ProjectQueryRequest): Promise<ProjectOverviewProjection> { return invokeQuery(this.ipc, 'query_project_overview', { request }) }
+  queryCommandReceipt(request: { projectId: string; idempotencyKey: string }) { return invokeQuery<CommandReceipt | null>(this.ipc, 'query_command_receipt', { request }) }
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
     onStatus?.('submitting', '正在提交正式事务')
     return invokeQuery<CommandReceipt>(this.ipc, 'execute_command', { request }).then(receipt => {
