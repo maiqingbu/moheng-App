@@ -3336,6 +3336,114 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
     println!("H03_AUTH_RESULT dry_run_plan=PASS explicit_authorization=PASS one_shot=PASS postverify=PASS status=PASS");
 }
 
+#[cfg(not(feature = "e2e-test"))]
+#[test]
+fn formal_ipc_rejects_test_only_controls_without_consuming_repair_authorization() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-h03-formal-test-control";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let connection = state.manager.create(project_id, "H03 formal", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_runtime_state(project_id,run_state,updated_at) VALUES (?1,'IDLE',?2)",
+            libsql_rusqlite::params![project_id, NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let plan_id = "repair-plan:h03:formal-test-control";
+    let authorization_id = "repair-auth:h03:formal-test-control";
+    let digest = create_h03_plan(
+        &state,
+        project_id,
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: format!("project:{project_id}"),
+            params: json!({}),
+            postconditions: json!({"kind":"projection_current"}),
+        },
+        0,
+    );
+    authorize_h03(
+        &state,
+        project_id,
+        plan_id,
+        authorization_id,
+        &digest,
+        0,
+    );
+
+    assert_eq!(
+        execute_command_impl(
+            &state,
+            json!({"type":"repair_execute","payload":{"testOnlyNoop":true}}),
+        )
+        .unwrap_err(),
+        "IPC_INVALID:testOnlyNoop"
+    );
+    assert_eq!(
+        execute_command_impl(
+            &state,
+            json!({"type":"volume_close","payload":{"faultInjection":"after_exit_artifact"}}),
+        )
+        .unwrap_err(),
+        "IPC_INVALID:faultInjection"
+    );
+
+    let connection = state.manager.open(project_id, "H03 formal", NOW).unwrap();
+    assert!(connection
+        .query_row::<Option<String>, _, _>(
+            "SELECT consumed_at FROM repair_authorizations WHERE authorization_id=?1",
+            [authorization_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
+        [project_id],
+        |row| row.get(0)
+    ).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='VolumeExitState'",
+        [project_id],
+        |row| row.get(0)
+    ).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT revision FROM project_meta WHERE project_id=?1",
+        [project_id],
+        |row| row.get(0)
+    ).unwrap(), 0);
+    drop(connection);
+
+    let executed = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_execute","commandId":"cmd:h03:formal-test-control:execute",
+            "idempotencyKey":"key:h03:formal-test-control:execute","projectId":project_id,
+            "requestedAt":NOW,
+            "payload":{"repairPlanId":plan_id,"authorizationId":authorization_id}
+        }),
+    )
+    .unwrap();
+    assert_eq!(executed["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "H03 formal", NOW).unwrap();
+    assert!(connection
+        .query_row::<Option<String>, _, _>(
+            "SELECT consumed_at FROM repair_authorizations WHERE authorization_id=?1",
+            [authorization_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+        .is_some());
+    assert_eq!(connection.query_row::<i64, _, _>(
+        "SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id=?1",
+        [project_id],
+        |row| row.get(0)
+    ).unwrap(), 1);
+}
+
 fn create_h03_plan(
     state: &KernelState,
     project_id: &str,

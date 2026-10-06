@@ -4769,14 +4769,18 @@ fn execute_repair_command(
                 .manager
                 .open(project_id, "", requested_at)
                 .map_err(|error| error.to_string())?;
+            #[cfg(feature = "e2e-test")]
+            let no_op = request
+                .pointer("/payload/testOnlyNoop")
+                .and_then(Value::as_bool)
+                == Some(true);
+            #[cfg(not(feature = "e2e-test"))]
+            let no_op = false;
             let owner = KernelRepairOwner {
                 connection: &handle,
                 project_id,
                 now: requested_at,
-                no_op: request
-                    .pointer("/payload/testOnlyNoop")
-                    .and_then(Value::as_bool)
-                    == Some(true),
+                no_op,
             };
             let receipt = crate::repair::execute(
                 &handle,
@@ -4881,10 +4885,19 @@ fn execute_volume_lifecycle_command(
                 command_id: command_id.into(),
                 idempotency_key: idempotency_key.into(),
                 reason: required_string(payload, "reason")?.into(),
-                fault_injection: payload
-                    .get("faultInjection")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
+                fault_injection: {
+                    #[cfg(feature = "e2e-test")]
+                    {
+                        payload
+                            .get("faultInjection")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
+                    }
+                    #[cfg(not(feature = "e2e-test"))]
+                    {
+                        None
+                    }
+                },
                 now: requested_at.into(),
             },
         )?,
@@ -6520,6 +6533,17 @@ fn execute_b11_command(
 
 pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let command_type = required_string(&request, "type")?;
+    #[cfg(not(feature = "e2e-test"))]
+    {
+        if command_type == "repair_execute"
+            && request.pointer("/payload/testOnlyNoop").is_some()
+        {
+            return Err("IPC_INVALID:testOnlyNoop".into());
+        }
+        if command_type == "volume_close" && request.pointer("/payload/faultInjection").is_some() {
+            return Err("IPC_INVALID:faultInjection".into());
+        }
+    }
     #[cfg(feature = "e2e-test")]
     if matches!(command_type, "project_delete" | "repair_execute")
         && request
