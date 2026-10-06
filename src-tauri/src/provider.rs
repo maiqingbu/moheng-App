@@ -647,7 +647,7 @@ mod tests {
         let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
         assert!(prompt.contains("body must not exceed targetChineseCharacters"));
         assert!(prompt.contains("complete Chinese chapter prose"));
-        assert!(prompt.contains("authorityContext is for comparison, not an exclusion list"));
+        assert!(prompt.contains("Use authorityContext to compare current facts"));
     }
 
     #[test]

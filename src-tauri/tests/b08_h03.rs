@@ -2598,7 +2598,16 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
     );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -2620,7 +2629,10 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             audit_inputs: audit_inputs.clone(),
         }),
     );
-    let connection = state.manager.create(project_id, "B08 canon conflict", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B08 canon conflict", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
@@ -2644,13 +2656,19 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
         .pointer("/authorityContext/state/facts")
         .and_then(Value::as_array)
         .expect("audit input must retain authority facts for comparison");
-    assert!(facts.iter().any(|fact| {
-        fact["subjectId"] == "entity:actual:linzhou"
-            && fact["predicate"] == "location"
-            && fact["objectJson"]["place"] == "stone-door"
-    }), "authority facts: {facts:?}");
+    assert!(
+        facts.iter().any(|fact| {
+            fact["subjectId"] == "entity:actual:linzhou"
+                && fact["predicate"] == "location"
+                && fact["objectJson"]["place"] == "stone-door"
+        }),
+        "authority facts: {facts:?}"
+    );
 
-    let connection = state.manager.open(project_id, "B08 canon conflict", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 canon conflict", NOW)
+        .unwrap();
     let heads_after: String = connection
         .query_row(
             "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
@@ -2672,7 +2690,16 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             .unwrap(),
         revision_at_audit.lock().unwrap().unwrap()
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
