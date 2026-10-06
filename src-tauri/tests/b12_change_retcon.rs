@@ -535,10 +535,6 @@ fn b12_h03_execute_change_request_uses_one_time_p3_and_the_same_typed_owner() {
         operation_digest: operation_digest.clone(),
         created_at: NOW.into(),
     };
-    execute_command_impl(&state, json!({
-        "type":"repair_plan_create","commandId":"cmd:b12:h03:plan","idempotencyKey":"key:b12:h03:plan","projectId":"p-b12-h03","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"dryRun":true,"repairPlan":plan}
-    })).unwrap();
     let authorization = RepairAuthorization {
         authorization_id: "repair-auth:b12:h03".into(),
         project_id: "p-b12-h03".into(),
@@ -549,10 +545,14 @@ fn b12_h03_execute_change_request_uses_one_time_p3_and_the_same_typed_owner() {
         issued_at: NOW.into(),
         consumed_at: None,
     };
-    execute_command_impl(&state, json!({
-        "type":"repair_authorize","commandId":"cmd:b12:h03:auth","idempotencyKey":"key:b12:h03:auth","projectId":"p-b12-h03","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"authorization":authorization}
-    })).unwrap();
+    let connection = state
+        .manager
+        .open("p-b12-h03", "B12 H03 fixture", NOW)
+        .unwrap();
+    ai_novel_production_system_core::repair::save_plan(&connection, &plan).unwrap();
+    ai_novel_production_system_core::repair::issue_authorization(&connection, &authorization)
+        .unwrap();
+    drop(connection);
     let fault = state.manager.open("p-b12-h03", "", NOW).unwrap();
     fault
         .execute_batch(

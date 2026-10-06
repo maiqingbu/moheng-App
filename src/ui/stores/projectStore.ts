@@ -471,10 +471,15 @@ export const useProjectStore = defineStore('project-projection', () => {
         type: 'repair_plan_create',
         projectId: currentProjectId.value ?? undefined,
         expectedRevision: plan.basedOnProjectRevision,
-        payload: { dryRun: true, repairPlan: plan },
+        payload: {
+          findingRefs: plan.findingRefs,
+          requestedOperationKinds: plan.proposedOperations.map(operation => String(operation.operation)),
+        },
       })
       if (receipt.finalStatus !== 'committed') throw new Error(receipt.message || '修复方案未保存。')
-      return plan
+      const generatedPlan = receipt.result?.repairPlan
+      if (!generatedPlan || typeof generatedPlan !== 'object') throw new Error('后端没有返回已保存的修复方案。')
+      return generatedPlan as AssistantRepairPlan
     } catch (error) {
       commandStates.value['assistant-plan'] = {
         status: 'failed',
@@ -489,24 +494,16 @@ export const useProjectStore = defineStore('project-projection', () => {
     const projectId = currentProjectId.value
     if (!projectId) throw new Error('当前没有打开的作品。')
     const authorizationId = `assistant-authorization:${plan.repairPlanId}`
-    const authorization = await runCommand('assistant-authorize', {
-      type: 'repair_authorize',
-      projectId,
-      expectedRevision: plan.basedOnProjectRevision,
-      payload: {
-        authorization: {
-          authorizationId,
-          projectId,
-          repairPlanId: plan.repairPlanId,
-          basedOnProjectRevision: plan.basedOnProjectRevision,
-          operationDigest: plan.operationDigest,
-          approvedByUser: true,
-          issuedAt: new Date().toISOString(),
-          consumedAt: null,
-        },
-      },
-    })
-    if (authorization.finalStatus !== 'committed') throw new Error(authorization.message || '授权未保存。')
+    const priorAuthorization = commandStates.value['assistant-authorize']
+    if (priorAuthorization?.confirmation !== 'confirmed' || priorAuthorization.status !== 'committed') {
+      const authorization = await runCommand('assistant-authorize', {
+        type: 'repair_authorize',
+        projectId,
+        expectedRevision: plan.basedOnProjectRevision,
+        payload: { repairPlanId: plan.repairPlanId, operationDigest: plan.operationDigest },
+      })
+      if (authorization.finalStatus !== 'committed') throw new Error(authorization.message || '授权未保存。')
+    }
     const receipt = await runCommand('assistant-execute', {
       type: 'repair_execute',
       projectId,

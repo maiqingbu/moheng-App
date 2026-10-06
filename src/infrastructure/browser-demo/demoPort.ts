@@ -330,6 +330,7 @@ export class BrowserDemoPort implements FrontendPort {
   private globalSettings: SettingsProjection = clone(demoBundle.settings)
   private records = new Map<string, DemoProjectRecord>(demoProjectRecords.map(record => [record.bundle.project.id, clone(record)]))
   private receipts = new Map<string, CommandReceipt>()
+  private repairPlans = new Map<string, AssistantRepairPlan>()
 
   private record(projectId: string) {
     const record = this.records.get(projectId)
@@ -459,13 +460,14 @@ export class BrowserDemoPort implements FrontendPort {
     await wait(30)
     const revision = this.record(request.projectId).bundle.project.revision
     const executable = /修复|重新整理|重建/.test(request.question)
-    return {
+    const findingRef = `demo-finding:${request.projectId}:${revision}`
+    const plan: AssistantRepairPlan = {
       action: executable ? 'EXECUTABLE' : 'PROPOSAL_ONLY',
       repairPlanId: `demo-repair-${revision}`,
       projectId: request.projectId,
       basedOnProjectRevision: revision,
       diagnosis: { claim: executable ? '当前作品展示需要重新整理。' : '这项请求会改变已经确认的作品事实，需要先建立正式提案。', supportStatus: 'SUPPORTED' },
-      findingRefs: [],
+      findingRefs: [findingRef],
       targetAuthorityOwner: 'B04::ProjectionOwner',
       proposedOperations: [{ operation: 'rebuild_projection', target: '项目展示', params: {}, postconditions: {} }],
       affectedArtifacts: ['项目展示'],
@@ -476,6 +478,8 @@ export class BrowserDemoPort implements FrontendPort {
       operationDigest: 'e'.repeat(64),
       createdAt: new Date().toISOString(),
     }
+    if (executable) this.repairPlans.set(findingRef, clone(plan))
+    return plan
   }
 
   async queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection> {
@@ -720,6 +724,7 @@ export class BrowserDemoPort implements FrontendPort {
     let message = '操作已完成。'
     const receiptId = `RCP-${Date.now()}`
     let resultProjectId = request.projectId
+    let result: Record<string, unknown> | undefined
 
     if (request.type === 'project_create_from_idea' || request.type === 'project_create_from_market') {
       const id = `proj-${Date.now().toString(36)}-${Math.floor(Math.random() * 999).toString(36)}`
@@ -796,7 +801,13 @@ export class BrowserDemoPort implements FrontendPort {
           case 'backup_create': message='项目备份已创建并完成快速校验。'; break
           case 'integrity_check_run': message='完整性检查已完成，未发现作品数据断链。'; break
           case 'settings_save': if(request.payload?.settings) bundle.settings=clone(request.payload.settings as unknown as SettingsProjection); message='项目设置已保存。'; break
-          case 'repair_plan_create': message='修改方案已保存，等待你的明确授权。'; break
+          case 'repair_plan_create': {
+            const findingRef = (request.payload?.findingRefs as string[] | undefined)?.[0]
+            const plan = findingRef ? this.repairPlans.get(findingRef) : undefined
+            if (plan) result = { repairPlan: clone(plan) }
+            else { finalStatus='failed'; message='演示适配器没有匹配的诊断记录。'; break }
+            message='修改方案已保存，等待你的明确授权。'; break
+          }
           case 'repair_authorize': message='授权已记录，等待责任方执行并回传结果。'; break
           case 'repair_execute': message='修改已执行，并已重新核对结果。'; break
           case 'signing_retry': bundle.signing.status='IN_REVIEW';bundle.project.signingStatus='IN_REVIEW';bundle.signing.verdict='正在重新执行完整开篇评估。';bundle.project.runState='ACTIVE';bundle.project.blockReason=null;message='开篇评估已重新启动。';break
@@ -815,7 +826,7 @@ export class BrowserDemoPort implements FrontendPort {
     // is the produced/target project. Create has no source, so this demo follows
     // the current Rust shape and uses the created project for both fields.
     const sourceProjectId = request.projectId ?? resultProjectId
-    const receipt: CommandReceipt = { commandId, projectId:sourceProjectId, resultProjectId, idempotencyKey: request.idempotencyKey, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId }
+    const receipt: CommandReceipt = { commandId, projectId:sourceProjectId, resultProjectId, idempotencyKey: request.idempotencyKey, acceptedAt:new Date().toISOString(), finalStatus, message, receiptId, result }
     this.receipts.set(commandId, clone(receipt))
     emit(finalStatus,message)
     return receipt

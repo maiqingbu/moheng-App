@@ -261,21 +261,10 @@ async function controlProduction(type: 'production_pause' | 'production_resume' 
 async function authorizeRepair() {
   const repair = production.value?.repair
   if (!repair || repair.status !== 'PROPOSED') return
-  const authorizationId = `repair-auth:${repair.repairPlanId}:${Date.now()}`
   lastCommand.value = 'repair-authorize'
   await store.runCommand(lastCommand.value, {
     type: 'repair_authorize',
-    payload: {
-      authorization: {
-        authorizationId,
-        projectId: project.value?.id,
-        repairPlanId: repair.repairPlanId,
-        basedOnProjectRevision: repair.basedOnProjectRevision,
-        operationDigest: repair.operationDigest,
-        approvedByUser: true,
-        issuedAt: new Date().toISOString(),
-      },
-    },
+    payload: { repairPlanId: repair.repairPlanId, operationDigest: repair.operationDigest },
   })
 }
 

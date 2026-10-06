@@ -184,6 +184,68 @@ pub fn validate_plan(plan: &RepairPlan) -> Result<(), RepairError> {
     Ok(())
 }
 
+pub fn generate_plan_from_findings(
+    connection: &Connection,
+    project_id: &str,
+    finding_refs: &[String],
+    requested_operation_kinds: &[String],
+    now: &str,
+) -> Result<RepairPlan, String> {
+    if finding_refs.is_empty() || requested_operation_kinds.len() != 1 {
+        return Err("H03_INVALID:findingRefs and one requestedOperationKind are required".into());
+    }
+    let question = match requested_operation_kinds[0].as_str() {
+        "rebuild_projection" => "修复当前页面数据展示。",
+        "rebuild_fts" => "修复全文索引。",
+        "recompile_chapter_plan" => "修复章节规划。",
+        "replan_volume_route" => "修复当前卷路线。",
+        _ => return Err("H03_INVALID:requestedOperationKinds".into()),
+    };
+    let diagnosis =
+        crate::project_entry::assistant_repair_plan(connection, project_id, question, now)?;
+    if diagnosis.get("action").and_then(Value::as_str) != Some("EXECUTABLE") {
+        return Err("H03_OPERATION_NOT_EXECUTABLE".into());
+    }
+    let generated_refs = diagnosis
+        .get("findingRefs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "H03_DIAGNOSIS_FINDINGS_MISSING".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "H03_DIAGNOSIS_FINDING_INVALID".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let generated_kinds = diagnosis
+        .get("proposedOperations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "H03_DIAGNOSIS_OPERATIONS_MISSING".to_string())?
+        .iter()
+        .map(|operation| {
+            operation
+                .get("operation")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "H03_DIAGNOSIS_OPERATION_INVALID".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut requested_refs = finding_refs.to_vec();
+    requested_refs.sort();
+    requested_refs.dedup();
+    let mut current_refs = generated_refs.clone();
+    current_refs.sort();
+    current_refs.dedup();
+    if requested_refs != current_refs || generated_kinds != requested_operation_kinds {
+        return Err("H03_FINDING_OR_OPERATION_MISMATCH".into());
+    }
+    let plan: RepairPlan = serde_json::from_value(diagnosis)
+        .map_err(|error| format!("H03_GENERATED_PLAN_INVALID:{error}"))?;
+    validate_plan(&plan).map_err(|error| error.to_string())?;
+    Ok(plan)
+}
+
 pub fn save_plan(connection: &Connection, plan: &RepairPlan) -> Result<(), RepairError> {
     validate_plan(plan)?;
     support::save_repair_plan(connection, plan)?;

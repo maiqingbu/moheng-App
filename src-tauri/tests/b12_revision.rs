@@ -2371,11 +2371,6 @@ fn b12_h03_retcon_execution_uses_the_same_owner_and_postverify() {
         operation_digest: operation_digest.clone(),
         created_at: NOW.into(),
     };
-    execute_command_impl(
-        &state,
-        json!({"type":"repair_plan_create","commandId":"cmd:r05:repair-plan","idempotencyKey":"key:r05:repair-plan","projectId":"p-b12-r05","expectedRevision":0,"requestedAt":NOW,"payload":{"dryRun":true,"repairPlan":repair_plan}}),
-    )
-    .expect("save h03 plan");
     let authorization = ai_novel_production_system_core::repair::RepairAuthorization {
         authorization_id: "repair-auth:r05".into(),
         project_id: "p-b12-r05".into(),
@@ -2386,11 +2381,15 @@ fn b12_h03_retcon_execution_uses_the_same_owner_and_postverify() {
         issued_at: NOW.into(),
         consumed_at: None,
     };
-    execute_command_impl(
-        &state,
-        json!({"type":"repair_authorize","commandId":"cmd:r05:authorize","idempotencyKey":"key:r05:authorize","projectId":"p-b12-r05","expectedRevision":0,"requestedAt":NOW,"payload":{"authorization":authorization}}),
-    )
-    .expect("authorize h03 plan");
+    let connection = state
+        .manager
+        .open("p-b12-r05", "B12 R05 fixture", NOW)
+        .unwrap();
+    ai_novel_production_system_core::repair::save_plan(&connection, &repair_plan)
+        .expect("save H03 plan fixture");
+    ai_novel_production_system_core::repair::issue_authorization(&connection, &authorization)
+        .expect("save H03 authorization fixture");
+    drop(connection);
     let fault = state.manager.open("p-b12-r05", "", NOW).unwrap();
     fault
         .execute_batch(

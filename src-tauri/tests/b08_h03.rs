@@ -3506,48 +3506,27 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
     let connection = state.manager.create("p-h03", "H03", NOW).unwrap();
     connection.execute("INSERT INTO project_runtime_state(project_id,run_state,updated_at) VALUES ('p-h03','IDLE',?1)", [NOW]).unwrap();
     drop(connection);
-    let operations = vec![RepairOperation {
-        operation: "refresh_runtime_projection".into(),
-        target: "project:p-h03".into(),
-        params: json!({}),
-        postconditions: json!({"requires":"runtime projection exists"}),
-    }];
-    let expected_postconditions = vec![json!({"kind":"projection_current","expected":true})];
-    let digest =
-        operation_digest_with_postconditions(&operations, &expected_postconditions).unwrap();
-    let plan = RepairPlan {
-        repair_plan_id: "repair-plan:h03:1".into(),
-        project_id: "p-h03".into(),
-        based_on_project_revision: 0,
-        diagnosis: json!({"finding":"projection stale"}),
-        finding_refs: vec!["finding:h03:1".into()],
-        target_authority_owner: "B06::RuntimeProjectionOwner".into(),
-        proposed_operations: operations,
-        affected_artifacts: vec![],
-        affected_scopes: vec!["PROJECT".into()],
-        risk_level: "LOW".into(),
-        requires_backup: false,
-        expected_postconditions,
-        operation_digest: digest.clone(),
-        created_at: NOW.into(),
-    };
-    execute_command_impl(&state, json!({"type":"repair_plan_create","commandId":"cmd:h03:plan","idempotencyKey":"key:h03:plan","projectId":"p-h03","expectedRevision":0,"requestedAt":NOW,"payload":{"dryRun":true,"repairPlan":plan}})).unwrap();
-    let authorization = RepairAuthorization {
-        authorization_id: "repair-auth:h03:1".into(),
-        project_id: "p-h03".into(),
-        repair_plan_id: "repair-plan:h03:1".into(),
-        based_on_project_revision: 0,
-        operation_digest: digest,
-        approved_by_user: true,
-        issued_at: NOW.into(),
-        consumed_at: None,
-    };
-    execute_command_impl(&state, json!({"type":"repair_authorize","commandId":"cmd:h03:auth","idempotencyKey":"key:h03:auth","projectId":"p-h03","expectedRevision":0,"requestedAt":NOW,"payload":{"authorization":authorization}})).unwrap();
-    let executed = execute_command_impl(&state, json!({"type":"repair_execute","commandId":"cmd:h03:execute","idempotencyKey":"key:h03:execute","projectId":"p-h03","requestedAt":NOW,"payload":{"repairPlanId":"repair-plan:h03:1","authorizationId":"repair-auth:h03:1"}})).unwrap();
+    // The previous IPC setup supplied a full RepairPlan and RepairAuthorization; that assertion pattern solidified the RV-19 trust-boundary defect.
+    let plan_id = "repair-plan:h03:1";
+    let authorization_id = "repair-auth:h03:1";
+    let digest = create_h03_plan(
+        &state,
+        "p-h03",
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: "project:p-h03".into(),
+            params: json!({}),
+            postconditions: json!({"requires":"runtime projection exists"}),
+        },
+        0,
+    );
+    authorize_h03(&state, "p-h03", plan_id, authorization_id, &digest, 0);
+    let executed = execute_command_impl(&state, json!({"type":"repair_execute","commandId":"cmd:h03:execute","idempotencyKey":"key:h03:execute","projectId":"p-h03","requestedAt":NOW,"payload":{"repairPlanId":plan_id,"authorizationId":authorization_id}})).unwrap();
     assert_eq!(executed["finalStatus"], "committed");
     let replay = execute_command_impl(
         &state,
-        json!({"type":"repair_execute","commandId":"cmd:h03:replay","idempotencyKey":"key:h03:replay","projectId":"p-h03","requestedAt":NOW,"payload":{"repairPlanId":"repair-plan:h03:1","authorizationId":"repair-auth:h03:1"}}),
+        json!({"type":"repair_execute","commandId":"cmd:h03:replay","idempotencyKey":"key:h03:replay","projectId":"p-h03","requestedAt":NOW,"payload":{"repairPlanId":plan_id,"authorizationId":authorization_id}}),
     );
     assert!(replay.unwrap_err().contains("H03_REPAIR_ALREADY_CONSUMED"));
     let connection = state.manager.open("p-h03", "H03", NOW).unwrap();
@@ -3731,7 +3710,8 @@ fn rv19_backend_generates_plan_from_finding_refs_and_authorizes_without_client_m
         .unwrap()
         .unwrap();
     assert!(authorization.approved_by_user);
-    assert_eq!(authorization.issued_at, NOW);
+    assert_ne!(authorization.issued_at, NOW);
+    assert!(authorization.issued_at.ends_with('Z'));
     assert_eq!(authorization.operation_digest, generated["operationDigest"]);
 }
 
@@ -3790,7 +3770,7 @@ fn rv19_repair_authorize_rejects_caller_supplied_approval_metadata() {
             .unwrap(),
         0
     );
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1 AND idempotency_key='key:rv19:caller-auth'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1 AND idempotency_key='key:rv19:caller-auth'", [project_id], |row| row.get(0)).unwrap(), 0);
 }
 
 #[cfg(not(feature = "e2e-test"))]
@@ -3941,11 +3921,8 @@ fn create_h03_plan(
         operation_digest: digest.clone(),
         created_at: NOW.into(),
     };
-    execute_command_impl(state, json!({
-        "type":"repair_plan_create","commandId":format!("cmd:{plan_id}:plan"),
-        "idempotencyKey":format!("key:{plan_id}:plan"),"projectId":project_id,
-        "expectedRevision":revision,"requestedAt":NOW,"payload":{"dryRun":true,"repairPlan":plan}
-    })).unwrap();
+    let connection = state.manager.open(project_id, "H03 fixture", NOW).unwrap();
+    ai_novel_production_system_core::repair::save_plan(&connection, &plan).unwrap();
     digest
 }
 
@@ -3957,17 +3934,19 @@ fn authorize_h03(
     digest: &str,
     revision: i64,
 ) {
-    execute_command_impl(
-        state,
-        json!({
-            "type":"repair_authorize","commandId":format!("cmd:{authorization_id}"),
-            "idempotencyKey":format!("key:{authorization_id}"),"projectId":project_id,
-            "expectedRevision":revision,"requestedAt":NOW,"payload":{"authorization":{
-                "authorizationId":authorization_id,"projectId":project_id,"repairPlanId":plan_id,
-                "basedOnProjectRevision":revision,"operationDigest":digest,"approvedByUser":true,
-                "issuedAt":NOW
-            }}
-        }),
+    let connection = state.manager.open(project_id, "H03 fixture", NOW).unwrap();
+    ai_novel_production_system_core::repair::issue_authorization(
+        &connection,
+        &RepairAuthorization {
+            authorization_id: authorization_id.into(),
+            project_id: project_id.into(),
+            repair_plan_id: plan_id.into(),
+            based_on_project_revision: revision,
+            operation_digest: digest.into(),
+            approved_by_user: true,
+            issued_at: NOW.into(),
+            consumed_at: None,
+        },
     )
     .unwrap();
 }

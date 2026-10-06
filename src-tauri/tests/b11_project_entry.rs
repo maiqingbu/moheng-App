@@ -1148,23 +1148,24 @@ fn b11_assistant_repair_plan_uses_h03_authorization_and_postverify() {
     let plan_receipt = execute_command_impl(&state, json!({
         "type":"repair_plan_create","commandId":"cmd:b11:repair-plan","idempotencyKey":"cmd:b11:repair-plan:key",
         "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
-        "payload":{"dryRun":true,"repairPlan":plan}
+        "payload":{"findingRefs":plan["findingRefs"],"requestedOperationKinds":["rebuild_projection"]}
     })).unwrap();
     assert_eq!(plan_receipt["finalStatus"], "committed");
-    let authorization = json!({
-        "authorizationId":"authorization:b11:repair","projectId":project_id,
-        "repairPlanId":plan["repairPlanId"],"basedOnProjectRevision":revision,
-        "operationDigest":plan["operationDigest"],"approvedByUser":true,"issuedAt":NOW,"consumedAt":null
-    });
+    let generated_plan = &plan_receipt["result"]["repairPlan"];
+    assert_eq!(generated_plan["operationDigest"], plan["operationDigest"]);
+    let authorization_id = format!(
+        "assistant-authorization:{}",
+        generated_plan["repairPlanId"].as_str().unwrap()
+    );
     execute_command_impl(&state, json!({
         "type":"repair_authorize","commandId":"cmd:b11:repair-auth","idempotencyKey":"cmd:b11:repair-auth:key",
         "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
-        "payload":{"authorization":authorization}
+        "payload":{"repairPlanId":generated_plan["repairPlanId"],"operationDigest":generated_plan["operationDigest"]}
     })).unwrap();
     let executed = execute_command_impl(&state, json!({
         "type":"repair_execute","commandId":"cmd:b11:repair-execute","idempotencyKey":"cmd:b11:repair-execute:key",
         "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
-        "payload":{"repairPlanId":plan["repairPlanId"],"authorizationId":"authorization:b11:repair"}
+        "payload":{"repairPlanId":generated_plan["repairPlanId"],"authorizationId":authorization_id}
     })).unwrap();
     assert_eq!(executed["finalStatus"], "committed");
     assert_eq!(executed["receipt"]["status"], "REPAIR_VERIFIED");

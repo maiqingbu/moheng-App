@@ -1,5 +1,5 @@
-use crate::harness::SupportCheckpoint;
 use crate::generated::types::DomainReceipt;
+use crate::harness::SupportCheckpoint;
 use crate::repair::{ExecutionReceipt, RepairAuthorization, RepairOperation, RepairPlan};
 use libsql_rusqlite::{Connection, OptionalExtension};
 
@@ -11,6 +11,14 @@ pub enum SupportRepositoryError {
     Json(#[from] serde_json::Error),
     #[error("repair execution receipt binding changed during re-verification")]
     RepairReceiptBindingChanged,
+}
+
+pub fn backend_utc_now(connection: &Connection) -> Result<String, SupportRepositoryError> {
+    connection
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| {
+            row.get(0)
+        })
+        .map_err(Into::into)
 }
 
 pub fn load_domain_receipt(

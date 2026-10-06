@@ -11,7 +11,7 @@ use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::repair::{
-    operation_digest_with_postconditions, RepairOperation, RepairPlan,
+    operation_digest_with_postconditions, RepairAuthorization, RepairOperation, RepairPlan,
 };
 use ai_novel_production_system_core::repositories::health::HealthRepository;
 use ai_novel_production_system_core::volume_lifecycle::{
@@ -115,6 +115,28 @@ fn fixture() -> Fixture {
         volume_id,
         intent_ref,
     }
+}
+
+fn save_repair_fixture(state: &KernelState, plan: &RepairPlan, authorization_id: &str) {
+    let connection = state
+        .manager
+        .open(&plan.project_id, "H04 repair fixture", NOW)
+        .unwrap();
+    ai_novel_production_system_core::repair::save_plan(&connection, plan).unwrap();
+    ai_novel_production_system_core::repair::issue_authorization(
+        &connection,
+        &RepairAuthorization {
+            authorization_id: authorization_id.into(),
+            project_id: plan.project_id.clone(),
+            repair_plan_id: plan.repair_plan_id.clone(),
+            based_on_project_revision: plan.based_on_project_revision,
+            operation_digest: plan.operation_digest.clone(),
+            approved_by_user: true,
+            issued_at: NOW.into(),
+            consumed_at: None,
+        },
+    )
+    .unwrap();
 }
 
 fn replan_request(expected_revision: i64, command: &str) -> RouteReplanRequest {
@@ -322,40 +344,7 @@ fn h04_authorized_replan_uses_typed_b09_owner_and_preserves_read_registry() {
     drop(fixture.connection);
     drop(fixture._manager);
     let state = KernelState::new(AppPaths::new(fixture._temp.path()));
-    execute_command_impl(
-        &state,
-        json!({
-            "type":"repair_plan_create",
-            "commandId":"cmd:b09:repair-plan",
-            "idempotencyKey":"key:b09:repair-plan",
-            "projectId":"p-b09",
-            "expectedRevision":0,
-            "requestedAt":NOW,
-            "payload":{"dryRun":true,"repairPlan":repair_plan}
-        }),
-    )
-    .unwrap();
-    execute_command_impl(
-        &state,
-        json!({
-            "type":"repair_authorize",
-            "commandId":"cmd:b09:repair-auth",
-            "idempotencyKey":"key:b09:repair-auth",
-            "projectId":"p-b09",
-            "expectedRevision":0,
-            "requestedAt":NOW,
-            "payload":{"authorization":{
-                "authorizationId":"repair-auth:b09:replan",
-                "projectId":"p-b09",
-                "repairPlanId":"repair-plan:b09:replan",
-                "basedOnProjectRevision":0,
-                "operationDigest":operation_digest,
-                "approvedByUser":true,
-                "issuedAt":NOW
-            }}
-        }),
-    )
-    .unwrap();
+    save_repair_fixture(&state, &repair_plan, "repair-auth:b09:replan");
     let executed = execute_command_impl(
         &state,
         json!({
@@ -515,30 +504,7 @@ fn h04_authorized_projection_repair_returns_with_health_ready() {
     drop(fixture._manager);
 
     let state = KernelState::new(AppPaths::new(project_root));
-    execute_command_impl(
-        &state,
-        json!({
-            "type":"repair_plan_create","commandId":"cmd:b09:r5:projection-plan",
-            "idempotencyKey":"key:b09:r5:projection-plan","projectId":"p-b09",
-            "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"dryRun":true,"repairPlan":repair_plan}
-        }),
-    )
-    .unwrap();
-    execute_command_impl(
-        &state,
-        json!({
-            "type":"repair_authorize","commandId":"cmd:b09:r5:projection-auth",
-            "idempotencyKey":"key:b09:r5:projection-auth","projectId":"p-b09",
-            "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"authorization":{
-                "authorizationId":"repair-auth:b09:projection-r5","projectId":"p-b09",
-                "repairPlanId":"repair-plan:b09:projection-r5","basedOnProjectRevision":0,
-                "operationDigest":operation_digest,"approvedByUser":true,"issuedAt":NOW
-            }}
-        }),
-    )
-    .unwrap();
+    save_repair_fixture(&state, &repair_plan, "repair-auth:b09:projection-r5");
     let executed = execute_command_impl(
         &state,
         json!({

@@ -71,7 +71,7 @@ async function prepareProposal() {
 }
 
 async function authorizeProposal() {
-  if (assistantPhase.value !== 'AWAITING_AUTHORIZATION' || !proposal.value || proposal.value.action !== 'EXECUTABLE' || authorizationState.value.status === 'submitting') return
+  if (assistantPhase.value !== 'AWAITING_AUTHORIZATION' || !proposal.value || proposal.value.action !== 'EXECUTABLE' || ['submitting','accepted','processing'].includes(authorizationState.value.status)) return
   executionBeforeRevision.value = store.project?.revision ?? null
   assistantPhase.value = 'EXECUTING'
   unknownCommandKey.value = 'assistant-execute'
@@ -108,6 +108,12 @@ async function authorizeProposal() {
     assistantPhase.value = 'VERIFIED'
     proposalMessage.value = '修改已完成，并已重新核对结果。'
   } catch (error) {
+    const authorization = store.commandState('assistant-authorize')
+    if (authorization.confirmation === 'pending') {
+      assistantPhase.value = 'AWAITING_AUTHORIZATION'
+      proposalMessage.value = authorization.message
+      return
+    }
     const outcome = store.commandState('assistant-execute')
     if (outcome.repairOutcome === 'unknown') {
       assistantPhase.value = 'OUTCOME_UNKNOWN'
@@ -122,6 +128,15 @@ async function authorizeProposal() {
     assistantPhase.value = 'FAILED'
     proposalMessage.value = productErrorMessage(error, '修改没有完成，请先刷新当前作品后再试。')
   }
+}
+
+async function requeryAuthorization() {
+  proposalMessage.value = '正在重新读取授权回执；不会再次提交授权。'
+  await store.confirmCommandResult('assistant-authorize')
+  const state = store.commandState('assistant-authorize')
+  proposalMessage.value = state.confirmation === 'confirmed'
+    ? '授权回执已确认；你可以继续执行这项一次性修复。'
+    : state.message
 }
 
 async function reverifyProposal() {
@@ -250,7 +265,7 @@ function startConversation() {
         <p>{{ sanitizeProductText(proposal.diagnosis?.claim, '已完成当前作品记录核对。') }}</p>
         <div class="prototype-plan-grid"><span>影响范围</span><strong>{{ displayScopes(proposal.affectedScopes) }}</strong><span>风险</span><strong>{{ sanitizeProductText(proposal.riskLevel, '按当前记录评估') }}</strong><span>执行前备份</span><strong>{{ proposal.requiresBackup ? '需要' : '不需要' }}</strong></div>
         <p v-if="proposalMessage" class="prototype-plan-message">{{ proposalMessage }}</p>
-        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || authorizationState.status === 'submitting' || executionState.status === 'submitting'" @click="authorizeProposal">确认执行</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'VERIFY_INCOMPLETE'" class="prototype-btn primary" type="button" @click="reverifyProposal">重新核对现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_UNKNOWN'" class="prototype-btn primary" type="button" @click="requeryProposalOutcome">重新读取现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_NOT_EXECUTED'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心核对执行状态</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
+        <div class="prototype-composerbar"><button class="prototype-btn" type="button" @click="proposalOpen = false">暂不处理</button><button v-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION' && authorizationState.confirmation === 'pending'" class="prototype-btn primary" type="button" @click="requeryAuthorization">重新读取授权结果</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'AWAITING_AUTHORIZATION'" class="prototype-btn primary" type="button" :disabled="proposalState.status !== 'committed' || ['submitting','accepted','processing'].includes(authorizationState.status) || executionState.status === 'submitting'" @click="authorizeProposal">{{ authorizationState.confirmation === 'confirmed' ? '继续执行已授权修复' : '确认执行' }}</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'VERIFY_INCOMPLETE'" class="prototype-btn primary" type="button" @click="reverifyProposal">重新核对现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_UNKNOWN'" class="prototype-btn primary" type="button" @click="requeryProposalOutcome">重新读取现有回执</button><button v-else-if="proposal.action === 'EXECUTABLE' && assistantPhase === 'OUTCOME_NOT_EXECUTED'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/production`)">前往创作中心核对执行状态</button><button v-else-if="proposal.action !== 'EXECUTABLE'" class="prototype-btn" type="button" @click="router.push(`/projects/${store.currentProjectId}/history`)">进入变更记录</button></div>
       </div>
       <p v-else class="prototype-plan-message">{{ proposalMessage }}</p>
     </div>

@@ -2027,15 +2027,20 @@ fn repair_plan_response(
     expected_postconditions: Vec<Value>,
     now: &str,
 ) -> Result<Value, String> {
+    let operations = operation.into_iter().collect::<Vec<_>>();
+    let requested_operation_kinds = operations
+        .iter()
+        .map(|value| value.operation.clone())
+        .collect::<Vec<_>>();
     let finding_digest = sha256_canonical(&json!({
         "projectId":project_id,
-        "question":question,
         "revision":revision,
-        "kind":kind,
+        "action":kind,
+        "diagnosisType":diagnosis_type,
+        "requestedOperationKinds":requested_operation_kinds,
         "sourceRefs":source_refs,
     }))
     .map_err(|error| error.to_string())?;
-    let operations = operation.into_iter().collect::<Vec<_>>();
     let operation_digest =
         crate::repair::operation_digest_with_postconditions(&operations, &expected_postconditions)
             .map_err(|error| error.to_string())?;

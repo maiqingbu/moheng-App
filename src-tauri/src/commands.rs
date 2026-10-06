@@ -22,6 +22,7 @@ use crate::runtime::{
     pending_decision_count, DurableJobService, DurableModelRunner, JobSpec, SecretStore,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -4728,6 +4729,23 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepairPlanCreateInput {
+    diagnosis_ref: Option<String>,
+    #[serde(default)]
+    finding_refs: Vec<String>,
+    #[serde(default)]
+    requested_operation_kinds: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepairAuthorizeInput {
+    repair_plan_id: String,
+    operation_digest: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_repair_command(
     state: &KernelState,
@@ -4742,19 +4760,19 @@ fn execute_repair_command(
 ) -> Result<Value, String> {
     match command_type {
         "repair_plan_create" => {
-            if request.pointer("/payload/dryRun").and_then(Value::as_bool) != Some(true) {
-                return Err("H03_DRY_RUN_REQUIRED".into());
-            }
-            let plan: crate::repair::RepairPlan = serde_json::from_value(
+            let input: RepairPlanCreateInput = serde_json::from_value(
                 request
-                    .pointer("/payload/repairPlan")
+                    .get("payload")
                     .cloned()
-                    .ok_or_else(|| "H03_INVALID:repairPlan".to_string())?,
+                    .ok_or_else(|| "IPC_INVALID:payload".to_string())?,
             )
-            .map_err(|error| format!("H03_INVALID:repairPlan:{error}"))?;
-            if plan.project_id != project_id {
-                return Err("H03_INVALID:projectId mismatch".into());
-            }
+            .map_err(|error| format!("IPC_INVALID:payload:{error}"))?;
+            let finding_refs = match (input.diagnosis_ref, input.finding_refs.is_empty()) {
+                (Some(reference), true) if !reference.trim().is_empty() => vec![reference],
+                (None, false) => input.finding_refs,
+                _ => return Err("IPC_INVALID:payload.diagnosisRefOrFindingRefs".into()),
+            };
+            let requested_operation_kinds = input.requested_operation_kinds;
             let spec = project_command_spec(
                 project_id,
                 project_id,
@@ -4769,23 +4787,70 @@ fn execute_repair_command(
             let outcome = state
                 .manager
                 .commit_project_command(spec, |connection| {
+                    let created_at = crate::repositories::support::backend_utc_now(connection)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    let plan = crate::repair::generate_plan_from_findings(
+                        connection,
+                        project_id,
+                        &finding_refs,
+                        &requested_operation_kinds,
+                        &created_at,
+                    )
+                    .map_err(ManagerError::ProjectCommand)?;
                     crate::repair::save_plan(connection, &plan)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    serde_json::to_value(plan)
                         .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
                 })
                 .map_err(|error| error.to_string())?;
-            Ok(project_command_response(&outcome_receipt(outcome)))
+            let (mut plan_value, receipt) = match outcome {
+                ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+                ProjectCommandOutcome::Replayed(receipt) => {
+                    let plan_value = state
+                        .manager
+                        .with_read_connection(project_id, requested_at, |connection| {
+                            let created_at = crate::repositories::support::backend_utc_now(
+                                connection,
+                            )
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                            let generated = crate::repair::generate_plan_from_findings(
+                                connection,
+                                project_id,
+                                &finding_refs,
+                                &requested_operation_kinds,
+                                &created_at,
+                            )
+                            .map_err(ManagerError::ProjectCommand)?;
+                            let plan = crate::repositories::support::load_repair_plan(
+                                connection,
+                                project_id,
+                                &generated.repair_plan_id,
+                            )
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                            .ok_or_else(|| {
+                                ManagerError::ProjectCommand("H03_REPAIR_PLAN_NOT_FOUND".into())
+                            })?;
+                            serde_json::to_value(plan)
+                                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                        })
+                        .map_err(|error| error.to_string())?;
+                    (plan_value, receipt)
+                }
+            };
+            plan_value["action"] = json!("EXECUTABLE");
+            let mut response = project_command_response(&receipt);
+            response["result"] = json!({"repairPlan":plan_value});
+            Ok(response)
         }
         "repair_authorize" => {
-            let authorization: crate::repair::RepairAuthorization = serde_json::from_value(
+            let input: RepairAuthorizeInput = serde_json::from_value(
                 request
-                    .pointer("/payload/authorization")
+                    .get("payload")
                     .cloned()
-                    .ok_or_else(|| "H03_INVALID:authorization".to_string())?,
+                    .ok_or_else(|| "IPC_INVALID:payload".to_string())?,
             )
-            .map_err(|error| format!("H03_INVALID:authorization:{error}"))?;
-            if authorization.project_id != project_id {
-                return Err("H03_INVALID:projectId mismatch".into());
-            }
+            .map_err(|error| format!("IPC_INVALID:payload:{error}"))?;
+            let authorization_id = format!("assistant-authorization:{}", input.repair_plan_id);
             let spec = project_command_spec(
                 project_id,
                 project_id,
@@ -4800,11 +4865,38 @@ fn execute_repair_command(
             let outcome = state
                 .manager
                 .commit_project_command(spec, |connection| {
+                    let plan = crate::repositories::support::load_repair_plan(
+                        connection,
+                        project_id,
+                        &input.repair_plan_id,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
+                    .ok_or_else(|| {
+                        ManagerError::ProjectCommand("H03_REPAIR_PLAN_NOT_FOUND".into())
+                    })?;
+                    let authorization = crate::repair::RepairAuthorization {
+                        authorization_id: authorization_id.clone(),
+                        project_id: project_id.into(),
+                        repair_plan_id: plan.repair_plan_id,
+                        based_on_project_revision: plan.based_on_project_revision,
+                        operation_digest: input.operation_digest,
+                        approved_by_user: true,
+                        issued_at: crate::repositories::support::backend_utc_now(connection)
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?,
+                        consumed_at: None,
+                    };
                     crate::repair::issue_authorization(connection, &authorization)
-                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    Ok(authorization.authorization_id)
                 })
                 .map_err(|error| error.to_string())?;
-            Ok(project_command_response(&outcome_receipt(outcome)))
+            let (authorization_id, receipt) = match outcome {
+                ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+                ProjectCommandOutcome::Replayed(receipt) => (authorization_id, receipt),
+            };
+            let mut response = project_command_response(&receipt);
+            response["result"] = json!({"authorizationId":authorization_id});
+            Ok(response)
         }
         "repair_execute" => {
             let plan_id = request

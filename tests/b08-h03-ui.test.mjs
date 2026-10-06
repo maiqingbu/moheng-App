@@ -10,6 +10,7 @@ const planning = fs.readFileSync(new URL('../src-tauri/src/planning.rs', import.
 const repair = fs.readFileSync(new URL('../src-tauri/src/repair.rs', import.meta.url), 'utf8')
 const support = fs.readFileSync(new URL('../src-tauri/src/repositories/support.rs', import.meta.url), 'utf8')
 const ui = fs.readFileSync(new URL('../src/ui/pages/ProductionCenter.vue', import.meta.url), 'utf8')
+const projectStore = fs.readFileSync(new URL('../src/ui/stores/projectStore.ts', import.meta.url), 'utf8')
 
 test('B08 production_start has one fail-closed composition root', () => {
   assert.match(commands, /if command_type == "production_start"/)
@@ -24,16 +25,18 @@ test('B08 production_start has one fail-closed composition root', () => {
   assert.match(production, /classify_plan_reality/)
 })
 
-test('H03 orchestration has no workflow SQL and UI requires explicit authorization', () => {
+test('H03 orchestration has no workflow SQL and UI sends only plan identity for authorization', () => {
   assert.doesNotMatch(repair, /INSERT INTO repair_|UPDATE repair_|DELETE FROM repair_/)
   assert.match(support, /claim_repair_authorization/)
   assert.match(repair, /TypedRepairOwner/)
   assert.match(repair, /REPAIR_VERIFICATION_INCOMPLETE/)
   assert.match(commands, /B07::PlanningOwner/)
   assert.match(ui, /明确授权/)
-  assert.match(ui, /approvedByUser: true/)
   assert.match(ui, /operationDigest/)
   assert.match(ui, /executionReceipt/)
+  // The previous approvedByUser assertion made renderer-supplied approval metadata part of the H03 contract.
+  assert.doesNotMatch(ui + projectStore, /approvedByUser|issuedAt/)
+  assert.match(projectStore, /payload: \{ repairPlanId: plan\.repairPlanId, operationDigest: plan\.operationDigest \}/)
 })
 
 test('R2 alignment keeps persistence SQL inside approved Rust owners', () => {
