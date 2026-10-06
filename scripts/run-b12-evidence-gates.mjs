@@ -215,9 +215,9 @@ const frontendAsyncPass = vitest.status === 'PASS'
 const ordinaryChangeUnknownPass = vitest.status === 'PASS'
   && ordinaryChangeUnknownEvidence?.status === 'PASS'
   && ordinaryChangeUnknownEvidence.unknownIsPending === true
-  && ordinaryChangeUnknownEvidence.noAutomaticResubmit === true
-  && ordinaryChangeUnknownEvidence.manualRetryUsesSameIdempotencyKey === true
-  && ordinaryChangeUnknownEvidence.replayReceiptReturned === true
+  && ordinaryChangeUnknownEvidence.noManualResubmit === true
+  && ordinaryChangeUnknownEvidence.queriedOriginalIdempotencyKey === true
+  && ordinaryChangeUnknownEvidence.receiptRead === true
 const summaryConcurrentJobs = Number(rustRevision.output.match(/B12_SUMMARY_BOOTSTRAP_CONCURRENCY_RESULT[^\n]+concurrentJobs=(\d+)/)?.[1] ?? 0)
 const summaryAsyncPass = /B12_SUMMARY_BOOTSTRAP_ASYNC_RESULT[^\n]+commandReturnedBeforeWorker=PASS[^\n]+workerCompletesLater=PASS[^\n]+status=PASS/.test(rustRevision.output)
 const groundingRuntimePass = /B12_ASSISTANT_GROUNDING_RESULT[^\n]+naturalLanguage=PASS[^\n]+exactFact=PASS[^\n]+status=PASS/.test(rustRevision.output)

@@ -404,7 +404,7 @@ async function approveAndApply() {
     try {
       result = await confirmRetconPlan((key, request) => store.runCommand(key, request), { ...draft, ...activeChange.value.plan })
     } catch {
-      actionMessage.value = '事实修订提交结果待确认。请先重新读取作品状态；如需重试，系统会使用同一操作编号，不会自动再次提交。'
+      actionMessage.value = '事实修订提交结果待确认。请只重新读取现有正式状态；系统不会重新提交。'
       await loadHistoryKind('all', true)
       return
     }
@@ -437,7 +437,7 @@ async function approveAndApply() {
       payload: { changeRequestId: activeChange.value.id, impactDigest: activeChange.value.digest },
     })
   } catch {
-    actionMessage.value = '普通修改结果待确认，提交状态未知。请先重新读取作品状态；如需重试，系统会使用同一操作编号，不会自动再次提交。'
+    actionMessage.value = '普通修改结果待确认，提交状态未知。请只重新读取现有正式状态；系统不会重新提交。'
     await loadHistoryKind('all', true)
     return
   }

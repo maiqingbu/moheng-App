@@ -77,15 +77,18 @@ test('B12 later-source re-verification permits only the pinned B13 migration', (
   assert.match(runner, /laterBatchReverify \? \/LongFormHealth\//)
 })
 
-test('ordinary Change unknown outcome shows pending and uses a stable manual replay identity', () => {
+test('ordinary Change unknown outcome stays pending and confirms by read-only original key', () => {
   const history = read('src/ui/pages/HistoryCenter.vue')
   const store = read('src/ui/stores/projectStore.ts')
   const runner = read('scripts/run-b12-evidence-gates.mjs')
   assert.match(history, /b12-change-decision:\$\{logicalChangeId\}/)
   assert.match(history, /b12-change-apply:\$\{logicalChangeId\}/)
   assert.match(history, /普通修改结果待确认/)
+  assert.match(history, /只重新读取现有正式状态；系统不会重新提交/)
   assert.match(history, /await loadHistoryKind\('all', true\)/)
-  assert.match(store, /request\.type === 'retcon_apply' \|\| request\.type === 'change_request_apply'/)
+  // The former one-off Change/Retcon branch encoded manual write replay; RV-23 now guards all formal writes and queries their original key.
+  assert.match(store, /isFormalWriteCommand\(request\.type\) && isTransportFailure\(error\)/)
+  assert.match(store, /frontendPort\.queryCommandReceipt\(/)
   assert.match(runner, /B12_ORDINARY_CHANGE_UNKNOWN_RESULT/)
   assert.match(runner, /ordinaryChangeUnknownPass/)
 })
