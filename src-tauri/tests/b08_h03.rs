@@ -2097,6 +2097,133 @@ fn b08_production_start_without_chapter_fails_closed_instead_of_using_legacy_fal
 }
 
 #[test]
+fn rv11_rejects_a_second_production_for_a_committed_chapter_before_model_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv11-duplicate";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "RV-11 duplicate", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let first = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:rv11:first","idempotencyKey":"key:rv11:first",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+    })).unwrap();
+    assert_eq!(first["finalStatus"], "committed");
+
+    let connection = state
+        .manager
+        .open(project_id, "RV-11 duplicate", NOW)
+        .unwrap();
+    let model_runs_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let final_heads_before: i64 = connection
+        .query_row("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0))
+        .unwrap();
+    let revision_before: i64 = connection
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+
+    // This opening chapter was committed by OPENING_BOOTSTRAP. Allowing a later
+    // LONG_FORM request to rewrite it would bypass the Change/Retcon boundary.
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:rv11:second","idempotencyKey":"key:rv11:second",
+        "projectId":project_id,"expectedRevision":revision_before,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"]}
+    })).unwrap_err();
+    assert_eq!(error, "B08_CHAPTER_ALREADY_COMMITTED");
+
+    let connection = state
+        .manager
+        .open(project_id, "RV-11 duplicate", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        model_runs_before
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), final_heads_before);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        revision_before
+    );
+}
+
+#[test]
+fn rv11_rejects_a_long_form_chapter_skip_before_model_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv11-order";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "RV-11 order", NOW)
+        .unwrap();
+    let _first_chapter = seed_chapter_and_gate(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=3 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    let chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "rv11-skipped-chapter-3")
+            .unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,3,'Chapter 3','NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![chapter_id, project_id, volume_id, NOW]).unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:rv11:skip","idempotencyKey":"key:rv11:skip",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"]}
+    })).unwrap_err();
+    assert_eq!(error, "B08_CHAPTER_ORDER_REQUIRED");
+    let connection = state.manager.open(project_id, "RV-11 order", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
