@@ -30,7 +30,8 @@ test('R8 secret scan covers staging and catches a synthetic credential mutation'
   assert.equal(clean.realSecretFindings.length, 0)
   assert.equal(clean.status, 'PASS')
 
-  write(stage, 'EVIDENCE/MUTATION.txt', 'Authorization: Bearer R8SyntheticFakeSecret-9aB7cD8eF1gH2jK3\n')
+  const syntheticBearer = ['Authorization: Bearer ', 'R8SyntheticFakeSecret-', '9aB7cD8eF1gH2jK3\n'].join('')
+  write(stage, 'EVIDENCE/MUTATION.txt', syntheticBearer)
   const mutation = scanSecretStaging(stage, 'EVIDENCE/SECRET_SCAN_R8.json', 'source')
   assert.ok(mutation.realSecretFindings.length > 0)
   assert.equal(mutation.status, 'FAIL')
