@@ -1806,9 +1806,9 @@ pub(crate) fn method_injection_provenance(
                             .reference
                             .contains(&format!("/skills/{}/", skill.slug))
                     })
-                    .map(|resource| {
-                        json!({"reference":resource.reference,"digest":resource.digest})
-                    }),
+                    .map(
+                        |resource| json!({"reference":resource.reference,"digest":resource.digest}),
+                    ),
             );
             Ok(json!({
                 "skillId":skill.id,

@@ -2140,25 +2140,38 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         .as_array()
         .expect("quality report must record method text injected into RENDER");
     assert_eq!(injections.len(), 2);
-    assert_eq!(candidate_payload["creativeEnrichment"]["methodInjectionProvenance"], quality_payload["methodInjectionProvenance"]);
+    assert_eq!(
+        candidate_payload["creativeEnrichment"]["methodInjectionProvenance"],
+        quality_payload["methodInjectionProvenance"]
+    );
     let render_model_run_id = candidate_payload
         .pointer("/renderer/modelRunId")
         .and_then(Value::as_str)
         .expect("candidate must reference the successful RENDER ModelRun");
     for injection in injections {
-        assert!(injection["skillId"].as_str().is_some_and(|value| !value.is_empty()));
-        assert!(injection["version"].as_str().is_some_and(|value| !value.is_empty()));
+        assert!(injection["skillId"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(injection["version"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
         assert!(injection["bundleDigest"]
             .as_str()
             .and_then(|digest| digest.strip_prefix("sha256:"))
             .is_some_and(|digest| digest.len() == 64));
         assert_eq!(injection["renderModelRunId"], render_model_run_id);
-        assert!(injection["loadedResources"].as_array().is_some_and(|resources| {
-            resources.iter().any(|resource| {
-                resource["reference"].as_str().is_some_and(|value| value.ends_with("/SKILL.md"))
-                    && resource["digest"].as_str().is_some_and(|value| value.len() == 64)
-            })
-        }));
+        assert!(injection["loadedResources"]
+            .as_array()
+            .is_some_and(|resources| {
+                resources.iter().any(|resource| {
+                    resource["reference"]
+                        .as_str()
+                        .is_some_and(|value| value.ends_with("/SKILL.md"))
+                        && resource["digest"]
+                            .as_str()
+                            .is_some_and(|value| value.len() == 64)
+                })
+            }));
     }
     assert_eq!(connection.query_row::<String, _, _>(
         "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",

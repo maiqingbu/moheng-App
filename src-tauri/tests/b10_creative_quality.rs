@@ -301,7 +301,9 @@ fn b10_formal_loader_lazily_loads_only_requested_selected_resource() {
     assert_eq!(enrichment.loaded_resources.len(), 2);
     assert!(enrichment.invocations.is_empty());
     assert!(enrichment.loaded_resources.iter().all(|resource| {
-        resource.reference.ends_with("resources/operating_method.md")
+        resource
+            .reference
+            .ends_with("resources/operating_method.md")
             && resource.digest.len() == 64
     }));
     let selection = select_creative_skills(SkillSelectionRequest {
