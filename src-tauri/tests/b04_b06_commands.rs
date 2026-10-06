@@ -20,18 +20,20 @@ use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFac
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-15T00:00:00Z";
 
 struct PlanningGateway {
     calls: AtomicUsize,
+    inputs: Mutex<Vec<Value>>,
 }
 
 impl ProductionModelGateway for PlanningGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         assert_eq!(capability, "PLAN_STRATEGY");
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inputs.lock().unwrap().push(input.clone());
         Ok(ProductionModelResponse::deterministic(json!({
             "payloadSchema":"chapter-plan.r1",
             "chapterId":input["chapterId"],
@@ -81,9 +83,44 @@ fn insert_artifact(
 }
 
 fn seed_authority(connection: &Connection, project_id: &str) -> (String, String) {
+    seed_authority_with_options(connection, project_id, "默认方向", 0, false)
+}
+
+fn seed_authority_for_direction(
+    connection: &Connection,
+    project_id: &str,
+    direction: &str,
+) -> (String, String) {
+    seed_authority_with_options(connection, project_id, direction, 0, true)
+}
+
+
+fn seed_authority_with_options(
+    connection: &Connection,
+    project_id: &str,
+    direction: &str,
+    world_rule_characters: usize,
+    stable_chapter_ids: bool,
+) -> (String, String) {
     let book_id = StableIdentityFactory::from_command(StableIdKind::Book, "b04-b06-book").unwrap();
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b04-b06-volume").unwrap();
+    let (chapter_one_id, chapter_two_id) = if stable_chapter_ids {
+        (
+            StableIdentityFactory::from_command(
+                StableIdKind::Chapter,
+                &format!("{project_id}:b04:chapter-one"),
+            )
+            .unwrap(),
+            StableIdentityFactory::from_command(
+                StableIdKind::Chapter,
+                &format!("{project_id}:b04:chapter-two"),
+            )
+            .unwrap(),
+        )
+    } else {
+        ("chapter:b04:1".to_string(), "chapter:b04:2".to_string())
+    };
     connection.execute(
         "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'Book','ACTIVE',?3,?3)",
         libsql_rusqlite::params![book_id, project_id, NOW],
@@ -93,55 +130,97 @@ fn seed_authority(connection: &Connection, project_id: &str) -> (String, String)
         libsql_rusqlite::params![volume_id, project_id, book_id, NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b04:1',?1,?2,1,'Chapter 1','NORMAL','COMMITTED',100,?3,?3)",
-        libsql_rusqlite::params![project_id, volume_id, NOW],
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'Chapter 1','NORMAL','COMMITTED',100,?4,?4)",
+        libsql_rusqlite::params![chapter_one_id, project_id, volume_id, NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:b04:2',?1,?2,2,'Chapter 2','NORMAL','PLANNED',0,?3,?3)",
-        libsql_rusqlite::params![project_id, volume_id, NOW],
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'Chapter 2','NORMAL','PLANNED',0,?4,?4)",
+        libsql_rusqlite::params![chapter_two_id, project_id, volume_id, NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES ('budget:chapter:b04:2',?1,'chapter:b04:2','NORMAL',12,500,?2)",
-        libsql_rusqlite::params![project_id, NOW],
+        "INSERT INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',12,500,?4)",
+        libsql_rusqlite::params![format!("budget:{chapter_two_id}"), project_id, chapter_two_id, NOW],
     ).unwrap();
     connection.execute(
         "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:b04:lead',?1,'主角','CHARACTER',?2,?2)",
         libsql_rusqlite::params![project_id, NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES ('fact:b04:reality',?1,'entity:b04:lead','DISCOVERED','{\"value\":true}','A','chapter:b04:1','chapter:b04:1',?2,?2)",
-        libsql_rusqlite::params![project_id, NOW],
+        "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES ('fact:b04:reality',?1,'entity:b04:lead','DISCOVERED','{\"value\":true}','A',?2,?2,?3,?3)",
+        libsql_rusqlite::params![project_id, chapter_one_id, NOW],
     ).unwrap();
 
     let project_scope = "{\"level\":\"PROJECT\"}";
-    insert_artifact(
+    let story = json!({
+        "payloadSchema":"story-constitution.r1",
+        "storyCore":{
+            "protagonist":format!("{direction}的主角"),
+            "desire":format!("{direction}的核心欲望"),
+            "mechanism":format!("{direction}的机制边界"),
+            "conflict":format!("{direction}的核心冲突"),
+            "readerPromise":format!("{direction}的读者承诺")
+        },
+        "storyPromise":format!("{direction}的故事承诺"),
+        "worldRules":[format!("{direction}世界规则{}", "规".repeat(world_rule_characters))],
+        "forbiddenReveals":[format!("{direction}暂缓揭示")]
+    });
+    let story_hash = insert_artifact(
         connection,
         project_id,
         "authority:story",
         "StoryConstitution",
         "PROJECT",
         project_scope,
-        &json!({"payloadSchema":"story-constitution.r1"}),
+        &story,
     );
-    insert_artifact(
+    let main_contract = json!({
+        "payloadSchema":"main-contract.r1",
+        "hardRules":[format!("{direction}的全书硬约束")],
+        "softPreferences":[]
+    });
+    let main_hash = insert_artifact(
         connection,
         project_id,
         "authority:main",
         "MainContract",
         "PROJECT",
         project_scope,
-        &json!({"payloadSchema":"main-contract.r1"}),
+        &main_contract,
     );
-    insert_artifact(
+    let book_plan = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":format!("{direction}的全书承诺"),
+        "protagonistMacroDirection":format!("{direction}的主角方向"),
+        "endingBoundary":format!("{direction}的完结边界"),
+        "mustAchieve":[{"id":format!("goal:{direction}"),"description":format!("{direction}的全书目标")}],
+        "mustNotBreak":[{"id":format!("rule:{direction}"),"description":format!("{direction}不得破坏的规则")}],
+        "futureReservations":[{"reservationId":format!("reservation:{direction}"),"description":format!("{direction}的后续预留内容")}]
+    });
+    let book_hash = insert_artifact(
         connection,
         project_id,
         "authority:book",
         "BookPlan",
         "PROJECT",
         project_scope,
-        &json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"}),
+        &book_plan,
     );
-    let book_ref = json!({"artifactId":"authority:book","version":1,"payloadHash":sha256_canonical(&json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"})).unwrap()});
+    let book_ref = json!({"artifactId":"authority:book","version":1,"payloadHash":book_hash});
+    insert_artifact(
+        connection,
+        project_id,
+        "authority:opening",
+        "OpeningContract",
+        "PROJECT",
+        project_scope,
+        &json!({
+            "payloadSchema":"opening-contract.r1",
+            "firstChapterGoal":format!("{direction}的第一章目标"),
+            "firstThreeChapterPromise":format!("{direction}的前三章承诺"),
+            "forbiddenReveals":[format!("{direction}开篇不揭示")]
+        }),
+    );
     let volume_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
     let intent = json!({
         "payloadSchema":"volume-intent.r1","volumeFunction":"推进事实调查",
@@ -179,7 +258,8 @@ fn seed_authority(connection: &Connection, project_id: &str) -> (String, String)
         &volume_scope,
         &route,
     );
-    (volume_id, "chapter:b04:2".to_string())
+    let _ = (story_hash, main_hash);
+    (volume_id, chapter_two_id)
 }
 
 #[test]
@@ -210,6 +290,7 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     drop(connection);
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let prepared = execute_command_impl(&state, json!({"type":"planning_prepare_next_chapter","commandId":"prepare-plan","idempotencyKey":"prepare-plan-key","projectId":"p-b04-b06-plan","expectedRevision":0,"requestedAt":NOW,"payload":{"volumeId":volume_id}})).unwrap();
@@ -229,6 +310,70 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
         .unwrap();
     let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ContextManifest'", ["p-b04-b06-plan"], |row| row.get(0)).unwrap();
     assert_eq!(source_count, 1);
+}
+
+#[test]
+fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let project_a = manager.create("p-b2-direction-a", "B2 direction A", NOW).unwrap();
+    let project_b = manager.create("p-b2-direction-b", "B2 direction B", NOW).unwrap();
+    let (_, chapter_a) = seed_authority_for_direction(&project_a, "p-b2-direction-a", "方向甲");
+    let (_, chapter_b) = seed_authority_for_direction(&project_b, "p-b2-direction-b", "方向乙");
+    drop(project_a);
+    drop(project_b);
+
+    let gateway = Arc::new(PlanningGateway {
+        calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
+    });
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    for (project_id, command_id, chapter_id) in [
+        ("p-b2-direction-a", "compile-direction-a", chapter_a),
+        ("p-b2-direction-b", "compile-direction-b", chapter_b),
+    ] {
+        execute_command_impl(
+            &state,
+            json!({
+                "type":"planning_compile_chapter_plan",
+                "commandId":command_id,
+                "idempotencyKey":format!("{command_id}-key"),
+                "projectId":project_id,
+                "expectedRevision":0,
+                "requestedAt":NOW,
+                "payload":{"chapterId":chapter_id}
+            }),
+        )
+        .unwrap();
+    }
+
+    let inputs = gateway.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let fields_a = inputs[0]["authorityContext"]["goalContractFields"]
+        .as_array()
+        .expect("PLAN input must contain expanded HARD Goal Contract fields");
+    let fields_b = inputs[1]["authorityContext"]["goalContractFields"]
+        .as_array()
+        .expect("PLAN input must contain expanded HARD Goal Contract fields");
+    let protagonist_a = fields_a
+        .iter()
+        .find(|field| field["fieldPath"] == "storyCore.protagonist")
+        .unwrap();
+    let protagonist_b = fields_b
+        .iter()
+        .find(|field| field["fieldPath"] == "storyCore.protagonist")
+        .unwrap();
+    assert_eq!(protagonist_a["value"], "方向甲的主角");
+    assert_eq!(protagonist_b["value"], "方向乙的主角");
+    assert_eq!(protagonist_a["sourceRef"]["artifactId"], "authority:story");
+    assert_eq!(protagonist_a["sourceRef"]["version"], 1);
+    assert_ne!(
+        protagonist_a["sourceRef"]["payloadHash"],
+        protagonist_b["sourceRef"]["payloadHash"]
+    );
+    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustAchieve.0"));
+    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustNotBreak.0"));
+    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.requiredExitConditions.0"));
 }
 
 #[test]
@@ -523,6 +668,7 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
 
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let prepared = execute_command_impl(
@@ -607,6 +753,7 @@ fn b_r2_01_long_form_route_task_total_over_bound_blocks_before_state_reads_and_m
     route["tasks"] = json!(tasks);
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let route_commit = execute_command_impl(
@@ -701,6 +848,7 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
 
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let prepared = execute_command_impl(
