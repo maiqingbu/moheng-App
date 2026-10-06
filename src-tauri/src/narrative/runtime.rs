@@ -376,6 +376,29 @@ pub struct ContextCompilerInput {
 
 pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 1024;
 pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 8192;
+pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r1";
+pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
+pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r1";
+pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextDigestConfig {
+    compiler_version: &'static str,
+    digest_algorithm_version: &'static str,
+    hard_budget_policy_version: &'static str,
+    token_estimator_version: &'static str,
+    hard_token_limit: i64,
+    hard_serialized_byte_limit: usize,
+}
+
+const CURRENT_CONTEXT_DIGEST_CONFIG: ContextDigestConfig = ContextDigestConfig {
+    compiler_version: CONTEXT_COMPILER_VERSION,
+    digest_algorithm_version: CONTEXT_DIGEST_ALGORITHM_VERSION,
+    hard_budget_policy_version: CONTEXT_HARD_BUDGET_POLICY_VERSION,
+    token_estimator_version: CONTEXT_TOKEN_ESTIMATOR_VERSION,
+    hard_token_limit: CONTEXT_HARD_TOKEN_LIMIT,
+    hard_serialized_byte_limit: CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextHardBudgetUsage {
@@ -436,6 +459,13 @@ fn context_scope(bounds: &RuntimeBounds) -> String {
 }
 
 pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, String> {
+    relevant_state_digest_with_config(input, CURRENT_CONTEXT_DIGEST_CONFIG)
+}
+
+fn relevant_state_digest_with_config(
+    input: &ContextCompilerInput,
+    config: ContextDigestConfig,
+) -> Result<String, String> {
     validate_context_hard_completeness(input)?;
     let mut goal_contract_refs = input.goal_contract_refs.clone();
     goal_contract_refs.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
@@ -451,7 +481,30 @@ pub fn relevant_state_digest(input: &ContextCompilerInput) -> Result<String, Str
     threads.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
     let mut task_refs = input.active_task_refs.clone();
     task_refs.sort();
-    sha256_canonical(&json!({"facts":facts,"relations":relations,"knowledge":knowledge,"events":events,"threads":threads,"activeTaskRefs":task_refs,"goalContractRefs":goal_contract_refs,"futureReservationRefs":input.future_reservation_refs})).map_err(|error| error.to_string())
+    let mut entity_ids = input.state.bounds.entity_ids.clone();
+    entity_ids.sort();
+    let mut future_reservation_refs = input.future_reservation_refs.clone();
+    future_reservation_refs.sort();
+    sha256_canonical(&json!({
+        "contextCompilerVersion":config.compiler_version,
+        "digestAlgorithmVersion":config.digest_algorithm_version,
+        "hardBudgetPolicy":{
+            "version":config.hard_budget_policy_version,
+            "tokenEstimatorVersion":config.token_estimator_version,
+            "tokenLimit":config.hard_token_limit,
+            "serializedByteLimit":config.hard_serialized_byte_limit
+        },
+        "facts":facts,
+        "relations":relations,
+        "knowledge":knowledge,
+        "events":events,
+        "threads":threads,
+        "activeTaskRefs":task_refs,
+        "entityRefs":entity_ids,
+        "goalContractRefs":goal_contract_refs,
+        "futureReservationRefs":future_reservation_refs
+    }))
+    .map_err(|error| error.to_string())
 }
 
 pub fn compile_context_manifest(
@@ -679,17 +732,11 @@ pub enum PlanStaleStatus {
 }
 
 pub fn evaluate_plan_stale(
-    compiled_revision: i64,
+    _compiled_revision: i64,
     compiled_digest: &str,
-    current_revision: i64,
+    _current_revision: i64,
     current_digest: &str,
 ) -> PlanStaleStatus {
-    // FR-016: an unchanged project revision is already the authoritative
-    // short-circuit.  Only a revision advance requires recomputing/comparing
-    // the relevant HARD-state digest.
-    if compiled_revision == current_revision {
-        return PlanStaleStatus::Valid;
-    }
     if compiled_digest == current_digest {
         PlanStaleStatus::Valid
     } else {
@@ -701,11 +748,53 @@ pub fn evaluate_plan_stale(
 mod b2_context_tests {
     use super::*;
 
+    fn empty_input() -> ContextCompilerInput {
+        ContextCompilerInput {
+            execution_mode: "LONG_FORM".into(),
+            project_revision: 7,
+            goal_contract_refs: Vec::new(),
+            state: CurrentNarrativeStateView::from_records(
+                RuntimeBounds {
+                    project_id: "project:b2".into(),
+                    entity_ids: Vec::new(),
+                    volume_id: Some("volume:b2".into()),
+                    chapter_id: Some("chapter:b2".into()),
+                    limit: 100,
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+            ),
+            continuity_threads: Vec::new(),
+            active_task_refs: Vec::new(),
+            future_reservation_refs: Vec::new(),
+            selected_evidence: Vec::new(),
+            omitted_soft_sources: Vec::new(),
+            hard_tokens: 0,
+            soft_tokens: 0,
+        }
+    }
+
     #[test]
     fn rv14_same_revision_digest_change_requires_recompile() {
         assert_eq!(
             evaluate_plan_stale(7, "old-context-digest", 7, "new-context-digest"),
             PlanStaleStatus::PlanStale
         );
+    }
+
+    #[test]
+    fn rv14_digest_changes_when_hard_budget_policy_version_changes() {
+        let input = empty_input();
+        let original = relevant_state_digest(&input).unwrap();
+        let next_policy = ContextDigestConfig {
+            hard_budget_policy_version: "b06-hard-budget.r2",
+            ..CURRENT_CONTEXT_DIGEST_CONFIG
+        };
+        let updated = relevant_state_digest_with_config(&input, next_policy).unwrap();
+        assert_ne!(original, updated);
     }
 }
