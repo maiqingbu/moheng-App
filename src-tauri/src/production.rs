@@ -1709,14 +1709,12 @@ fn run_chapter_production_inner(
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
-    let original_candidate_ref = reference(&candidate);
-    let effective_candidate = candidate.clone();
-    let effective_body = body.clone();
+    let candidate_ref = reference(&candidate);
     let mut quality_report = None;
     let mut repair_evidence = Value::Null;
     if let Some(enrichment) = creative_enrichment.as_ref() {
         let initial_report = crate::creative_skills::evaluate_narrative_quality(
-            &original_candidate_ref,
+            &candidate_ref,
             &project_id,
             current_revision,
             &body,
@@ -1749,8 +1747,8 @@ fn run_chapter_production_inner(
             "run":0,
             "limit":repair_limit,
             "transportCalls":0,
-            "candidateBefore":original_candidate_ref.clone(),
-            "candidateAfter":original_candidate_ref.clone(),
+            "candidateBefore":candidate_ref.clone(),
+            "candidateAfter":candidate_ref.clone(),
             "affectedDimensions":affected_dimensions,
             "scope":affected_dimensions,
             "recheckedDimensions":[],
@@ -1762,12 +1760,11 @@ fn run_chapter_production_inner(
             "run":0,
             "limit":repair_limit,
             "transportCalls":0,
-            "effectiveCandidateRef":original_candidate_ref,
+            "effectiveCandidateRef":candidate_ref,
             "affectedDimensions":affected_dimensions,
             "escalation":escalation
         });
     }
-    let effective_candidate_ref = reference(&effective_candidate);
     let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
         if let Some(enrichment) = creative_enrichment.as_ref() {
             let taste_payload = serde_json::to_value(&enrichment.taste_profile)
@@ -1811,7 +1808,7 @@ fn run_chapter_production_inner(
                 &job_id,
                 None,
                 &now,
-                vec![effective_candidate_ref.clone(), taste_ref.clone()],
+                vec![candidate_ref.clone(), taste_ref.clone()],
             )?;
             quality.provenance.created_by = "B10::NarrativeQualityOwner".into();
             let quality_ref = reference(&quality);
@@ -1846,13 +1843,13 @@ fn run_chapter_production_inner(
         &provider_profile,
         &audit_spec,
         "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":effective_candidate_ref.clone(),"body":effective_body.clone(),"qualityReportRef":quality_ref}),
+        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref}),
         &now,
     )?;
     let audit_payload = audit_result
         .parsed
         .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
-    let audit_payload = normalize_audit_model_output(audit_payload, &effective_body);
+    let audit_payload = normalize_audit_model_output(audit_payload, &body);
     let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
     validate_audit_completeness(&audit_payload, &extraction)?;
@@ -1860,7 +1857,7 @@ fn run_chapter_production_inner(
         connection,
         &project_id,
         &chapter_id,
-        &effective_body,
+        &body,
         &plan_payload,
         &gate_policy_payload,
         &mut extraction,
@@ -1889,7 +1886,7 @@ fn run_chapter_production_inner(
             .and_then(|item| item.get("decision").and_then(Value::as_str))
             .unwrap_or("DO_NOT_PROMOTE")
     };
-    let review_payload = json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":effective_candidate_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()});
+    let review_payload = json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":candidate_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()});
     let mut audit = artifact(
         &project_id,
         audit_id,
@@ -1900,10 +1897,10 @@ fn run_chapter_production_inner(
         &job_id,
         Some(&audit_run_id),
         &now,
-        vec![effective_candidate_ref.clone()],
+        vec![candidate_ref.clone()],
     )?;
     audit.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
-    validate_audit_candidate_binding(&audit.payload, &effective_candidate_ref)?;
+    validate_audit_candidate_binding(&audit.payload, &candidate_ref)?;
     update_stage(connection, &project_id, &job_id, "GATE", &now)?;
     if let Err(error) = validate_plan_is_current(
         connection,
@@ -2012,7 +2009,7 @@ fn run_chapter_production_inner(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":effective_candidate.payload["body"],"bodyDigest":effective_candidate.payload["bodyDigest"],"candidateRef":effective_candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":effective_candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -2023,7 +2020,7 @@ fn run_chapter_production_inner(
         &job_id,
         Some(&render_run_id),
         &now,
-        vec![effective_candidate_ref.clone(), reference(&audit)],
+        vec![candidate_ref.clone(), reference(&audit)],
     )?;
     final_artifact.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
     let task_states = extraction.task_progress_candidates.iter().map(|item| json!({
@@ -2111,7 +2108,7 @@ fn run_chapter_production_inner(
             "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
         })
     }));
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"candidateRef":effective_candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -2141,7 +2138,6 @@ fn run_chapter_production_inner(
         json!({"artifactType":"ProductionReceipt","scope":chapter_scope(&chapter_id),"artifactId":receipt_artifact.artifact_id,"version":1,"payloadHash":receipt_artifact.payload_hash}),
     ];
     let mut bundle_artifacts = Vec::new();
-    let candidate_ref = effective_candidate_ref.clone();
     let final_ref = reference(&final_artifact);
     let canon_delta = extraction.canon_candidates.iter().map(|item| json!({
         "entityId":item.entity_id,
