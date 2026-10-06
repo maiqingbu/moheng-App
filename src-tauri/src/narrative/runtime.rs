@@ -696,3 +696,16 @@ pub fn evaluate_plan_stale(
         PlanStaleStatus::PlanStale
     }
 }
+
+#[cfg(test)]
+mod b2_context_tests {
+    use super::*;
+
+    #[test]
+    fn rv14_same_revision_digest_change_requires_recompile() {
+        assert_eq!(
+            evaluate_plan_stale(7, "old-context-digest", 7, "new-context-digest"),
+            PlanStaleStatus::PlanStale
+        );
+    }
+}
