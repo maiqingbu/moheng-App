@@ -8,15 +8,14 @@
 use crate::commit::CommitService;
 use crate::generated::types::{
     ArtifactEnvelope, ArtifactEnvelopeProvenance, ArtifactRef, ArtifactScope, ArtifactScopeLevel,
-    ArtifactStatus, ArtifactType, AuthorityLevel, CommitBundle, DomainReceipt, HeadChange,
-    SemanticLifecycle,
+    ArtifactStatus, ArtifactType, AuthorityLevel, CommitBundle, HeadChange, SemanticLifecycle,
 };
 use crate::hash::sha256_canonical;
 use crate::planning;
 use crate::repositories::artifacts::{scope_key, ArtifactRepository};
 use crate::repositories::narrative::NarrativeRepository;
 use crate::repositories::volume_lifecycle::VolumeLifecycleRepository;
-use libsql_rusqlite::{Connection, OptionalExtension};
+use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -87,17 +86,14 @@ fn existing_lifecycle_receipt(
     if let Some(receipt) = CommitService::find_receipt(connection, project_id, idempotency_key)
         .map_err(|error| error.to_string())?
     {
-        let receipt_json: String = connection
-            .query_row(
-                "SELECT receipt_json FROM domain_receipts WHERE project_id=?1 AND commit_receipt_id=?2 AND domain=?3",
-                libsql_rusqlite::params![project_id, receipt.receipt_id, domain],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "B09_LIFECYCLE_RECEIPT_BINDING_MISSING".to_string())?;
-        let domain_receipt: DomainReceipt =
-            serde_json::from_str(&receipt_json).map_err(|error| error.to_string())?;
+        let domain_receipt = crate::repositories::support::load_domain_receipt(
+            connection,
+            project_id,
+            &receipt.receipt_id,
+            domain,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B09_LIFECYCLE_RECEIPT_BINDING_MISSING".to_string())?;
         if domain_receipt
             .payload
             .get("requestDigest")

@@ -1,4 +1,5 @@
 use crate::harness::SupportCheckpoint;
+use crate::generated::types::DomainReceipt;
 use crate::repair::{ExecutionReceipt, RepairAuthorization, RepairOperation, RepairPlan};
 use libsql_rusqlite::{Connection, OptionalExtension};
 
@@ -10,6 +11,24 @@ pub enum SupportRepositoryError {
     Json(#[from] serde_json::Error),
     #[error("repair execution receipt binding changed during re-verification")]
     RepairReceiptBindingChanged,
+}
+
+pub fn load_domain_receipt(
+    connection: &Connection,
+    project_id: &str,
+    commit_receipt_id: &str,
+    domain: &str,
+) -> Result<Option<DomainReceipt>, SupportRepositoryError> {
+    let receipt_json: Option<String> = connection
+        .query_row(
+            "SELECT receipt_json FROM domain_receipts WHERE project_id=?1 AND commit_receipt_id=?2 AND domain=?3",
+            libsql_rusqlite::params![project_id, commit_receipt_id, domain],
+            |row| row.get(0),
+        )
+        .optional()?;
+    receipt_json
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
 }
 
 pub fn save_repair_plan(
