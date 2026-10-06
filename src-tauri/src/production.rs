@@ -1223,6 +1223,32 @@ fn run_chapter_production_inner(
     if chapter_volume.is_none() {
         return Err("B08_CHAPTER_NOT_FOUND".into());
     }
+    if crate::repositories::narrative::NarrativeRepository::chapter_status(
+        connection,
+        &project_id,
+        &chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .as_deref()
+        == Some("COMMITTED")
+    {
+        return Err("B08_CHAPTER_ALREADY_COMMITTED".into());
+    }
+    let volume_id = chapter_volume
+        .as_deref()
+        .ok_or_else(|| "B08_CHAPTER_NOT_FOUND".to_string())?;
+    if execution_mode == "LONG_FORM"
+        && crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
+            connection,
+            &project_id,
+            volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_deref()
+            != Some(chapter_id.as_str())
+    {
+        return Err("B08_CHAPTER_ORDER_REQUIRED".into());
+    }
     if execution_mode == "OPENING_BOOTSTRAP" {
         let next_opening_chapter =
             crate::repositories::project_entry::next_opening_chapter_id(connection, &project_id)

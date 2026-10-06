@@ -1571,6 +1571,36 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn chapter_status(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT status FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn next_unsubmitted_chapter_id(
+        connection: &Connection,
+        project_id: &str,
+        volume_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND volume_id=?2 AND status!='COMMITTED' ORDER BY chapter_no,chapter_id LIMIT 1",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn volume_exists(
         connection: &Connection,
         project_id: &str,
