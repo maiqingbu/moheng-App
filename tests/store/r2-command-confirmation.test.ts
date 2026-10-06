@@ -30,13 +30,72 @@ describe('R2 正式回执后的查询失败', () => {
     expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
   })
 
-  it('Given ordinary Change commit response is lost When manually retried Then show pending and reuse the same operation identity', async () => {
-    const requests: CommandRequest[] = []
-    let loseFirstResponse = true
+  it('Given production_start transport timeout When rereading by the original key Then no new write is submitted', async () => {
+    const commandReceipt = {
+      commandId: 'production-command-1',
+      projectId: 'p',
+      finalStatus: 'committed' as const,
+      receiptId: 'receipt:production:1',
+      message: '章节已正式提交。',
+      acceptedAt: '2026-10-06T00:00:00Z',
+    }
     holder.port = {
       queryProjectOverview: vi.fn(async () => ({ project: { id: 'p', revision: 1 }, recentChapters: [] })),
       queryProjectLibrary: vi.fn(async () => ({ projects: [], totals: {} })),
       queryProductionCenter: vi.fn(async () => ({ signing: { status: 'NOT_STARTED' } })),
+      queryCommandReceipt: vi.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(commandReceipt),
+      executeCommand: vi.fn(async () => { throw new Error('transport timeout') }),
+    }
+    const { useProjectStore } = await import('../../src/ui/stores/projectStore')
+    const store = useProjectStore()
+    await store.openProject('p')
+    await store.loadProduction()
+    const request: CommandRequest = {
+      type: 'production_start',
+      projectId: 'p',
+      commandId: 'production-command-1',
+      idempotencyKey: 'production-key-1',
+      payload: { chapterId: 'chapter:1' },
+    }
+
+    await expect(store.runCommand('production-start', request)).rejects.toThrow('transport timeout')
+    expect(store.commandState('production-start')).toMatchObject({ status: 'processing', confirmation: 'pending' })
+    await expect(store.runCommand('production-start', request)).rejects.toThrow('COMMAND_RESULT_UNCONFIRMED')
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+
+    await store.confirmCommandResult('production-start')
+    expect(store.commandState('production-start')).toMatchObject({ status: 'processing', confirmation: 'pending' })
+    await store.confirmCommandResult('production-start')
+    expect(store.commandState('production-start')).toMatchObject({ status: 'committed', confirmation: 'confirmed', receiptId: 'receipt:production:1' })
+    expect(holder.port.queryCommandReceipt).toHaveBeenNthCalledWith(1, { projectId: 'p', idempotencyKey: 'production-key-1' })
+    expect(holder.port.queryCommandReceipt).toHaveBeenNthCalledWith(2, { projectId: 'p', idempotencyKey: 'production-key-1' })
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not render the production submit action while its outcome is pending', () => {
+    const page = fs.readFileSync(new URL('../../src/ui/pages/ProductionCenter.vue', import.meta.url), 'utf8')
+    expect(page).toMatch(/<button v-if="canStartProduction && productionStartState\.confirmation !== 'pending'"/)
+  })
+
+  // The previous assertion accepted resubmitting a write when its idempotency key was reused; RV-23 requires read-only confirmation.
+  it('Given ordinary Change commit response is lost When rereading Then never resubmit the formal write', async () => {
+    const requests: CommandRequest[] = []
+    let loseFirstResponse = true
+    let expectedCommand: CommandRequest
+    holder.port = {
+      queryProjectOverview: vi.fn(async () => ({ project: { id: 'p', revision: 1 }, recentChapters: [] })),
+      queryProjectLibrary: vi.fn(async () => ({ projects: [], totals: {} })),
+      queryProductionCenter: vi.fn(async () => ({ signing: { status: 'NOT_STARTED' } })),
+      queryCommandReceipt: vi.fn(async () => ({
+        commandId: expectedCommand.commandId,
+        projectId: 'p',
+        finalStatus: 'committed' as const,
+        receiptId: 'receipt:change:1',
+        message: '修改已提交。',
+        acceptedAt: '2026-10-06T00:00:00Z',
+      })),
       executeCommand: vi.fn(async (request: CommandRequest) => {
         requests.push(request)
         if (request.type === 'change_request_apply' && loseFirstResponse) {
@@ -58,7 +117,7 @@ describe('R2 正式回执后的查询失败', () => {
     const { useProjectStore } = await import('../../src/ui/stores/projectStore')
     const store = useProjectStore()
     await store.openProject('p')
-    const request: CommandRequest = {
+    const request: CommandRequest = expectedCommand = {
       type: 'change_request_apply',
       projectId: 'p',
       commandId: 'b12-change-apply:p:change:1',
@@ -71,21 +130,20 @@ describe('R2 正式回执后的查询失败', () => {
     expect(store.commandState('history-apply').message).toContain('结果待确认')
     expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
 
-    const replay = await store.runCommand('history-apply', request)
-    expect(replay.result).toEqual({ status: 'REPLAYED' })
-    expect(holder.port.executeCommand).toHaveBeenCalledTimes(2)
-    expect(requests.map(item => item.idempotencyKey)).toEqual([
-      'b12-change-apply:p:change:1',
-      'b12-change-apply:p:change:1',
-    ])
+    await expect(store.runCommand('history-apply', request)).rejects.toThrow('COMMAND_RESULT_UNCONFIRMED')
+    await store.confirmCommandResult('history-apply')
+    expect(store.commandState('history-apply')).toMatchObject({ status: 'committed', confirmation: 'confirmed', receiptId: 'receipt:change:1' })
+    expect(holder.port.queryCommandReceipt).toHaveBeenCalledWith({ projectId: 'p', idempotencyKey: 'b12-change-apply:p:change:1' })
+    expect(holder.port.executeCommand).toHaveBeenCalledTimes(1)
+    expect(requests.map(item => item.idempotencyKey)).toEqual(['b12-change-apply:p:change:1'])
     const evidenceFile = process.env.B12_FRONTEND_EVIDENCE_FILE
     if (evidenceFile) {
       fs.appendFileSync(evidenceFile, `${JSON.stringify({
         marker: 'B12_ORDINARY_CHANGE_UNKNOWN_RESULT',
         unknownIsPending: true,
-        noAutomaticResubmit: true,
-        manualRetryUsesSameIdempotencyKey: requests[0].idempotencyKey === requests[1].idempotencyKey,
-        replayReceiptReturned: replay.result?.status === 'REPLAYED',
+        noManualResubmit: requests.length === 1,
+        queriedOriginalIdempotencyKey: holder.port.queryCommandReceipt.mock.calls[0][0].idempotencyKey === requests[0].idempotencyKey,
+        receiptRead: store.commandState('history-apply').confirmation === 'confirmed',
         status: 'PASS',
       })}\n`)
     }
