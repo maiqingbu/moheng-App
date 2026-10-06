@@ -1,5 +1,5 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_command_receipt_impl, KernelState,
+    execute_command_impl, query_assistant_repair_plan_impl, query_command_receipt_impl, KernelState,
 };
 use ai_novel_production_system_core::commands::{
     query_book_health_impl, query_context_manifest_impl, query_production_center_impl,
@@ -3553,6 +3553,244 @@ fn h03_authorization_is_revision_and_digest_bound_and_one_shot() {
     let connection = state.manager.open("p-h03", "H03", NOW).unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM repair_execution_receipts WHERE project_id='p-h03' AND status='REPAIR_VERIFIED'", [], |row| row.get(0)).unwrap(), 1);
     println!("H03_AUTH_RESULT dry_run_plan=PASS explicit_authorization=PASS one_shot=PASS postverify=PASS status=PASS");
+}
+
+#[test]
+fn rv19_repair_plan_create_rejects_caller_supplied_operations_without_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv19-untrusted-plan";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create(project_id, "RV-19 plan", NOW).unwrap());
+    let operation = RepairOperation {
+        operation: "refresh_runtime_projection".into(),
+        target: format!("project:{project_id}"),
+        params: json!({}),
+        postconditions: json!({}),
+    };
+    let expected_postconditions = vec![json!({"kind":"projection_current","expected":true})];
+    let operation_digest = operation_digest_with_postconditions(
+        std::slice::from_ref(&operation),
+        &expected_postconditions,
+    )
+    .unwrap();
+    let untrusted_plan = RepairPlan {
+        repair_plan_id: "repair-plan:rv19:caller".into(),
+        project_id: project_id.into(),
+        based_on_project_revision: 0,
+        diagnosis: json!({"finding":"caller supplied"}),
+        finding_refs: vec!["finding:rv19:caller".into()],
+        target_authority_owner: "B06::RuntimeProjectionOwner".into(),
+        proposed_operations: vec![operation],
+        affected_artifacts: vec![],
+        affected_scopes: vec!["PROJECT".into()],
+        risk_level: "LOW".into(),
+        requires_backup: false,
+        expected_postconditions,
+        operation_digest,
+        created_at: NOW.into(),
+    };
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_plan_create","commandId":"cmd:rv19:untrusted-plan",
+            "idempotencyKey":"key:rv19:untrusted-plan","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"dryRun":true,"repairPlan":untrusted_plan}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        error.starts_with("IPC_INVALID"),
+        "unexpected rejection: {error}"
+    );
+    let connection = state.manager.open(project_id, "RV-19 plan", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_plans WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn rv19_backend_generates_plan_from_finding_refs_and_authorizes_without_client_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv19-generated-plan";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(
+        state
+            .manager
+            .create(project_id, "RV-19 generated", NOW)
+            .unwrap(),
+    );
+    let diagnosis = query_assistant_repair_plan_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "question":"当前卷进度显示不对，帮我修复。",
+            "requestedAt":NOW
+        }),
+    )
+    .unwrap();
+    let requested_kinds = diagnosis["proposedOperations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|operation| operation["operation"].clone())
+        .collect::<Vec<_>>();
+    let saved = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_plan_create","commandId":"cmd:rv19:generated-plan",
+            "idempotencyKey":"key:rv19:generated-plan","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"findingRefs":diagnosis["findingRefs"],"requestedOperationKinds":requested_kinds}
+        }),
+    )
+    .unwrap();
+    let generated = &saved["result"]["repairPlan"];
+    assert_eq!(generated["repairPlanId"], diagnosis["repairPlanId"]);
+    assert_eq!(generated["findingRefs"], diagnosis["findingRefs"]);
+    assert_eq!(
+        generated["proposedOperations"],
+        diagnosis["proposedOperations"]
+    );
+    let operations: Vec<RepairOperation> =
+        serde_json::from_value(generated["proposedOperations"].clone()).unwrap();
+    let expected_postconditions = generated["expectedPostconditions"].as_array().unwrap();
+    assert_eq!(
+        operation_digest_with_postconditions(&operations, expected_postconditions).unwrap(),
+        generated["operationDigest"]
+    );
+
+    let unauthorized_metadata = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_authorize","commandId":"cmd:rv19:caller-auth",
+            "idempotencyKey":"key:rv19:caller-auth","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"repairPlanId":generated["repairPlanId"],"operationDigest":generated["operationDigest"],"approvedByUser":false}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        unauthorized_metadata.starts_with("IPC_INVALID"),
+        "unexpected rejection: {unauthorized_metadata}"
+    );
+
+    let authorized = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_authorize","commandId":"cmd:rv19:generated-auth",
+            "idempotencyKey":"key:rv19:generated-auth","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"repairPlanId":generated["repairPlanId"],"operationDigest":generated["operationDigest"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(authorized["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open(project_id, "RV-19 generated", NOW)
+        .unwrap();
+    let authorization_id = format!(
+        "assistant-authorization:{}",
+        generated["repairPlanId"].as_str().unwrap()
+    );
+    let authorization =
+        ai_novel_production_system_core::repositories::support::load_repair_authorization(
+            &connection,
+            project_id,
+            &authorization_id,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(authorization.approved_by_user);
+    assert_eq!(authorization.issued_at, NOW);
+    assert_eq!(authorization.operation_digest, generated["operationDigest"]);
+}
+
+#[test]
+fn rv19_repair_authorize_rejects_caller_supplied_approval_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-rv19-auth-metadata";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let connection = state.manager.create(project_id, "RV-19 auth", NOW).unwrap();
+    connection.execute("INSERT INTO project_runtime_state(project_id,run_state,updated_at) VALUES (?1,'IDLE',?2)", libsql_rusqlite::params![project_id,NOW]).unwrap();
+    drop(connection);
+    let plan_id = "repair-plan:rv19:auth";
+    let digest = create_h03_plan(
+        &state,
+        project_id,
+        plan_id,
+        RepairOperation {
+            operation: "refresh_runtime_projection".into(),
+            target: format!("project:{project_id}"),
+            params: json!({}),
+            postconditions: json!({}),
+        },
+        0,
+    );
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_authorize","commandId":"cmd:rv19:caller-auth",
+            "idempotencyKey":"key:rv19:caller-auth","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"authorization":{
+                "authorizationId":"repair-auth:caller",
+                "projectId":project_id,
+                "repairPlanId":plan_id,
+                "basedOnProjectRevision":0,
+                "operationDigest":digest,
+                "approvedByUser":true,
+                "issuedAt":NOW
+            }}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        error.starts_with("IPC_INVALID"),
+        "unexpected rejection: {error}"
+    );
+    let connection = state.manager.open(project_id, "RV-19 auth", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM repair_authorizations WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1 AND idempotency_key='key:rv19:caller-auth'", [], |row| row.get(0)).unwrap(), 0);
 }
 
 #[cfg(not(feature = "e2e-test"))]
