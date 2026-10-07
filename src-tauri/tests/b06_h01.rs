@@ -290,7 +290,9 @@ fn b06_missing_long_form_contract_reports_required_without_writes() {
     .unwrap_err();
 
     assert!(
-        error.contains("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope=CHAPTER:chapter:missing-contract:1"),
+        error.contains(
+            "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope=CHAPTER:chapter:missing-contract:1"
+        ),
         "{error}"
     );
     assert_eq!(
@@ -445,10 +447,15 @@ fn b06_long_form_resolves_volume_from_chapter_scope() {
         }),
     )
     .unwrap();
-    assert!(context["goalContractRefs"].as_array().unwrap().iter().any(|reference| {
-        reference["artifactId"] == "intent:chapter-scope"
-    }));
-    assert_eq!(context["activeVolumeTaskRefs"], json!(["task:chapter-scope"]));
+    assert!(context["goalContractRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| { reference["artifactId"] == "intent:chapter-scope" }));
+    assert_eq!(
+        context["activeVolumeTaskRefs"],
+        json!(["task:chapter-scope"])
+    );
     assert!(context["narrativeStateSources"]
         .as_array()
         .unwrap()

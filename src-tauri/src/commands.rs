@@ -2004,9 +2004,7 @@ fn goal_contract_context_for_request(
             "StoryConstitution",
         )
         .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-        .ok_or_else(|| {
-            format!("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope={scope}")
-        })?;
+        .ok_or_else(|| format!("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope={scope}"))?;
     let main_ref = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
         connection,
         project_id,
@@ -2110,7 +2108,9 @@ fn goal_contract_context_for_request(
         None
     } else {
         let volume_id = volume_id.ok_or_else(|| {
-            format!("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED|reason=VOLUME_SCOPE_REQUIRED|scope={scope}")
+            format!(
+                "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED|reason=VOLUME_SCOPE_REQUIRED|scope={scope}"
+            )
         })?;
         let reference = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
             connection,
@@ -2145,10 +2145,7 @@ fn goal_contract_context_for_request(
             format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore|scope={scope}")
         })?;
     for field in ["worldRules", "forbiddenReveals"] {
-        if story_core
-            .get(field)
-            .is_some_and(|value| !value.is_array())
-        {
+        if story_core.get(field).is_some_and(|value| !value.is_array()) {
             return Err(format!(
                 "GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.{field}|scope={scope}"
             ));
@@ -2265,9 +2262,13 @@ fn goal_contract_context_for_request(
         &mut fields,
         &main_ref,
         "hardRules",
-        Some(main.get("hardRules").filter(|value| value.is_array()).ok_or_else(|| {
-            format!("GOAL_CONTRACT_MAIN_CONTRACT_INVALID|field=hardRules|scope={scope}")
-        })?),
+        Some(
+            main.get("hardRules")
+                .filter(|value| value.is_array())
+                .ok_or_else(|| {
+                    format!("GOAL_CONTRACT_MAIN_CONTRACT_INVALID|field=hardRules|scope={scope}")
+                })?,
+        ),
     )?;
     if opening {
         if let Some(hard_rules) = main.get("hardRules") {
@@ -2681,9 +2682,7 @@ pub(crate) fn context_input_from_authority(
     } else if let Some(chapter_id) = request.get("chapterId").and_then(Value::as_str) {
         let volume_id = map_context_query(
             crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-                connection,
-                project_id,
-                chapter_id,
+                connection, project_id, chapter_id,
             ),
             ContextHardSource::Contract,
             &scope,
@@ -2867,9 +2866,7 @@ pub(crate) fn context_input_from_authority(
                     .and_then(Value::as_str)
                     .filter(|task_id| !task_id.trim().is_empty())
                     .map(ToOwned::to_owned)
-                    .ok_or_else(|| {
-                        format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
-                    })
+                    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let contracts = tasks
