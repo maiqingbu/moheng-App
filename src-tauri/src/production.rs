@@ -1096,7 +1096,7 @@ fn make_certificate(
         "evidenceRefs": evidence,
     }))
     .map_err(|error| error.to_string())?;
-    let certificate_id = format!("cert:b08:{}", &subject.artifact_id.replace(':', "-"));
+    let certificate_id = format!("cert:b08:{}", subject.artifact_id.replace(':', "-"));
     let mut certificate = crate::generated::types::GateCertificate {
         certificate_id,
         project_id: project_id.into(),
@@ -2571,7 +2571,7 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             if !required.iter().all(|key| object.contains_key(*key)) {
                 return false;
             }
-            let Some(evidence) = object.get("evidence").and_then(&normalize_evidence) else {
+            let Some(evidence) = object.get("evidence").and_then(normalize_evidence) else {
                 return false;
             };
             object.insert("evidence".into(), evidence);
