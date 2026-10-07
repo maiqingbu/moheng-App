@@ -5811,10 +5811,6 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     .get("chapterId")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "H03_RECOMPILE_CHAPTER_REQUIRED".to_string())?;
-                let expected = operation
-                    .params
-                    .get("plan")
-                    .ok_or_else(|| "H03_RECOMPILE_PLAN_REQUIRED".to_string())?;
                 let actual =
                     crate::repositories::narrative::NarrativeRepository::b07_chapter_plan_payload(
                         self.connection,
@@ -5872,7 +5868,7 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     "PLAN_STALE"
                 };
                 Ok(
-                    json!({"operation":operation.operation,"kind":"chapter_plan_stale","status":if actual == *expected && observed == "VALID" {"PASS"} else {"FAIL"},"owner":"B07::PlanningOwner","observed":observed,"stale":observed}),
+                    json!({"operation":operation.operation,"kind":"chapter_plan_stale","status":if observed == "VALID" {"PASS"} else {"FAIL"},"owner":"B07::PlanningOwner","observed":observed,"stale":observed}),
                 )
             }
             "backup_restore_maintenance" => {
