@@ -13,6 +13,18 @@ use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Removes only the confirmed legacy BookPlan payload field that predates the
+/// frozen R1 schema. Unknown fields remain untouched for strict validation.
+pub fn normalize_legacy_book_plan_payload(payload: &Value) -> (Value, Vec<String>) {
+    let mut normalized = payload.clone();
+    let ignored_fields = normalized
+        .as_object_mut()
+        .and_then(|object| object.remove("createdAt"))
+        .map(|_| vec!["createdAt".to_owned()])
+        .unwrap_or_default();
+    (normalized, ignored_fields)
+}
+
 pub fn normalize_chapter_plan_model_output(
     mut plan: Value,
     triggered_thread_refs: &[String],
@@ -192,6 +204,7 @@ pub fn approve_book_plan(
     signing_evidence_refs: &[String],
     actual_state: &OpeningActualState,
 ) -> Result<Value, String> {
+    let (seed, _) = normalize_legacy_book_plan_payload(seed);
     if !signing_pass || opening_canon_refs.len() < 3 || signing_evidence_refs.is_empty() {
         return Err("BOOK_PLAN_SIGNING_REQUIRED".into());
     }
@@ -200,10 +213,6 @@ pub fn approve_book_plan(
     }
     let mut approved = seed.clone();
     let object = approved.as_object_mut().ok_or("BOOK_PLAN_INVALID")?;
-    // Older entry payloads carried a timestamp for display.  It is not part
-    // of the frozen BookPlan R1 schema, so strip it from the new authority
-    // while retaining the historical SEED artifact unchanged.
-    object.remove("createdAt");
     object.insert("planningMaturity".into(), json!("APPROVED"));
     enrich_book_plan_from_opening(
         object,
@@ -1463,7 +1472,8 @@ pub fn validate_change_target_owner(
 ) -> Result<(), String> {
     match artifact_type {
         "BookPlan" => {
-            validate_book_plan_r1(candidate)
+            let (candidate, _) = normalize_legacy_book_plan_payload(candidate);
+            validate_book_plan_r1(&candidate)
                 .map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
             if !matches!(
                 candidate.get("planningMaturity").and_then(Value::as_str),

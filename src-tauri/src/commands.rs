@@ -2020,7 +2020,10 @@ fn goal_contract_context_for_request(
 
     let story = context_contract_payload(connection, project_id, &story_ref, "CONTRACT", scope)?;
     let main = context_contract_payload(connection, project_id, &main_ref, "CONTRACT", scope)?;
-    let book = context_contract_payload(connection, project_id, &book_ref, "CONTRACT", scope)?;
+    let legacy_book_payload =
+        context_contract_payload(connection, project_id, &book_ref, "CONTRACT", scope)?;
+    let (book, legacy_fields_ignored) =
+        crate::planning::normalize_legacy_book_plan_payload(&legacy_book_payload);
     crate::generated::validators::validate_book_plan_r1(&book)
         .map_err(|error| format!("GOAL_CONTRACT_BOOK_PLAN_INVALID|{error}"))?;
     let maturity = book.get("planningMaturity").and_then(Value::as_str);
@@ -2030,6 +2033,14 @@ fn goal_contract_context_for_request(
         Vec::new()
     };
     let mut omitted_soft_sources = Vec::new();
+    if !legacy_fields_ignored.is_empty() {
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &book_ref,
+            "legacyFieldsIgnored",
+            &format!("legacyFieldsIgnored:{}", json!(legacy_fields_ignored)),
+        );
+    }
     if !opening_canon_refs.is_empty() {
         for (field, id_key) in [
             ("mustAchieve", "id"),

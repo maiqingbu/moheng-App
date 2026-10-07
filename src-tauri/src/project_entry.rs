@@ -1409,7 +1409,7 @@ pub fn commit_story_setup(
         format!("book-plan-seed:{project_id}:{command_id}"),
         "BookPlan",
         project_scope(),
-        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":format!("解决“{}”与主角选择之间的长期冲突", story_promise),"mustNotBreak":[{"id":"rule:mechanism-cost","description":format!("围绕“{}”建立可验证的推进与代价", core.get("mechanism").and_then(Value::as_str).unwrap_or("核心机制"))}],"openingHypotheses":[format!("开篇先围绕“{}”建立第一个可验证问题", protagonist)],"globalLengthBudget":{"preferredWords":1200000},"createdAt":now}),
+        json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":story_promise,"protagonistMacroDirection":protagonist,"endingBoundary":format!("解决“{}”与主角选择之间的长期冲突", story_promise),"mustNotBreak":[{"id":"rule:mechanism-cost","description":format!("围绕“{}”建立可验证的推进与代价", core.get("mechanism").and_then(Value::as_str).unwrap_or("核心机制"))}],"openingHypotheses":[format!("开篇先围绕“{}”建立第一个可验证问题", protagonist)],"globalLengthBudget":{"preferredWords":1200000}}),
         vec![constitution_ref.clone(), opening_ref.clone()],
         "B07::PlanningOwner",
         command_id,
@@ -1487,9 +1487,18 @@ pub fn commit_opening_ready(
         .get("readerPromise")
         .and_then(Value::as_str)
         .unwrap_or("当前故事承诺");
-    let book_plan = project_entry::canonical_head_ref(connection, project_id, "BookPlan")
+    let book_plan_row = project_entry::canonical_head(connection, project_id, "BookPlan")
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "B11_STORY_SETUP_REQUIRED".to_string())?;
+    let (normalized_book_plan, _) =
+        crate::planning::normalize_legacy_book_plan_payload(&book_plan_row.payload);
+    crate::generated::validators::validate_book_plan_r1(&normalized_book_plan)
+        .map_err(|error| format!("GOAL_CONTRACT_BOOK_PLAN_INVALID|{error}"))?;
+    let book_plan = ArtifactRef {
+        artifact_id: book_plan_row.artifact_id,
+        version: book_plan_row.version,
+        payload_hash: book_plan_row.payload_hash,
+    };
     let topology_ids = opening_ids(project_id)?;
     let topology = project_entry::ensure_opening_topology(
         connection,

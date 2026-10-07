@@ -1,7 +1,9 @@
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_plan_route_impl, query_production_center_impl,
-    query_volume_list_impl, KernelState,
+    execute_command_impl, query_context_manifest_impl, query_plan_route_impl,
+    query_production_center_impl, query_volume_list_impl, KernelState,
 };
+use ai_novel_production_system_core::commit::CommitService;
+use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
@@ -209,13 +211,13 @@ fn command(
     .unwrap_or_else(|error| panic!("{command_type} failed: {error}"))
 }
 
-fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
+fn create_story_setup_seed(state: &KernelState, prefix: &str) -> String {
     let created = execute_command_impl(
         state,
         json!({
             "type":"project_create_from_idea",
-            "commandId":"b2-red:create",
-            "idempotencyKey":"b2-red:create:key",
+            "commandId":format!("{prefix}:create"),
+            "idempotencyKey":format!("{prefix}:create:key"),
             "requestedAt":NOW,
             "payload":{
                 "title":"B2 开篇 Canon 行为测试",
@@ -232,7 +234,7 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
     command(
         state,
         &project_id,
-        "b2-red:directions",
+        &format!("{prefix}:directions"),
         "story_directions_generate",
         json!({}),
     );
@@ -245,14 +247,14 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
     command(
         state,
         &project_id,
-        "b2-red:select",
+        &format!("{prefix}:select"),
         "pitch_select",
         json!({"pitchIds":[pitch_id]}),
     );
     command(
         state,
         &project_id,
-        "b2-red:setup",
+        &format!("{prefix}:setup"),
         "story_setup_save",
         json!({"storyCore":{
             "protagonist":"林舟",
@@ -263,6 +265,14 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
             "forbiddenReveals":["前三章不揭开账本来源"]
         }}),
     );
+    project_id
+}
+
+fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
+    let project_id = create_story_setup_seed(state, "b2-red");
+    let (_, _, mut legacy_seed) = current_book_plan_payload(state, &project_id);
+    legacy_seed["createdAt"] = json!(NOW);
+    commit_book_plan_fixture(state, &project_id, legacy_seed);
     command(
         state,
         &project_id,
@@ -318,6 +328,180 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
     );
     assert_eq!(approved["result"]["planningMaturity"], "APPROVED");
     (project_id, approved["result"].clone())
+}
+
+fn current_book_plan_payload(state: &KernelState, project_id: &str) -> (String, i64, Value) {
+    let connection = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project db");
+    let (artifact_id, version, raw): (String, i64, String) = connection
+        .query_row(
+            "SELECT a.artifact_id,a.version,p.payload_json FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan'",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("BookPlan head");
+    let payload = serde_json::from_str(&raw).expect("BookPlan JSON");
+    (artifact_id, version, payload)
+}
+
+fn commit_book_plan_fixture(state: &KernelState, project_id: &str, payload: Value) {
+    let (current_artifact_id, current_version, _) = current_book_plan_payload(state, project_id);
+    let connection = state
+        .manager
+        .open(project_id, "", NOW)
+        .expect("open project db");
+    let dependencies = {
+        let mut statement = connection
+            .prepare("SELECT target_artifact_id,target_version,target_payload_hash FROM artifact_dependencies WHERE source_artifact_id=?1 AND source_version=?2 ORDER BY target_artifact_id")
+            .expect("prepare BookPlan dependencies");
+        statement
+            .query_map(
+                libsql_rusqlite::params![current_artifact_id, current_version],
+                |row| {
+                    Ok(json!({
+                        "artifactId":row.get::<_, String>(0)?,
+                        "version":row.get::<_, i64>(1)?,
+                        "payloadHash":row.get::<_, String>(2)?
+                    }))
+                },
+            )
+            .expect("query BookPlan dependencies")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect BookPlan dependencies")
+    };
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .expect("project revision");
+    let command_id = format!("rv03:legacy-book-plan:{project_id}");
+    let artifact_id = format!("book-plan:rv03-legacy:{project_id}");
+    let payload_hash = sha256_canonical(&payload).expect("legacy payload hash");
+    let bundle: ai_novel_production_system_core::generated::types::CommitBundle =
+        serde_json::from_value(json!({
+            "commitId":format!("commit:{command_id}"),
+            "projectId":project_id,
+            "commandId":command_id,
+            "idempotencyKey":format!("{command_id}:key"),
+            "expectedProjectRevision":revision,
+            "contractVersion":"m0a.v1",
+            "createdAt":NOW,
+            "artifacts":[{
+                "artifactId":artifact_id,
+                "projectId":project_id,
+                "artifactType":"BookPlan",
+                "scope":{"level":"PROJECT"},
+                "version":1,
+                "schemaVersion":"m0a.artifact.v1",
+                "artifactStatus":"CANDIDATE",
+                "payloadHash":payload_hash,
+                "dependencyRefs":dependencies,
+                "provenance":{"createdBy":"rv03-legacy-fixture","commandId":command_id},
+                "payload":payload,
+                "createdAt":NOW
+            }],
+            "headUpdates":[{
+                "artifactType":"BookPlan",
+                "scope":{"level":"PROJECT"},
+                "artifactId":artifact_id,
+                "version":1,
+                "payloadHash":payload_hash
+            }]
+        }))
+        .expect("legacy BookPlan CommitBundle");
+    CommitService::commit(&connection, &bundle, NOW).expect("commit historical BookPlan fixture");
+}
+
+fn opening_context_manifest(state: &KernelState, project_id: &str) -> Result<Value, String> {
+    let opening = ai_novel_production_system_core::commands::query_opening_ready_impl(
+        state,
+        json!({"request":{"projectId":project_id,"scope":"PROJECT","pageSize":10}}),
+    )?;
+    query_context_manifest_impl(
+        state,
+        json!({
+            "projectId":project_id,
+            "volumeId":opening["firstChapter"]["volumeId"],
+            "chapterId":opening["firstChapter"]["chapterId"],
+            "scope":"CHAPTER",
+            "executionMode":"OPENING_BOOTSTRAP",
+            "entityIds":[],
+            "references":[]
+        }),
+    )
+}
+
+#[test]
+fn rv03_legacy_book_plan_created_at_is_ignored_and_recorded_during_hard_compilation() {
+    let (state, _temp, _gateway) = state();
+    let project_id = create_story_setup_seed(&state, "rv03-legacy");
+    let (_, _, mut legacy_seed) = current_book_plan_payload(&state, &project_id);
+    legacy_seed["createdAt"] = json!(NOW);
+    commit_book_plan_fixture(&state, &project_id, legacy_seed);
+
+    command(
+        &state,
+        &project_id,
+        "rv03-legacy:ready",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    let manifest = opening_context_manifest(&state, &project_id)
+        .expect("legacy BookPlan should compile into opening HARD context");
+    assert!(manifest["hardSourceCount"].as_i64().unwrap() > 0);
+    assert!(manifest["omittedSoftSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| {
+            source["sourceRef"]["ref"]
+                .as_str()
+                .is_some_and(|reference| reference.contains("legacyFieldsIgnored"))
+                && source["reason"] == "legacyFieldsIgnored:[\"createdAt\"]"
+        }));
+}
+
+#[test]
+fn rv03_book_plan_unknown_payload_field_is_still_rejected() {
+    let (state, _temp, _gateway) = state();
+    let project_id = create_story_setup_seed(&state, "rv03-unknown");
+    let (_, _, mut seed) = current_book_plan_payload(&state, &project_id);
+    seed["foo"] = json!("must remain invalid");
+    commit_book_plan_fixture(&state, &project_id, seed);
+
+    let command_id = "rv03-unknown:ready";
+    let revision_before = revision(&state, &project_id);
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"opening_ready",
+            "commandId":command_id,
+            "idempotencyKey":format!("{command_id}:key"),
+            "projectId":project_id,
+            "expectedRevision":revision(&state, &project_id),
+            "requestedAt":NOW,
+            "payload":{"approved":true}
+        }),
+    )
+    .expect_err("unknown BookPlan payload field must fail closed");
+    assert!(
+        error.starts_with("GOAL_CONTRACT_BOOK_PLAN_INVALID|"),
+        "{error}"
+    );
+    assert!(error.contains("foo"), "{error}");
+    assert_eq!(revision(&state, &project_id), revision_before);
+}
+
+#[test]
+fn rv03_story_setup_seed_does_not_put_created_at_inside_payload() {
+    let (state, _temp, _gateway) = state();
+    let project_id = create_story_setup_seed(&state, "rv03-seed");
+    let (_, _, seed) = current_book_plan_payload(&state, &project_id);
+
+    assert!(seed.get("createdAt").is_none(), "{seed}");
+    ai_novel_production_system_core::generated::validators::validate_book_plan_r1(&seed)
+        .expect("new SEED should satisfy the frozen strict schema directly");
 }
 
 fn opening_item<'a>(book: &'a Value, field: &str, key: &str, prefix: &str) -> &'a Value {
