@@ -76,7 +76,7 @@ const isFormalWriteCommand = (type: string) =>
 
 const isTransportFailure = (error: unknown) => {
   if (!(error instanceof Error) || /^IPC_(?:INVALID|UNSUPPORTED):/.test(error.message)) return false
-  return /timeout|timed out|transport|response lost|lost response|network|failed to fetch|failed to invoke|connection (?:closed|reset|lost)/i.test(error.message)
+  return /EXECUTE_COMMAND_WORKER_FAILED|timeout|timed out|transport|response lost|lost response|network|failed to fetch|failed to invoke|connection (?:closed|reset|lost)/i.test(error.message)
 }
 
 export const useProjectStore = defineStore('project-projection', () => {
