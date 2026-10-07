@@ -360,12 +360,35 @@ pub fn build_volume_progress(input: VolumeProgressInput) -> VolumeProgressProjec
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct GoalContractField {
+    pub field_path: String,
+    pub source_ref: ArtifactRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_source_refs: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_field_paths: Vec<String>,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPlanTask {
+    pub task_ref: String,
+    pub contract: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextCompilerInput {
     pub execution_mode: String,
     pub project_revision: i64,
     pub goal_contract_refs: Vec<ArtifactRef>,
+    pub goal_contract_fields: Vec<GoalContractField>,
     pub state: CurrentNarrativeStateView,
     pub continuity_threads: Vec<ContinuityThreadView>,
+    pub plan_task_refs: Vec<String>,
+    pub plan_task_contexts: Vec<ContextPlanTask>,
+    pub task_states: Vec<TaskStateRecord>,
     pub active_task_refs: Vec<String>,
     pub future_reservation_refs: Vec<String>,
     pub selected_evidence: Vec<EvidenceRef>,
@@ -380,6 +403,113 @@ pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r1";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
 pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r1";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
+pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r2";
+pub const OPENING_HARD_CONTRACT_FIELDS: &[&str] = &[
+    "StoryConstitution.storyCore.protagonist",
+    "StoryConstitution.storyCore.desire",
+    "StoryConstitution.storyCore.mechanism",
+    "StoryConstitution.storyCore.conflict",
+    "StoryConstitution.storyCore.readerPromise",
+    "StoryConstitution.storyCore.worldRules",
+    "StoryConstitution.storyCore.forbiddenReveals",
+    "MainContract.hardRules",
+    "OpeningContract.firstChapterGoal",
+    "OpeningContract.firstThreeChapterPromise",
+    "OpeningContract.forbiddenReveals",
+];
+pub const LONG_FORM_HARD_CONTRACT_FIELDS: &[&str] = &[
+    "StoryConstitution.storyCore.worldRules",
+    "StoryConstitution.storyCore.mechanism",
+    "StoryConstitution.storyCore.forbiddenReveals",
+    "MainContract.hardRules",
+    "BookPlan.futureReservations.applicable",
+    "VolumeIntent.mustAchieve",
+    "VolumeIntent.mustNotBreak",
+    "VolumeIntent.requiredExitConditions",
+    "VolumeIntent.futureReservationRefs",
+    "VolumeIntent.crossVolumeResponsibilityRefs",
+];
+pub const LONG_FORM_OPENING_CANON_REFERENCE_RULES: &[&str] = &[
+    "source=BookPlan.openingCanonRefs;fields=VolumeIntent.mustAchieve,VolumeIntent.mustNotBreak;hard=id+canonRefs;description=SOFT_CANON_DUPLICATE",
+    "source=BookPlan.openingCanonRefs;opening-owner-items;hard=canonicalRefsOnly;description=SOFT_CANON_DUPLICATE",
+];
+
+/// Projects only current-volume or earlier reservations from a BookPlan into
+/// the LONG_FORM contract set. Volume IDs are resolved by the authority
+/// repository before calling this pure classifier.
+pub fn project_applicable_future_reservations(
+    book_plan: &Value,
+    current_volume_no: i64,
+    volume_numbers: &BTreeMap<String, i64>,
+) -> Result<(Vec<Value>, usize), String> {
+    let reservations = book_plan
+        .get("futureReservations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope=LONG_FORM".to_string())?;
+    let mut applicable = BTreeMap::new();
+    let mut excluded = 0usize;
+    for item in reservations {
+        let unavailable =
+            || "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope=LONG_FORM".to_string();
+        let reservation_id = item
+            .get("reservationId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(unavailable)?;
+        let reserved_for_no = item.get("reservedForVolumeNo").and_then(Value::as_i64);
+        let reserved_for_id_no = item
+            .get("reservedForVolumeId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| volume_numbers.get(id).copied().ok_or_else(unavailable))
+            .transpose()?;
+        if reserved_for_no.is_some()
+            && reserved_for_id_no.is_some()
+            && reserved_for_no != reserved_for_id_no
+        {
+            return Err(unavailable());
+        }
+        let reserved_for_no = reserved_for_no.or(reserved_for_id_no);
+        if reserved_for_no.is_some_and(|number| number > current_volume_no) {
+            excluded += 1;
+            continue;
+        }
+
+        let prerequisites = item
+            .get("prerequisites")
+            .and_then(Value::as_array)
+            .ok_or_else(unavailable)?;
+        let may_foreshadow = item
+            .get("mayForeshadow")
+            .and_then(Value::as_bool)
+            .ok_or_else(unavailable)?;
+        let may_reveal = item
+            .get("mayReveal")
+            .and_then(Value::as_bool)
+            .ok_or_else(unavailable)?;
+        let mut projection = serde_json::Map::new();
+        projection.insert("reservationId".into(), json!(reservation_id));
+        for field in [
+            "notBeforeVolumeNo",
+            "reservedForVolumeNo",
+            "reservedForVolumeId",
+        ] {
+            if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
+                projection.insert(field.into(), value.clone());
+            }
+        }
+        projection.insert("mayForeshadow".into(), json!(may_foreshadow));
+        projection.insert("mayReveal".into(), json!(may_reveal));
+        projection.insert("prerequisites".into(), json!(prerequisites));
+        if applicable
+            .insert(reservation_id.to_owned(), Value::Object(projection))
+            .is_some()
+        {
+            return Err(unavailable());
+        }
+    }
+    Ok((applicable.into_values().collect(), excluded))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContextDigestConfig {
@@ -469,6 +599,21 @@ fn relevant_state_digest_with_config(
     validate_context_hard_completeness(input)?;
     let mut goal_contract_refs = input.goal_contract_refs.clone();
     goal_contract_refs.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
+    let mut goal_contract_fields = input.goal_contract_fields.clone();
+    for field in &mut goal_contract_fields {
+        field.additional_source_refs.sort_by(|a, b| {
+            a.artifact_id
+                .cmp(&b.artifact_id)
+                .then_with(|| a.version.cmp(&b.version))
+        });
+        field.additional_field_paths.sort();
+    }
+    goal_contract_fields.sort_by(|a, b| {
+        a.source_ref
+            .artifact_id
+            .cmp(&b.source_ref.artifact_id)
+            .then_with(|| a.field_path.cmp(&b.field_path))
+    });
     let mut facts = input.state.facts.clone();
     facts.sort_by(|a, b| a.fact_id.cmp(&b.fact_id));
     let mut relations = input.state.relations.clone();
@@ -753,6 +898,7 @@ mod b2_context_tests {
             execution_mode: "LONG_FORM".into(),
             project_revision: 7,
             goal_contract_refs: Vec::new(),
+            goal_contract_fields: Vec::new(),
             state: CurrentNarrativeStateView::from_records(
                 RuntimeBounds {
                     project_id: "project:b2".into(),
@@ -769,6 +915,9 @@ mod b2_context_tests {
                 false,
             ),
             continuity_threads: Vec::new(),
+            plan_task_refs: Vec::new(),
+            plan_task_contexts: Vec::new(),
+            task_states: Vec::new(),
             active_task_refs: Vec::new(),
             future_reservation_refs: Vec::new(),
             selected_evidence: Vec::new(),

@@ -3227,6 +3227,7 @@ mod tests {
             execution_mode: "LONG_FORM".into(),
             project_revision: 7,
             goal_contract_refs: Vec::new(),
+            goal_contract_fields: Vec::new(),
             state: crate::narrative::CurrentNarrativeStateView::from_records(
                 crate::narrative::RuntimeBounds {
                     project_id: "project".into(),
@@ -3243,6 +3244,9 @@ mod tests {
                 false,
             ),
             continuity_threads: Vec::new(),
+            plan_task_refs: Vec::new(),
+            plan_task_contexts: Vec::new(),
+            task_states: Vec::new(),
             active_task_refs: vec!["task:current".into()],
             future_reservation_refs: Vec::new(),
             selected_evidence: Vec::new(),

@@ -1121,6 +1121,102 @@ fn request_strings(request: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextScopeSelection {
+    task_refs: Option<Vec<String>>,
+    responsibility_refs: Option<Vec<String>>,
+    reservation_refs: Option<Vec<String>>,
+    entity_refs: Option<Vec<String>>,
+}
+
+fn context_scope_selection(request: &Value) -> Result<Option<ContextScopeSelection>, String> {
+    let selection_value = request
+        .get("scopeSelection")
+        .or_else(|| request.pointer("/payload/scopeSelection"));
+    let plan = request.get("chapterPlan").and_then(Value::as_object);
+    if let Some(value) = selection_value.filter(|value| !value.is_null()) {
+        let selection: ContextScopeSelection = serde_json::from_value(value.clone())
+            .map_err(|_| "IPC_INVALID:payload.scopeSelection".to_string())?;
+        if selection.task_refs.is_none()
+            || selection.responsibility_refs.is_none()
+            || selection.reservation_refs.is_none()
+            || selection.entity_refs.is_none()
+        {
+            return Err("IPC_INVALID:payload.scopeSelection requires all scope lists".into());
+        }
+        if let Some(hard_scope) = plan
+            .and_then(|plan| plan.get("hardScope"))
+            .and_then(Value::as_object)
+        {
+            let allowed: ContextScopeSelection =
+                serde_json::from_value(Value::Object(hard_scope.clone()))
+                    .map_err(|_| "CHAPTER_PLAN_HARD_SCOPE_INVALID".to_string())?;
+            for (requested, available) in [
+                (&selection.task_refs, &allowed.task_refs),
+                (&selection.responsibility_refs, &allowed.responsibility_refs),
+                (&selection.reservation_refs, &allowed.reservation_refs),
+                (&selection.entity_refs, &allowed.entity_refs),
+            ] {
+                if requested.as_ref().is_some_and(|requested| {
+                    available.as_ref().is_none_or(|available| {
+                        requested
+                            .iter()
+                            .any(|reference| !available.contains(reference))
+                    })
+                }) {
+                    return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
+                }
+            }
+        }
+        return Ok(Some(selection));
+    }
+
+    let Some(plan) = plan else {
+        return Ok(None);
+    };
+    if let Some(hard_scope) = plan.get("hardScope") {
+        return serde_json::from_value(hard_scope.clone())
+            .map(Some)
+            .map_err(|_| "CHAPTER_PLAN_HARD_SCOPE_INVALID".into());
+    }
+    let plan_strings = |key: &str| -> Result<Vec<String>, String> {
+        match plan.get(key) {
+            None => Ok(Vec::new()),
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| "CONTEXT_SCOPE_SELECTION_INVALID".to_string())
+                })
+                .collect(),
+            _ => Err("CONTEXT_SCOPE_SELECTION_INVALID".into()),
+        }
+    };
+    let responsibility_refs = match plan.get("continuityActions") {
+        None => Vec::new(),
+        Some(Value::Array(actions)) => actions
+            .iter()
+            .map(|action| {
+                action
+                    .get("threadRef")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| "CONTEXT_SCOPE_SELECTION_INVALID".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("CONTEXT_SCOPE_SELECTION_INVALID".into()),
+    };
+    Ok(Some(ContextScopeSelection {
+        task_refs: Some(plan_strings("activeTaskRefs")?),
+        responsibility_refs: Some(responsibility_refs),
+        reservation_refs: Some(plan_strings("reservationRefs")?),
+        entity_refs: Some(plan_strings("entityRefs")?),
+    }))
+}
+
 fn request_resume_context(request: &Value) -> ResumeContext {
     let mut context = ResumeContext {
         current_chapter: request
@@ -1518,47 +1614,1145 @@ fn continuity_from_request_bounded(
     Ok((threads, truncated_sources))
 }
 
+struct GoalContractContext {
+    refs: Vec<crate::generated::types::ArtifactRef>,
+    fields: Vec<crate::narrative::GoalContractField>,
+    omitted_soft_sources: Vec<crate::generated::types::OmittedSource>,
+    future_reservation_refs: Vec<String>,
+    responsibility_refs: Vec<String>,
+    current_scope_refs: Vec<String>,
+}
+
+fn extract_contract_source_refs(text: &str) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    let markers = [
+        "(fact:",
+        "(event:",
+        "(knowledge:",
+        "(evidence:",
+        "(obligation:",
+    ];
+    for marker in markers {
+        let mut offset = 0;
+        while let Some(start) = text[offset..].find(marker) {
+            let value_start = offset + start + 1;
+            let Some(end) = text[value_start..].find(')') else {
+                break;
+            };
+            refs.insert(text[value_start..value_start + end].to_owned());
+            offset = value_start + end + 1;
+        }
+    }
+    refs.into_iter().collect()
+}
+
+fn contract_value_source_refs(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => extract_contract_source_refs(text),
+        Value::Array(items) => items.iter().flat_map(contract_value_source_refs).collect(),
+        Value::Object(fields) => fields
+            .values()
+            .flat_map(contract_value_source_refs)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_opening_owner_canon_item(item: &Value) -> bool {
+    item.get("kind").and_then(Value::as_str) == Some("CANON_REFS")
+        || item
+            .get("id")
+            .or_else(|| item.get("reservationId"))
+            .or_else(|| item.get("seedId"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| {
+                id.contains("opening-reality")
+                    || id.contains("relationship:opening:")
+                    || id.contains("relationship:opening-facts:")
+            })
+}
+
+fn opening_canon_reference_projection(
+    item: &Value,
+    opening_canon_refs: &[String],
+    scope: &str,
+) -> Result<Option<Value>, String> {
+    let id = item
+        .get("id")
+        .or_else(|| item.get("reservationId"))
+        .or_else(|| item.get("seedId"))
+        .and_then(Value::as_str);
+    let has_canon_refs_kind = item.get("kind").and_then(Value::as_str) == Some("CANON_REFS");
+    if !has_canon_refs_kind && (!is_opening_owner_canon_item(item) || opening_canon_refs.is_empty())
+    {
+        return Ok(None);
+    }
+    if opening_canon_refs.is_empty() {
+        return Err(format!(
+            "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+        ));
+    }
+    let id =
+        id.ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+    let refs = if let Some(refs) = item.get("refs") {
+        let refs = refs
+            .as_array()
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        refs.iter()
+            .map(|reference| {
+                reference
+                    .as_str()
+                    .filter(|reference| {
+                        opening_canon_refs
+                            .iter()
+                            .any(|source| source.as_str() == *reference)
+                    })
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        opening_canon_refs.to_vec()
+    };
+    if refs.is_empty() {
+        return Err(format!(
+            "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+        ));
+    }
+    Ok(Some(json!({"id":id,"refs":refs})))
+}
+
+fn normalized_hard_rule(text: &str, ids: Vec<String>) -> Value {
+    json!({"constraint":text,"constraintIds":ids})
+}
+
+fn normalize_hard_contract_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => normalized_hard_rule(text, Vec::new()),
+        Value::Object(object) => {
+            if let Some(Value::String(description)) = object.get("description") {
+                let ids = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| vec![id.to_owned()])
+                    .unwrap_or_default();
+                normalized_hard_rule(description, ids)
+            } else {
+                object.clone().into()
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
+fn hard_contract_semantic_key(value: &Value) -> String {
+    if let Some(text) = value.get("constraint").and_then(Value::as_str) {
+        return format!("CONSTRAINT:{text}");
+    }
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn merge_constraint_ids(existing: &mut Value, incoming: &Value) {
+    let mut ids = existing
+        .get("constraintIds")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    ids.extend(
+        incoming
+            .get("constraintIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
+    ids.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    ids.dedup();
+    if let Some(object) = existing.as_object_mut() {
+        object.insert("constraintIds".into(), Value::Array(ids));
+    }
+}
+
+fn append_goal_contract_field(
+    fields: &mut Vec<crate::narrative::GoalContractField>,
+    source_ref: &crate::generated::types::ArtifactRef,
+    field_path: impl Into<String>,
+    value: Option<&Value>,
+) -> Result<(), String> {
+    let field_path = field_path.into();
+    if let Some(value) =
+        value.filter(|value| !value.is_null() && !value.as_array().is_some_and(Vec::is_empty))
+    {
+        let value = normalize_hard_contract_value(value);
+        let semantic_key = hard_contract_semantic_key(&value);
+        if let Some(existing) = fields
+            .iter_mut()
+            .find(|field| hard_contract_semantic_key(&field.value) == semantic_key)
+        {
+            merge_constraint_ids(&mut existing.value, &value);
+            if existing.source_ref != *source_ref
+                && !existing.additional_source_refs.contains(source_ref)
+            {
+                existing.additional_source_refs.push(source_ref.clone());
+            }
+            if field_path != existing.field_path
+                && !existing.additional_field_paths.contains(&field_path)
+            {
+                existing.additional_field_paths.push(field_path);
+            }
+            return Ok(());
+        }
+        fields.push(crate::narrative::GoalContractField {
+            field_path,
+            source_ref: source_ref.clone(),
+            additional_source_refs: Vec::new(),
+            additional_field_paths: Vec::new(),
+            value,
+        });
+    }
+    Ok(())
+}
+
+fn append_goal_contract_array(
+    fields: &mut Vec<crate::narrative::GoalContractField>,
+    source_ref: &crate::generated::types::ArtifactRef,
+    field_path: &str,
+    value: Option<&Value>,
+) -> Result<(), String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    let Some(items) = value.as_array() else {
+        return append_goal_contract_field(fields, source_ref, field_path, Some(value));
+    };
+    for (index, item) in items.iter().enumerate() {
+        let item_id = item
+            .get("id")
+            .or_else(|| item.get("reservationId"))
+            .or_else(|| item.get("seedId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| index.to_string());
+        append_goal_contract_field(
+            fields,
+            source_ref,
+            format!("{field_path}[{item_id}]"),
+            Some(item),
+        )?;
+    }
+    Ok(())
+}
+
+fn contract_string_array(
+    payload: &Value,
+    field_path: &str,
+    scope: &str,
+) -> Result<Vec<String>, String> {
+    let Some(values) = payload.get(field_path).and_then(Value::as_array) else {
+        return Err(format!(
+            "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+        ));
+    };
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))
+        })
+        .collect()
+}
+
+fn record_omitted_contract_field(
+    omitted: &mut Vec<crate::generated::types::OmittedSource>,
+    source_ref: &crate::generated::types::ArtifactRef,
+    field_path: &str,
+    reason: &str,
+) {
+    omitted.push(crate::generated::types::OmittedSource {
+        source_ref: crate::generated::types::SourceRef {
+            kind: "contract-field".into(),
+            ref_: format!(
+                "{}@{}#{field_path}",
+                source_ref.artifact_id, source_ref.version
+            ),
+        },
+        reason: reason.into(),
+    });
+}
+
+fn context_contract_payload(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    reference: &crate::generated::types::ArtifactRef,
+    source: &str,
+    scope: &str,
+) -> Result<Value, String> {
+    crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        connection, project_id, reference,
+    )
+    .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source={source}|scope={scope}"))?
+    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source={source}|scope={scope}"))
+}
+
+fn hard_plan_task_projection(
+    task: &Value,
+    goal_contract_fields: &[crate::narrative::GoalContractField],
+) -> Value {
+    let mut projected = serde_json::Map::new();
+    for key in [
+        "taskId",
+        "class",
+        "dependsOnTaskIds",
+        "continuityThreadRefs",
+        "reservationRefs",
+        "completionPredicate",
+    ] {
+        if let Some(value) = task.get(key) {
+            projected.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(objective) = task.get("objective").and_then(Value::as_str) {
+        let normalized = normalize_hard_contract_value(&Value::String(objective.into()));
+        if let Some(goal) = goal_contract_fields.iter().find(|field| {
+            hard_contract_semantic_key(&field.value) == hard_contract_semantic_key(&normalized)
+        }) {
+            projected.insert(
+                "objectiveContractRef".into(),
+                json!({
+                    "fieldPath":goal.field_path,
+                    "additionalFieldPaths":goal.additional_field_paths,
+                    "sourceRef":goal.source_ref,
+                    "additionalSourceRefs":goal.additional_source_refs
+                }),
+            );
+        } else {
+            projected.insert("objective".into(), normalized["constraint"].clone());
+            let source_refs = extract_contract_source_refs(objective);
+            if !source_refs.is_empty() {
+                projected.insert("objectiveSourceRefs".into(), json!(source_refs));
+            }
+        }
+    }
+    Value::Object(projected)
+}
+
+fn task_ref_covers_goal(task_refs: &[String], goal_id: &str) -> bool {
+    task_refs.iter().any(|task_ref| task_ref.contains(goal_id))
+}
+
+fn selected_entity_source_ids(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    entity_refs: &[String],
+    scope: &str,
+) -> Result<BTreeSet<String>, String> {
+    let entity_slices = entity_refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let (facts, facts_truncated) = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::current_canon_bounded(
+            connection,
+            project_id,
+            &entity_slices,
+            100,
+        ),
+        ContextHardSource::Canon,
+        scope,
+    )?;
+    let relations = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::current_relations(
+            connection,
+            project_id,
+            &entity_slices,
+            100,
+        ),
+        ContextHardSource::Canon,
+        scope,
+    )?;
+    let relations_truncated = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::has_more_relations(
+            connection,
+            project_id,
+            &entity_slices,
+            100,
+        ),
+        ContextHardSource::Canon,
+        scope,
+    )?;
+    let (knowledge, knowledge_truncated) = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::knowledge_for_entities_bounded(
+            connection,
+            project_id,
+            &entity_slices,
+            100,
+        ),
+        ContextHardSource::Knowledge,
+        scope,
+    )?;
+    if facts_truncated || relations_truncated || knowledge_truncated {
+        return Err(format!(
+            "CONTEXT_HARD_INCOMPLETE|sources={}|scope={scope}",
+            [
+                (facts_truncated || relations_truncated).then_some("CANON"),
+                knowledge_truncated.then_some("KNOWLEDGE"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(",")
+        ));
+    }
+    Ok(facts
+        .into_iter()
+        .map(|fact| fact.fact_id)
+        .chain(relations.into_iter().map(|relation| relation.relation_id))
+        .chain(knowledge.into_iter().map(|item| item.knowledge_id))
+        .collect())
+}
+
+fn volume_constraint_matches_scope(
+    item: &Value,
+    task_refs: Option<&[String]>,
+    selected_source_refs: Option<&BTreeSet<String>>,
+) -> bool {
+    let Some(id) = item.get("id").and_then(Value::as_str) else {
+        return true;
+    };
+    if let Some(task_refs) = task_refs {
+        if let Some(goal_id) = id
+            .strip_prefix("rule:")
+            .filter(|id| id.starts_with("opening-reality:"))
+        {
+            if task_ref_covers_goal(task_refs, goal_id) {
+                return true;
+            }
+        }
+    }
+    let Some(selected_source_refs) = selected_source_refs else {
+        return true;
+    };
+    if let Some(refs) = item.get("refs").and_then(Value::as_array) {
+        return refs
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|reference| selected_source_refs.contains(reference));
+    }
+    for marker in [":fact:", ":relation:", ":knowledge:", ":event:"] {
+        if let Some(reference) = id.rsplit_once(marker).map(|(_, reference)| reference) {
+            return selected_source_refs.contains(reference);
+        }
+    }
+    if let Some(description) = item.get("description").and_then(Value::as_str) {
+        let refs = extract_contract_source_refs(description);
+        return refs.is_empty()
+            || refs
+                .iter()
+                .any(|reference| selected_source_refs.contains(reference));
+    }
+    true
+}
+
+fn goal_contract_context_for_request(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+    volume_id: Option<&str>,
+    selection: Option<&ContextScopeSelection>,
+    scope: &str,
+) -> Result<GoalContractContext, String> {
+    let opening = request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
+    let story_ref =
+        crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "StoryConstitution",
+        )
+        .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+    let main_ref = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+        connection,
+        project_id,
+        "MainContract",
+    )
+    .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+    let book_ref = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+        connection, project_id, "BookPlan",
+    )
+    .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+
+    let story = context_contract_payload(connection, project_id, &story_ref, "CONTRACT", scope)?;
+    let main = context_contract_payload(connection, project_id, &main_ref, "CONTRACT", scope)?;
+    let book = context_contract_payload(connection, project_id, &book_ref, "CONTRACT", scope)?;
+    let maturity = book.get("planningMaturity").and_then(Value::as_str);
+    let opening_canon_refs = if book.get("openingCanonRefs").is_some() {
+        contract_string_array(&book, "openingCanonRefs", scope)?
+    } else {
+        Vec::new()
+    };
+    let mut omitted_soft_sources = Vec::new();
+    if !opening_canon_refs.is_empty() {
+        for (field, id_key) in [
+            ("mustAchieve", "id"),
+            ("mustNotBreak", "id"),
+            ("relationshipMacroDirections", "id"),
+            ("majorMysteryGoals", "id"),
+            ("futureReservations", "reservationId"),
+            ("volumeIntentSeeds", "seedId"),
+        ] {
+            for item in book
+                .get(field)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|item| is_opening_owner_canon_item(item))
+            {
+                let item_id = item
+                    .get(id_key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                record_omitted_contract_field(
+                    &mut omitted_soft_sources,
+                    &book_ref,
+                    &format!("BookPlan.{field}[{item_id}].description"),
+                    "开篇合同描述是 Canon 的语义副本；LONG_FORM HARD 保留必要引用，原描述作为 SOFT 历史摘录省略。",
+                );
+            }
+        }
+    }
+    if (opening && !matches!(maturity, Some("SEED" | "APPROVED")))
+        || (!opening && maturity != Some("APPROVED"))
+    {
+        return Err(format!(
+            "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+        ));
+    }
+
+    let opening_ref_and_payload = if opening {
+        let reference =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                connection,
+                project_id,
+                "OpeningContract",
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let payload =
+            context_contract_payload(connection, project_id, &reference, "CONTRACT", scope)?;
+        Some((reference, payload))
+    } else {
+        None
+    };
+    let intent_ref_and_payload = if opening {
+        None
+    } else {
+        let volume_id = volume_id
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let reference = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+            connection,
+            project_id,
+            "VolumeIntent",
+            volume_id,
+        )
+        .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let payload =
+            context_contract_payload(connection, project_id, &reference, "CONTRACT", scope)?;
+        Some((reference, payload))
+    };
+
+    let mut refs = vec![story_ref.clone(), main_ref.clone(), book_ref.clone()];
+    if let Some((reference, _)) = &opening_ref_and_payload {
+        refs.push(reference.clone());
+    }
+    if let Some((reference, _)) = &intent_ref_and_payload {
+        refs.push(reference.clone());
+    }
+    let mut fields = Vec::new();
+    let mut future_reservation_refs = Vec::new();
+    let mut responsibility_refs = Vec::new();
+    let mut current_scope_refs = Vec::new();
+    let story_core = story
+        .get("storyCore")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+
+    if opening {
+        for key in [
+            "protagonist",
+            "desire",
+            "mechanism",
+            "conflict",
+            "readerPromise",
+        ] {
+            let value = story_core.get(key).ok_or_else(|| {
+                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+            })?;
+            append_goal_contract_field(
+                &mut fields,
+                &story_ref,
+                format!("storyCore.{key}"),
+                Some(value),
+            )?;
+            current_scope_refs.extend(contract_value_source_refs(value));
+        }
+    } else {
+        let mechanism = story_core
+            .get("mechanism")
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        append_goal_contract_field(
+            &mut fields,
+            &story_ref,
+            "storyCore.mechanism",
+            Some(mechanism),
+        )?;
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "storyCore.protagonist",
+            "长期人物定位不是当前卷硬约束；只保留合同引用。",
+        );
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "storyCore.desire",
+            "全书人物方向不是当前卷硬约束；只保留合同引用。",
+        );
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "storyCore.conflict",
+            "全书冲突方向不是当前卷硬约束；只保留合同引用。",
+        );
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "storyCore.readerPromise",
+            "宣传性读者承诺不进入 LONG_FORM HARD。",
+        );
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "storyPromise",
+            "全书故事承诺只保留引用，不进入当前卷 HARD。",
+        );
+    }
+    append_goal_contract_array(
+        &mut fields,
+        &story_ref,
+        "storyCore.worldRules",
+        story_core
+            .get("worldRules")
+            .or_else(|| story.get("worldRules")),
+    )?;
+    if opening {
+        if let Some(world_rules) = story_core
+            .get("worldRules")
+            .or_else(|| story.get("worldRules"))
+        {
+            current_scope_refs.extend(contract_value_source_refs(world_rules));
+        }
+    }
+    append_goal_contract_array(
+        &mut fields,
+        &story_ref,
+        "storyCore.forbiddenReveals",
+        story_core
+            .get("forbiddenReveals")
+            .or_else(|| story.get("forbiddenReveals")),
+    )?;
+    if opening {
+        if let Some(forbidden_reveals) = story_core
+            .get("forbiddenReveals")
+            .or_else(|| story.get("forbiddenReveals"))
+        {
+            current_scope_refs.extend(contract_value_source_refs(forbidden_reveals));
+        }
+    }
+    append_goal_contract_array(
+        &mut fields,
+        &main_ref,
+        "hardRules",
+        Some(
+            main.get("hardRules").ok_or_else(|| {
+                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+            })?,
+        ),
+    )?;
+    if opening {
+        if let Some(hard_rules) = main.get("hardRules") {
+            current_scope_refs.extend(contract_value_source_refs(hard_rules));
+        }
+    }
+    if main.get("softPreferences").is_some() {
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &main_ref,
+            "softPreferences",
+            "主合同软偏好不是 HARD 约束。",
+        );
+    }
+
+    if let Some((reference, opening_contract)) = &opening_ref_and_payload {
+        for key in [
+            "firstChapterGoal",
+            "firstThreeChapterPromise",
+            "forbiddenReveals",
+        ] {
+            let value = opening_contract.get(key).ok_or_else(|| {
+                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+            })?;
+            append_goal_contract_array(
+                &mut fields,
+                reference,
+                &format!("openingContract.{key}"),
+                Some(value),
+            )?;
+            current_scope_refs.extend(contract_value_source_refs(value));
+        }
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &book_ref,
+            "BookPlan.longTermDirection",
+            "开篇阶段使用 OpeningContract；书级长期方向仅保留 BookPlan 引用。",
+        );
+    }
+
+    if let Some((intent_ref, intent)) = &intent_ref_and_payload {
+        let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(
+            connection,
+            project_id,
+            volume_id.unwrap_or_default(),
+        )
+        .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let selected_task_refs = selection.and_then(|selection| selection.task_refs.as_deref());
+        let selected_entity_ids = selection
+            .and_then(|selection| selection.entity_refs.clone())
+            .unwrap_or_else(|| request_strings(request, "entityIds"));
+        let selected_entity_scope = Some(selected_entity_ids.as_slice());
+        let selected_entity_sources = selected_entity_scope
+            .map(|entity_refs| {
+                selected_entity_source_ids(connection, project_id, entity_refs, scope)
+            })
+            .transpose()?;
+        let must_achieve = intent
+            .get("mustAchieve")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        for goal in must_achieve {
+            let goal_id = goal.get("id").and_then(Value::as_str).ok_or_else(|| {
+                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+            })?;
+            let opening_projection =
+                opening_canon_reference_projection(goal, &opening_canon_refs, scope)?;
+            let projected_goal = if let Some(projected) = opening_projection.as_ref() {
+                current_scope_refs.extend(contract_string_array(projected, "refs", scope)?);
+                record_omitted_contract_field(
+                    &mut omitted_soft_sources,
+                    intent_ref,
+                    &format!("volumeIntent.mustAchieve[{goal_id}].description"),
+                    "开篇合同描述是 Canon 的语义副本；HARD 保留条目 ID 和 Canon 引用，描述作为 SOFT 历史摘录省略。",
+                );
+                projected
+            } else {
+                if let Some(description) = goal.get("description").and_then(Value::as_str) {
+                    current_scope_refs.extend(extract_contract_source_refs(description));
+                }
+                goal
+            };
+            append_goal_contract_field(
+                &mut fields,
+                intent_ref,
+                format!("volumeIntent.mustAchieve[{goal_id}]"),
+                Some(projected_goal),
+            )?;
+        }
+        let must_not_break = intent
+            .get("mustNotBreak")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let mut omitted_scoped_constraints = 0usize;
+        for (index, rule) in must_not_break.iter().enumerate() {
+            let rule_id = rule.get("id").and_then(Value::as_str).unwrap_or("unnamed");
+            let opening_projection =
+                opening_canon_reference_projection(rule, &opening_canon_refs, scope)?;
+            let scoped_rule = opening_projection.as_ref().unwrap_or(rule);
+            if !volume_constraint_matches_scope(
+                scoped_rule,
+                selected_task_refs,
+                selected_entity_sources.as_ref(),
+            ) {
+                omitted_scoped_constraints += 1;
+                continue;
+            }
+            let projected_rule = if let Some(projected) = opening_projection.as_ref() {
+                current_scope_refs.extend(contract_string_array(projected, "refs", scope)?);
+                record_omitted_contract_field(
+                    &mut omitted_soft_sources,
+                    intent_ref,
+                    &format!("volumeIntent.mustNotBreak[{rule_id}].description"),
+                    "开篇合同描述是 Canon 的语义副本；HARD 保留条目 ID 和 Canon 引用，描述作为 SOFT 历史摘录省略。",
+                );
+                projected
+            } else {
+                if let Some(description) = rule.get("description").and_then(Value::as_str) {
+                    current_scope_refs.extend(extract_contract_source_refs(description));
+                }
+                rule
+            };
+            append_goal_contract_field(
+                &mut fields,
+                intent_ref,
+                format!("volumeIntent.mustNotBreak[{rule_id}:{index}]"),
+                Some(projected_rule),
+            )?;
+        }
+        if omitted_scoped_constraints > 0 {
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                intent_ref,
+                "VolumeIntent.mustNotBreak.outsideChapterPlanScope",
+                "Only mustNotBreak rules tied to the current ChapterPlan task or entity scope are in HARD; other rules remain in the volume contract.",
+            );
+        }
+        let required_exits = intent
+            .get("requiredExitConditions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        append_goal_contract_array(
+            &mut fields,
+            intent_ref,
+            "volumeIntent.requiredExitConditions",
+            Some(&json!(required_exits)),
+        )?;
+        let intent_reservations = contract_string_array(intent, "futureReservationRefs", scope)?;
+        let intent_responsibilities =
+            contract_string_array(intent, "crossVolumeResponsibilityRefs", scope)?;
+        let book_reservations = book
+            .get("futureReservations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let mut volume_numbers = BTreeMap::new();
+        for item in book_reservations {
+            if let Some(reserved_for_id) = item
+                .get("reservedForVolumeId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+            {
+                let number = crate::repositories::narrative::NarrativeRepository::volume_number(
+                    connection,
+                    project_id,
+                    reserved_for_id,
+                )
+                .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+                .ok_or_else(|| {
+                    format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+                })?;
+                volume_numbers.insert(reserved_for_id.to_owned(), number);
+            }
+        }
+        let (projected_reservations, excluded_other_volume_reservations) =
+            crate::narrative::project_applicable_future_reservations(
+                &book,
+                current_volume_no,
+                &volume_numbers,
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let available_reservations = projected_reservations
+            .into_iter()
+            .map(|reservation| {
+                let reservation_id = reservation
+                    .get("reservationId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+                    })?;
+                Ok((reservation_id.to_owned(), reservation))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        if intent_reservations
+            .iter()
+            .any(|reservation| !available_reservations.contains_key(reservation))
+        {
+            return Err(format!(
+                "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+            ));
+        }
+        let mut selected_reservations = if let Some(selection) = selection {
+            let requested = selection.reservation_refs.clone().unwrap_or_default();
+            if requested
+                .iter()
+                .any(|reservation| !available_reservations.contains_key(reservation))
+            {
+                return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
+            }
+            requested
+        } else {
+            available_reservations.keys().cloned().collect::<Vec<_>>()
+        };
+        selected_reservations.extend(intent_reservations.iter().cloned());
+        selected_reservations.sort();
+        selected_reservations.dedup();
+        for reservation_id in &selected_reservations {
+            let reservation = available_reservations.get(reservation_id).ok_or_else(|| {
+                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+            })?;
+            let prerequisites = contract_string_array(reservation, "prerequisites", scope)?;
+            let mut projected = serde_json::Map::new();
+            projected.insert("reservationId".into(), json!(reservation_id));
+            for field in [
+                "notBeforeVolumeNo",
+                "reservedForVolumeNo",
+                "reservedForVolumeId",
+            ] {
+                if let Some(value) = reservation.get(field).filter(|value| !value.is_null()) {
+                    projected.insert(field.into(), value.clone());
+                }
+            }
+            projected.insert(
+                "mayForeshadow".into(),
+                json!(reservation
+                    .get("mayForeshadow")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| format!(
+                        "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+                    ))?),
+            );
+            projected.insert(
+                "mayReveal".into(),
+                json!(reservation
+                    .get("mayReveal")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| format!(
+                        "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+                    ))?),
+            );
+            projected.insert("prerequisites".into(), json!(prerequisites));
+            append_goal_contract_field(
+                &mut fields,
+                &book_ref,
+                format!("bookPlan.futureReservations[{reservation_id}]"),
+                Some(&Value::Object(projected)),
+            )?;
+        }
+        future_reservation_refs = selected_reservations;
+        responsibility_refs = selection
+            .and_then(|selection| selection.responsibility_refs.clone())
+            .unwrap_or_else(|| intent_responsibilities.clone());
+        if intent_responsibilities
+            .iter()
+            .any(|reference| !responsibility_refs.contains(reference))
+        {
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                intent_ref,
+                "VolumeIntent.crossVolumeResponsibilityRefs.unselected",
+                "本章 Plan 未引用的卷内承接责任仅保留当前卷合同引用。",
+            );
+        }
+        append_goal_contract_field(
+            &mut fields,
+            intent_ref,
+            "volumeIntent.crossVolumeResponsibilityRefs",
+            Some(&json!(responsibility_refs)),
+        )?;
+        if let Some(values) = intent.get("sourceCanonRefs") {
+            let source_refs = contract_string_array(intent, "sourceCanonRefs", scope)?;
+            if let Some(selected_sources) = selected_entity_sources.as_ref() {
+                current_scope_refs.extend(
+                    source_refs
+                        .into_iter()
+                        .filter(|source_ref| selected_sources.contains(source_ref)),
+                );
+            } else {
+                current_scope_refs.extend(source_refs);
+            }
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                intent_ref,
+                "volumeIntent.sourceCanonRefs",
+                "保留与当前卷硬约束相关的源引用；不把全书历史状态快照复制到 HARD。",
+            );
+            let _ = values;
+        }
+        if intent.get("sourceEvidenceRefs").is_some() {
+            current_scope_refs.extend(contract_string_array(intent, "sourceEvidenceRefs", scope)?);
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                intent_ref,
+                "volumeIntent.sourceEvidenceRefs",
+                "仅在 HARD 中保留精确证据范围引用，不复制签约或开篇证据正文。",
+            );
+        }
+        if excluded_other_volume_reservations > 0 {
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                &book_ref,
+                "BookPlan.futureReservations.otherVolumes",
+                "其它卷的预留内容不属于当前卷 HARD。",
+            );
+        }
+        for (field, reason) in [
+            ("volumeFunction", "卷宣传性/说明性描述不进入 HARD。"),
+            ("entryConditions", "规划准入说明不进入当前章 HARD。"),
+            ("targetChapterRange", "卷级容量范围不是当前章内容约束。"),
+            ("targetWordRange", "卷级篇幅范围不是当前章内容约束。"),
+        ] {
+            if intent.get(field).is_some() {
+                record_omitted_contract_field(
+                    &mut omitted_soft_sources,
+                    intent_ref,
+                    &format!("VolumeIntent.{field}"),
+                    reason,
+                );
+            }
+        }
+        for field in [
+            "storyPromise",
+            "protagonistMacroDirection",
+            "endingBoundary",
+        ] {
+            record_omitted_contract_field(
+                &mut omitted_soft_sources,
+                &book_ref,
+                &format!("BookPlan.{field}"),
+                "书级长期方向不属于当前卷 HARD。",
+            );
+        }
+        for field in [
+            "mustAchieve",
+            "mustNotBreak",
+            "relationshipMacroDirections",
+            "majorMysteryGoals",
+            "volumeIntentSeeds",
+            "openingCanonRefs",
+            "signingEvidenceRefs",
+            "openingActualStateDigest",
+            "openingHypotheses",
+        ] {
+            if book.get(field).is_some() {
+                record_omitted_contract_field(
+                    &mut omitted_soft_sources,
+                    &book_ref,
+                    &format!("BookPlan.{field}"),
+                    "LONG_FORM 仅使用当前卷适用的 FutureReservation；其它书级内容只保留引用。",
+                );
+            }
+        }
+    }
+
+    refs.sort_by(|a, b| a.artifact_id.cmp(&b.artifact_id));
+    refs.dedup_by(|a, b| a.artifact_id == b.artifact_id && a.version == b.version);
+    fields.sort_by(|a, b| {
+        a.source_ref
+            .artifact_id
+            .cmp(&b.source_ref.artifact_id)
+            .then_with(|| a.field_path.cmp(&b.field_path))
+            .then_with(|| {
+                serde_json::to_string(&a.value)
+                    .unwrap_or_default()
+                    .cmp(&serde_json::to_string(&b.value).unwrap_or_default())
+            })
+    });
+    current_scope_refs.sort();
+    current_scope_refs.dedup();
+    Ok(GoalContractContext {
+        refs,
+        fields,
+        omitted_soft_sources,
+        future_reservation_refs,
+        responsibility_refs,
+        current_scope_refs,
+    })
+}
+
 pub(crate) fn context_input_from_authority(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
     project_id: &str,
     revision: i64,
 ) -> Result<crate::narrative::ContextCompilerInput, String> {
-    // A normal LONG_FORM UI request does not need to hand-maintain an
-    // entity allow-list.  Derive a bounded set from the immediately previous
-    // committed chapters so the compiler cannot silently produce an empty
-    // authority context after Reality changes.
     let scope = context_scope(request, project_id);
-    let mut derived_entities_truncated = false;
-    let request_with_scope;
-    let request = if request.get("executionMode").and_then(Value::as_str) == Some("LONG_FORM")
-        && request_strings(request, "entityIds").is_empty()
-    {
-        if let (Some(volume_id), Some(chapter_id)) = (
-            request.get("volumeId").and_then(Value::as_str),
-            request.get("chapterId").and_then(Value::as_str),
-        ) {
-            let (entity_ids, was_truncated) = map_context_query(
-                crate::repositories::narrative::NarrativeRepository::recent_chapter_entity_ids_bounded(
-                    connection, project_id, volume_id, chapter_id, 100,
-                ),
-                ContextHardSource::Canon,
-                &scope,
-            )?;
-            derived_entities_truncated = was_truncated;
-            request_with_scope = {
-                let mut value = request.clone();
-                value["entityIds"] = json!(entity_ids);
-                value
-            };
-            &request_with_scope
-        } else {
-            request
+    let scope_selection = context_scope_selection(request)?;
+    let volume_id = request
+        .get("volumeId")
+        .or_else(|| request.get("currentVolumeId"))
+        .and_then(Value::as_str);
+    let opening_bootstrap =
+        request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
+    let goal_context = goal_contract_context_for_request(
+        connection,
+        request,
+        project_id,
+        volume_id,
+        scope_selection.as_ref(),
+        &scope,
+    )?;
+    let mut request_scope = request.clone();
+    if opening_bootstrap && request_strings(&request_scope, "entityIds").is_empty() {
+        let volume_id = volume_id
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CANON|scope={scope}"))?;
+        let chapter_id = request_scope
+            .get("chapterId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CANON|scope={scope}"))?;
+        let (recent_entities, truncated) = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::recent_chapter_entity_ids_bounded(
+                connection, project_id, volume_id, chapter_id, 100,
+            ),
+            ContextHardSource::Canon,
+            &scope,
+        )?;
+        if truncated {
+            return Err(format!(
+                "CONTEXT_HARD_INCOMPLETE|sources=CANON|scope={scope}"
+            ));
         }
-    } else {
-        request
-    };
-    if let Some(context_ref) = request.get("contextManifestRef").and_then(Value::as_str) {
+        request_scope["entityIds"] = json!(recent_entities);
+    }
+    if let Some(entity_refs) = scope_selection
+        .as_ref()
+        .and_then(|selection| selection.entity_refs.as_ref())
+    {
+        request_scope["entityIds"] = json!(entity_refs);
+    }
+    let mut references = request_strings(&request_scope, "references");
+    for refs in [
+        scope_selection
+            .as_ref()
+            .and_then(|selection| selection.task_refs.as_ref()),
+        scope_selection
+            .as_ref()
+            .and_then(|selection| selection.responsibility_refs.as_ref()),
+        scope_selection
+            .as_ref()
+            .and_then(|selection| selection.reservation_refs.as_ref()),
+        Some(&goal_context.responsibility_refs),
+        Some(&goal_context.future_reservation_refs),
+        Some(&goal_context.current_scope_refs),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for reference in refs {
+            references.push(reference.clone());
+            if let Some(obligation_ref) = reference.strip_prefix("thread:") {
+                references.push(obligation_ref.to_owned());
+            }
+        }
+    }
+    references.sort();
+    references.dedup();
+    request_scope["references"] = json!(references);
+    if let Some(context_ref) = request_scope
+        .get("contextManifestRef")
+        .and_then(Value::as_str)
+    {
         if crate::repositories::change_retcon::has_pending_stale_target(
             connection,
             project_id,
@@ -1569,33 +2763,62 @@ pub(crate) fn context_input_from_authority(
             return Err("CONTEXT_STALE:RECOMPILE_REQUIRED".into());
         }
     }
-    let state = narrative_state_from_request(connection, request, project_id)?;
-    let (threads, continuity_truncated_sources) =
-        continuity_from_request_bounded(connection, request, project_id)?;
-    let volume_id = request
-        .get("volumeId")
-        .or_else(|| request.get("currentVolumeId"))
-        .and_then(Value::as_str);
-    let (goal_contract_refs, contracts_truncated) = if let Some(volume_id) = volume_id {
-        map_context_query(
-            crate::repositories::narrative::NarrativeRepository::goal_contract_refs_for_volume_bounded(
-                connection, project_id, volume_id, 100,
-            ),
-            ContextHardSource::Contract,
-            &scope,
-        )?
-    } else {
-        map_context_query(
-            crate::repositories::narrative::NarrativeRepository::goal_contract_refs_bounded(
-                connection, project_id, 100,
-            ),
-            ContextHardSource::Contract,
-            &scope,
-        )?
-    };
-    let opening_bootstrap =
-        request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
-    let (task_states, task_truncated) = if let Some(volume_id) =
+    let mut state = narrative_state_from_request(connection, &request_scope, project_id)?;
+    let (mut threads, mut continuity_truncated_sources) =
+        continuity_from_request_bounded(connection, &request_scope, project_id)?;
+    let participant_entities = state
+        .active_responsibilities
+        .iter()
+        .flat_map(|responsibility| responsibility.participant_entities.iter().cloned())
+        .chain(
+            threads
+                .iter()
+                .flat_map(|thread| thread.participant_entities.iter().cloned()),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut entity_ids = request_strings(&request_scope, "entityIds")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if scope_selection
+        .as_ref()
+        .and_then(|selection| selection.entity_refs.as_ref())
+        .is_some_and(|selected| participant_entities.iter().any(|id| !selected.contains(id)))
+    {
+        return Err(
+            "CONTEXT_SCOPE_SELECTION_INVALID|reason=RESPONSIBILITY_PARTICIPANT_REQUIRED".into(),
+        );
+    }
+    let missing_participants = participant_entities
+        .iter()
+        .filter(|entity_id| !entity_ids.contains(*entity_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_participants.is_empty() {
+        entity_ids.extend(missing_participants);
+        request_scope["entityIds"] = json!(entity_ids);
+        state = narrative_state_from_request(connection, &request_scope, project_id)?;
+        let updated = continuity_from_request_bounded(connection, &request_scope, project_id)?;
+        threads = updated.0;
+        continuity_truncated_sources = updated.1;
+    }
+    for thread_ref in &goal_context.responsibility_refs {
+        let matches_thread = threads.iter().any(|thread| {
+            thread.thread_id == *thread_ref
+                || thread.thread_id.strip_prefix("thread:") == Some(thread_ref.as_str())
+                || thread_ref.strip_prefix("thread:") == Some(thread.thread_id.as_str())
+        });
+        if !matches_thread {
+            return Err(format!(
+                "CONTEXT_SOURCE_UNAVAILABLE|source=CONTINUITY|scope={scope}"
+            ));
+        }
+    }
+    let request = &request_scope;
+    let future_reservation_refs = goal_context.future_reservation_refs;
+    let mut omitted_soft_sources = goal_context.omitted_soft_sources;
+    let goal_contract_refs = goal_context.refs;
+    let goal_contract_fields = goal_context.fields;
+    let (route_task_refs, route_task_contracts) = if let Some(volume_id) =
         volume_id.filter(|_| !opening_bootstrap)
     {
         let route = map_context_query(
@@ -1618,99 +2841,97 @@ pub(crate) fn context_input_from_authority(
                 .get("tasks")
                 .and_then(Value::as_array)
                 .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
-            if tasks.len() > 100 {
-                // Reject the aggregate route scope before reading any Task Reality rows.
-                (Vec::new(), true)
-            } else {
-                let refs = tasks
-                    .iter()
-                    .map(|item| {
-                        item.get("taskId")
-                            .and_then(Value::as_str)
-                            .filter(|task_id| !task_id.trim().is_empty())
-                            .ok_or_else(|| {
-                                format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let states = map_context_query(
-                    crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
-                        connection, project_id, &refs, 100,
-                    ),
-                    ContextHardSource::Task,
-                    &scope,
-                )?;
-                (states, false)
-            }
+            let references = tasks
+                .iter()
+                .map(|item| {
+                    item.get("taskId")
+                        .and_then(Value::as_str)
+                        .filter(|task_id| !task_id.trim().is_empty())
+                        .map(ToOwned::to_owned)
+                        .ok_or_else(|| {
+                            format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let contracts = tasks
+                .iter()
+                .filter_map(|item| {
+                    item.get("taskId")
+                        .and_then(Value::as_str)
+                        .map(|task_id| (task_id.to_owned(), item.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            (references, contracts)
         } else {
-            (Vec::new(), false)
+            (Vec::new(), BTreeMap::new())
         }
     } else {
-        map_context_query(
-            crate::repositories::narrative::NarrativeRepository::task_states_bounded(
-                connection, project_id, 100,
-            ),
-            ContextHardSource::Task,
-            &scope,
-        )?
+        (Vec::new(), BTreeMap::new())
     };
+    let explicit_task_scope = scope_selection
+        .as_ref()
+        .and_then(|selection| selection.task_refs.as_ref())
+        .is_some();
+    if route_task_refs.len() > 100 && !explicit_task_scope {
+        return Err(format!(
+            "CONTEXT_HARD_INCOMPLETE|sources=TASK|scope={scope}"
+        ));
+    }
+    let plan_task_refs = scope_selection
+        .as_ref()
+        .and_then(|selection| selection.task_refs.clone())
+        .unwrap_or_else(|| route_task_refs.iter().take(100).cloned().collect());
+    if plan_task_refs.len() > 100
+        || plan_task_refs
+            .iter()
+            .any(|task_ref| !route_task_refs.contains(task_ref))
+    {
+        return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
+    }
+    let plan_task_contexts = plan_task_refs
+        .iter()
+        .map(|task_ref| {
+            route_task_contracts
+                .get(task_ref)
+                .map(|contract| crate::narrative::ContextPlanTask {
+                    task_ref: task_ref.clone(),
+                    contract: hard_plan_task_projection(contract, &goal_contract_fields),
+                })
+                .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let task_ref_slices = plan_task_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let task_states = map_context_query(
+        crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+            connection,
+            project_id,
+            &task_ref_slices,
+            100,
+        ),
+        ContextHardSource::Task,
+        &scope,
+    )?;
     let active_task_refs = task_states
-        .into_iter()
+        .iter()
         .filter(|task| {
             matches!(
                 task.value.get("status").and_then(Value::as_str),
                 Some("ACTIVE") | Some("BLOCKED")
             )
         })
-        .map(|task| task.state_id)
+        .map(|task| task.state_id.clone())
         .collect();
-    let mut future_reservation_refs = Vec::new();
-    let volume_intent = if let Some(volume_id) = volume_id {
-        map_context_query(
-            crate::repositories::narrative::NarrativeRepository::artifact_payload(
-                connection,
-                project_id,
-                "VolumeIntent",
-                volume_id,
-            ),
-            ContextHardSource::Reservation,
-            &scope,
-        )?
-    } else {
-        None
-    };
-    for payload in [
-        map_context_query(
-            crate::repositories::narrative::NarrativeRepository::latest_artifact_payload(
-                connection, project_id, "BookPlan",
-            ),
-            ContextHardSource::Reservation,
-            &scope,
-        )?,
-        volume_intent,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Some(items) = payload
-            .get("futureReservations")
-            .or_else(|| payload.get("futureReservationRefs"))
-            .and_then(Value::as_array)
-        {
-            future_reservation_refs.extend(items.iter().filter_map(|item| {
-                item.get("reservationId")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.as_str())
-                    .map(ToOwned::to_owned)
-            }));
-        }
-    }
+    let explicit_evidence_refs = request_strings(request, "references");
     let authority_refs = state
         .source_refs
         .iter()
         .map(|item| item.ref_.as_str())
+        .chain(explicit_evidence_refs.iter().map(String::as_str))
         .collect::<Vec<_>>();
-    let (mut evidence, mut evidence_truncated) = map_context_query(
+    let (evidence, evidence_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::evidence_for_refs_bounded(
             connection,
             project_id,
@@ -1766,36 +2987,24 @@ pub(crate) fn context_input_from_authority(
             quote: None,
         });
     }
-    let omitted_soft_sources = if request
+    if request
         .get("includeSoftSources")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        vec![crate::generated::types::OmittedSource {
+        omitted_soft_sources.push(crate::generated::types::OmittedSource {
             source_ref: crate::generated::types::SourceRef {
                 kind: "soft-cache".into(),
                 ref_: "summary".into(),
             },
             reason: "soft cache is excluded from HARD digest".into(),
-        }]
-    } else {
-        Vec::new()
-    };
-    let mut state = state;
-    if derived_entities_truncated {
-        state.mark_truncated(ContextHardSource::Canon);
+        });
     }
     for source in continuity_truncated_sources {
         state.mark_truncated(source);
     }
-    for (source, truncated) in [
-        (ContextHardSource::Contract, contracts_truncated),
-        (ContextHardSource::Task, task_truncated),
-        (ContextHardSource::Evidence, evidence_truncated),
-    ] {
-        if truncated {
-            state.mark_truncated(source);
-        }
+    if evidence_truncated {
+        state.mark_truncated(ContextHardSource::Evidence);
     }
     let mut input = crate::narrative::ContextCompilerInput {
         execution_mode: request
@@ -1805,8 +3014,12 @@ pub(crate) fn context_input_from_authority(
             .into(),
         project_revision: revision,
         goal_contract_refs,
+        goal_contract_fields,
         state,
         continuity_threads: threads,
+        plan_task_refs,
+        plan_task_contexts,
+        task_states,
         active_task_refs,
         future_reservation_refs,
         selected_evidence,
@@ -5362,7 +6575,10 @@ fn compile_current_chapter_plan(
     if crate::planning::validate_volume_intent_semantics(&intent_payload).is_err() {
         return Err("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".into());
     }
-    if context_input.state.source_refs.is_empty() {
+    if context_input.state.source_refs.is_empty()
+        && context_input.goal_contract_fields.is_empty()
+        && context_input.plan_task_refs.is_empty()
+    {
         return Err("B04_RUNTIME_STATE_REQUIRED".into());
     }
     let context_command_id = format!("{command_id}:context");

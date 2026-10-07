@@ -41,12 +41,13 @@ impl ProductionModelGateway for PlanningGateway {
             "compiledFromStateDigest":input["compiledFromStateDigest"],
             "contextManifestRef":input["contextManifestRef"],
             "chapterGoal":"基于最新事实推进调查",
-            "activeTaskRefs":[],
+            "activeTaskRefs":input["authorityContext"]["planTaskRefs"],
             "continuityActions":[],
             "requiredStateOutcomes":[],
             "forbiddenTransitions":[],
             "knowledgeBoundaries":[],
-            "reservationRefs":[],
+            "reservationRefs":input["authorityContext"]["futureReservationRefs"],
+            "entityRefs":input["authorityContext"]["state"]["bounds"]["entityIds"],
             "sceneExecution":[],
             "horizonPreview":[
                 {"slotNo":1,"objective":"核对新证据","tentative":true},
@@ -202,7 +203,7 @@ fn seed_authority_with_options(
         "endingBoundary":format!("{direction}的完结边界"),
         "mustAchieve":[{"id":format!("goal:{direction}"),"description":format!("{direction}的全书目标")}],
         "mustNotBreak":[{"id":format!("rule:{direction}"),"description":format!("{direction}不得破坏的规则")}],
-        "futureReservations":[{"reservationId":format!("reservation:{direction}"),"description":format!("{direction}的后续预留内容")}]
+        "futureReservations":[{"reservationId":format!("reservation:{direction}"),"description":format!("{direction}的后续预留内容"),"reservedForVolumeNo":3,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":false,"mayReveal":false,"authorityLevel":"B"}]
     });
     let book_hash = insert_artifact(
         connection,
@@ -348,7 +349,7 @@ fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
                 "projectId":project_id,
                 "expectedRevision":0,
                 "requestedAt":NOW,
-                "payload":{"chapterId":chapter_id}
+                "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:b04:lead"]}}
             }),
         )
         .unwrap();
@@ -362,25 +363,58 @@ fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
     let fields_b = inputs[1]["authorityContext"]["goalContractFields"]
         .as_array()
         .expect("PLAN input must contain expanded HARD Goal Contract fields");
-    let protagonist_a = fields_a
+    let mechanism_a = fields_a
         .iter()
-        .find(|field| field["fieldPath"] == "storyCore.protagonist")
+        .find(|field| field["fieldPath"] == "storyCore.mechanism")
         .unwrap();
-    let protagonist_b = fields_b
+    let mechanism_b = fields_b
         .iter()
-        .find(|field| field["fieldPath"] == "storyCore.protagonist")
+        .find(|field| field["fieldPath"] == "storyCore.mechanism")
         .unwrap();
-    assert_eq!(protagonist_a["value"], "方向甲的主角");
-    assert_eq!(protagonist_b["value"], "方向乙的主角");
-    assert_eq!(protagonist_a["sourceRef"]["artifactId"], "authority:story");
-    assert_eq!(protagonist_a["sourceRef"]["version"], 1);
+    assert_eq!(mechanism_a["value"]["constraint"], "方向甲的机制边界");
+    assert_eq!(mechanism_b["value"]["constraint"], "方向乙的机制边界");
+    assert_eq!(mechanism_a["sourceRef"]["artifactId"], "authority:story");
+    assert_eq!(mechanism_a["sourceRef"]["version"], 1);
     assert_ne!(
-        protagonist_a["sourceRef"]["payloadHash"],
-        protagonist_b["sourceRef"]["payloadHash"]
+        mechanism_a["sourceRef"]["payloadHash"],
+        mechanism_b["sourceRef"]["payloadHash"]
     );
-    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustAchieve.0"));
-    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.mustNotBreak.0"));
-    assert!(fields_a.iter().any(|field| field["fieldPath"] == "volumeIntent.requiredExitConditions.0"));
+    assert!(fields_a.iter().any(|field| field["fieldPath"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("volumeIntent.mustAchieve["))
+        && field["value"]["constraint"]
+            .as_str()
+            .is_some_and(|value| value.contains("完成一项可验证调查"))));
+    assert!(fields_a.iter().any(|field| field["fieldPath"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("volumeIntent.mustNotBreak["))
+        && field["value"]["constraint"]
+            .as_str()
+            .is_some_and(|value| value.contains("不得违背当前事实"))));
+    assert!(fields_a.iter().any(|field| field["fieldPath"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("volumeIntent.requiredExitConditions["))
+        && field["value"]["kind"] == "TASK_SATISFIED"));
+    assert!(!fields_a.iter().any(|field| {
+        field["fieldPath"].as_str().is_some_and(|path| {
+            path.starts_with("bookPlan.mustAchieve")
+                || path.starts_with("bookPlan.mustNotBreak")
+                || path.starts_with("bookPlan.majorMysteryGoals")
+                || path.starts_with("openingContract.")
+        })
+    }));
+    assert_eq!(
+        inputs[0]["authorityContext"]["planTaskContexts"][0]["contract"]["objectiveContractRef"]
+            ["fieldPath"],
+        "volumeIntent.mustAchieve[goal:b04]"
+    );
+    assert_eq!(
+        inputs[0]["volumePlanRoute"]["tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -722,10 +756,18 @@ fn b_r2_01_soft_omission_keeps_reason_and_allows_complete_context() {
         json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:b04:lead"],"references":[],"includeSoftSources":true}),
     )
     .unwrap();
-    assert_eq!(
-        manifest["omittedSoftSources"][0]["reason"],
-        "soft cache is excluded from HARD digest"
-    );
+    assert!(manifest["omittedSoftSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["reason"] == "soft cache is excluded from HARD digest"));
+    assert!(manifest["omittedSoftSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["sourceRef"]["ref"]
+            .as_str()
+            .is_some_and(|reference| { reference.contains("BookPlan.longTermDirection") })));
 }
 
 #[test]

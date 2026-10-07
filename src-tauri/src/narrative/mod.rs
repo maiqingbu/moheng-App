@@ -11,6 +11,7 @@ pub use runtime::{
     PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
     CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, CONTEXT_HARD_TOKEN_LIMIT,
 };
+pub use runtime::{project_applicable_future_reservations, ContextPlanTask, GoalContractField};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadPromotionDecision {
