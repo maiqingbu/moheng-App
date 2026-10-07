@@ -1006,16 +1006,17 @@ fn current_authority_digest(
     connection: &libsql_rusqlite::Connection,
     request: &Value,
     project_id: &str,
-    chapter_id: &str,
-    volume_id: &str,
+    chapter_scope: (&str, &str),
     execution_mode: &str,
+    chapter_plan: &Value,
     revision: i64,
 ) -> Result<String, String> {
+    let (chapter_id, volume_id) = chapter_scope;
+    let mut authority =
+        authority_request(request, project_id, chapter_id, volume_id, execution_mode);
+    authority["chapterPlan"] = chapter_plan.clone();
     let input = crate::commands::context_input_from_authority(
-        connection,
-        &authority_request(request, project_id, chapter_id, volume_id, execution_mode),
-        project_id,
-        revision,
+        connection, &authority, project_id, revision,
     )?;
     crate::narrative::relevant_state_digest(&input)
 }
@@ -1039,9 +1040,9 @@ fn validate_plan_is_current(
         connection,
         request,
         project_id,
-        chapter_id,
-        volume_id,
+        (chapter_id, volume_id),
         execution_mode,
+        plan,
         revision,
     )?;
     let compiled_revision = plan
@@ -1549,15 +1550,17 @@ fn run_chapter_production_inner(
             )
             .map_err(|e| format!("B08_PLAN_CONTEXT_REF_INVALID:{e}"))?;
             let context_payload = load_artifact_payload(connection, &project_id, &context_ref)?;
+            let mut chapter_authority = authority_request(
+                request,
+                &project_id,
+                &chapter_id,
+                &volume_id,
+                execution_mode,
+            );
+            chapter_authority["chapterPlan"] = plan_payload.clone();
             let authority_input = crate::commands::context_input_from_authority(
                 connection,
-                &authority_request(
-                    request,
-                    &project_id,
-                    &chapter_id,
-                    &volume_id,
-                    execution_mode,
-                ),
+                &chapter_authority,
                 &project_id,
                 current_revision,
             )?;
@@ -1591,9 +1594,9 @@ fn run_chapter_production_inner(
         connection,
         request,
         &project_id,
-        &chapter_id,
-        &volume_id,
+        (&chapter_id, &volume_id),
         execution_mode,
+        &plan_payload,
         current_revision,
     )?;
     // B10 is an enrichment/quality layer on the existing B08 composition

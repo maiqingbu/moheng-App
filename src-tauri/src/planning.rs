@@ -1677,7 +1677,8 @@ fn validate_chapter_plan_change_semantics(
             "volumeId":volume_id,
             "currentVolumeId":volume_id,
             "currentChapter":current_chapter_no,
-            "executionMode":"LONG_FORM"
+            "executionMode":"LONG_FORM",
+            "chapterPlan":candidate
         }),
         project_id,
         project_revision,
@@ -2449,9 +2450,11 @@ pub fn recompile_chapter_plan_owner(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let mut context_authority = authority_request.clone();
+    context_authority["chapterPlan"] = plan.clone();
     let context = crate::commands::context_input_from_authority(
         connection,
-        authority_request,
+        &context_authority,
         project_id,
         expected_revision,
     )?;

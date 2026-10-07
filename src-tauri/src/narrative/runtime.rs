@@ -551,6 +551,7 @@ struct ContextDigestConfig {
     digest_algorithm_version: &'static str,
     hard_budget_policy_version: &'static str,
     token_estimator_version: &'static str,
+    contract_classification_version: &'static str,
     hard_token_limit: i64,
     hard_serialized_byte_limit: usize,
 }
@@ -560,6 +561,7 @@ const CURRENT_CONTEXT_DIGEST_CONFIG: ContextDigestConfig = ContextDigestConfig {
     digest_algorithm_version: CONTEXT_DIGEST_ALGORITHM_VERSION,
     hard_budget_policy_version: CONTEXT_HARD_BUDGET_POLICY_VERSION,
     token_estimator_version: CONTEXT_TOKEN_ESTIMATOR_VERSION,
+    contract_classification_version: CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION,
     hard_token_limit: CONTEXT_HARD_TOKEN_LIMIT,
     hard_serialized_byte_limit: CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
 };
@@ -902,13 +904,27 @@ fn relevant_state_digest_with_config(
     events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     let mut threads = input.continuity_threads.clone();
     threads.sort_by(|a, b| a.thread_id.cmp(&b.thread_id));
+    let mut plan_task_refs = input.plan_task_refs.clone();
+    plan_task_refs.sort();
+    let mut plan_task_contexts = input.plan_task_contexts.clone();
+    plan_task_contexts.sort_by(|a, b| a.task_ref.cmp(&b.task_ref));
+    let mut task_states = input.task_states.clone();
+    task_states.sort_by(|a, b| a.state_id.cmp(&b.state_id));
     let mut task_refs = input.active_task_refs.clone();
     task_refs.sort();
     let mut entity_ids = input.state.bounds.entity_ids.clone();
     entity_ids.sort();
     let mut future_reservation_refs = input.future_reservation_refs.clone();
     future_reservation_refs.sort();
+    let mut selected_evidence = input.selected_evidence.clone();
+    selected_evidence.sort_by(|a, b| {
+        a.artifact_id
+            .cmp(&b.artifact_id)
+            .then_with(|| a.range_start.cmp(&b.range_start))
+            .then_with(|| a.range_end.cmp(&b.range_end))
+    });
     sha256_canonical(&json!({
+        "executionMode":input.execution_mode,
         "contextCompilerVersion":config.compiler_version,
         "digestAlgorithmVersion":config.digest_algorithm_version,
         "hardBudgetPolicy":{
@@ -917,15 +933,26 @@ fn relevant_state_digest_with_config(
             "tokenLimit":config.hard_token_limit,
             "serializedByteLimit":config.hard_serialized_byte_limit
         },
+        "hardContractClassification":{
+            "version":config.contract_classification_version,
+            "openingFields":OPENING_HARD_CONTRACT_FIELDS,
+            "longFormFields":LONG_FORM_HARD_CONTRACT_FIELDS,
+            "longFormOpeningCanonReferenceRules":LONG_FORM_OPENING_CANON_REFERENCE_RULES
+        },
         "facts":facts,
         "relations":relations,
         "knowledge":knowledge,
         "events":events,
         "threads":threads,
+        "planTaskRefs":plan_task_refs,
+        "planTaskContexts":plan_task_contexts,
+        "taskStates":task_states,
         "activeTaskRefs":task_refs,
         "entityRefs":entity_ids,
         "goalContractRefs":goal_contract_refs,
-        "futureReservationRefs":future_reservation_refs
+        "goalContractFields":goal_contract_fields,
+        "futureReservationRefs":future_reservation_refs,
+        "selectedEvidence":selected_evidence
     }))
     .map_err(|error| error.to_string())
 }
@@ -1222,10 +1249,31 @@ mod b2_context_tests {
         let input = empty_input();
         let original = relevant_state_digest(&input).unwrap();
         let next_policy = ContextDigestConfig {
-            hard_budget_policy_version: "b06-hard-budget.r2",
+            hard_budget_policy_version: "b06-hard-budget.r3",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let updated = relevant_state_digest_with_config(&input, next_policy).unwrap();
         assert_ne!(original, updated);
+    }
+
+    #[test]
+    fn rv14_digest_versions_contract_classification_and_compiler_rules() {
+        let input = empty_input();
+        let original = relevant_state_digest(&input).unwrap();
+        assert_eq!(original, relevant_state_digest(&input).unwrap());
+
+        let next_classification = ContextDigestConfig {
+            contract_classification_version: "b06-contract-hard-fields.r3",
+            ..CURRENT_CONTEXT_DIGEST_CONFIG
+        };
+        let reclassified = relevant_state_digest_with_config(&input, next_classification).unwrap();
+        assert_ne!(original, reclassified);
+
+        let next_compiler = ContextDigestConfig {
+            compiler_version: "b06-context-compiler.r5",
+            ..CURRENT_CONTEXT_DIGEST_CONFIG
+        };
+        let recompiled = relevant_state_digest_with_config(&input, next_compiler).unwrap();
+        assert_ne!(original, recompiled);
     }
 }
