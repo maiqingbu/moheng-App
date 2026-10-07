@@ -72,7 +72,11 @@ impl ProductionModelGateway for RecordingGateway {
         let active_task_progress = input
             .pointer("/chapterPlan/activeTaskRefs")
             .and_then(Value::as_array)
-            .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some("task:actual")));
+            .is_some_and(|tasks| {
+                tasks
+                    .iter()
+                    .any(|task| task.as_str() == Some("task:actual"))
+            });
         let task_progress_candidates = if active_task_progress {
             json!([{
                 "taskId":"task:actual",
@@ -2009,8 +2013,8 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
                 "SELECT status FROM chapters WHERE chapter_id=?1",
                 [&chapter_id],
                 |row| row.get(0)
-        )
-        .unwrap(),
+            )
+            .unwrap(),
         "COMMITTED"
     );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'", [project_id], |row| row.get(0)).unwrap(), 1);
@@ -2068,7 +2072,10 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         AppPaths::new(temp.path()),
         Arc::new(TaskProgressCandidateGateway),
     );
-    let connection = state.manager.create(project_id, "B08 opening", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B08 opening", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, project_id);
     assert_eq!(
         connection
@@ -2095,7 +2102,10 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
     }))
     .unwrap_err();
-    assert!(error.contains("B08_TASK_SCOPE_VIOLATION"), "actual error: {error}");
+    assert!(
+        error.contains("B08_TASK_SCOPE_VIOLATION"),
+        "actual error: {error}"
+    );
 
     let connection = state.manager.open(project_id, "B08 opening", NOW).unwrap();
     assert_eq!(
