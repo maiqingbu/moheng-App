@@ -777,7 +777,7 @@ fn seed_b08_goal_contracts(
             "volumeFunction":"推进当前章节任务",
             "entryConditions":[],
             "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
-            "mustNotBreak":[],
+            "mustNotBreak":[{"id":"rule:b08:actual","description":"不得改变已确认的开篇事实"}],
             "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
             "futureReservationRefs":[],
             "crossVolumeResponsibilityRefs":[],
@@ -785,7 +785,7 @@ fn seed_b08_goal_contracts(
             "targetWordRange":{"preferred":1000},
             "sourceBookPlanRef":book_ref,
             "compiledFromProjectRevision":0,
-            "sourceEvidenceRefs":[],
+            "sourceEvidenceRefs":["fact:actual:seed"],
             "semanticDigest":"0".repeat(64)
         }),
     );
