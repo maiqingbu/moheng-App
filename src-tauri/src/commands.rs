@@ -2004,23 +2004,27 @@ fn goal_contract_context_for_request(
             "StoryConstitution",
         )
         .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        .ok_or_else(|| {
+            format!("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope={scope}")
+        })?;
     let main_ref = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
         connection,
         project_id,
         "MainContract",
     )
     .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+    .ok_or_else(|| format!("GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED|scope={scope}"))?;
     let book_ref = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
         connection, project_id, "BookPlan",
     )
     .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-    .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+    .ok_or_else(|| format!("GOAL_CONTRACT_BOOK_PLAN_REQUIRED|scope={scope}"))?;
 
     let story = context_contract_payload(connection, project_id, &story_ref, "CONTRACT", scope)?;
     let main = context_contract_payload(connection, project_id, &main_ref, "CONTRACT", scope)?;
     let book = context_contract_payload(connection, project_id, &book_ref, "CONTRACT", scope)?;
+    crate::generated::validators::validate_book_plan_r1(&book)
+        .map_err(|error| format!("GOAL_CONTRACT_BOOK_PLAN_INVALID|{error}"))?;
     let maturity = book.get("planningMaturity").and_then(Value::as_str);
     let opening_canon_refs = if book.get("openingCanonRefs").is_some() {
         contract_string_array(&book, "openingCanonRefs", scope)?
@@ -2057,11 +2061,14 @@ fn goal_contract_context_for_request(
             }
         }
     }
-    if (opening && !matches!(maturity, Some("SEED" | "APPROVED")))
-        || (!opening && maturity != Some("APPROVED"))
-    {
+    if opening && !matches!(maturity, Some("SEED" | "APPROVED")) {
         return Err(format!(
-            "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
+            "GOAL_CONTRACT_BOOK_PLAN_SEED_OR_APPROVED_REQUIRED|scope={scope}"
+        ));
+    }
+    if !opening && maturity != Some("APPROVED") {
+        return Err(format!(
+            "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED|scope={scope}"
         ));
     }
 
@@ -2073,9 +2080,28 @@ fn goal_contract_context_for_request(
                 "OpeningContract",
             )
             .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+            .ok_or_else(|| format!("GOAL_CONTRACT_OPENING_CONTRACT_REQUIRED|scope={scope}"))?;
         let payload =
             context_contract_payload(connection, project_id, &reference, "CONTRACT", scope)?;
+        for field in [
+            "firstChapterGoal",
+            "firstThreeChapterPromise",
+            "forbiddenReveals",
+        ] {
+            let valid = match field {
+                "firstChapterGoal" | "firstThreeChapterPromise" => payload
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "forbiddenReveals" => payload.get(field).is_some_and(Value::is_array),
+                _ => false,
+            };
+            if !valid {
+                return Err(format!(
+                    "GOAL_CONTRACT_OPENING_CONTRACT_INVALID|field={field}|scope={scope}"
+                ));
+            }
+        }
         Some((reference, payload))
     } else {
         None
@@ -2083,8 +2109,9 @@ fn goal_contract_context_for_request(
     let intent_ref_and_payload = if opening {
         None
     } else {
-        let volume_id = volume_id
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let volume_id = volume_id.ok_or_else(|| {
+            format!("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED|reason=VOLUME_SCOPE_REQUIRED|scope={scope}")
+        })?;
         let reference = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
             connection,
             project_id,
@@ -2092,9 +2119,11 @@ fn goal_contract_context_for_request(
             volume_id,
         )
         .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        .ok_or_else(|| format!("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED|scope={scope}"))?;
         let payload =
             context_contract_payload(connection, project_id, &reference, "CONTRACT", scope)?;
+        crate::generated::validators::validate_volume_intent_r1(&payload)
+            .map_err(|error| format!("GOAL_CONTRACT_VOLUME_INTENT_INVALID|{error}"))?;
         Some((reference, payload))
     };
 
@@ -2112,7 +2141,19 @@ fn goal_contract_context_for_request(
     let story_core = story
         .get("storyCore")
         .and_then(Value::as_object)
-        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        .ok_or_else(|| {
+            format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore|scope={scope}")
+        })?;
+    for field in ["worldRules", "forbiddenReveals"] {
+        if story_core
+            .get(field)
+            .is_some_and(|value| !value.is_array())
+        {
+            return Err(format!(
+                "GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.{field}|scope={scope}"
+            ));
+        }
+    }
 
     if opening {
         for key in [
@@ -2122,9 +2163,16 @@ fn goal_contract_context_for_request(
             "conflict",
             "readerPromise",
         ] {
-            let value = story_core.get(key).ok_or_else(|| {
-                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
-            })?;
+            let value = story_core
+                .get(key)
+                .filter(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty())
+                })
+                .ok_or_else(|| {
+                    format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.{key}|scope={scope}")
+                })?;
             append_goal_contract_field(
                 &mut fields,
                 &story_ref,
@@ -2136,7 +2184,14 @@ fn goal_contract_context_for_request(
     } else {
         let mechanism = story_core
             .get("mechanism")
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+            .filter(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty())
+            })
+            .ok_or_else(|| {
+                format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.mechanism|scope={scope}")
+            })?;
         append_goal_contract_field(
             &mut fields,
             &story_ref,
@@ -2210,11 +2265,9 @@ fn goal_contract_context_for_request(
         &mut fields,
         &main_ref,
         "hardRules",
-        Some(
-            main.get("hardRules").ok_or_else(|| {
-                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
-            })?,
-        ),
+        Some(main.get("hardRules").filter(|value| value.is_array()).ok_or_else(|| {
+            format!("GOAL_CONTRACT_MAIN_CONTRACT_INVALID|field=hardRules|scope={scope}")
+        })?),
     )?;
     if opening {
         if let Some(hard_rules) = main.get("hardRules") {
@@ -2237,7 +2290,7 @@ fn goal_contract_context_for_request(
             "forbiddenReveals",
         ] {
             let value = opening_contract.get(key).ok_or_else(|| {
-                format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
+                format!("GOAL_CONTRACT_OPENING_CONTRACT_INVALID|field={key}|scope={scope}")
             })?;
             append_goal_contract_array(
                 &mut fields,
@@ -2276,7 +2329,9 @@ fn goal_contract_context_for_request(
         let must_achieve = intent
             .get("mustAchieve")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+            .ok_or_else(|| {
+                format!("GOAL_CONTRACT_VOLUME_INTENT_INVALID|field=mustAchieve|scope={scope}")
+            })?;
         for goal in must_achieve {
             let goal_id = goal.get("id").and_then(Value::as_str).ok_or_else(|| {
                 format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
@@ -2308,7 +2363,9 @@ fn goal_contract_context_for_request(
         let must_not_break = intent
             .get("mustNotBreak")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+            .ok_or_else(|| {
+                format!("GOAL_CONTRACT_VOLUME_INTENT_INVALID|field=mustNotBreak|scope={scope}")
+            })?;
         let mut omitted_scoped_constraints = 0usize;
         for (index, rule) in must_not_break.iter().enumerate() {
             let rule_id = rule.get("id").and_then(Value::as_str).unwrap_or("unnamed");
@@ -2356,7 +2413,9 @@ fn goal_contract_context_for_request(
         let required_exits = intent
             .get("requiredExitConditions")
             .and_then(Value::as_array)
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+            .ok_or_else(|| {
+                format!("GOAL_CONTRACT_VOLUME_INTENT_INVALID|field=requiredExitConditions|scope={scope}")
+            })?;
         append_goal_contract_array(
             &mut fields,
             intent_ref,
@@ -2760,44 +2819,43 @@ pub(crate) fn context_input_from_authority(
             ),
             ContextHardSource::Task,
             &scope,
-        )?;
-        if let Some(route) = route {
-            let payload = map_context_query(
-                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-                    connection, project_id, &route,
-                ),
-                ContextHardSource::Task,
-                &scope,
-            )?
+        )?
+        .ok_or_else(|| format!("GOAL_CONTRACT_VOLUME_PLAN_REQUIRED|scope={scope}"))?;
+        let payload = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection, project_id, &route,
+            ),
+            ContextHardSource::Task,
+            &scope,
+        )?
+        .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
+        crate::generated::validators::validate_volume_plan_r1(&payload)
+            .map_err(|error| format!("GOAL_CONTRACT_VOLUME_PLAN_INVALID|{error}"))?;
+        let tasks = payload
+            .get("tasks")
+            .and_then(Value::as_array)
             .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
-            let tasks = payload
-                .get("tasks")
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))?;
-            let references = tasks
-                .iter()
-                .map(|item| {
-                    item.get("taskId")
-                        .and_then(Value::as_str)
-                        .filter(|task_id| !task_id.trim().is_empty())
-                        .map(ToOwned::to_owned)
-                        .ok_or_else(|| {
-                            format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let contracts = tasks
-                .iter()
-                .filter_map(|item| {
-                    item.get("taskId")
-                        .and_then(Value::as_str)
-                        .map(|task_id| (task_id.to_owned(), item.clone()))
-                })
-                .collect::<BTreeMap<_, _>>();
-            (references, contracts)
-        } else {
-            (Vec::new(), BTreeMap::new())
-        }
+        let references = tasks
+            .iter()
+            .map(|item| {
+                item.get("taskId")
+                    .and_then(Value::as_str)
+                    .filter(|task_id| !task_id.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let contracts = tasks
+            .iter()
+            .filter_map(|item| {
+                item.get("taskId")
+                    .and_then(Value::as_str)
+                    .map(|task_id| (task_id.to_owned(), item.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        (references, contracts)
     } else {
         (Vec::new(), BTreeMap::new())
     };

@@ -203,7 +203,12 @@ fn seed_authority_with_options(
         "endingBoundary":format!("{direction}的完结边界"),
         "mustAchieve":[{"id":format!("goal:{direction}"),"description":format!("{direction}的全书目标")}],
         "mustNotBreak":[{"id":format!("rule:{direction}"),"description":format!("{direction}不得破坏的规则")}],
-        "futureReservations":[{"reservationId":format!("reservation:{direction}"),"description":format!("{direction}的后续预留内容"),"reservedForVolumeNo":3,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":false,"mayReveal":false,"authorityLevel":"B"}]
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[],
+        "futureReservations":[{"reservationId":format!("reservation:{direction}"),"description":format!("{direction}的后续预留内容"),"reservedForVolumeNo":3,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":false,"mayReveal":false,"authorityLevel":"B"}],
+        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
+        "globalLengthBudget":{"preferredWords":1000}
     });
     let book_hash = insert_artifact(
         connection,

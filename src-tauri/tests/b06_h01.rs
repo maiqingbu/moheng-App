@@ -68,6 +68,158 @@ fn populated_state() -> CurrentNarrativeStateView {
     )
 }
 
+fn insert_context_artifact(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    scope_level: &str,
+    scope_key: &str,
+    payload: &Value,
+) -> String {
+    let hash = sha256_canonical(payload).unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED',?6,'{}','2026-08-29T00:00:00Z','2026-08-29T00:00:00Z')",
+            libsql_rusqlite::params![artifact_id, project_id, artifact_type, scope_level, scope_key, hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![artifact_id, payload.to_string(), hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
+            libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key, artifact_id, hash],
+        )
+        .unwrap();
+    hash
+}
+
+fn seed_project_goal_contracts(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    include_story_constitution: bool,
+    future_reservations: &[Value],
+) {
+    if include_story_constitution {
+        insert_context_artifact(
+            connection,
+            project_id,
+            &format!("story-constitution:{project_id}"),
+            "StoryConstitution",
+            "PROJECT",
+            project_id,
+            &json!({
+                "payloadSchema":"story-constitution.r1",
+                "storyCore":{
+                    "protagonist":"主角",
+                    "desire":"达成目标",
+                    "mechanism":"已证实事实不得被无依据改写",
+                    "conflict":"现实冲突",
+                    "readerPromise":"每次行动呈现可核对后果",
+                    "worldRules":[],
+                    "forbiddenReveals":[]
+                }
+            }),
+        );
+    }
+    insert_context_artifact(
+        connection,
+        project_id,
+        &format!("main-contract:{project_id}"),
+        "MainContract",
+        "PROJECT",
+        project_id,
+        &json!({
+            "payloadSchema":"main-contract.r1",
+            "scope":"BOOK",
+            "hardRules":["保持已证实事实"],
+            "softPreferences":[]
+        }),
+    );
+    insert_context_artifact(
+        connection,
+        project_id,
+        &format!("plan:book:{project_id}"),
+        "BookPlan",
+        "PROJECT",
+        project_id,
+        &json!({
+            "payloadSchema":"book-plan.r1",
+            "planningMaturity":"APPROVED",
+            "storyPromise":"以证据推动选择",
+            "protagonistMacroDirection":"由被动转为主动",
+            "endingBoundary":"核心冲突必须有可核对结局",
+            "mustAchieve":[],
+            "mustNotBreak":[],
+            "relationshipMacroDirections":[],
+            "majorMysteryGoals":[],
+            "futureReservations":future_reservations,
+            "volumeIntentSeeds":[],
+            "openingHypotheses":[],
+            "globalLengthBudget":{"preferredWords":1000}
+        }),
+    );
+}
+
+fn seed_volume_goal_contracts(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    volume_id: &str,
+    intent_artifact_id: &str,
+    plan_artifact_id: &str,
+    future_reservation_refs: &[&str],
+    tasks: Vec<Value>,
+) {
+    let intent_payload = json!({
+        "payloadSchema":"volume-intent.r1",
+        "volumeFunction":"推进本卷当前目标",
+        "entryConditions":[],
+        "mustAchieve":[],
+        "mustNotBreak":[],
+        "requiredExitConditions":[],
+        "futureReservationRefs":future_reservation_refs,
+        "crossVolumeResponsibilityRefs":[],
+        "targetChapterRange":{"min":1,"preferred":5,"max":10},
+        "targetWordRange":{"preferred":1000}
+    });
+    let intent_hash = insert_context_artifact(
+        connection,
+        project_id,
+        intent_artifact_id,
+        "VolumeIntent",
+        "VOLUME",
+        volume_id,
+        &intent_payload,
+    );
+    let plan_payload = json!({
+        "payloadSchema":"volume-plan.r1",
+        "volumeIntentRef":{
+            "artifactId":intent_artifact_id,
+            "version":1,
+            "payloadHash":intent_hash
+        },
+        "routeVersion":1,
+        "tasks":tasks,
+        "routeInvariants":[],
+        "requiredExitConditions":[],
+        "capacityBudget":{"minChapters":1,"preferredChapters":5,"maxChapters":10}
+    });
+    insert_context_artifact(
+        connection,
+        project_id,
+        plan_artifact_id,
+        "VolumePlan",
+        "VOLUME",
+        volume_id,
+        &plan_payload,
+    );
+}
+
 #[test]
 fn b06_current_state_is_populated_bounded_and_keeps_narrative_time_separate() {
     let state = populated_state();
@@ -83,7 +235,108 @@ fn b06_current_state_is_populated_bounded_and_keeps_narrative_time_separate() {
 }
 
 #[test]
-fn b06_long_form_empty_entity_selection_recalls_recent_reality() {
+fn b06_missing_long_form_contract_reports_required_without_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-missing-long-form-contract";
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create(project_id, "Missing contract", "2026-08-29T00:00:00Z")
+        .unwrap();
+    connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:missing-contract',?1,1,'Book','ACTIVE',?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:missing-contract',?1,'book:missing-contract',1,'Volume','PRODUCING',1,1,1000,?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:missing-contract:1',?1,'volume:missing-contract',1,'Chapter','NORMAL','PLANNED',0,?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:missing-contract',?1,'Probe','CHARACTER',?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    let revision_before: i64 = connection
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let artifacts_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let heads_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let model_runs_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let error = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "volumeId":"volume:missing-contract",
+            "chapterId":"chapter:missing-contract:1",
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:missing-contract"],
+            "references":[]
+        }),
+    )
+    .unwrap_err();
+
+    assert!(
+        error.contains("GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED|scope=CHAPTER:chapter:missing-contract:1"),
+        "{error}"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        revision_before
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        artifacts_before
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        heads_before
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        model_runs_before
+    );
+}
+
+#[test]
+fn b06_long_form_selected_entity_scope_recalls_recent_reality() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager
@@ -109,6 +362,16 @@ fn b06_long_form_empty_entity_selection_recalls_recent_reality() {
         "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES ('fact:recall','p-recall','entity:recall','DISCOVERED','{\"value\":true}','A','chapter:recall:1','chapter:recall:1',?1,?1)",
         ["2026-08-29T00:00:00Z"],
     ).unwrap();
+    seed_project_goal_contracts(&connection, "p-recall", true, &[]);
+    seed_volume_goal_contracts(
+        &connection,
+        "p-recall",
+        "volume:recall",
+        "intent:volume:recall",
+        "plan:volume:recall",
+        &[],
+        Vec::new(),
+    );
     drop(connection);
 
     let state = KernelState::new(AppPaths::new(temp.path()));
@@ -116,7 +379,13 @@ fn b06_long_form_empty_entity_selection_recalls_recent_reality() {
         &state,
         json!({
             "projectId":"p-recall","volumeId":"volume:recall","chapterId":"chapter:recall:2",
-            "executionMode":"LONG_FORM","entityIds":[],"references":[]
+            "executionMode":"LONG_FORM","entityIds":[],"references":[],
+            "scopeSelection":{
+                "taskRefs":[],
+                "responsibilityRefs":[],
+                "reservationRefs":[],
+                "entityRefs":["entity:recall"]
+            }
         }),
     )
     .unwrap();
@@ -444,6 +713,19 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p1", "H01", "2026-08-29T00:00:00Z").unwrap();
+    connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:h01','p1',1,'H01','ACTIVE',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:h01','p1','book:h01',1,'H01','PRODUCING',1,1,1000,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:1','p1','volume:h01',1,'Chapter','NORMAL','PLANNED',0,?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
+    seed_project_goal_contracts(&connection, "p1", true, &[]);
+    seed_volume_goal_contracts(
+        &connection,
+        "p1",
+        "volume:h01",
+        "intent:volume:h01",
+        "plan:volume:h01",
+        &[],
+        Vec::new(),
+    );
     connection.execute("INSERT INTO model_runs(model_run_id,project_id,provider,model,idempotency_key,capability,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES ('model-run:h01','p1','fixture','fixture','h01-run','diagnose',1,1,'COMPLETED',?1,?1)", ["2026-08-29T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO commands(project_id,command_id,idempotency_key,request_digest,status,created_at) VALUES ('p1','command:h01','idempotency:h01',?1,'COMMITTED',?2)", libsql_rusqlite::params!["a".repeat(64), "2026-08-29T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO commit_receipts(receipt_id,project_id,commit_id,command_id,idempotency_key,before_revision,after_revision,bundle_digest,receipt_json,receipt_digest,committed_at) VALUES ('receipt:h01','p1','commit:h01','command:h01','idempotency:h01',0,1,?1,'{}',?1,?2)", libsql_rusqlite::params!["b".repeat(64), "2026-08-29T00:00:00Z"]).unwrap();
@@ -636,7 +918,7 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
         project_id: "p1",
     };
     for spec in registry.specs.values() {
-        let input = json!({"entityIds":["entity:a"],"references":[],"chapterId":"chapter:1","projectRevision":7});
+        let input = json!({"entityIds":["entity:a"],"references":[],"chapterId":"chapter:1","volumeId":"volume:h01","executionMode":"LONG_FORM","projectRevision":7});
         let call = CapabilityCallEnvelope {
             call_id: format!("parity:{}", spec.capability_id),
             capability_id: spec.capability_id.clone(),
@@ -649,14 +931,18 @@ fn h01_registry_executor_planner_checkpoint_and_diagnostics_fail_closed() {
             input,
             requested_bounds: RequestedBounds {
                 max_results: 1,
-                max_serialized_bytes: 4096,
+                max_serialized_bytes: if spec.capability_id == "query_context_manifest" {
+                    8192
+                } else {
+                    4096
+                },
             },
         };
         let result = BoundedCapabilityExecutor {
             registry: registry.clone(),
         }
         .execute(&adapter, &call)
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{}: {error}", spec.capability_id));
         if spec.capability_id == "query_canon" || spec.capability_id == "query_relations" {
             assert!(!result.result.as_array().unwrap().is_empty());
             assert!(!result.source_refs.is_empty());
@@ -768,33 +1054,67 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,subject_id,story_time,event_ordinal,payload_json,created_at) VALUES ('event:noise','p1','chapter:1','BACKGROUND','entity:a','1990-01-01T00:00:00Z',0,'{}',?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_timepoints(timepoint_id,project_id,chapter_id,story_time,ordering,created_at) VALUES ('timepoint:1','p1','chapter:1','2020-01-01T00:00:00Z',1,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:identity','p1','fact:identity','event:identity','chapter:1','artifact:evidence',1,'EVENT','B revealed identity',1,20,?1)", ["2026-08-28T00:00:00Z"]).unwrap();
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"boundary","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000},"futureReservations":[{"reservationId":"reservation:book","description":"later","prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"B"}]});
-    let book_plan_hash = sha256_canonical(&book_plan).unwrap();
-    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:book','p1','BookPlan','PROJECT','p1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&book_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book',1,?1,?2)", [&book_plan.to_string(), &book_plan_hash]).unwrap();
-    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','BookPlan','PROJECT','p1','plan:book',1,?1)", [&book_plan_hash]).unwrap();
-    let volume_plan = json!({"payloadSchema":"volume-plan.r1","capacityBudget":{"minChapters":1,"preferredChapters":5,"maxChapters":10},"tasks":[]});
-    let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
-    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:volume','p1','VolumePlan','VOLUME','volume:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_plan_hash, "2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume',1,?1,?2)", [&volume_plan.to_string(), &volume_plan_hash]).unwrap();
-    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:1','plan:volume',1,?1)", [&volume_plan_hash]).unwrap();
-    let volume_intent_v1 = json!({"futureReservations":[{"reservationId":"reservation:v1"}]});
-    let volume_intent_v1_hash = sha256_canonical(&volume_intent_v1).unwrap();
-    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('intent:volume:1','p1','VolumeIntent','VOLUME','volume:1',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_intent_v1_hash, "2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('intent:volume:1',1,?1,?2)", [&volume_intent_v1.to_string(), &volume_intent_v1_hash]).unwrap();
-    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumeIntent','VOLUME','volume:1','intent:volume:1',1,?1)", [&volume_intent_v1_hash]).unwrap();
+    let book_reservations = vec![
+        json!({
+            "reservationId":"reservation:book",
+            "description":"Book reservation",
+            "prerequisites":[],
+            "mayForeshadow":true,
+            "mayReveal":true,
+            "authorityLevel":"B"
+        }),
+        json!({
+            "reservationId":"reservation:v1",
+            "description":"Volume one reservation",
+            "reservedForVolumeNo":1,
+            "notBeforeVolumeNo":1,
+            "prerequisites":[],
+            "mayForeshadow":true,
+            "mayReveal":true,
+            "authorityLevel":"B"
+        }),
+        json!({
+            "reservationId":"reservation:v2",
+            "description":"Volume two reservation",
+            "reservedForVolumeNo":2,
+            "notBeforeVolumeNo":2,
+            "prerequisites":[],
+            "mayForeshadow":false,
+            "mayReveal":true,
+            "authorityLevel":"B"
+        }),
+    ];
+    seed_project_goal_contracts(&connection, "p1", true, &book_reservations);
+    seed_volume_goal_contracts(
+        &connection,
+        "p1",
+        "volume:1",
+        "intent:volume:1",
+        "plan:volume",
+        &["reservation:v1"],
+        Vec::new(),
+    );
     let task_v2 = json!({"status":"ACTIVE"}).to_string();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:v2','p1','volume.task.progress',?1,'chapter:2','{}',?2,?2)", [&task_v2, "2026-08-28T00:00:00Z"]).unwrap();
-    let volume_plan_v2 = json!({"payloadSchema":"volume-plan.r1","capacityBudget":{"minChapters":2,"preferredChapters":20,"maxChapters":30},"tasks":[{"taskId":"task:v2"}]});
-    let volume_plan_v2_hash = sha256_canonical(&volume_plan_v2).unwrap();
-    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:volume:2','p1','VolumePlan','VOLUME','volume:2',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_plan_v2_hash, "2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:volume:2',1,?1,?2)", [&volume_plan_v2.to_string(), &volume_plan_v2_hash]).unwrap();
-    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME','volume:2','plan:volume:2',1,?1)", [&volume_plan_v2_hash]).unwrap();
-    let volume_intent_v2 = json!({"futureReservations":[{"reservationId":"reservation:v2"}]});
-    let volume_intent_v2_hash = sha256_canonical(&volume_intent_v2).unwrap();
-    connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('intent:volume:2','p1','VolumeIntent','VOLUME','volume:2',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2)", [&volume_intent_v2_hash, "2026-08-28T00:00:00Z"]).unwrap();
-    connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('intent:volume:2',1,?1,?2)", [&volume_intent_v2.to_string(), &volume_intent_v2_hash]).unwrap();
-    connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumeIntent','VOLUME','volume:2','intent:volume:2',1,?1)", [&volume_intent_v2_hash]).unwrap();
+    let task_v2_contract = json!({
+        "taskId":"task:v2",
+        "class":"REQUIRED",
+        "objective":"Complete the current task",
+        "dependsOnTaskIds":[],
+        "continuityThreadRefs":[],
+        "reservationRefs":[],
+        "completionPredicate":{"kind":"TASK_DONE","value":true},
+        "estimatedChapterCost":{"preferred":1}
+    });
+    seed_volume_goal_contracts(
+        &connection,
+        "p1",
+        "volume:2",
+        "intent:volume:2",
+        "plan:volume:2",
+        &["reservation:v2"],
+        vec![task_v2_contract],
+    );
     drop(connection);
     let state = KernelState::new(paths);
     let request = json!({"projectId":"p1","scope":"PROJECT","entityIds":["entity:a"],"chapterId":"chapter:1","currentChapter":1,"currentVolumeId":"volume:1","includeSoftSources":true});
@@ -807,19 +1127,23 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        4
     );
     assert_eq!(
         context_projection["futureReservationRefs"],
         json!(["reservation:book", "reservation:v1"])
     );
-    assert_eq!(
-        context_projection["omittedSoftSources"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    let omitted_sources = context_projection["omittedSoftSources"].as_array().unwrap();
+    assert!(omitted_sources.iter().any(|source| {
+        source["sourceRef"]["ref"]
+            .as_str()
+            .is_some_and(|reference| reference.contains("storyCore.readerPromise"))
+    }));
+    assert!(omitted_sources.iter().any(|source| {
+        source["sourceRef"]["ref"]
+            .as_str()
+            .is_some_and(|reference| reference.contains("BookPlan.mustAchieve"))
+    }));
     let context_goal_refs = context_projection["goalContractRefs"]
         .as_array()
         .unwrap()
@@ -840,10 +1164,10 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     .unwrap();
     assert_eq!(
         context_v2["futureReservationRefs"],
-        json!(["reservation:book", "reservation:v2"])
+        json!(["reservation:book", "reservation:v1", "reservation:v2"])
     );
     assert_eq!(context_v2["activeVolumeTaskRefs"], json!(["task:v2"]));
-    assert!(!context_v2["futureReservationRefs"]
+    assert!(context_v2["futureReservationRefs"]
         .as_array()
         .unwrap()
         .iter()
@@ -866,7 +1190,7 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         .is_some();
     let stale_projection = query_plan_stale_impl(&state, json!({"projectId":"p1","compiledFromProjectRevision":0,"compiledFromStateDigest":context_projection["compiledFromStateDigest"],"currentStateDigest":"f".repeat(64),"entityIds":["entity:a"],"chapterId":"chapter:1"})).unwrap();
     assert_eq!(stale_projection["status"], "VALID");
-    let support = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1"})).unwrap();
+    let support = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1","currentVolumeId":"volume:1"})).unwrap();
     assert_eq!(support["receipt"]["projectId"], "p1");
     assert_eq!(support["finding"]["supportStatus"], "SUPPORTED");
     let call_count = support["calls"].as_array().unwrap().len();
@@ -874,7 +1198,7 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
     assert_eq!(call_count, ledger_count);
     assert_eq!(support["calls"][2]["result"].as_array().unwrap().len(), 1);
     assert_eq!(support["calls"][2]["result"][0]["rangeStart"], 1);
-    let missing_evidence = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:missing"],"chapterId":"chapter:1"})).unwrap();
+    let missing_evidence = support_session_impl(&state, json!({"projectId":"p1","question":"A 何时知道 B 的身份","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:missing"],"chapterId":"chapter:1","currentVolumeId":"volume:1"})).unwrap();
     assert_eq!(missing_evidence["finding"]["supportStatus"], "INSUFFICIENT");
     let time_writer = state
         .manager
@@ -882,7 +1206,7 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         .unwrap();
     time_writer.execute("UPDATE canon_timepoints SET story_time='1998-01-01T00:00:00Z' WHERE project_id='p1' AND chapter_id='chapter:1'", []).unwrap();
     drop(time_writer);
-    let production_time_conflict = support_session_impl(&state, json!({"projectId":"p1","question":"A 在世界时间之前知道 B 的身份吗","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1"})).unwrap();
+    let production_time_conflict = support_session_impl(&state, json!({"projectId":"p1","question":"A 在世界时间之前知道 B 的身份吗","mode":"DIAGNOSE","scope":"PROJECT","entityIds":["entity:a"],"references":["event:identity"],"chapterId":"chapter:1","currentVolumeId":"volume:1"})).unwrap();
     assert_eq!(
         production_time_conflict["finding"]["supportStatus"],
         "CONFLICTING"
