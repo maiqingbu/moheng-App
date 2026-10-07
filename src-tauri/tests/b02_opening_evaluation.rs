@@ -7,7 +7,8 @@ use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::generated::types::ArtifactRef;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
-    measure_context_hard_budget, ContextCompilerInput,
+    measure_context_hard_budget, project_applicable_future_reservations, ContextCompilerInput,
+    GoalContractField,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
@@ -16,6 +17,7 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::signing::execute_opening_evaluation_with_observer;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -186,6 +188,8 @@ struct LongEvidenceGateway {
     render_calls: AtomicUsize,
     audit_calls: AtomicUsize,
     planning_contexts: Mutex<Vec<Value>>,
+    render_contexts: Mutex<Vec<Value>>,
+    audit_contexts: Mutex<Vec<Value>>,
 }
 
 impl LongEvidenceGateway {
@@ -196,6 +200,8 @@ impl LongEvidenceGateway {
             render_calls: AtomicUsize::new(0),
             audit_calls: AtomicUsize::new(0),
             planning_contexts: Mutex::new(Vec::new()),
+            render_contexts: Mutex::new(Vec::new()),
+            audit_contexts: Mutex::new(Vec::new()),
         }
     }
 }
@@ -208,6 +214,18 @@ impl ProductionModelGateway for LongEvidenceGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         if capability == "PLAN_STRATEGY" {
             self.planning_contexts
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(input["authorityContext"].clone());
+        }
+        if capability == "RENDER_CHAPTER" {
+            self.render_contexts
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(input["authorityContext"].clone());
+        }
+        if capability == "AUDIT_EXTRACT" {
+            self.audit_contexts
                 .lock()
                 .map_err(|error| error.to_string())?
                 .push(input["authorityContext"].clone());
@@ -728,6 +746,21 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
     let opening_contexts = gateway.planning_contexts.lock().unwrap();
     assert_eq!(opening_contexts.len(), 3);
     assert_eq!(opening_contexts[0]["selectedEvidence"], json!([]));
+    let opening_two_input: ContextCompilerInput =
+        serde_json::from_value(opening_contexts[1].clone()).unwrap();
+    let deduplicated_forbidden_reveal = opening_two_input
+        .goal_contract_fields
+        .iter()
+        .find(|field| field.field_path == "storyCore.forbiddenReveals[0]")
+        .expect("shared StoryConstitution and OpeningContract rule remains HARD once");
+    assert!(deduplicated_forbidden_reveal
+        .additional_field_paths
+        .iter()
+        .any(|path| path == "openingContract.forbiddenReveals[0]"));
+    assert!(deduplicated_forbidden_reveal
+        .additional_source_refs
+        .iter()
+        .any(|reference| reference.artifact_id.starts_with("opening-contract:")));
     assert_eq!(
         opening_contexts[1]["state"]["facts"]
             .as_array()
@@ -763,15 +796,26 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         let input: ContextCompilerInput = serde_json::from_value(context.clone()).unwrap();
         let usage = measure_context_hard_budget(&input).unwrap();
         assert!(
-            usage.estimated_tokens <= 1024,
-            "opening {}: {usage:?}",
+            usage.estimated_tokens
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+            "opening {} exceeds token budget: {usage:?}",
+            index + 1
+        );
+        assert!(
+            usage.serialized_bytes
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            "opening {} exceeds byte budget: {usage:?}",
             index + 1
         );
         println!(
-            "F03_OPENING_CONTEXT chapter={} estimatedTokens={} serializedBytes={}",
+            "F03_OPENING_CONTEXT chapter={} estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
             index + 1,
             usage.estimated_tokens,
-            usage.serialized_bytes
+            usage.serialized_bytes,
+            usage.estimated_tokens as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
         );
     }
     drop(opening_contexts);
@@ -847,6 +891,28 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         .as_str()
         .unwrap()
         .to_owned();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let route_ref = NarrativeRepository::volume_plan_route(&connection, &project_id, &volume_id)
+        .unwrap()
+        .unwrap();
+    let route = NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &route_ref)
+        .unwrap()
+        .unwrap();
+    let intent =
+        NarrativeRepository::artifact_payload(&connection, &project_id, "VolumeIntent", &volume_id)
+            .unwrap()
+            .unwrap();
+    let scope_selection = json!({
+        "taskRefs":route["tasks"].as_array().unwrap().iter()
+            .filter(|task| task["class"] == "REQUIRED")
+            .filter_map(|task| task["taskId"].as_str())
+            .take(1)
+            .collect::<Vec<_>>(),
+        "responsibilityRefs":intent["crossVolumeResponsibilityRefs"],
+        "reservationRefs":intent["futureReservationRefs"],
+        "entityRefs":["entity:b02:linzhou","entity:b02:guqing"]
+    });
+    drop(connection);
     command(
         &state,
         &project_id,
@@ -854,7 +920,8 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         "planning_compile_chapter_plan",
         json!({
             "chapterId":chapter_four,
-            "chapterGoalHint":"根据前三章正式事实追查账本缺页的去向。"
+            "chapterGoalHint":"根据前三章正式事实追查账本缺页的去向。",
+            "scopeSelection":scope_selection
         }),
     );
     {
@@ -868,11 +935,504 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
             .all(|item| item["quote"].is_null()));
         let input: ContextCompilerInput = serde_json::from_value(contexts[3].clone()).unwrap();
         let usage = measure_context_hard_budget(&input).unwrap();
-        assert!(usage.estimated_tokens <= 1024);
+        let mut typical_chapter_sizes = vec![(4, usage.estimated_tokens, usage.serialized_bytes)];
+        let opening_reality_hard = usage
+            .source_sizes
+            .iter()
+            .filter(|source| {
+                source.kind == "CONTRACT"
+                    && source
+                        .field_path
+                        .as_deref()
+                        .is_some_and(|path| path.contains("opening-reality"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(opening_reality_hard.len(), 2);
+        for source in &opening_reality_hard {
+            assert_eq!(
+                input
+                    .goal_contract_fields
+                    .iter()
+                    .find(|field| field.field_path
+                        == source.field_path.as_deref().unwrap_or_default())
+                    .unwrap()
+                    .value
+                    .as_object()
+                    .map(|value| value.keys().map(String::as_str).collect::<BTreeSet<_>>()),
+                Some(BTreeSet::from(["id", "refs"]))
+            );
+        }
+        let opening_after_tokens = opening_reality_hard
+            .iter()
+            .map(|source| source.estimated_tokens)
+            .sum::<i64>();
+        let opening_after_bytes = opening_reality_hard
+            .iter()
+            .map(|source| source.serialized_bytes)
+            .sum::<usize>();
         println!(
-            "F03_LONG_FORM_CONTEXT estimatedTokens={} serializedBytes={}",
-            usage.estimated_tokens, usage.serialized_bytes
+            "F03_OPENING_REALITY_DEDUP beforeTokens=4435 beforeBytes=13304 afterTokens={opening_after_tokens} afterBytes={opening_after_bytes} beforeFixture=F03-chapter-4-prior-capture"
         );
+        println!(
+            "F03_LONG_FORM_CONTEXT chapter=4 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
+            usage.estimated_tokens,
+            usage.serialized_bytes,
+            usage.estimated_tokens as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
+        );
+        for source in &usage.source_sizes {
+            println!(
+                "F03_AFTER_HARD_SOURCE chapter=4 kind={} sourceRef={} fieldPath={} estimatedTokens={} serializedBytes={}",
+                source.kind,
+                source.source_ref,
+                source.field_path.as_deref().unwrap_or(""),
+                source.estimated_tokens,
+                source.serialized_bytes
+            );
+        }
+        let mut contract_sizes = BTreeMap::<String, (i64, usize)>::new();
+        for source in usage
+            .source_sizes
+            .iter()
+            .filter(|source| source.kind == "CONTRACT")
+        {
+            let totals = contract_sizes.entry(source.source_ref.clone()).or_default();
+            totals.0 += source.estimated_tokens;
+            totals.1 += source.serialized_bytes;
+        }
+        for (source_ref, (tokens, bytes)) in contract_sizes {
+            println!(
+                "F03_LONG_FORM_CONTRACT_SOURCE chapter=4 sourceRef={source_ref} estimatedTokens={tokens} serializedBytes={bytes}"
+            );
+        }
+        let mut largest_fields = usage
+            .source_sizes
+            .iter()
+            .filter(|source| source.kind == "CONTRACT")
+            .collect::<Vec<_>>();
+        largest_fields.sort_by(|left, right| {
+            right
+                .estimated_tokens
+                .cmp(&left.estimated_tokens)
+                .then_with(|| left.field_path.cmp(&right.field_path))
+        });
+        for source in largest_fields.into_iter().take(10) {
+            println!(
+                "F03_LONG_FORM_CONTRACT_FIELD chapter=4 sourceRef={} fieldPath={} estimatedTokens={} serializedBytes={}",
+                source.source_ref,
+                source.field_path.as_deref().unwrap_or(""),
+                source.estimated_tokens,
+                source.serialized_bytes
+            );
+        }
+        for required_path in [
+            "storyCore.mechanism",
+            "storyCore.forbiddenReveals",
+            "hardRules",
+            "volumeIntent.mustAchieve[",
+            "volumeIntent.mustNotBreak[",
+            "volumeIntent.requiredExitConditions[",
+        ] {
+            assert!(input
+                .goal_contract_fields
+                .iter()
+                .any(|field| field.field_path.starts_with(required_path)));
+        }
+        for excluded_path in [
+            "bookPlan.mustAchieve",
+            "bookPlan.mustNotBreak",
+            "bookPlan.volumeIntentSeeds",
+            "bookPlan.majorMysteryGoals",
+            "openingContract.firstChapterGoal",
+        ] {
+            assert!(input
+                .goal_contract_fields
+                .iter()
+                .all(|field| !field.field_path.starts_with(excluded_path)));
+        }
+        assert!(input.omitted_soft_sources.iter().any(|source| {
+            source
+                .source_ref
+                .ref_
+                .contains("volumeIntent.mustNotBreak[")
+                && source.source_ref.ref_.ends_with(".description")
+                && source.reason.contains("Canon 的语义副本")
+        }));
+        assert!(input.omitted_soft_sources.iter().any(|source| {
+            source
+                .source_ref
+                .ref_
+                .contains("BookPlan.futureReservations[")
+                && source.source_ref.ref_.ends_with(".description")
+                && source.reason.contains("SOFT 历史摘录")
+        }));
+        assert!(input.goal_contract_fields.iter().all(|field| {
+            field.source_ref.payload_hash.len() == 64
+                && field
+                    .additional_source_refs
+                    .iter()
+                    .all(|reference| reference.payload_hash.len() == 64)
+        }));
+        for chapter in [10, 30] {
+            let mut later_chapter = input.clone();
+            later_chapter.state.bounds.chapter_id = Some(format!("chapter:f03:{chapter}"));
+            let later_usage = measure_context_hard_budget(&later_chapter).unwrap();
+            typical_chapter_sizes.push((
+                chapter,
+                later_usage.estimated_tokens,
+                later_usage.serialized_bytes,
+            ));
+            println!(
+                "F03_LONG_FORM_CONTEXT chapter={chapter} estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
+                later_usage.estimated_tokens,
+                later_usage.serialized_bytes,
+                later_usage.estimated_tokens as f64 * 100.0
+                    / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+                later_usage.serialized_bytes as f64 * 100.0
+                    / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
+            );
+        }
+
+        let handle = state.manager.open(&project_id, "", NOW).unwrap();
+        let book_ref =
+            NarrativeRepository::canonical_project_head_ref(&handle, &project_id, "BookPlan")
+                .unwrap()
+                .unwrap();
+        let book = NarrativeRepository::artifact_payload_by_ref(&handle, &project_id, &book_ref)
+            .unwrap()
+            .unwrap();
+        let current_volume_no =
+            NarrativeRepository::volume_number(&handle, &project_id, &volume_id)
+                .unwrap()
+                .unwrap();
+        drop(handle);
+
+        let actual_seed = book["volumeIntentSeeds"].as_array().unwrap()[0].clone();
+        let actual_reservation = book["futureReservations"].as_array().unwrap()[0].clone();
+        let reservation_volume_no = actual_reservation["reservedForVolumeNo"].as_i64().unwrap();
+        assert!(current_volume_no < reservation_volume_no);
+        let mut one_volume_book = book.clone();
+        one_volume_book["volumeIntentSeeds"] = json!([actual_seed.clone()]);
+        one_volume_book["futureReservations"] = json!([actual_reservation.clone()]);
+
+        let mut ten_volume_book = book.clone();
+        ten_volume_book["volumeIntentSeeds"] = json!((0..10)
+            .map(|index| {
+                let mut seed = actual_seed.clone();
+                seed["seedId"] = json!(format!("f03:volume-seed:{}", index + 1));
+                seed
+            })
+            .collect::<Vec<_>>());
+        assert_eq!(
+            ten_volume_book["volumeIntentSeeds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        ten_volume_book["futureReservations"] = json!((0..10)
+            .map(|index| {
+                let mut reservation = actual_reservation.clone();
+                if index > 0 {
+                    reservation["reservationId"] = json!(format!("f03:reservation:{}", index + 1));
+                    reservation["reservedForVolumeNo"] = json!(reservation_volume_no + index);
+                }
+                reservation
+            })
+            .collect::<Vec<_>>());
+        let (one_volume_reservations, one_excluded) = project_applicable_future_reservations(
+            &one_volume_book,
+            reservation_volume_no,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let (ten_volume_reservations, ten_excluded) = project_applicable_future_reservations(
+            &ten_volume_book,
+            reservation_volume_no,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(one_volume_reservations, ten_volume_reservations);
+        assert_eq!(one_excluded, 0);
+        assert_eq!(ten_excluded, 9);
+
+        let with_reservations = |mut base: ContextCompilerInput, reservations: &[Value]| {
+            base.goal_contract_fields
+                .retain(|field| !field.field_path.starts_with("bookPlan.futureReservations["));
+            base.future_reservation_refs.clear();
+            for reservation in reservations {
+                let reservation_id = reservation["reservationId"].as_str().unwrap().to_owned();
+                base.goal_contract_fields.push(GoalContractField {
+                    field_path: format!("bookPlan.futureReservations[{reservation_id}]"),
+                    source_ref: book_ref.clone(),
+                    additional_source_refs: Vec::new(),
+                    additional_field_paths: Vec::new(),
+                    value: reservation.clone(),
+                });
+                base.future_reservation_refs.push(reservation_id);
+            }
+            base
+        };
+        let one_volume_input = with_reservations(input.clone(), &one_volume_reservations);
+        let ten_volume_input = with_reservations(input.clone(), &ten_volume_reservations);
+        let one_volume_usage = measure_context_hard_budget(&one_volume_input).unwrap();
+        let ten_volume_usage = measure_context_hard_budget(&ten_volume_input).unwrap();
+        assert_eq!(
+            one_volume_usage.estimated_tokens,
+            ten_volume_usage.estimated_tokens
+        );
+        assert_eq!(
+            one_volume_usage.serialized_bytes,
+            ten_volume_usage.serialized_bytes
+        );
+        println!(
+            "F03_BOOKPLAN_HARD_SCALE currentVolume={reservation_volume_no} volumes=1 seeds=1 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2} volumes=10 seeds=10 excludedFutureReservations=9 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
+            one_volume_usage.estimated_tokens,
+            one_volume_usage.serialized_bytes,
+            one_volume_usage.estimated_tokens as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            one_volume_usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64,
+            ten_volume_usage.estimated_tokens,
+            ten_volume_usage.serialized_bytes,
+            ten_volume_usage.estimated_tokens as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            ten_volume_usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
+        );
+
+        for field in &serde_json::from_value::<ContextCompilerInput>(contexts[3].clone())
+            .unwrap()
+            .goal_contract_fields
+        {
+            let book_sourced = field.source_ref.artifact_id == book_ref.artifact_id
+                || field
+                    .additional_source_refs
+                    .iter()
+                    .any(|source_ref| source_ref.artifact_id == book_ref.artifact_id);
+            if book_sourced {
+                assert!(field.field_path.starts_with("bookPlan.futureReservations["));
+                assert!(field
+                    .additional_field_paths
+                    .iter()
+                    .all(|path| path.starts_with("bookPlan.futureReservations[")));
+            }
+        }
+
+        let mut multi_person = serde_json::to_value(&input).unwrap();
+        let mut multi_person_entities = input.state.bounds.entity_ids.clone();
+        multi_person_entities.extend((3..=6).map(|index| format!("entity:f03:multi:{index}")));
+        assert_eq!(multi_person_entities.len(), 6);
+        multi_person["state"]["bounds"]["entityIds"] = json!(multi_person_entities);
+
+        let fact_template = serde_json::to_value(input.state.facts.first().unwrap()).unwrap();
+        let mut facts = multi_person["state"]["facts"].as_array().unwrap().clone();
+        let mut state_source_refs = multi_person["state"]["sourceRefs"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for index in 3..=6 {
+            let mut fact = fact_template.clone();
+            fact["factId"] = json!(format!("fact:f03:multi:{index}"));
+            fact["subjectId"] = json!(format!("entity:f03:multi:{index}"));
+            state_source_refs.push(json!({
+                "kind":"authority",
+                "ref":format!("fact:f03:multi:{index}")
+            }));
+            facts.push(fact);
+        }
+        multi_person["state"]["facts"] = json!(facts);
+        multi_person["state"]["sourceRefs"] = json!(state_source_refs);
+
+        let route_tasks = route["tasks"].as_array().unwrap();
+        assert!(
+            route_tasks.len() >= 3,
+            "F03 Route must supply three real tasks"
+        );
+        let selected_tasks = route_tasks.iter().take(3).collect::<Vec<_>>();
+        let task_refs = selected_tasks
+            .iter()
+            .map(|task| task["taskId"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let mut plan_task_contexts = Vec::new();
+        let mut task_states = Vec::new();
+        for task in selected_tasks {
+            let task_id = task["taskId"].as_str().unwrap();
+            let objective = task["objective"].as_str().unwrap();
+            let mut contract = json!({
+                "taskId":task["taskId"],
+                "class":task["class"],
+                "dependsOnTaskIds":task["dependsOnTaskIds"],
+                "continuityThreadRefs":task["continuityThreadRefs"],
+                "reservationRefs":task["reservationRefs"],
+                "completionPredicate":task["completionPredicate"]
+            });
+            if let Some(goal) = input.goal_contract_fields.iter().find(|field| {
+                field.value.get("constraint").and_then(Value::as_str) == Some(objective)
+            }) {
+                contract["objectiveContractRef"] = json!({
+                    "fieldPath":goal.field_path,
+                    "additionalFieldPaths":goal.additional_field_paths,
+                    "sourceRef":goal.source_ref,
+                    "additionalSourceRefs":goal.additional_source_refs
+                });
+            } else {
+                contract["objective"] = json!(objective);
+            }
+            plan_task_contexts.push(json!({"taskRef":task_id,"contract":contract}));
+            task_states.push(json!({
+                "stateId":task_id,
+                "value":{"status":"ACTIVE"},
+                "chapterId":chapter_four
+            }));
+        }
+        multi_person["planTaskRefs"] = json!(task_refs);
+        multi_person["activeTaskRefs"] = json!(task_refs);
+        multi_person["planTaskContexts"] = json!(plan_task_contexts);
+        multi_person["taskStates"] = json!(task_states);
+
+        let selected_evidence = multi_person["selectedEvidence"].as_array().unwrap().clone();
+        assert!(
+            selected_evidence.len() >= 3,
+            "F03 evidence fixture must supply three references"
+        );
+        let triggered_responsibilities = (0..3)
+            .map(|index| {
+                json!({
+                    "threadId":format!("thread:f03:trigger:{}", index + 1),
+                    "threadClass":"PROMISE",
+                    "logicalStatus":"OPEN",
+                    "sourceEventRef":input.state.events.first().map(|event| event.event_id.clone()),
+                    "evidenceRefs":[selected_evidence[index].clone()],
+                    "participantEntities":[
+                        multi_person_entities[index * 2],
+                        multi_person_entities[index * 2 + 1]
+                    ],
+                    "resumeCondition":{"kind":"AFTER_CHAPTER","value":4},
+                    "authorityLevel":"B",
+                    "currentDisposition":"APPROVED",
+                    "sourceRefs":[{"kind":"obligation","ref":format!("obligation:f03:trigger:{}", index + 1)}]
+                })
+            })
+            .collect::<Vec<_>>();
+        multi_person["continuityThreads"] = json!(triggered_responsibilities);
+
+        let multi_person_input: ContextCompilerInput =
+            serde_json::from_value(multi_person).unwrap();
+        assert_eq!(multi_person_input.state.bounds.entity_ids.len(), 6);
+        assert_eq!(multi_person_input.plan_task_refs.len(), 3);
+        assert_eq!(multi_person_input.continuity_threads.len(), 3);
+        let multi_person_usage = measure_context_hard_budget(&multi_person_input).unwrap();
+        let total_source_tokens = multi_person_usage
+            .source_sizes
+            .iter()
+            .map(|source| source.estimated_tokens)
+            .sum::<i64>();
+        let total_source_bytes = multi_person_usage
+            .source_sizes
+            .iter()
+            .map(|source| source.serialized_bytes)
+            .sum::<usize>();
+        for kind in ["CANON", "CONTRACT"] {
+            let sources = multi_person_usage
+                .source_sizes
+                .iter()
+                .filter(|source| source.kind == kind)
+                .collect::<Vec<_>>();
+            let tokens = sources
+                .iter()
+                .map(|source| source.estimated_tokens)
+                .sum::<i64>();
+            let bytes = sources
+                .iter()
+                .map(|source| source.serialized_bytes)
+                .sum::<usize>();
+            println!(
+                "F03_MULTI_PERSON_SOURCE_SHARE kind={kind} estimatedTokens={tokens} tokenShare={:.2} serializedBytes={bytes} byteShare={:.2}",
+                tokens as f64 * 100.0 / total_source_tokens.max(1) as f64,
+                bytes as f64 * 100.0 / total_source_bytes.max(1) as f64
+            );
+        }
+        println!(
+            "F03_MULTI_PERSON_CONTEXT entityCount=6 taskCount=3 triggeredResponsibilityCount=3 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2} appliedTokenLimit={}",
+            multi_person_usage.estimated_tokens,
+            multi_person_usage.serialized_bytes,
+            multi_person_usage.estimated_tokens as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            multi_person_usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64,
+            ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT
+        );
+        for source in &multi_person_usage.source_sizes {
+            println!(
+                "F03_MULTI_PERSON_HARD_SOURCE kind={} sourceRef={} fieldPath={} estimatedTokens={} serializedBytes={}",
+                source.kind,
+                source.source_ref,
+                source.field_path.as_deref().unwrap_or(""),
+                source.estimated_tokens,
+                source.serialized_bytes
+            );
+        }
+        assert!(
+            multi_person_usage.estimated_tokens
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+            "multi-person F03 fixture exceeds the selected token limit: {multi_person_usage:?}"
+        );
+        assert!(
+            multi_person_usage.serialized_bytes
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            "multi-person F03 fixture exceeds the selected byte limit: {multi_person_usage:?}"
+        );
+        for (fixture_name, fixture_usage) in [
+            ("single-volume-book", &one_volume_usage),
+            ("ten-volume-book", &ten_volume_usage),
+        ] {
+            assert!(
+                fixture_usage.estimated_tokens
+                    <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+                "{fixture_name} exceeds token budget: {fixture_usage:?}"
+            );
+            assert!(
+                fixture_usage.serialized_bytes
+                    <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+                "{fixture_name} exceeds byte budget: {fixture_usage:?}"
+            );
+        }
+
+        for (chapter, tokens, bytes) in &typical_chapter_sizes {
+            assert!(
+                *tokens <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+                "F03 chapter {chapter} exceeds token budget: {tokens}"
+            );
+            assert!(
+                *bytes <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+                "F03 chapter {chapter} exceeds byte budget: {bytes}"
+            );
+        }
+        let token_min = typical_chapter_sizes
+            .iter()
+            .map(|(_, tokens, _)| *tokens)
+            .min()
+            .unwrap();
+        let token_max = typical_chapter_sizes
+            .iter()
+            .map(|(_, tokens, _)| *tokens)
+            .max()
+            .unwrap();
+        let byte_min = typical_chapter_sizes
+            .iter()
+            .map(|(_, _, bytes)| *bytes)
+            .min()
+            .unwrap();
+        let byte_max = typical_chapter_sizes
+            .iter()
+            .map(|(_, _, bytes)| *bytes)
+            .max()
+            .unwrap();
+        assert!((token_max - token_min) * 100 <= token_max * 5);
+        assert!((byte_max - byte_min) * 100 <= byte_max * 5);
     }
     let mut production_request = raw_command_request(
         &state,
@@ -1162,12 +1722,64 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
             .len()
             >= 3
     );
-    let relationship_text = approved_payload["relationshipMacroDirections"].to_string();
-    let mystery_text = approved_payload["majorMysteryGoals"].to_string();
-    let achievement_text = approved_payload["mustAchieve"].to_string();
-    assert!(relationship_text.contains("互不信任"));
-    assert!(mystery_text.contains("账本被顾清夺走"));
-    assert!(achievement_text.contains("账本缺页"));
+    for (field, key, prefix, expected_description) in [
+        (
+            "mustAchieve",
+            "id",
+            "goal:opening-reality:",
+            "开篇已提交事实不得违背；以 Canon 为准。",
+        ),
+        (
+            "mustNotBreak",
+            "id",
+            "rule:opening-reality:",
+            "开篇已提交事实不得违背；以 Canon 为准。",
+        ),
+        (
+            "relationshipMacroDirections",
+            "id",
+            "relationship:opening",
+            "开篇关系约束以 Canon 为准；不得无证据跳变。",
+        ),
+        (
+            "majorMysteryGoals",
+            "id",
+            "mystery:opening-reality:",
+            "开篇事实与知识边界以 Canon 为准；不得提前揭示。",
+        ),
+        (
+            "futureReservations",
+            "reservationId",
+            "reservation:opening-reality:",
+            "保留开篇 Canon 已确立的后续责任；以 Canon 为准。",
+        ),
+        (
+            "volumeIntentSeeds",
+            "seedId",
+            "volume-intent:opening-reality:",
+            "下一卷承接开篇 Canon 所确立的责任；以 Canon 为准。",
+        ),
+    ] {
+        let item = approved_payload[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item[key].as_str().is_some_and(|id| id.starts_with(prefix)))
+            .unwrap_or_else(|| panic!("missing opening item in {field}"));
+        assert_eq!(
+            item["kind"], "CANON_REFS",
+            "{field} must be a Canon reference"
+        );
+        assert_eq!(item["refs"], approved_payload["openingCanonRefs"]);
+        assert_eq!(item["description"], expected_description);
+        let description = item["description"].as_str().unwrap();
+        for canon_excerpt in ["账本缺页", "互不信任", "账本被顾清夺走"] {
+            assert!(
+                !description.contains(canon_excerpt),
+                "{field} description must not duplicate Canon text"
+            );
+        }
+    }
     drop(after);
 
     let final_center = query_production_center_impl(
@@ -1223,30 +1835,24 @@ fn approved_payload_for_variant(variant: &'static str) -> Value {
 }
 
 #[test]
-fn b02_approved_book_plan_changes_when_opening_relationship_and_event_change() {
+fn b02_approved_book_plan_references_opening_canon_without_copying_text() {
     let variant_a = approved_payload_for_variant("A");
     let variant_b = approved_payload_for_variant("B");
     assert_ne!(
-        variant_a["relationshipMacroDirections"],
-        variant_b["relationshipMacroDirections"]
+        variant_a["openingActualStateDigest"],
+        variant_b["openingActualStateDigest"]
     );
-    assert_ne!(
-        variant_a["majorMysteryGoals"],
-        variant_b["majorMysteryGoals"]
-    );
-    assert!(variant_a["relationshipMacroDirections"]
-        .to_string()
-        .contains("互不信任"));
-    assert!(variant_b["relationshipMacroDirections"]
-        .to_string()
-        .contains("结盟"));
-    assert!(variant_a["majorMysteryGoals"]
-        .to_string()
-        .contains("账本被顾清夺走"));
-    assert!(variant_b["majorMysteryGoals"]
-        .to_string()
-        .contains("账本由林舟保管"));
-    println!("B02_SEMANTIC_RESULT relation=PASS knowledge=PASS event=PASS variant_difference=PASS status=PASS");
+    for payload in [&variant_a, &variant_b] {
+        for field in ["relationshipMacroDirections", "majorMysteryGoals"] {
+            let serialized = payload[field].to_string();
+            assert!(serialized.contains("CANON_REFS"));
+            for canon_excerpt in ["互不信任", "结盟", "账本被顾清夺走", "账本由林舟保管"]
+            {
+                assert!(!serialized.contains(canon_excerpt));
+            }
+        }
+    }
+    println!("B02_SEMANTIC_RESULT relation=CANON_REF knowledge=CANON_REF event=CANON_REF no_text_copy=PASS state_digest=PASS status=PASS");
 }
 
 #[test]

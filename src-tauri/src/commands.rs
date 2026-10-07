@@ -9093,3 +9093,92 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_market_opportunities,
     ]
 }
+
+#[cfg(test)]
+mod rv30_opening_canon_tests {
+    use super::*;
+
+    #[test]
+    fn rv30_legacy_opening_description_projects_to_id_and_canon_refs() {
+        let item = json!({
+            "id":"rule:opening-reality:legacy",
+            "description":"不得违背开篇事实 林舟持有账本；证据原文：账本缺页。"
+        });
+        let refs = vec![
+            "fact:opening:linzhou".to_string(),
+            "relation:opening:linzhou-guqing".to_string(),
+        ];
+
+        let projected = opening_canon_reference_projection(&item, &refs, "LONG_FORM")
+            .unwrap()
+            .expect("legacy opening item should be classified from BookPlan.openingCanonRefs");
+
+        assert_eq!(
+            projected,
+            json!({
+                "id":"rule:opening-reality:legacy",
+                "refs":["fact:opening:linzhou","relation:opening:linzhou-guqing"]
+            })
+        );
+        assert!(projected.get("description").is_none());
+    }
+
+    #[test]
+    fn rv30_structured_opening_item_keeps_only_its_declared_canon_refs() {
+        let item = json!({
+            "id":"goal:opening-reality:current",
+            "kind":"CANON_REFS",
+            "refs":["fact:opening:linzhou"],
+            "description":"开篇已提交事实不得违背；以 Canon 为准。"
+        });
+        let refs = vec![
+            "fact:opening:linzhou".to_string(),
+            "event:opening:ledger".to_string(),
+        ];
+
+        let projected = opening_canon_reference_projection(&item, &refs, "LONG_FORM")
+            .unwrap()
+            .expect("structured opening item should be classified");
+
+        assert_eq!(
+            projected,
+            json!({"id":"goal:opening-reality:current","refs":["fact:opening:linzhou"]})
+        );
+    }
+
+    #[test]
+    fn rv30_opening_item_rejects_canon_refs_outside_its_source_contract() {
+        let item = json!({
+            "id":"rule:opening-reality:current",
+            "kind":"CANON_REFS",
+            "refs":["fact:unrelated"],
+            "description":"opening text"
+        });
+        let refs = vec!["fact:opening:linzhou".to_string()];
+
+        assert!(
+            opening_canon_reference_projection(&item, &refs, "LONG_FORM")
+                .unwrap_err()
+                .contains("CONTEXT_SOURCE_UNAVAILABLE")
+        );
+    }
+
+    #[test]
+    fn rv30_opening_canon_refs_follow_selected_entity_scope() {
+        let item = json!({
+            "id":"rule:opening-reality:current",
+            "refs":["fact:opening:linzhou"]
+        });
+
+        assert!(volume_constraint_matches_scope(
+            &item,
+            Some(&[]),
+            Some(&BTreeSet::from(["fact:opening:linzhou".to_string()]))
+        ));
+        assert!(!volume_constraint_matches_scope(
+            &item,
+            Some(&[]),
+            Some(&BTreeSet::from(["fact:opening:guqing".to_string()]))
+        ));
+    }
+}

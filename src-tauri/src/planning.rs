@@ -257,98 +257,6 @@ fn enrich_book_plan_from_opening(
         return Err("BOOK_PLAN_OPENING_STATE_DIGEST_REQUIRED".into());
     }
     let short_digest = &digest[..16];
-    let fact_text = actual_state
-        .facts
-        .iter()
-        .take(8)
-        .map(|fact| {
-            format!(
-                "{}{}={}({})",
-                fact.subject_name.as_deref().unwrap_or(&fact.subject_id),
-                fact.predicate,
-                fact.object_json,
-                fact.fact_id
-            )
-        })
-        .collect::<Vec<_>>();
-    let relation_text = actual_state
-        .relations
-        .iter()
-        .take(8)
-        .map(|relation| {
-            format!(
-                "{}{}{}({})",
-                relation
-                    .subject_name
-                    .as_deref()
-                    .unwrap_or(&relation.subject_id),
-                relation.predicate,
-                relation
-                    .object_name
-                    .as_deref()
-                    .unwrap_or(&relation.object_id),
-                relation.relation_id
-            )
-        })
-        .collect::<Vec<_>>();
-    let knowledge_text = actual_state
-        .knowledge
-        .iter()
-        .take(8)
-        .map(|knowledge| {
-            format!(
-                "{}对{}的认知为{}({})",
-                knowledge.knower_id,
-                knowledge.fact_id.as_deref().unwrap_or("未知事实"),
-                knowledge.epistemic_state,
-                knowledge.knowledge_id
-            )
-        })
-        .collect::<Vec<_>>();
-    let event_text = actual_state
-        .events
-        .iter()
-        .take(8)
-        .map(|event| {
-            format!(
-                "{}:{}({})",
-                event.event_type, event.object_json, event.event_id
-            )
-        })
-        .collect::<Vec<_>>();
-    let evidence_text = actual_state
-        .evidence
-        .iter()
-        .take(8)
-        .filter_map(|evidence| evidence.quote.as_deref())
-        .collect::<Vec<_>>()
-        .join("；");
-    let facts = if fact_text.is_empty() {
-        "无".into()
-    } else {
-        fact_text.join("；")
-    };
-    let relations = if relation_text.is_empty() {
-        "无".into()
-    } else {
-        relation_text.join("；")
-    };
-    let knowledge = if knowledge_text.is_empty() {
-        "无".into()
-    } else {
-        knowledge_text.join("；")
-    };
-    let events = if event_text.is_empty() {
-        "无".into()
-    } else {
-        event_text.join("；")
-    };
-    let evidence = if evidence_text.is_empty() {
-        "无".into()
-    } else {
-        evidence_text
-    };
-    let actual_refs = opening_canon_refs.join(", ");
     let semantic_evidence_refs = actual_state
         .evidence
         .iter()
@@ -365,7 +273,9 @@ fn enrich_book_plan_from_opening(
         "mustAchieve",
         json!({
             "id":format!("goal:opening-reality:{short_digest}"),
-            "description":format!("基于开篇事实 {facts} 与事件 {events}，继续让真实选择产生可核对后果；来源 {actual_refs}。")
+            "kind":"CANON_REFS",
+            "refs":opening_canon_refs,
+            "description":"开篇已提交事实不得违背；以 Canon 为准。"
         }),
     );
     append_book_plan_item(
@@ -373,7 +283,9 @@ fn enrich_book_plan_from_opening(
         "mustNotBreak",
         json!({
             "id":format!("rule:opening-reality:{short_digest}"),
-            "description":format!("不得违背开篇事实 {facts}、关系 {relations}、知识边界 {knowledge}；逐章证据：{evidence}。")
+            "kind":"CANON_REFS",
+            "refs":opening_canon_refs,
+            "description":"开篇已提交事实不得违背；以 Canon 为准。"
         }),
     );
     if actual_state.relations.is_empty() {
@@ -382,7 +294,9 @@ fn enrich_book_plan_from_opening(
             "relationshipMacroDirections",
             json!({
                 "id":format!("relationship:opening-facts:{short_digest}"),
-                "description":format!("根据开篇事实中的人物变化继续保持关系可追溯：{facts}。")
+                "kind":"CANON_REFS",
+                "refs":opening_canon_refs,
+                "description":"开篇关系约束以 Canon 为准；不得无证据跳变。"
             }),
         );
     } else {
@@ -392,7 +306,9 @@ fn enrich_book_plan_from_opening(
                 "relationshipMacroDirections",
                 json!({
                     "id":format!("relationship:opening:{}", relation.relation_id),
-                    "description":format!("{}与{}的关系“{}”必须沿真实开篇变化继续可追溯。", relation.subject_name.as_deref().unwrap_or(&relation.subject_id), relation.object_name.as_deref().unwrap_or(&relation.object_id), relation.predicate)
+                    "kind":"CANON_REFS",
+                    "refs":opening_canon_refs,
+                    "description":"开篇关系约束以 Canon 为准；不得无证据跳变。"
                 }),
             );
         }
@@ -402,7 +318,9 @@ fn enrich_book_plan_from_opening(
         "majorMysteryGoals",
         json!({
             "id":format!("mystery:opening-reality:{short_digest}"),
-            "description":format!("围绕开篇实际事件 {events} 与知识边界 {knowledge} 推进未解问题，证据线索为 {evidence}。")
+            "kind":"CANON_REFS",
+            "refs":opening_canon_refs,
+            "description":"开篇事实与知识边界以 Canon 为准；不得提前揭示。"
         }),
     );
     append_book_plan_item(
@@ -410,7 +328,9 @@ fn enrich_book_plan_from_opening(
         "futureReservations",
         json!({
             "reservationId":format!("reservation:opening-reality:{short_digest}"),
-            "description":format!("保留由开篇事实 {facts}、关系 {relations} 与事件 {events} 提出的后续责任。"),
+            "kind":"CANON_REFS",
+            "refs":opening_canon_refs,
+            "description":"保留开篇 Canon 已确立的后续责任；以 Canon 为准。",
             "reservedForVolumeNo":2,
             "notBeforeVolumeNo":2,
             "prerequisites":opening_canon_refs.iter().cloned().chain(signing_evidence_refs.iter().cloned()).collect::<Vec<_>>(),
@@ -424,7 +344,9 @@ fn enrich_book_plan_from_opening(
         "volumeIntentSeeds",
         json!({
             "seedId":format!("volume-intent:opening-reality:{short_digest}"),
-            "description":format!("下一卷承接事实 {facts}、关系 {relations}、知识 {knowledge} 和事件 {events}，并以证据 {evidence} 校验推进。")
+            "kind":"CANON_REFS",
+            "refs":opening_canon_refs,
+            "description":"下一卷承接开篇 Canon 所确立的责任；以 Canon 为准。"
         }),
     );
     Ok(())
@@ -790,13 +712,15 @@ pub fn compile_volume_intent_from_authority(
             seed.get("seedId").and_then(Value::as_str),
             seed.get("description").and_then(Value::as_str),
         ) {
-            push_unique_goal(
-                &mut must_achieve,
-                json!({
-                    "id":format!("goal:{volume_id}:seed:{seed_id}"),
-                    "description":description
-                }),
-            );
+            let mut goal = json!({
+                "id":format!("goal:{volume_id}:seed:{seed_id}"),
+                "description":description
+            });
+            if seed.get("kind").and_then(Value::as_str) == Some("CANON_REFS") {
+                goal["kind"] = json!("CANON_REFS");
+                goal["refs"] = seed.get("refs").cloned().unwrap_or_else(|| json!([]));
+            }
+            push_unique_goal(&mut must_achieve, goal);
         }
     }
     for responsibility in sources

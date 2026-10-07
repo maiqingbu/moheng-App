@@ -3,16 +3,22 @@
 export interface GoalConstraint {
   "id": string
   "description": string
+  "kind"?: "CANON_REFS"
+  "refs"?: Array<string>
 }
 
 export interface MacroDirection {
   "id": string
   "description": string
+  "kind"?: "CANON_REFS"
+  "refs"?: Array<string>
 }
 
 export interface FutureReservation {
   "reservationId": string
   "description": string
+  "kind"?: "CANON_REFS"
+  "refs"?: Array<string>
   "reservedForVolumeNo"?: number | null
   "reservedForVolumeId"?: string | null
   "notBeforeVolumeNo"?: number | null
@@ -25,6 +31,8 @@ export interface FutureReservation {
 export interface VolumeIntentSeed {
   "seedId": string
   "description": string
+  "kind"?: "CANON_REFS"
+  "refs"?: Array<string>
 }
 
 export interface Condition {
