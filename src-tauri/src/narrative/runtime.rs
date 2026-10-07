@@ -433,7 +433,7 @@ pub fn context_hard_scope(input: &ContextCompilerInput) -> Value {
 
 pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 4096;
 pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 32768;
-pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r5";
+pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r6";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
 pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r2";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
@@ -1270,7 +1270,7 @@ mod b2_context_tests {
         assert_ne!(original, reclassified);
 
         let next_compiler = ContextDigestConfig {
-            compiler_version: "b06-context-compiler.r6",
+            compiler_version: "b06-context-compiler.r7",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let recompiled = relevant_state_digest_with_config(&input, next_compiler).unwrap();

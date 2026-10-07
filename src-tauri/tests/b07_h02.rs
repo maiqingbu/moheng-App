@@ -46,6 +46,61 @@ fn insert_project_authority(
     hash
 }
 
+fn persist_context_manifest_version(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    chapter_id: &str,
+    artifact_id: &str,
+    version: i64,
+    payload: &serde_json::Value,
+) -> ArtifactRef {
+    let payload_hash = sha256_canonical(payload).unwrap();
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,
+        "projectId":project_id,
+        "artifactType":"ContextManifest",
+        "scope":{"level":"CHAPTER","chapterId":chapter_id},
+        "version":version,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "payload":payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":[],
+        "provenance":{"createdBy":"B07::PlanningOwner","commandId":format!("command:context:{project_id}:v{version}")},
+        "createdAt":"2026-08-30T00:00:02Z"
+    }))
+    .unwrap();
+    ArtifactRepository::insert_candidate(connection, project_id, &artifact).unwrap();
+    connection
+        .execute(
+            "UPDATE artifacts SET artifact_status='COMMITTED' WHERE artifact_id=?1",
+            [&artifact.artifact_id],
+        )
+        .unwrap();
+    let scope_key = String::from_utf8(
+        ai_novel_production_system_core::hash::canonical_bytes(
+            &json!({"level":"CHAPTER","chapterId":chapter_id}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let reference = ArtifactRef {
+        artifact_id: artifact.artifact_id,
+        version,
+        payload_hash: payload_hash.clone(),
+    };
+    ArtifactRepository::promote_head(
+        connection,
+        project_id,
+        &reference,
+        "ContextManifest",
+        "CHAPTER",
+        &scope_key,
+    )
+    .unwrap();
+    reference
+}
+
 #[test]
 fn b07_volume_intent_and_route_query_use_commit_bundle_authority() {
     let temp = tempfile::tempdir().unwrap();
@@ -375,7 +430,7 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:3','p3',1,'Book','ACTIVE',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,'p3','book:3',1,'Volume','PLANNING',1,1,1000,?2,?2)", libsql_rusqlite::params![volume_id, "2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p3',?2,1,'Chapter','NORMAL','PLANNED',0,?3,?3)", libsql_rusqlite::params![chapter_id, volume_id, "2026-08-30T00:00:00Z"]).unwrap();
-    let approved_book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[{"reservationId":"secret:v5","description":"reserved reveal","reservedForVolumeNo":5,"notBeforeVolumeNo":5,"prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"A"}],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
+    let approved_book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[{"reservationId":"secret:v5","description":"reserved reveal","notBeforeVolumeNo":5,"prerequisites":[],"mayForeshadow":true,"mayReveal":true,"authorityLevel":"A"}],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
     let approved_hash = sha256_canonical(&approved_book_plan).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('plan:bookplan:p3','p3','BookPlan','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", approved_hash, "2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:bookplan:p3',1,?1,?2)", libsql_rusqlite::params![approved_book_plan.to_string(), approved_hash]).unwrap();
@@ -415,7 +470,19 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:p3:thread-source',1,?1,?2)", libsql_rusqlite::params![thread_source_payload.to_string(), thread_source_hash]).unwrap();
     connection.execute("INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,lifecycle,created_at,updated_at,resume_condition_json) VALUES ('obligation:p3','p3','VOLUME','PROMISE','A','artifact:p3:thread-source',1,'must continue','APPROVED',?1,?1,?2)", libsql_rusqlite::params!["2026-08-30T00:00:02Z", json!({"kind":"AFTER_CHAPTER","value":0}).to_string()]).unwrap();
     drop(connection);
-    let manifest = query_context_manifest_impl(&state, json!({"projectId":"p3","volumeId":volume_id,"chapterId":chapter_id,"scope":"CHAPTER","entityIds":[],"references":[]})).unwrap();
+    let scope_selection = json!({
+        "taskRefs":["task:required"],
+        "responsibilityRefs":["thread:obligation:p3"],
+        "reservationRefs":["secret:v5"],
+        "entityRefs":[]
+    });
+    let context_request = json!({"projectId":"p3","volumeId":volume_id,"chapterId":chapter_id,"scope":"CHAPTER","entityIds":[],"references":[],"scopeSelection":scope_selection});
+    let manifest = query_context_manifest_impl(&state, context_request.clone()).unwrap();
+    assert!(manifest["omittedSoftSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["reason"] == "undeclaredFields:[\"storyCore.mechanism\"]"));
     let context_hash = sha256_canonical(&manifest).unwrap();
     let context_artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":"context:p3:chapter","projectId":"p3","artifactType":"ContextManifest","scope":{"level":"CHAPTER","chapterId":chapter_id},"version":1,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":manifest,"payloadHash":context_hash,"dependencyRefs":[],"provenance":{"createdBy":"B07::PlanningOwner","commandId":"command:context:p3"},"createdAt":"2026-08-30T00:00:02Z"})).unwrap();
     let model_run_id =
@@ -462,7 +529,7 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     drop(connection);
     let dependency_blocked = execute_command_impl(
         &state,
-        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:dependency-blocked:p3","idempotencyKey":"key:chapter:dependency-blocked:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:02Z","payload":{"chapterId":chapter_id,"modelRunId":model_run_id,"routeTaskIds":[],"plan":plan}}),
+        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:dependency-blocked:p3","idempotencyKey":"key:chapter:dependency-blocked:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:02Z","payload":{"chapterId":chapter_id,"modelRunId":model_run_id,"routeTaskIds":[],"scopeSelection":scope_selection,"plan":plan}}),
     );
     assert_eq!(dependency_blocked.unwrap_err(), "TASK_DEPENDENCY_UNMET");
     let connection = state
@@ -471,12 +538,38 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
         .unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:dependency','p3','volume.task.progress','{\"status\":\"SATISFIED\"}',?1,'{}',?2,?2)", libsql_rusqlite::params![chapter_id, "2026-08-30T00:00:02Z"]).unwrap();
     drop(connection);
+    let refreshed_manifest = query_context_manifest_impl(&state, context_request.clone()).unwrap();
+    let refreshed_model_run_id = StableIdentityFactory::from_command(
+        StableIdKind::ModelRun,
+        "command:model:p3:dependency-satisfied",
+    )
+    .unwrap();
+    let connection = state
+        .manager
+        .open("p3", "", "2026-08-30T00:00:03Z")
+        .unwrap();
+    let refreshed_context_ref = persist_context_manifest_version(
+        &connection,
+        "p3",
+        &chapter_id,
+        "context:p3:chapter:dependency-satisfied",
+        1,
+        &refreshed_manifest,
+    );
+    connection.execute("INSERT INTO model_runs(model_run_id,project_id,context_manifest_ref,provider,model,idempotency_key,capability,status,created_at,updated_at) VALUES (?1,'p3',?2,'fixture','fixture','planning:p3:dependency-satisfied','PLAN_STRATEGY','COMPLETED',?3,?3)", libsql_rusqlite::params![refreshed_model_run_id, refreshed_context_ref.artifact_id, "2026-08-30T00:00:03Z"]).unwrap();
+    let mut refreshed_plan = plan.clone();
+    refreshed_plan["compiledFromStateDigest"] =
+        refreshed_manifest["compiledFromStateDigest"].clone();
+    refreshed_plan["contextManifestRef"] = serde_json::to_value(&refreshed_context_ref).unwrap();
+    let refreshed_plan_digest = sha256_canonical(&refreshed_plan).unwrap();
+    connection.execute("INSERT INTO model_parse_results(parse_id,project_id,model_run_id,status,parsed_json,created_at) VALUES (?1,'p3',?2,'OK',?3,?4)", libsql_rusqlite::params![format!("parse:{refreshed_model_run_id}"), refreshed_model_run_id, json!({"outputDigest":refreshed_plan_digest}).to_string(), "2026-08-30T00:00:03Z"]).unwrap();
+    drop(connection);
     let result = execute_command_impl(
         &state,
-        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:p3","idempotencyKey":"key:chapter:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:03Z","payload":{"chapterId":chapter_id,"modelRunId":model_run_id,"routeTaskIds":["task:caller-must-not-authorize"],"plan":plan}}),
+        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:p3","idempotencyKey":"key:chapter:p3","projectId":"p3","expectedRevision":2,"requestedAt":"2026-08-30T00:00:03Z","payload":{"chapterId":chapter_id,"modelRunId":refreshed_model_run_id,"routeTaskIds":["task:caller-must-not-authorize"],"scopeSelection":scope_selection,"plan":refreshed_plan}}),
     );
     assert!(result.is_ok(), "{result:?}");
-    let mut reveal_plan = plan.clone();
+    let mut reveal_plan = refreshed_plan.clone();
     reveal_plan["sceneExecution"][0]["action"] = json!("REVEAL");
     let reveal_digest = sha256_canonical(&reveal_plan).unwrap();
     let connection = state
@@ -488,14 +581,14 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
             "UPDATE model_parse_results SET parsed_json=?1 WHERE model_run_id=?2",
             libsql_rusqlite::params![
                 json!({"outputDigest":reveal_digest}).to_string(),
-                model_run_id
+                refreshed_model_run_id
             ],
         )
         .unwrap();
     drop(connection);
     let reveal = execute_command_impl(
         &state,
-        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:reveal:p3","idempotencyKey":"key:chapter:reveal:p3","projectId":"p3","expectedRevision":3,"requestedAt":"2026-08-30T00:00:04Z","payload":{"chapterId":chapter_id,"modelRunId":model_run_id,"plan":reveal_plan}}),
+        json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:reveal:p3","idempotencyKey":"key:chapter:reveal:p3","projectId":"p3","expectedRevision":3,"requestedAt":"2026-08-30T00:00:04Z","payload":{"chapterId":chapter_id,"modelRunId":refreshed_model_run_id,"scopeSelection":scope_selection,"plan":reveal_plan}}),
     );
     assert_eq!(reveal.unwrap_err(), "FUTURE_RESERVATION_VIOLATION");
     let connection = state
@@ -506,8 +599,8 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
         .execute(
             "UPDATE model_parse_results SET parsed_json=?1 WHERE model_run_id=?2",
             libsql_rusqlite::params![
-                json!({"outputDigest":plan_digest}).to_string(),
-                model_run_id
+                json!({"outputDigest":refreshed_plan_digest}).to_string(),
+                refreshed_model_run_id
             ],
         )
         .unwrap();

@@ -1832,6 +1832,21 @@ fn context_contract_payload(
     .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source={source}|scope={scope}"))
 }
 
+fn declared_story_mechanism<'a>(
+    story_core: &'a serde_json::Map<String, Value>,
+    scope: &str,
+) -> Result<Option<&'a Value>, String> {
+    match story_core.get("mechanism") {
+        None => Ok(None),
+        Some(value) if value.as_str().is_some_and(|text| !text.trim().is_empty()) => {
+            Ok(Some(value))
+        }
+        Some(_) => Err(format!(
+            "GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.mechanism|scope={scope}"
+        )),
+    }
+}
+
 fn hard_plan_task_projection(
     task: &Value,
     goal_contract_fields: &[crate::narrative::GoalContractField],
@@ -2162,6 +2177,15 @@ fn goal_contract_context_for_request(
             ));
         }
     }
+    let mechanism = declared_story_mechanism(story_core, scope)?;
+    if mechanism.is_none() {
+        record_omitted_contract_field(
+            &mut omitted_soft_sources,
+            &story_ref,
+            "undeclaredFields",
+            "undeclaredFields:[\"storyCore.mechanism\"]",
+        );
+    }
 
     if opening {
         for key in [
@@ -2171,16 +2195,25 @@ fn goal_contract_context_for_request(
             "conflict",
             "readerPromise",
         ] {
-            let value = story_core
-                .get(key)
-                .filter(|value| {
-                    value
-                        .as_str()
-                        .is_some_and(|text| !text.trim().is_empty())
-                })
-                .ok_or_else(|| {
-                    format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.{key}|scope={scope}")
-                })?;
+            let value = if key == "mechanism" {
+                mechanism
+            } else {
+                Some(
+                    story_core
+                        .get(key)
+                        .filter(|value| {
+                            value
+                                .as_str()
+                                .is_some_and(|text| !text.trim().is_empty())
+                        })
+                        .ok_or_else(|| {
+                            format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.{key}|scope={scope}")
+                        })?,
+                )
+            };
+            let Some(value) = value else {
+                continue;
+            };
             append_goal_contract_field(
                 &mut fields,
                 &story_ref,
@@ -2189,17 +2222,7 @@ fn goal_contract_context_for_request(
             )?;
             current_scope_refs.extend(contract_value_source_refs(value));
         }
-    } else {
-        let mechanism = story_core
-            .get("mechanism")
-            .filter(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|text| !text.trim().is_empty())
-            })
-            .ok_or_else(|| {
-                format!("GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.mechanism|scope={scope}")
-            })?;
+    } else if let Some(mechanism) = mechanism {
         append_goal_contract_field(
             &mut fields,
             &story_ref,
@@ -9183,6 +9206,32 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         test_provider,
         query_market_opportunities,
     ]
+}
+
+#[cfg(test)]
+mod story_constitution_contract_tests {
+    use super::*;
+
+    #[test]
+    fn missing_story_mechanism_is_undeclared() {
+        let story_core = json!({"protagonist":"林舟"});
+        assert!(
+            declared_story_mechanism(story_core.as_object().unwrap(), "CHAPTER:1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn non_string_story_mechanism_remains_invalid() {
+        let story_core = json!({"mechanism":{"value":"代价"}});
+        let error =
+            declared_story_mechanism(story_core.as_object().unwrap(), "CHAPTER:1").unwrap_err();
+        assert_eq!(
+            error,
+            "GOAL_CONTRACT_STORY_CONSTITUTION_INVALID|field=storyCore.mechanism|scope=CHAPTER:1"
+        );
+    }
 }
 
 #[cfg(test)]
