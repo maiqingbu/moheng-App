@@ -1601,7 +1601,11 @@ fn validate_chapter_plan_change_semantics(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .any(|task_ref| !route_task_ids.iter().any(|route_task| route_task == task_ref))
+        .any(|task_ref| {
+            !route_task_ids
+                .iter()
+                .any(|route_task| route_task == task_ref)
+        })
     {
         return Err("TASK_SCOPE_VIOLATION".into());
     }
