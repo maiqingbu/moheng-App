@@ -1240,6 +1240,14 @@ fn insert_semantic_chapter_fixture(
     state: &KernelState,
     project_id: &str,
 ) -> SemanticChapterFixture {
+    insert_semantic_chapter_fixture_with_responsibilities(state, project_id, &[])
+}
+
+fn insert_semantic_chapter_fixture_with_responsibilities(
+    state: &KernelState,
+    project_id: &str,
+    responsibility_refs: &[&str],
+) -> SemanticChapterFixture {
     let chapter_plan_id = format!("plan:chapter:{project_id}:1");
     let chapter_id = format!("chapter-{project_id}-1");
     let volume_id = format!("volume-{project_id}-2");
@@ -1267,25 +1275,76 @@ fn insert_semantic_chapter_fixture(
         )
         .expect("insert semantic fixture chapter");
 
+    let story_id = format!("story-constitution:{project_id}");
+    let story_hash = insert_committed_artifact(
+        &handle,
+        project_id,
+        "StoryConstitution",
+        &story_id,
+        "PROJECT",
+        json!({"level":"PROJECT"}),
+        json!({
+            "storyCore":{
+                "protagonist":"主角",
+                "desire":"推进当前路线",
+                "mechanism":"行动留下可验证证据",
+                "conflict":"当前路线受到阻碍",
+                "readerPromise":"每章推进正式任务",
+                "worldRules":[],
+                "forbiddenReveals":[]
+            }
+        }),
+        true,
+    );
+    let story_ref = json!({"artifactId":story_id,"version":1,"payloadHash":story_hash});
     insert_committed_artifact(
         &handle,
         project_id,
+        "MainContract",
+        &format!("main-contract:{project_id}"),
+        "PROJECT",
+        json!({"level":"PROJECT"}),
+        json!({"storyConstitutionRef":story_ref,"scope":"BOOK","hardRules":["必须依据正式 Route 推进任务"],"softPreferences":[]}),
+        true,
+    );
+    let book_plan_id = format!("plan:book:{project_id}");
+    let book_plan_hash = insert_committed_artifact(
+        &handle,
+        project_id,
         "BookPlan",
-        &format!("plan:book:{project_id}"),
+        &book_plan_id,
         "PROJECT",
         json!({"level":"PROJECT"}),
         json!({
             "payloadSchema":"book-plan.r1",
             "planningMaturity":"APPROVED",
+            "storyPromise":"围绕正式任务推进",
+            "protagonistMacroDirection":"主动面对当前路线",
+            "endingBoundary":"依据证据完成本卷目标",
+            "mustAchieve":[{"id":"goal:b12:route","description":"推进当前路线"}],
+            "mustNotBreak":[],
+            "relationshipMacroDirections":[],
+            "majorMysteryGoals":[],
             "futureReservations":[{
                 "reservationId":"reservation:b12:future",
+                "description":"保留给后续卷揭示的事实",
                 "notBeforeVolumeNo":4,
+                "prerequisites":[],
                 "mayForeshadow":true,
-                "mayReveal":false
-            }]
+                "mayReveal":false,
+                "authorityLevel":"A"
+            }],
+            "volumeIntentSeeds":[],
+            "openingHypotheses":[],
+            "globalLengthBudget":{"preferredWords":3000}
         }),
         true,
     );
+    let book_plan_ref = json!({
+        "artifactId":book_plan_id,
+        "version":1,
+        "payloadHash":book_plan_hash
+    });
     let context_id = format!("context:{project_id}:1");
     let context_hash = insert_committed_artifact(
         &handle,
@@ -1305,7 +1364,21 @@ fn insert_semantic_chapter_fixture(
         &intent_id,
         "VOLUME",
         json!({"level":"VOLUME","volumeId":volume_id}),
-        json!({"payloadSchema":"volume-intent.r1","futureReservations":[]}),
+        json!({
+            "payloadSchema":"volume-intent.r1",
+            "volumeFunction":"推进当前 Route 中的正式任务",
+            "entryConditions":[],
+            "mustAchieve":[{"id":"goal:b12:route","description":"推进当前路线"}],
+            "mustNotBreak":[{"id":"rule:b12:route","description":"不得越出正式 Route"}],
+            "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:b12:route"}],
+            "futureReservationRefs":[],
+            "crossVolumeResponsibilityRefs":responsibility_refs,
+            "targetChapterRange":{"min":1,"preferred":3,"max":3},
+            "targetWordRange":{"preferred":3000},
+            "sourceBookPlanRef":book_plan_ref,
+            "compiledFromProjectRevision":0,
+            "sourceEvidenceRefs":[]
+        }),
         true,
     );
     let route_id = format!("plan:{volume_id}");
@@ -1320,7 +1393,7 @@ fn insert_semantic_chapter_fixture(
             "payloadSchema":"volume-plan.r1",
             "volumeIntentRef":{"artifactId":intent_id,"version":1,"payloadHash":intent_hash},
             "routeVersion":1,
-            "tasks":[{"taskId":"task:b12:route","class":"REQUIRED","dependsOnTaskIds":[],"objective":"推进当前路线"}],
+            "tasks":[{"taskId":"task:b12:route","class":"REQUIRED","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"objective":"推进当前路线","completionPredicate":{"kind":"TASK_SATISFIED","value":"task:b12:route"},"estimatedChapterCost":{"preferred":1}}],
             "routeInvariants":[],
             "requiredExitConditions":[],
             "capacityBudget":{"minChapters":1,"preferredChapters":3,"maxChapters":3}
@@ -1333,7 +1406,7 @@ fn insert_semantic_chapter_fixture(
             params![project_id, chapter_id, NOW],
         )
         .expect("insert route task state");
-    let chapter_plan = json!({
+    let mut chapter_plan = json!({
         "payloadSchema":"chapter-plan.r1",
         "chapterId":chapter_id,
         "compiledFromProjectRevision":0,
@@ -1353,6 +1426,14 @@ fn insert_semantic_chapter_fixture(
             {"slotNo":3,"objective":"留下后果","tentative":true}
         ]
     });
+    if !responsibility_refs.is_empty() {
+        chapter_plan["hardScope"] = json!({
+            "taskRefs":["task:b12:route"],
+            "responsibilityRefs":responsibility_refs,
+            "reservationRefs":[],
+            "entityRefs":[]
+        });
+    }
     insert_committed_artifact(
         &handle,
         project_id,
@@ -1769,7 +1850,11 @@ fn b12_change_chapter_plan_rejects_blocked_real_route_task() {
 fn b12_change_chapter_plan_rejects_missing_triggered_continuity() {
     let project_id = "p-b12-r01-continuity";
     let state = test_state(project_id);
-    let fixture = insert_semantic_chapter_fixture(&state, project_id);
+    let fixture = insert_semantic_chapter_fixture_with_responsibilities(
+        &state,
+        project_id,
+        &["obligation:b12:secret"],
+    );
     let handle = state
         .manager
         .open(project_id, "", NOW)
