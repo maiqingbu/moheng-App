@@ -34,7 +34,12 @@ import type {
   VolumeLifecycleProjection
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
-import { receiptSummary, repairExecutionLabel } from '../presentation/productLanguage'
+import {
+  parseContextHardBudgetFailure,
+  receiptSummary,
+  repairExecutionLabel,
+  type ContextHardBudgetFailure,
+} from '../presentation/productLanguage'
 import { useProjectLibraryStore } from './projectLibraryStore'
 
 const frontendPort = getFrontendPort()
@@ -46,6 +51,7 @@ export interface CommandUiState {
   confirmation?: 'pending' | 'confirmed'
   receiptId?: string
   repairOutcome?: 'receipt' | 'unknown' | 'not_executed'
+  contextBudget?: ContextHardBudgetFailure
 }
 
 export interface CommandBinding {
@@ -690,6 +696,7 @@ export const useProjectStore = defineStore('project-projection', () => {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      const contextBudget = parseContextHardBudgetFailure(error)
       if (request.type === 'repair_execute') {
         const repairPlanId = request.payload?.repairPlanId
         const authorizationId = request.payload?.authorizationId
@@ -727,7 +734,7 @@ export const useProjectStore = defineStore('project-projection', () => {
           commandId,
         })
       } else {
-        setStateIfCurrent({ status: 'failed', message, commandId })
+        setStateIfCurrent({ status: 'failed', message, commandId, contextBudget })
       }
       if (request.type.startsWith('production_')) {
         try { await loadProduction(true) } catch { /* preserve the original command error */ }

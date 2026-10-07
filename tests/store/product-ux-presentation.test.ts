@@ -6,6 +6,7 @@ import {
   evidenceLabel,
   evidenceSelector,
   productErrorMessage,
+  parseContextHardBudgetFailure,
   repairExecutionLabel,
   receiptSummary,
   selectEvidenceByIdentity,
@@ -67,6 +68,37 @@ describe('Product UX 展示语义映射', () => {
     expect(message).toContain('1024')
     expect(message).toContain('chapter:3')
     expect(message).not.toMatch(/CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens|serializedBytes|CHAPTER/)
+  })
+
+  it('parses versioned HARD budget source sizes for manual scope adjustment', () => {
+    const failure = new Error(`CONTEXT_HARD_BUDGET_EXCEEDED|details=${JSON.stringify({
+      usedTokens: 4200,
+      limitTokens: 4096,
+      serializedBytes: 33000,
+      limitBytes: 32768,
+      scope: 'CHAPTER:chapter:3',
+      budgetPolicyVersion: 'b06-hard-budget.r2',
+      sourceSizes: [{
+        kind: 'TASK',
+        sourceRef: 'task:current',
+        selectionKind: 'TASK',
+        selectionRef: 'task:current',
+        fieldPath: null,
+        estimatedTokens: 620,
+        serializedBytes: 1860,
+        adjustable: true,
+      }],
+    })}`)
+    const parsed = parseContextHardBudgetFailure(failure)
+    expect(parsed).toMatchObject({
+      usedTokens: 4200,
+      limitTokens: 4096,
+      serializedBytes: 33000,
+      limitBytes: 32768,
+      budgetPolicyVersion: 'b06-hard-budget.r2',
+      sourceSizes: [{ kind: 'TASK', selectionRef: 'task:current', adjustable: true }],
+    })
+    expect(commandMessage({ status: 'failed', message: failure.message })).toContain('手动重新编译')
   })
 
   it('blocks every dynamic internal engineering token while preserving a caller fallback', () => {

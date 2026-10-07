@@ -315,7 +315,10 @@ fn b06_progress_context_digest_and_stale_evaluation_are_bounded_and_order_stable
     );
     assert!(manifest.hard_source_count >= state.source_refs.len() as i64);
     assert!(manifest.budget.hard_tokens > 0);
-    assert!(manifest.budget.hard_tokens < 1024);
+    assert!(
+        manifest.budget.hard_tokens
+            < ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT
+    );
     assert_eq!(manifest.budget.soft_tokens, 40);
     assert_eq!(
         manifest.budget.total_tokens,
@@ -413,8 +416,11 @@ fn b_r2_01_aggregate_hard_budget_counts_multiple_sources_and_future_reservations
     input.future_reservation_refs.truncate(1);
     input.selected_evidence.clear();
     let recovered = compile_context_manifest(input).unwrap();
-    assert!(recovered.budget.hard_tokens < 1024);
-    println!("B_R2_01_AGGREGATE_HARD_RECOVERY_RESULT reduced_scope=PASS estimated_hard_tokens={} limit=1024 status=PASS", recovered.budget.hard_tokens);
+    assert!(
+        recovered.budget.hard_tokens
+            < ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT
+    );
+    println!("B_R2_01_AGGREGATE_HARD_RECOVERY_RESULT reduced_scope=PASS estimated_hard_tokens={} limit={} status=PASS", recovered.budget.hard_tokens, ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT);
 }
 
 struct EchoAdapter;

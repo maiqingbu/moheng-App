@@ -37,10 +37,16 @@ const routeProjection = (currentChapterPlan: unknown = null) => ({
   currentChapterPlan, horizonPreview: [], truncated: false,
 })
 
-function mountWorkspace(chapterStatus: 'official' | 'producing', currentChapterPlan: unknown = null) {
+function mountWorkspace(
+  chapterStatus: 'official' | 'producing',
+  currentChapterPlan: unknown = null,
+  budgetFailure: Record<string, unknown> | null = null,
+) {
   const store = reactive({
     currentProjectId: 'project-b04-b06', volumeDetail: detail(chapterStatus), planningRoute: routeProjection(currentChapterPlan),
-    volumeLifecycle: null, advancedMode: false, commandState: vi.fn(() => ({ status: 'idle', message: '' })),
+    volumeLifecycle: null, advancedMode: false, commandState: vi.fn((key: string) => key === 'chapter-plan-compile' && budgetFailure
+      ? { status: 'failed', message: '本章硬性资料超出预算。', contextBudget: budgetFailure }
+      : { status: 'idle', message: '' }),
     runCommand: vi.fn(async () => ({ finalStatus: 'committed', message: 'ok' })),
     loadVolumeDetail: vi.fn(async () => store.volumeDetail),
     loadPlanningRoute: vi.fn(async () => store.planningRoute), loadVolumeLifecycle: vi.fn(async () => null),
@@ -78,6 +84,50 @@ describe('B04-B06 chapter planning controls', () => {
     expect(mounted.store.runCommand).toHaveBeenCalledWith('chapter-plan-compile', expect.objectContaining({
       type: 'planning_compile_chapter_plan',
       payload: { chapterId: 'chapter:4', chapterGoalHint: expect.any(String) },
+    }))
+    mounted.app.unmount()
+  })
+
+  it('shows oversized HARD sources and manually recompiles only the selected ChapterPlan scope', async () => {
+    const mounted = mountWorkspace('producing', null, {
+      usedTokens: 4200,
+      limitTokens: 4096,
+      serializedBytes: 33000,
+      limitBytes: 32768,
+      scope: 'CHAPTER:chapter:4',
+      budgetPolicyVersion: 'b06-hard-budget.r2',
+      sourceSizes: [
+        { kind: 'TASK', sourceRef: 'task:required', selectionKind: 'TASK', selectionRef: 'task:required', estimatedTokens: 700, serializedBytes: 2100, adjustable: true },
+        { kind: 'TASK', sourceRef: 'task:optional', selectionKind: 'TASK', selectionRef: 'task:optional', estimatedTokens: 500, serializedBytes: 1500, adjustable: true },
+        { kind: 'CONTINUITY', sourceRef: 'thread:promise', selectionKind: 'RESPONSIBILITY', selectionRef: 'thread:promise', estimatedTokens: 300, serializedBytes: 900, adjustable: true },
+        { kind: 'RESERVATION', sourceRef: 'reservation:later', selectionKind: 'RESERVATION', selectionRef: 'reservation:later', estimatedTokens: 150, serializedBytes: 450, adjustable: true },
+        { kind: 'ENTITY', sourceRef: 'entity:lead', selectionKind: 'ENTITY', selectionRef: 'entity:lead', estimatedTokens: 80, serializedBytes: 240, adjustable: true },
+      ],
+    })
+    await Promise.resolve()
+    const panel = mounted.container.querySelector('[data-hard-budget-scope-adjustment]')
+    expect(panel?.textContent).toContain('task:optional')
+    expect(panel?.textContent).toContain('500 token / 1500 字节')
+    const optionalTask = [...panel!.querySelectorAll('label')]
+      .find(label => label.textContent?.includes('task:optional'))
+      ?.querySelector('input') as HTMLInputElement
+    optionalTask.click()
+    await Promise.resolve()
+    const recompile = panel!.querySelector('[data-action="recompile-narrowed-scope"]') as HTMLButtonElement
+    recompile.click()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mounted.store.runCommand).toHaveBeenCalledWith('chapter-plan-compile', expect.objectContaining({
+      type: 'planning_compile_chapter_plan',
+      payload: expect.objectContaining({
+        chapterId: 'chapter:4',
+        scopeSelection: {
+          taskRefs: ['task:required'],
+          responsibilityRefs: ['thread:promise'],
+          reservationRefs: ['reservation:later'],
+          entityRefs: ['entity:lead'],
+        },
+      }),
     }))
     mounted.app.unmount()
   })

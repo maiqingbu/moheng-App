@@ -845,6 +845,10 @@ pub struct ChapterPlanR1 {
     pub context_manifest_ref: ArtifactRef,
     pub chapter_goal: String,
     pub active_task_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_scope: Option<ChapterPlanR1HardScope>,
     pub continuity_actions: Vec<ChapterPlanR1ContinuityActionsItem>,
     pub required_state_outcomes: Vec<Condition>,
     pub forbidden_transitions: Vec<Condition>,
@@ -852,6 +856,15 @@ pub struct ChapterPlanR1 {
     pub reservation_refs: Vec<String>,
     pub scene_execution: Vec<serde_json::Value>,
     pub horizon_preview: Vec<HorizonSlot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChapterPlanR1HardScope {
+    pub task_refs: Vec<String>,
+    pub responsibility_refs: Vec<String>,
+    pub reservation_refs: Vec<String>,
+    pub entity_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -47,6 +47,37 @@ const nextChapter = computed(() => detail.value?.chapters.items
   .sort((left, right) => left.number - right.number)[0] ?? null)
 const currentChapterPlan = computed(() => planRoute.value?.currentChapterPlan ?? null)
 const chapterPlanningBusy = (status: string) => ['submitting', 'accepted', 'processing'].includes(status)
+type ScopeBudgetGroup = { key: string; kind: string; ref: string; estimatedTokens: number; serializedBytes: number }
+const chapterBudgetFailure = computed(() => {
+  const chapterScope = nextChapter.value?.id ? 'CHAPTER:' + nextChapter.value.id : ''
+  return [
+    store.commandState('chapter-plan-compile').contextBudget,
+    store.commandState('production-start').contextBudget,
+  ].find(report => report && (!chapterScope || report.scope === chapterScope))
+})
+function groupBudgetSources(report: typeof chapterBudgetFailure.value): ScopeBudgetGroup[] {
+  const groups = new Map<string, ScopeBudgetGroup>()
+  for (const source of report?.sourceSizes ?? []) {
+    if (!source.adjustable || !source.selectionKind || !source.selectionRef) continue
+    const key = source.selectionKind + ':' + source.selectionRef
+    const group = groups.get(key) ?? {
+      key,
+      kind: source.selectionKind,
+      ref: source.selectionRef,
+      estimatedTokens: 0,
+      serializedBytes: 0,
+    }
+    group.estimatedTokens += source.estimatedTokens
+    group.serializedBytes += source.serializedBytes
+    groups.set(key, group)
+  }
+  return [...groups.values()].sort((left, right) => left.kind.localeCompare(right.kind) || left.ref.localeCompare(right.ref))
+}
+const scopeBudgetGroups = computed(() => groupBudgetSources(chapterBudgetFailure.value))
+const selectedScopeKeys = ref<string[]>([])
+watch(chapterBudgetFailure, () => {
+  selectedScopeKeys.value = scopeBudgetGroups.value.map(group => group.key)
+}, { immediate: true })
 const workspaceRuntimePoller = createVolumePlanningRuntimePoller({
   query: async () => {
     const value = await store.loadVolumeDetail(volumeId.value, true)
@@ -101,15 +132,22 @@ async function prepareNextChapter() {
   if (chapter) await store.loadPlanningRoute(volumeId.value, true, chapter.number)
 }
 
-async function compileNextChapterPlan() {
+async function compileNextChapterPlan(adjustScope = false) {
   const chapter = nextChapter.value
   if (!chapterActionsAvailable.value || !chapter || chapterPlanningBusy(chapterPlanState.value.status)) return
+  const scopeSelection = adjustScope ? {
+    taskRefs: scopeBudgetGroups.value.filter(group => group.kind === 'TASK' && selectedScopeKeys.value.includes(group.key)).map(group => group.ref),
+    responsibilityRefs: scopeBudgetGroups.value.filter(group => group.kind === 'RESPONSIBILITY' && selectedScopeKeys.value.includes(group.key)).map(group => group.ref),
+    reservationRefs: scopeBudgetGroups.value.filter(group => group.kind === 'RESERVATION' && selectedScopeKeys.value.includes(group.key)).map(group => group.ref),
+    entityRefs: scopeBudgetGroups.value.filter(group => group.kind === 'ENTITY' && selectedScopeKeys.value.includes(group.key)).map(group => group.ref),
+  } : undefined
   await store.runCommand('chapter-plan-compile', {
     type: 'planning_compile_chapter_plan',
     projectId: store.currentProjectId ?? undefined,
     payload: {
       chapterId: chapter.id,
       chapterGoalHint: '推进当前卷任务，并让真实选择产生可核对后果。',
+      ...(scopeSelection ? { scopeSelection } : {}),
     },
   })
   await store.loadPlanningRoute(volumeId.value, true, chapter.number)
@@ -165,6 +203,19 @@ onUnmounted(() => {
       <div v-if="!nextChapter" class="actions" style="margin-top:14px"><button class="btn primary" data-action="prepare" :disabled="chapterPlanningBusy(chapterPrepareState.status)" @click="performAction(prepareNextChapter)">准备下一章</button><span class="muted" style="font-size:12px">以正式提交的章节为起点，准备当前章。</span></div>
       <div v-else-if="!currentChapterPlan" class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章 · {{ nextChapter.title }}</strong><div class="muted" style="font-size:12px;margin-top:4px">章节已准备，尚未生成当前章计划。</div></div><button class="btn primary" data-action="compile" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="performAction(compileNextChapterPlan)">生成当前章节计划</button></div>
       <div v-else class="actions" style="margin-top:14px"><div><strong>第 {{ nextChapter.number }} 章计划已绑定</strong><div class="muted" style="font-size:12px;margin-top:4px">第 {{ currentChapterPlan.version }} 版 · 执行有效性以生产前检查为准</div></div><span class="muted" style="font-size:12px">请在“创作”页从正式 UI 启动本章生产。</span></div>
+      <section v-if="chapterBudgetFailure" class="section-subgroup" data-hard-budget-scope-adjustment aria-labelledby="hard-budget-scope-title">
+        <h3 id="hard-budget-scope-title">缩小本章 Plan 范围后重新编译</h3>
+        <p class="muted">硬性目标合同保持不变。取消本章不需要的任务、责任、预留或实体后，由你手动重新编译；系统不会自动删除来源、降低 HARD 或提高预算。</p>
+        <fieldset v-if="scopeBudgetGroups.length" class="context-budget-scope-list">
+          <legend>可调整的本章来源</legend>
+          <label v-for="group in scopeBudgetGroups" :key="group.key" class="context-budget-scope-option">
+            <input v-model="selectedScopeKeys" type="checkbox" :value="group.key">
+            <span>{{ group.kind }} · {{ group.ref }} · {{ group.estimatedTokens }} token / {{ group.serializedBytes }} 字节</span>
+          </label>
+        </fieldset>
+        <p v-else class="muted">超限来源都属于必须保留的合同或约束。请在正式规划记录中调整合同/计划来源后重新读取，再编译。</p>
+        <button v-if="scopeBudgetGroups.length" class="btn primary" data-action="recompile-narrowed-scope" :disabled="chapterPlanningBusy(chapterPlanState.status)" @click="performAction(() => compileNextChapterPlan(true))">按所选范围重新编译</button>
+      </section>
     </section>
 
     <section v-if="lifecycle" class="card pad section">

@@ -305,7 +305,7 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     let chapter_id = prepared["chapter"]["chapterId"]
         .as_str()
         .unwrap_or(&chapter_id);
-    let compiled = execute_command_impl(&state, json!({"type":"planning_compile_chapter_plan","commandId":"compile-plan","idempotencyKey":"compile-plan-key","projectId":"p-b04-b06-plan","expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id}})).unwrap();
+    let compiled = execute_command_impl(&state, json!({"type":"planning_compile_chapter_plan","commandId":"compile-plan","idempotencyKey":"compile-plan-key","projectId":"p-b04-b06-plan","expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:b04:lead"]}}})).unwrap();
     assert_eq!(compiled["finalStatus"], "committed");
     assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     assert!(compiled["contextManifestRef"]["artifactId"]
@@ -318,14 +318,47 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
         .unwrap();
     let source_count: i64 = connection.query_row("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ContextManifest'", ["p-b04-b06-plan"], |row| row.get(0)).unwrap();
     assert_eq!(source_count, 1);
+    let plan_ref: ai_novel_production_system_core::generated::types::ArtifactRef =
+        serde_json::from_value(compiled["chapterPlanRef"].clone()).unwrap();
+    let plan_payload =
+        NarrativeRepository::artifact_payload_by_ref(&connection, "p-b04-b06-plan", &plan_ref)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        plan_payload["hardScope"]["taskRefs"],
+        json!(["task:actual"])
+    );
+    assert_eq!(
+        plan_payload["hardScope"]["entityRefs"],
+        json!(["entity:b04:lead"])
+    );
+    let recompiled_context = query_context_manifest_impl(
+        &state,
+        json!({"projectId":"p-b04-b06-plan","volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","chapterPlan":plan_payload}),
+    )
+    .unwrap();
+    assert_eq!(
+        recompiled_context["compiledFromStateDigest"],
+        plan_payload["compiledFromStateDigest"]
+    );
+    let incomplete_scope = query_context_manifest_impl(
+        &state,
+        json!({"projectId":"p-b04-b06-plan","volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","scopeSelection":{"taskRefs":[]}}),
+    )
+    .unwrap_err();
+    assert!(incomplete_scope.contains("IPC_INVALID:payload.scopeSelection"));
 }
 
 #[test]
 fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
-    let project_a = manager.create("p-b2-direction-a", "B2 direction A", NOW).unwrap();
-    let project_b = manager.create("p-b2-direction-b", "B2 direction B", NOW).unwrap();
+    let project_a = manager
+        .create("p-b2-direction-a", "B2 direction A", NOW)
+        .unwrap();
+    let project_b = manager
+        .create("p-b2-direction-b", "B2 direction B", NOW)
+        .unwrap();
     let (_, chapter_a) = seed_authority_for_direction(&project_a, "p-b2-direction-a", "方向甲");
     let (_, chapter_b) = seed_authority_for_direction(&project_b, "p-b2-direction-b", "方向乙");
     drop(project_a);
@@ -424,11 +457,13 @@ fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
     let connection = manager.create("p-b2-overflow", "B2 overflow", NOW).unwrap();
     let (volume_id, chapter_id) =
         seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 5000);
-    let revision_before = connection.query_row::<i64, _, _>(
-        "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let revision_before = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(connection);
 
     let state = KernelState::new(AppPaths::new(temp.path()));
@@ -448,12 +483,17 @@ fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
     assert!(error.contains("authority:story"));
     assert!(error.contains("sourceSizes"));
 
-    let connection = state.manager.open("p-b2-overflow", "B2 overflow", NOW).unwrap();
-    let revision_after = connection.query_row::<i64, _, _>(
-        "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let connection = state
+        .manager
+        .open("p-b2-overflow", "B2 overflow", NOW)
+        .unwrap();
+    let revision_after = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let context_manifests: i64 = connection.query_row(
         "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b2-overflow' AND artifact_type='ContextManifest'",
         [],
@@ -467,7 +507,9 @@ fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
 fn b2_recent_chapter_entities_are_not_promoted_to_hard_context_implicitly() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
-    let connection = manager.create("p-b2-soft-entities", "B2 entity scope", NOW).unwrap();
+    let connection = manager
+        .create("p-b2-soft-entities", "B2 entity scope", NOW)
+        .unwrap();
     let (volume_id, chapter_id) = seed_authority(&connection, "p-b2-soft-entities");
     drop(connection);
 
@@ -481,10 +523,13 @@ fn b2_recent_chapter_entities_are_not_promoted_to_hard_context_implicitly() {
             "executionMode":"LONG_FORM",
             "references":[]
         }),
-    ).unwrap();
+    )
+    .unwrap();
     let hard_sources = manifest["narrativeStateSources"].as_array().unwrap();
     assert!(
-        !hard_sources.iter().any(|source| source["ref"] == "fact:b04:reality"),
+        !hard_sources
+            .iter()
+            .any(|source| source["ref"] == "fact:b04:reality"),
         "an entity from the previous chapter must not enter HARD without a current Plan reference"
     );
 }
@@ -640,15 +685,28 @@ fn b_r2_01_knowledge_overflow_blocks_formal_context_manifest() {
 }
 
 #[test]
-fn b_r2_01_task_overflow_blocks_formal_context_manifest() {
-    assert_context_manifest_blocks_hard_overflow("TASK", |connection, project_id, chapter_id| {
-        for index in 0..101 {
-            connection.execute(
-                "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES (?1,?2,'volume.task.progress','{\"status\":\"ACTIVE\"}',?3,'{}',?4,?4)",
-                libsql_rusqlite::params![format!("task-state:overflow:{index}"), project_id, chapter_id, NOW],
-            ).unwrap();
-        }
-    });
+fn b2_task_hard_source_over_budget_reports_task_size() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-context-task-overflow";
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create(project_id, "Task context budget", NOW)
+        .unwrap();
+    let (volume_id, chapter_id) = seed_authority(&connection, project_id);
+    connection.execute(
+        "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress',?2,?3,'{}',?4,?4)",
+        libsql_rusqlite::params![project_id, json!({"status":"ACTIVE","detail":"任务状态".repeat(3000)}).to_string(), chapter_id, NOW],
+    ).unwrap();
+    drop(connection);
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let error = query_context_manifest_impl(
+        &state,
+        json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:b04:lead"],"references":[]}),
+    ).unwrap_err();
+    assert!(error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"), "{error}");
+    assert!(error.contains("TASK"), "{error}");
+    assert!(error.contains("task:actual"), "{error}");
 }
 
 #[test]
@@ -705,7 +763,7 @@ fn b_r2_01_unavailable_hard_source_returns_typed_blocker_with_scope() {
 }
 
 #[test]
-fn b_r2_01_derived_long_form_entity_scope_overflow_is_not_silently_cut() {
+fn b2_selected_canon_scope_over_budget_reports_required_sources() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-context-derived-scope-overflow";
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
@@ -727,16 +785,17 @@ fn b_r2_01_derived_long_form_entity_scope_overflow_is_not_silently_cut() {
     drop(connection);
 
     let state = KernelState::new(AppPaths::new(temp.path()));
+    let entity_ids = (0..100)
+        .map(|index| format!("entity:derived:{index}"))
+        .collect::<Vec<_>>();
     let error = query_context_manifest_impl(
         &state,
-        json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":[],"references":[]}),
+        json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":entity_ids,"references":[]}),
     )
     .unwrap_err();
-    assert!(error.contains("CONTEXT_HARD_INCOMPLETE"), "{error}");
+    assert!(error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"), "{error}");
     assert!(error.contains("CANON"), "{error}");
-    println!(
-        "B_R2_01_DERIVED_SCOPE_RESULT source=CANON derived_entities=101 blocker=PASS status=PASS"
-    );
+    assert!(error.contains("fact:derived"), "{error}");
 }
 
 #[test]
@@ -778,13 +837,7 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
     let connection = manager
         .create(project_id, "Context completeness", NOW)
         .unwrap();
-    let (volume_id, _) = seed_authority(&connection, project_id);
-    for index in 0..101 {
-        connection.execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,created_at,updated_at) VALUES (?1,?2,'entity:b04:lead','HARD_CONTEXT',?3,'A','chapter:b04:1',?4,?4)",
-            libsql_rusqlite::params![format!("fact:planning-overflow:{index}"), project_id, json!(index).to_string(), NOW],
-        ).unwrap();
-    }
+    let (volume_id, _) = seed_authority_with_large_world_rule(&connection, project_id, 5000);
     drop(connection);
 
     let gateway = Arc::new(PlanningGateway {
@@ -825,7 +878,7 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
         )
         .unwrap();
     let blocked = |result: Result<Value, String>| {
-        result.is_err_and(|error| error.contains("CONTEXT_HARD_INCOMPLETE"))
+        result.is_err_and(|error| error.contains("CONTEXT_HARD_BUDGET_EXCEEDED"))
     };
     assert_eq!(context_count_before, 0);
     assert!(blocked(compile_result), "planning command was not blocked");
@@ -981,7 +1034,10 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
     let query_request = json!({"projectId":project_id,"volumeId":volume_id,"chapterId":chapter_id,"executionMode":"LONG_FORM","entityIds":["entity:b04:lead"],"references":[]});
     let query_result = query_context_manifest_impl(&state, query_request.clone());
     let context_manifest = query_result.expect("historical excerpt is excluded from HARD context");
-    assert!(context_manifest["budget"]["hardTokens"].as_i64().unwrap() <= 1024);
+    assert!(
+        context_manifest["budget"]["hardTokens"].as_i64().unwrap()
+            <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT
+    );
     assert_eq!(
         context_manifest["selectedEvidence"]
             .as_array()
@@ -1014,7 +1070,7 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
     assert_eq!(stored_evidence[0].quote.as_deref(), Some(quote.as_str()));
     let planning_result = execute_command_impl(
         &state,
-        json!({"type":"planning_compile_chapter_plan","commandId":"compile-budget","idempotencyKey":"compile-budget-key","projectId":project_id,"expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id}}),
+        json!({"type":"planning_compile_chapter_plan","commandId":"compile-budget","idempotencyKey":"compile-budget-key","projectId":project_id,"expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":[],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:b04:lead"]}}}),
     );
     assert_eq!(planning_result.unwrap()["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "", NOW).unwrap();

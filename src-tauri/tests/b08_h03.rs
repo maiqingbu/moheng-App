@@ -1274,19 +1274,26 @@ fn b08_context_and_policy_hard_scopes_are_bounded_in_the_same_audit_request() {
         .count();
     let contract_tokens = contract_ascii_bytes.div_ceil(3) + contract_non_ascii_scalars;
     assert!(context_usage.estimated_tokens > 700, "{context_usage:?}");
-    assert!(context_usage.estimated_tokens <= 1024, "{context_usage:?}");
+    assert!(
+        context_usage.estimated_tokens
+            <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+        "{context_usage:?}"
+    );
     assert!(contract_tokens > 700, "contractTokens={contract_tokens}");
     assert!(contract_tokens <= 1024, "contractTokens={contract_tokens}");
     assert!(
         context_usage.estimated_tokens as usize + contract_tokens > 1024,
         "both hard-owned objects are in the same provider request: context={context_usage:?}, contractTokens={contract_tokens}"
     );
-    assert!(context_usage.serialized_bytes <= 8192);
+    assert!(
+        context_usage.serialized_bytes
+            <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+    );
     assert!(serialized_contract.len() <= 8192);
     println!(
         "F02_R2_SAME_REQUEST_HARD_SCOPES={}",
         json!({
-            "contextInput":{"estimatedTokens":context_usage.estimated_tokens,"serializedBytes":context_usage.serialized_bytes,"limitTokens":1024,"limitBytes":8192},
+            "contextInput":{"estimatedTokens":context_usage.estimated_tokens,"serializedBytes":context_usage.serialized_bytes,"limitTokens":ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,"limitBytes":ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT},
             "auditPolicyContract":{"estimatedTokens":contract_tokens,"serializedBytes":serialized_contract.len(),"limitTokens":1024,"limitBytes":8192},
             "combinedNamedHardScopesTokens":context_usage.estimated_tokens as usize + contract_tokens,
             "requestContainsBoth":request.get("authorityContext").is_some() && request.get("auditPolicyContract").is_some()
@@ -1543,8 +1550,8 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
                 "policyVersionChars":contract["canonSemanticPolicyVersion"].as_str().unwrap().chars().count(),
                 "contractBytes":serialized.len(),
                 "estimatedTokens":estimated_tokens,
-                "limitTokens":ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
-                "limitBytes":ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+                "limitTokens":1024,
+                "limitBytes":8192,
                 "gatewayCapabilities":gateway.capabilities.lock().unwrap().clone()
             })
         );
@@ -1562,11 +1569,8 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
         .and_then(|value| value.parse::<usize>().ok())
         .expect("the budget rejection reports the actual contract byte count");
     println!("F02_R2_FULL_CONTRACT_REJECTED={error}");
-    assert!(used_tokens > ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT);
-    assert!(
-        serialized_bytes
-            <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
-    );
+    assert!(used_tokens > 1024);
+    assert!(serialized_bytes <= 8192);
     assert!(
         error.starts_with("B08_GATE_POLICY_HARD_BUDGET_EXCEEDED"),
         "{error}"

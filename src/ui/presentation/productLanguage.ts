@@ -121,11 +121,92 @@ const contextHardSourceLabels: Record<string, string> = {
   UNKNOWN: '必需资料',
 }
 
+export interface ContextHardSourceSize {
+  kind: string
+  sourceRef: string
+  selectionKind?: string | null
+  selectionRef?: string | null
+  fieldPath?: string | null
+  additionalSourceRefs?: string[]
+  additionalFieldPaths?: string[]
+  estimatedTokens: number
+  serializedBytes: number
+  adjustable: boolean
+}
+
+export interface ContextHardBudgetFailure {
+  usedTokens: number
+  limitTokens: number
+  serializedBytes: number
+  limitBytes: number
+  scope: string
+  budgetPolicyVersion?: string
+  contractClassificationVersion?: string
+  sourceSizes: ContextHardSourceSize[]
+}
+
+export function parseContextHardBudgetFailure(value: unknown): ContextHardBudgetFailure | undefined {
+  const raw = textOf(value).trim()
+  const details = raw.match(/^CONTEXT_HARD_BUDGET_EXCEEDED\|details=(.+)$/)
+  if (details) {
+    try {
+      const parsed = JSON.parse(details[1]) as Partial<ContextHardBudgetFailure>
+      if (typeof parsed.usedTokens === 'number'
+        && typeof parsed.limitTokens === 'number'
+        && typeof parsed.serializedBytes === 'number'
+        && typeof parsed.limitBytes === 'number'
+        && typeof parsed.scope === 'string'
+        && Array.isArray(parsed.sourceSizes)) {
+        return {
+          usedTokens: parsed.usedTokens,
+          limitTokens: parsed.limitTokens,
+          serializedBytes: parsed.serializedBytes,
+          limitBytes: parsed.limitBytes,
+          scope: parsed.scope,
+          budgetPolicyVersion: parsed.budgetPolicyVersion,
+          contractClassificationVersion: parsed.contractClassificationVersion,
+          sourceSizes: parsed.sourceSizes.filter(source =>
+            source && typeof source.kind === 'string'
+            && typeof source.sourceRef === 'string'
+            && typeof source.estimatedTokens === 'number'
+            && typeof source.serializedBytes === 'number'
+            && typeof source.adjustable === 'boolean',
+          ).map(source => ({
+            ...source,
+            additionalSourceRefs: Array.isArray(source.additionalSourceRefs)
+              ? source.additionalSourceRefs.filter(ref => typeof ref === 'string')
+              : [],
+            additionalFieldPaths: Array.isArray(source.additionalFieldPaths)
+              ? source.additionalFieldPaths.filter(path => typeof path === 'string')
+              : [],
+          })),
+        }
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  const legacy = raw.match(/CONTEXT_HARD_BUDGET_EXCEEDED\|usedTokens=(\d+)\|limitTokens=(\d+)\|serializedBytes=(\d+)\|limitBytes=(\d+)\|scope=([A-Z]+:[^"')\s}]+)/)
+  if (!legacy) return undefined
+  return {
+    usedTokens: Number(legacy[1]),
+    limitTokens: Number(legacy[2]),
+    serializedBytes: Number(legacy[3]),
+    limitBytes: Number(legacy[4]),
+    scope: legacy[5],
+    sourceSizes: [],
+  }
+}
+
 function contextBlockerMessage(raw: string): string | undefined {
-  const budget = raw.match(/CONTEXT_HARD_BUDGET_EXCEEDED\|usedTokens=(\d+)\|limitTokens=(\d+)\|serializedBytes=(\d+)\|limitBytes=(\d+)\|scope=([A-Z]+:[^"')\s}]+)/)
+  const budget = parseContextHardBudgetFailure(raw)
   if (budget) {
-    const scope = budget[5].replace(/^[A-Z]+:/, '')
-    return `当前范围 ${scope} 的必需资料估算为 ${budget[1]} / ${budget[2]} token，序列化数据为 ${budget[3]} / ${budget[4]} 字节，超过硬性预算；请缩小范围后重新准备，不能忽略继续。`
+    const scope = budget.scope.replace(/^[A-Z]+:/, '')
+    return '当前范围 ' + scope + ' 的必需资料估算为 '
+      + budget.usedTokens + ' / ' + budget.limitTokens + ' token，序列化数据为 '
+      + budget.serializedBytes + ' / ' + budget.limitBytes
+      + ' 字节，超过硬性预算；请在本章 Plan 中缩小任务、责任或实体范围后手动重新编译。系统不会自动删减或降级硬性来源。'
   }
 
   const incomplete = raw.match(/CONTEXT_HARD_INCOMPLETE\|sources=([A-Z_,]+)\|scope=([A-Z]+:[^"')\s}]+)/)

@@ -2509,7 +2509,13 @@ pub fn recompile_chapter_plan_owner(
     } else {
         (context.active_task_refs.clone(), None)
     };
-    validate_current_chapter_plan(plan, chapter_id, &route_task_ids, &triggered_threads)?;
+    let mut bound_plan = plan.clone();
+    let hard_scope = crate::narrative::context_hard_scope(&context);
+    bound_plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+    bound_plan["entityRefs"] = hard_scope["entityRefs"].clone();
+    bound_plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+    bound_plan["hardScope"] = hard_scope;
+    validate_current_chapter_plan(&bound_plan, chapter_id, &route_task_ids, &triggered_threads)?;
     if let Some(route) = route_payload.as_ref() {
         let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
             connection,
@@ -2534,7 +2540,7 @@ pub fn recompile_chapter_plan_owner(
                 )
             })
             .collect::<Vec<_>>();
-        validate_task_reality(plan, route, &states)?;
+        validate_task_reality(&bound_plan, route, &states)?;
     }
     let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(
         connection, project_id, &volume_id,
@@ -2564,7 +2570,7 @@ pub fn recompile_chapter_plan_owner(
             .unwrap_or_default()
     })
     .collect::<Vec<_>>();
-    validate_reservation_actions(plan, &reservations, current_volume_no)?;
+    validate_reservation_actions(&bound_plan, &reservations, current_volume_no)?;
     let artifact_id = format!("plan:chapterplan:{chapter_id}");
     let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
         connection,
@@ -2572,11 +2578,11 @@ pub fn recompile_chapter_plan_owner(
         &artifact_id,
     )
     .map_err(|error| error.to_string())?;
-    let hash = sha256_canonical(plan).map_err(|error| error.to_string())?;
+    let hash = sha256_canonical(&bound_plan).map_err(|error| error.to_string())?;
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({
         "artifactId":artifact_id,"projectId":project_id,"artifactType":"ChapterPlan",
         "scope":{"level":"CHAPTER","chapterId":chapter_id},"version":version,
-        "schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":plan,
+        "schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":bound_plan,
         "payloadHash":hash,"dependencyRefs":[context_ref],
         "provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"contextManifestRef":context_ref.artifact_id,"modelRunId":model_run_id},
         "createdAt":now

@@ -176,6 +176,8 @@ export interface ChapterPlanR1 {
   "contextManifestRef": ArtifactRef
   "chapterGoal": string
   "activeTaskRefs": Array<string>
+  "entityRefs"?: Array<string>
+  "hardScope"?: { "taskRefs": Array<string>; "responsibilityRefs": Array<string>; "reservationRefs": Array<string>; "entityRefs": Array<string> }
   "continuityActions": Array<{ "threadRef": string; "disposition": "ADVANCE" | "RESOLVE" | "DEFER_WITH_BRIDGE" | "NO_LONGER_APPLICABLE_CHANGE_REQUEST"; "bridge"?: string | null }>
   "requiredStateOutcomes": Array<Condition>
   "forbiddenTransitions": Array<Condition>

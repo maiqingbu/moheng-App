@@ -397,11 +397,45 @@ pub struct ContextCompilerInput {
     pub soft_tokens: i64,
 }
 
-pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 1024;
-pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 8192;
-pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r1";
+pub fn context_hard_scope(input: &ContextCompilerInput) -> Value {
+    let responsibility_refs = input
+        .goal_contract_fields
+        .iter()
+        .find(|field| {
+            field.field_path == "volumeIntent.crossVolumeResponsibilityRefs"
+                || field
+                    .additional_field_paths
+                    .iter()
+                    .any(|path| path == "volumeIntent.crossVolumeResponsibilityRefs")
+        })
+        .and_then(|field| field.value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            input
+                .continuity_threads
+                .iter()
+                .map(|thread| thread.thread_id.clone())
+                .collect()
+        });
+    json!({
+        "taskRefs":input.plan_task_refs,
+        "responsibilityRefs":responsibility_refs,
+        "reservationRefs":input.future_reservation_refs,
+        "entityRefs":input.state.bounds.entity_ids
+    })
+}
+
+pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 4096;
+pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 32768;
+pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r4";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
-pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r1";
+pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r2";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
 pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r2";
 pub const OPENING_HARD_CONTRACT_FIELDS: &[&str] = &[
@@ -530,10 +564,28 @@ const CURRENT_CONTEXT_DIGEST_CONFIG: ContextDigestConfig = ContextDigestConfig {
     hard_serialized_byte_limit: CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextHardBudgetUsage {
     pub estimated_tokens: i64,
     pub serialized_bytes: usize,
+    pub source_sizes: Vec<ContextHardSourceSize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextHardSourceSize {
+    pub kind: String,
+    pub source_ref: String,
+    pub selection_kind: Option<String>,
+    pub selection_ref: Option<String>,
+    pub field_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_source_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_field_paths: Vec<String>,
+    pub estimated_tokens: i64,
+    pub serialized_bytes: usize,
+    pub adjustable: bool,
 }
 
 /// Measures the full HARD input payload deterministically. The provider may
@@ -556,7 +608,228 @@ pub fn measure_context_hard_budget(
     Ok(ContextHardBudgetUsage {
         estimated_tokens,
         serialized_bytes: serialized.len(),
+        source_sizes: context_hard_source_sizes(input)?,
     })
+}
+
+fn context_hard_source_sizes(
+    input: &ContextCompilerInput,
+) -> Result<Vec<ContextHardSourceSize>, String> {
+    fn push(
+        output: &mut Vec<ContextHardSourceSize>,
+        kind: &str,
+        source_ref: &str,
+        selection: Option<(&str, &str)>,
+        field_path: Option<&str>,
+        value: &Value,
+        adjustable: bool,
+    ) -> Result<(), String> {
+        let selection_kind = selection.map(|(kind, _)| kind);
+        let selection_ref = selection.map(|(_, reference)| reference);
+        let serialized = serde_json::to_string(&json!({
+            "kind":kind,
+            "sourceRef":source_ref,
+            "selectionKind":selection_kind,
+            "selectionRef":selection_ref,
+            "fieldPath":field_path,
+            "value":value
+        }))
+        .map_err(|error| error.to_string())?;
+        let ascii_bytes = serialized.bytes().filter(u8::is_ascii).count();
+        let non_ascii_scalars = serialized
+            .chars()
+            .filter(|character| !character.is_ascii())
+            .count();
+        output.push(ContextHardSourceSize {
+            kind: kind.into(),
+            source_ref: source_ref.into(),
+            selection_kind: selection_kind.map(ToOwned::to_owned),
+            selection_ref: selection_ref.map(ToOwned::to_owned),
+            field_path: field_path.map(ToOwned::to_owned),
+            additional_source_refs: Vec::new(),
+            additional_field_paths: Vec::new(),
+            estimated_tokens: (ascii_bytes.div_ceil(3) + non_ascii_scalars) as i64,
+            serialized_bytes: serialized.len(),
+            adjustable,
+        });
+        Ok(())
+    }
+
+    let mut sizes = Vec::new();
+    for field in &input.goal_contract_fields {
+        let field_value = json!({
+            "value":field.value,
+            "additionalSourceRefs":field.additional_source_refs,
+            "additionalFieldPaths":field.additional_field_paths
+        });
+        push(
+            &mut sizes,
+            "CONTRACT",
+            &field.source_ref.artifact_id,
+            None,
+            Some(&field.field_path),
+            &field_value,
+            false,
+        )?;
+        let size = sizes.last_mut().expect("contract source was just added");
+        size.additional_source_refs = field
+            .additional_source_refs
+            .iter()
+            .map(|source| {
+                format!(
+                    "{}@{}#{}",
+                    source.artifact_id, source.version, source.payload_hash
+                )
+            })
+            .collect();
+        size.additional_field_paths = field.additional_field_paths.clone();
+    }
+    for entity_id in &input.state.bounds.entity_ids {
+        push(
+            &mut sizes,
+            "ENTITY",
+            entity_id,
+            Some(("ENTITY", entity_id)),
+            None,
+            &json!({"entityId":entity_id}),
+            true,
+        )?;
+    }
+    for fact in &input.state.facts {
+        push(
+            &mut sizes,
+            "CANON",
+            &fact.fact_id,
+            Some(("ENTITY", &fact.subject_id)),
+            None,
+            &serde_json::to_value(fact).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for relation in &input.state.relations {
+        push(
+            &mut sizes,
+            "CANON",
+            &relation.relation_id,
+            Some(("ENTITY", &relation.subject_id)),
+            None,
+            &serde_json::to_value(relation).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for knowledge in &input.state.knowledge {
+        push(
+            &mut sizes,
+            "KNOWLEDGE",
+            &knowledge.knowledge_id,
+            Some(("ENTITY", &knowledge.knower_id)),
+            None,
+            &serde_json::to_value(knowledge).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for event in &input.state.events {
+        push(
+            &mut sizes,
+            "CANON",
+            &event.event_id,
+            None,
+            None,
+            &serde_json::to_value(event).map_err(|error| error.to_string())?,
+            false,
+        )?;
+    }
+    for responsibility in &input.state.active_responsibilities {
+        push(
+            &mut sizes,
+            "CONTINUITY",
+            &responsibility.obligation_id,
+            Some(("RESPONSIBILITY", &responsibility.obligation_id)),
+            None,
+            &serde_json::to_value(responsibility).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for thread in &input.continuity_threads {
+        push(
+            &mut sizes,
+            "CONTINUITY",
+            &thread.thread_id,
+            Some(("RESPONSIBILITY", &thread.thread_id)),
+            None,
+            &serde_json::to_value(thread).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for task_ref in &input.plan_task_refs {
+        push(
+            &mut sizes,
+            "TASK",
+            task_ref,
+            Some(("TASK", task_ref)),
+            None,
+            &json!({"taskRef":task_ref}),
+            true,
+        )?;
+    }
+    for task in &input.plan_task_contexts {
+        push(
+            &mut sizes,
+            "TASK",
+            &task.task_ref,
+            Some(("TASK", &task.task_ref)),
+            None,
+            &task.contract,
+            true,
+        )?;
+    }
+    for task in &input.task_states {
+        push(
+            &mut sizes,
+            "TASK",
+            &task.state_id,
+            Some(("TASK", &task.state_id)),
+            None,
+            &serde_json::to_value(task).map_err(|error| error.to_string())?,
+            true,
+        )?;
+    }
+    for reservation_ref in &input.future_reservation_refs {
+        push(
+            &mut sizes,
+            "RESERVATION",
+            reservation_ref,
+            Some(("RESERVATION", reservation_ref)),
+            None,
+            &json!({"reservationRef":reservation_ref}),
+            true,
+        )?;
+    }
+    for evidence in &input.selected_evidence {
+        let reference = format!(
+            "{}@{}:{}-{}",
+            evidence.artifact_id,
+            evidence.version,
+            evidence.range_start.unwrap_or_default(),
+            evidence.range_end.unwrap_or_default()
+        );
+        push(
+            &mut sizes,
+            "EVIDENCE",
+            &reference,
+            None,
+            None,
+            &serde_json::to_value(evidence).map_err(|error| error.to_string())?,
+            false,
+        )?;
+    }
+    sizes.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.source_ref.cmp(&b.source_ref))
+            .then_with(|| a.field_path.cmp(&b.field_path))
+    });
+    Ok(sizes)
 }
 
 pub fn validate_context_hard_budget(
@@ -567,13 +840,18 @@ pub fn validate_context_hard_budget(
         || usage.serialized_bytes > CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
     {
         let scope = context_scope(&input.state.bounds);
-        return Err(format!(
-            "CONTEXT_HARD_BUDGET_EXCEEDED|usedTokens={}|limitTokens={}|serializedBytes={}|limitBytes={}|scope={scope}",
-            usage.estimated_tokens,
-            CONTEXT_HARD_TOKEN_LIMIT,
-            usage.serialized_bytes,
-            CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
-        ));
+        let details = serde_json::to_string(&json!({
+            "usedTokens":usage.estimated_tokens,
+            "limitTokens":CONTEXT_HARD_TOKEN_LIMIT,
+            "serializedBytes":usage.serialized_bytes,
+            "limitBytes":CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            "scope":scope,
+            "budgetPolicyVersion":CONTEXT_HARD_BUDGET_POLICY_VERSION,
+            "contractClassificationVersion":CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION,
+            "sourceSizes":usage.source_sizes
+        }))
+        .map_err(|error| error.to_string())?;
+        return Err(format!("CONTEXT_HARD_BUDGET_EXCEEDED|details={details}"));
     }
     Ok(usage)
 }
@@ -670,8 +948,12 @@ pub fn compile_context_manifest(
     let digest = relevant_state_digest(&input)?;
     let mut state_sources = input.state.source_refs.clone();
     state_sources.sort_by(|a, b| a.ref_.cmp(&b.ref_));
-    let hard_source_count = (state_sources.len()
+    let hard_source_count = (input.goal_contract_fields.len()
+        + state_sources.len()
         + input.continuity_threads.len()
+        + input.plan_task_refs.len()
+        + input.plan_task_contexts.len()
+        + input.task_states.len()
         + input.selected_evidence.len()) as i64;
     Ok(ContextManifestR1 {
         payload_schema: json!("context-manifest.r1"),

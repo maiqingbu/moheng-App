@@ -1299,28 +1299,7 @@ fn narrative_state_from_request(
     let references = request_strings(request, "references");
     let reference_refs = references.iter().map(String::as_str).collect::<Vec<_>>();
     let chapter_id = request.get("chapterId").and_then(Value::as_str);
-    let opening_bootstrap =
-        request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
-    let previous_chapter_ids = if opening_bootstrap {
-        if let Some(chapter) = chapter_id {
-            map_context_query(
-                crate::repositories::narrative::NarrativeRepository::previous_committed_chapter_ids(
-                    connection, project_id, chapter, 2,
-                ),
-                ContextHardSource::Canon,
-                &scope,
-            )?
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    let previous_chapter_refs = previous_chapter_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let (mut facts, mut facts_truncated) = map_context_query(
+    let (facts, facts_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::current_canon_bounded(
             connection,
             project_id,
@@ -1340,7 +1319,7 @@ fn narrative_state_from_request(
         ContextHardSource::Canon,
         &scope,
     )?;
-    let (mut knowledge, mut knowledge_truncated) = map_context_query(
+    let (knowledge, knowledge_truncated) = map_context_query(
         crate::repositories::narrative::NarrativeRepository::knowledge_for_entities_bounded(
             connection,
             project_id,
@@ -1350,7 +1329,7 @@ fn narrative_state_from_request(
         ContextHardSource::Knowledge,
         &scope,
     )?;
-    let mut events = if let Some(chapter) = chapter_id {
+    let events = if let Some(chapter) = chapter_id {
         map_context_query(
             crate::repositories::narrative::NarrativeRepository::canon_events(
                 connection, project_id, chapter, 100,
@@ -1380,52 +1359,6 @@ fn narrative_state_from_request(
             ContextHardSource::Canon,
             &scope,
         )?;
-    }
-    if !previous_chapter_refs.is_empty() {
-        let (prior_facts, prior_facts_truncated) = map_context_query(
-            crate::repositories::narrative::NarrativeRepository::canon_facts_for_chapters_bounded(
-                connection,
-                project_id,
-                &previous_chapter_refs,
-                100,
-            ),
-            ContextHardSource::Canon,
-            &scope,
-        )?;
-        facts.extend(prior_facts);
-        let mut fact_ids = BTreeSet::new();
-        facts.retain(|fact| fact_ids.insert(fact.fact_id.clone()));
-        facts_truncated = facts_truncated || prior_facts_truncated;
-
-        let (prior_knowledge, prior_knowledge_truncated) = map_context_query(
-            crate::repositories::narrative::NarrativeRepository::knowledge_for_chapters_bounded(
-                connection,
-                project_id,
-                &previous_chapter_refs,
-                100,
-            ),
-            ContextHardSource::Knowledge,
-            &scope,
-        )?;
-        knowledge.extend(prior_knowledge);
-        let mut knowledge_ids = BTreeSet::new();
-        knowledge.retain(|item| knowledge_ids.insert(item.knowledge_id.clone()));
-        knowledge_truncated = knowledge_truncated || prior_knowledge_truncated;
-
-        let (prior_events, prior_events_truncated) = map_context_query(
-            crate::repositories::narrative::NarrativeRepository::canon_events_for_chapters_bounded(
-                connection,
-                project_id,
-                &previous_chapter_refs,
-                100,
-            ),
-            ContextHardSource::Canon,
-            &scope,
-        )?;
-        events.extend(prior_events);
-        let mut event_ids = BTreeSet::new();
-        events.retain(|event| event_ids.insert(event.event_id.clone()));
-        events_truncated = events_truncated || prior_events_truncated;
     }
     let obligations_truncated = map_context_query(
         crate::repositories::narrative::NarrativeRepository::has_more_obligations(
@@ -2941,23 +2874,6 @@ pub(crate) fn context_input_from_authority(
         ContextHardSource::Evidence,
         &scope,
     )?;
-    // A newly committed Reality fact may not yet be reachable through the
-    // bounded source-ref projection (for example when the current plan has
-    // no entity allow-list). Select the latest authoritative evidence instead
-    // of persisting an empty ContextManifest evidence set.
-    if evidence.is_empty() {
-        (evidence, evidence_truncated) = map_context_query(
-            crate::repositories::narrative::NarrativeRepository::recent_evidence_bounded(
-                connection,
-                project_id,
-                &[],
-                &[],
-                100,
-            ),
-            ContextHardSource::Evidence,
-            &scope,
-        )?;
-    }
     // Evidence references are HARD provenance; their historical excerpts are
     // SOFT context under the frozen runtime architecture. Keep each unique
     // source range in the hard projection, but do not copy prose into it.
@@ -6615,6 +6531,22 @@ fn compile_current_chapter_plan(
         attempt_no: 1,
         repair_round: 0,
     };
+    let selected_task_refs = context_input
+        .plan_task_refs
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut scoped_route_payload = route_payload.clone();
+    if let Some(tasks) = scoped_route_payload
+        .get_mut("tasks")
+        .and_then(Value::as_array_mut)
+    {
+        tasks.retain(|task| {
+            task.get("taskId")
+                .and_then(Value::as_str)
+                .is_some_and(|task_id| selected_task_refs.contains(task_id))
+        });
+    }
     let planning_input = json!({
         "projectId":project_id,
         "chapterId":chapter_id,
@@ -6624,7 +6556,7 @@ fn compile_current_chapter_plan(
         "compiledFromStateDigest":state_digest,
         "contextManifestRef":context_ref,
         "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
-        "volumePlanRoute":route_payload,
+        "volumePlanRoute":scoped_route_payload,
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
     let planning_result = crate::production::execute_production_model_with_profile(
@@ -6659,6 +6591,11 @@ fn compile_current_chapter_plan(
     plan["compiledFromStateDigest"] = json!(state_digest);
     plan["contextManifestRef"] =
         serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+    let hard_scope = crate::narrative::context_hard_scope(&context_input);
+    plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+    plan["entityRefs"] = hard_scope["entityRefs"].clone();
+    plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+    plan["hardScope"] = hard_scope;
     let receipt = crate::planning::recompile_chapter_plan_owner(
         &handle,
         project_id,

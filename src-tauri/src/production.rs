@@ -914,6 +914,7 @@ fn authority_request(
         "scope": "CHAPTER",
         "entityIds": request.pointer("/payload/entityIds").cloned().unwrap_or_else(|| json!([])),
         "references": request.pointer("/payload/references").cloned().unwrap_or_else(|| json!([])),
+        "scopeSelection": request.pointer("/payload/scopeSelection").cloned().unwrap_or(Value::Null),
         "presentEntityIds": request.pointer("/payload/presentEntityIds").cloned().unwrap_or_else(|| json!([])),
         "acquiredFactIds": request.pointer("/payload/acquiredFactIds").cloned().unwrap_or_else(|| json!([])),
         "satisfiedTaskIds": request.pointer("/payload/satisfiedTaskIds").cloned().unwrap_or_else(|| json!([])),
@@ -957,8 +958,8 @@ fn audit_policy_contract(
     });
     validate_audit_policy_contract_size(
         &audit_policy_contract,
-        crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
-        crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+        AUDIT_POLICY_HARD_TOKEN_LIMIT,
+        AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT,
     )?;
     Ok(audit_policy_contract)
 }
@@ -968,6 +969,9 @@ struct AuditPolicyContractSize {
     estimated_tokens: usize,
     serialized_bytes: usize,
 }
+
+const AUDIT_POLICY_HARD_TOKEN_LIMIT: i64 = 1024;
+const AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT: usize = 8192;
 
 fn audit_policy_contract_size(contract: &Value) -> Result<AuditPolicyContractSize, String> {
     let serialized = serde_json::to_string(contract).map_err(|error| error.to_string())?;
@@ -1465,7 +1469,7 @@ fn run_chapter_production_inner(
             let plan_payload = planning_result
                 .parsed
                 .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
-            let plan_payload = crate::planning::normalize_chapter_plan_model_output(
+            let mut plan_payload = crate::planning::normalize_chapter_plan_model_output(
                 plan_payload,
                 &compiler_input
                     .continuity_threads
@@ -1475,6 +1479,11 @@ fn run_chapter_production_inner(
                     .collect::<Vec<_>>(),
                 &planning_input,
             );
+            let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
+            plan_payload["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+            plan_payload["entityRefs"] = hard_scope["entityRefs"].clone();
+            plan_payload["reservationRefs"] = hard_scope["reservationRefs"].clone();
+            plan_payload["hardScope"] = hard_scope;
             crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
                 .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
             crate::planning::validate_current_chapter_plan(
@@ -2889,17 +2898,16 @@ mod tests {
                 let contract =
                     synthetic_audit_policy_contract("gate:test".into(), "v".repeat(length));
                 let size = audit_policy_contract_size(&contract).unwrap();
-                (size.estimated_tokens == crate::narrative::CONTEXT_HARD_TOKEN_LIMIT as usize
-                    && size.serialized_bytes
-                        <= crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT)
+                (size.estimated_tokens == AUDIT_POLICY_HARD_TOKEN_LIMIT as usize
+                    && size.serialized_bytes <= AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT)
                     .then_some((length, contract, size))
             })
             .expect("ASCII policy version can reach the exact token threshold");
         assert_eq!(
             validate_audit_policy_contract_size(
                 &exact.1,
-                crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
-                crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+                AUDIT_POLICY_HARD_TOKEN_LIMIT,
+                AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT,
             )
             .unwrap(),
             exact.2
@@ -2910,14 +2918,14 @@ mod tests {
                 let contract =
                     synthetic_audit_policy_contract("gate:test".into(), "v".repeat(length));
                 let size = audit_policy_contract_size(&contract).unwrap();
-                (size.estimated_tokens > crate::narrative::CONTEXT_HARD_TOKEN_LIMIT as usize)
+                (size.estimated_tokens > AUDIT_POLICY_HARD_TOKEN_LIMIT as usize)
                     .then_some((contract, size))
             })
             .expect("the next token boundary must be reachable");
         let error = validate_audit_policy_contract_size(
             &over.0,
-            crate::narrative::CONTEXT_HARD_TOKEN_LIMIT,
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            AUDIT_POLICY_HARD_TOKEN_LIMIT,
+            AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT,
         )
         .unwrap_err();
         assert!(error.contains(&format!("usedTokens={}", over.1.estimated_tokens)));
@@ -2926,23 +2934,20 @@ mod tests {
 
     #[test]
     fn audit_policy_contract_byte_limit_accepts_equal_and_rejects_next_byte() {
-        let exact = contract_with_exact_serialized_bytes(
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
-        );
+        let exact = contract_with_exact_serialized_bytes(AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT);
         let exact_size = audit_policy_contract_size(&exact).unwrap();
         assert_eq!(
             exact_size.serialized_bytes,
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+            AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT
         );
         validate_audit_policy_contract_size(&exact, 4096, 8192).unwrap();
 
-        let over = contract_with_exact_serialized_bytes(
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT + 1,
-        );
+        let over =
+            contract_with_exact_serialized_bytes(AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT + 1);
         let over_size = audit_policy_contract_size(&over).unwrap();
         assert_eq!(
             over_size.serialized_bytes,
-            crate::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT + 1
+            AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT + 1
         );
         let error = validate_audit_policy_contract_size(&over, 4096, 8192).unwrap_err();
         assert!(error.contains("serializedBytes=8193"));
