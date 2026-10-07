@@ -1258,6 +1258,19 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
         "projectId":project_id,"expectedRevision":2,"requestedAt":NOW,
         "payload":{"storyCore":{"protagonist":"被逐出宗门的炼丹师","desire":"证明废丹的价值","mechanism":"废丹让妖兽进化并留下代价","conflict":"宗门封锁秘密","readerPromise":"每次升级都伴随选择与代价","forbiddenReveals":[]}}
     })).unwrap();
+    execute_command_impl(&state, json!({
+        "type":"opening_ready","commandId":"cmd:b11:assistant-query:opening","idempotencyKey":"cmd:b11:assistant-query:opening:key",
+        "projectId":project_id,"expectedRevision":3,"requestedAt":NOW,"payload":{"approved":true}
+    })).unwrap();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (chapter_id, volume_id) = connection
+        .query_row::<(String, String), _, _>(
+            "SELECT chapter_id,volume_id FROM chapters WHERE project_id=?1 ORDER BY chapter_no LIMIT 1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(connection);
     let supported = support_session_impl(
         &state,
         json!({
@@ -1265,6 +1278,11 @@ fn b11_assistant_query_is_bounded_and_marks_missing_evidence_without_guessing() 
             "question":"当前作品的故事方向是什么？",
             "mode":"INSPECT",
             "scope":"PROJECT",
+            "executionMode":"OPENING_BOOTSTRAP",
+            "chapterId":chapter_id,
+            "volumeId":volume_id,
+            "entityIds":[],
+            "references":[],
             "requestedAt":NOW
         }),
     )
