@@ -105,11 +105,7 @@ impl ProductionModelGateway for RecordingGateway {
                 }],
                 "knowledgeCandidates":[],
                 "continuityCandidates":[],
-                "taskProgressCandidates":[{
-                    "taskId":"task:actual",
-                    "status":"ACTIVE",
-                    "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
-                }],
+                "taskProgressCandidates":[],
                 "revealedReservationRefs":[],
                 "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}],
                 "auditCompleteness":"COMPLETE_WITH_DELTA",
@@ -258,10 +254,14 @@ impl ProductionModelGateway for W13AuditGateway {
                 .map_err(|error| error.to_string())?
                 .push(input.clone());
         }
-        AuditVariantGateway {
+        let mut response = AuditVariantGateway {
             variant: self.variant,
         }
-        .invoke(capability, input)
+        .invoke(capability, input)?;
+        if self.variant == "actual-reveal-after-foreshadow" && capability == "AUDIT_EXTRACT" {
+            response.output["taskProgressCandidates"] = json!([]);
+        }
+        Ok(response)
     }
 }
 
@@ -419,11 +419,19 @@ impl ProductionModelGateway for AuditVariantGateway {
                         json!(["reservation:not-authorized"])
                 }
                 "blocked" => {
-                    response.output["taskProgressCandidates"][0]["status"] = json!("BLOCKED")
+                    response.output["taskProgressCandidates"] = json!([{
+                        "taskId":"task:actual",
+                        "status":"BLOCKED",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
                 }
                 "next" => response.output["nextChapterRecompileRequired"] = json!(true),
                 "rolling" => {
-                    response.output["taskProgressCandidates"][0]["status"] = json!("BLOCKED")
+                    response.output["taskProgressCandidates"] = json!([{
+                        "taskId":"task:actual",
+                        "status":"BLOCKED",
+                        "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                    }]);
                 }
                 "route" => response.output["capacityExhausted"] = json!(true),
                 "change" => response.output["changeRequested"] = json!(true),
@@ -627,27 +635,241 @@ impl ProductionModelGateway for MutatingGateway {
     }
 }
 
-fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
-    seed_chapter_and_gate_with_policy(
+fn insert_b08_contract_artifact(
+    connection: &Connection,
+    project_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+    scope_level: &str,
+    scope_key: &str,
+    payload: &Value,
+) -> Value {
+    let hash = sha256_canonical(payload).unwrap();
+    connection.execute(
+        "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED',?6,'{}',?7,?7)",
+        libsql_rusqlite::params![artifact_id, project_id, artifact_type, scope_level, scope_key, hash, NOW],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+        libsql_rusqlite::params![artifact_id, payload.to_string(), hash],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
+        libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key, artifact_id, hash],
+    ).unwrap();
+    json!({"artifactId":artifact_id,"version":1,"payloadHash":hash})
+}
+
+fn b08_approved_book_plan_payload(future_reservations: Value) -> Value {
+    json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"推进实际任务并承担代价",
+        "protagonistMacroDirection":"主动面对石门后的事实",
+        "endingBoundary":"依据证据完成当前任务",
+        "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
+        "mustNotBreak":[],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[],
+        "futureReservations":future_reservations,
+        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
+        "globalLengthBudget":{"preferredWords":1000}
+    })
+}
+
+fn seed_b08_goal_contracts(
+    connection: &Connection,
+    project_id: &str,
+    include_book_plan: bool,
+    include_volume_plan: bool,
+) {
+    let project_scope = json!({"level":"PROJECT"}).to_string();
+    let story_id = format!("story-constitution:{project_id}");
+    let story_ref = insert_b08_contract_artifact(
         connection,
         project_id,
-        json!({
-            "payloadSchema":"gate-policy.r1",
-            "policyId":"b08-default",
-            "rules":["candidate-audit","chapter-final"],
-            "canonSemantics":{
-                "policyVersion":"canon-semantics.r1",
-                "rules":[
-                    {"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
-                    {"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},
-                    {"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
-                    {"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
-                    {"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},
-                    {"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},
-                    {"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}
-                ]
+        &story_id,
+        "StoryConstitution",
+        "PROJECT",
+        &project_scope,
+        &json!({
+            "payloadSchema":"story-constitution.r1",
+            "storyCore":{
+                "protagonist":"林舟",
+                "desire":"查明门后的事实",
+                "mechanism":"每次追查都会留下可验证代价",
+                "conflict":"旧秩序试图掩盖真相",
+                "readerPromise":"每章推进一项真实任务",
+                "worldRules":[],
+                "forbiddenReveals":[]
             }
         }),
+    );
+    let main_id = format!("main-contract:{project_id}");
+    let main_ref = insert_b08_contract_artifact(
+        connection,
+        project_id,
+        &main_id,
+        "MainContract",
+        "PROJECT",
+        &project_scope,
+        &json!({
+            "payloadSchema":"main-contract.r1",
+            "storyConstitutionRef":story_ref,
+            "scope":"BOOK",
+            "hardRules":["必须依据正式证据推进任务"],
+            "softPreferences":[]
+        }),
+    );
+    let book_ref = if include_book_plan {
+        Some(insert_b08_contract_artifact(
+            connection,
+            project_id,
+            &format!("book-plan:{project_id}"),
+            "BookPlan",
+            "PROJECT",
+            &project_scope,
+            &b08_approved_book_plan_payload(json!([])),
+        ))
+    } else {
+        None
+    };
+    let mut opening_payload = json!({
+        "payloadSchema":"opening-contract.r1",
+        "storyConstitutionRef":story_ref,
+        "mainContractRef":main_ref,
+        "openingReady":true,
+        "firstChapterGoal":"依据证据推进当前任务",
+        "firstThreeChapterPromise":"逐步承担追查代价",
+        "forbiddenReveals":[]
+    });
+    if let Some(book_ref) = &book_ref {
+        opening_payload["bookPlanRef"] = book_ref.clone();
+    }
+    insert_b08_contract_artifact(
+        connection,
+        project_id,
+        &format!("opening-contract:{project_id}"),
+        "OpeningContract",
+        "PROJECT",
+        &project_scope,
+        &opening_payload,
+    );
+
+    if !include_book_plan {
+        return;
+    }
+    let book_ref = book_ref.unwrap();
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let volume_scope =
+        serde_json::to_string(&json!({"level":"VOLUME","volumeId":volume_id})).unwrap();
+    let intent_ref = insert_b08_contract_artifact(
+        connection,
+        project_id,
+        &format!("volume-intent:{project_id}"),
+        "VolumeIntent",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-intent.r1",
+            "volumeFunction":"推进当前章节任务",
+            "entryConditions":[],
+            "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
+            "mustNotBreak":[],
+            "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
+            "futureReservationRefs":[],
+            "crossVolumeResponsibilityRefs":[],
+            "targetChapterRange":{"min":1,"preferred":1,"max":1},
+            "targetWordRange":{"preferred":1000},
+            "sourceBookPlanRef":book_ref,
+            "compiledFromProjectRevision":0,
+            "sourceEvidenceRefs":[],
+            "semanticDigest":"0".repeat(64)
+        }),
+    );
+    if !include_volume_plan {
+        return;
+    }
+    insert_b08_contract_artifact(
+        connection,
+        project_id,
+        &format!("volume-plan:{project_id}"),
+        "VolumePlan",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-plan.r1",
+            "volumeIntentRef":intent_ref,
+            "routeVersion":1,
+            "tasks":[{
+                "taskId":"task:actual",
+                "class":"REQUIRED",
+                "objective":"推进当前章节任务",
+                "dependsOnTaskIds":[],
+                "continuityThreadRefs":[],
+                "reservationRefs":[],
+                "completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},
+                "estimatedChapterCost":{"preferred":1}
+            }],
+            "routeInvariants":["task-order"],
+            "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
+            "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
+        }),
+    );
+}
+
+fn default_b08_gate_policy() -> Value {
+    json!({
+        "payloadSchema":"gate-policy.r1",
+        "policyId":"b08-default",
+        "rules":["candidate-audit","chapter-final"],
+        "canonSemantics":{
+            "policyVersion":"canon-semantics.r1",
+            "rules":[
+                {"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},
+                {"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},
+                {"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},
+                {"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},
+                {"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}
+            ]
+        }
+    })
+}
+
+fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
+    seed_chapter_and_gate_with_policy(connection, project_id, default_b08_gate_policy())
+}
+
+fn seed_chapter_and_gate_without_volume_plan(connection: &Connection, project_id: &str) -> String {
+    let policy_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
+    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+        connection,
+        project_id,
+        default_b08_gate_policy(),
+        policy_id,
+        true,
+        false,
+    )
+}
+
+fn seed_chapter_and_gate_without_planning_contracts(
+    connection: &Connection,
+    project_id: &str,
+) -> String {
+    let policy_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
+    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+        connection,
+        project_id,
+        default_b08_gate_policy(),
+        policy_id,
+        false,
+        false,
     )
 }
 
@@ -658,11 +880,13 @@ fn seed_chapter_and_gate_with_policy(
 ) -> String {
     let policy_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
-    seed_chapter_and_gate_with_policy_and_artifact_id(
+    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
         connection,
         project_id,
         policy_payload,
         policy_id,
+        true,
+        true,
     )
 }
 
@@ -671,6 +895,24 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id(
     project_id: &str,
     policy_payload: Value,
     policy_id: String,
+) -> String {
+    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+        connection,
+        project_id,
+        policy_payload,
+        policy_id,
+        true,
+        true,
+    )
+}
+
+fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+    connection: &Connection,
+    project_id: &str,
+    policy_payload: Value,
+    policy_id: String,
+    include_book_plan: bool,
+    include_volume_plan: bool,
 ) -> String {
     let book_id = StableIdentityFactory::from_command(StableIdKind::Book, "b08-book").unwrap();
     let volume_id =
@@ -690,6 +932,12 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id(
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'GatePolicy','PROJECT',?3,1,'b08.artifact.r1','COMMITTED',?4,'{}',?5,?5)", libsql_rusqlite::params![policy_id, project_id, scope, policy_hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![policy_id, policy_payload.to_string(), policy_hash]).unwrap();
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'GatePolicy','PROJECT',?2,?3,1,?4)", libsql_rusqlite::params![project_id, scope, policy_id, policy_hash]).unwrap();
+    seed_b08_goal_contracts(
+        connection,
+        project_id,
+        include_book_plan,
+        include_volume_plan,
+    );
     chapter_id
 }
 
@@ -698,17 +946,17 @@ fn seed_b08_long_form_project(
     project_id: &str,
 ) -> (String, String, String, (String, i64, String)) {
     let connection = state.manager.create(project_id, "B08 long", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     let book_plan_id = "plan:book:b08-long";
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+    let book_plan = b08_approved_book_plan_payload(json!([]));
     let book_plan_hash = sha256_canonical(&book_plan).unwrap();
     let volume_intent_id = "plan:volume-intent:b08-long";
-    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000}});
+    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],"mustNotBreak":[],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000},"sourceBookPlanRef":{"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash},"compiledFromProjectRevision":0,"sourceEvidenceRefs":[],"semanticDigest":"0".repeat(64)});
     let volume_intent_hash = sha256_canonical(&volume_intent).unwrap();
     let volume_plan_id = "plan:volume-plan:b08-long";
-    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":["task-order"],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
     let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
     for (artifact_id, artifact_type, scope_level, scope_key, payload, hash) in [
         (
@@ -747,7 +995,8 @@ fn seed_b08_long_form_project(
         state,
         json!({
             "projectId":project_id,"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]
+            "entityIds":["entity:actual:linzhou"],"references":[],
+            "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
         }),
     )
     .unwrap();
@@ -758,7 +1007,7 @@ fn seed_b08_long_form_project(
         "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":0,
         "compiledFromStateDigest":context["compiledFromStateDigest"],
         "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
-        "chapterGoal":"复用当前正式计划","activeTaskRefs":["task:actual"],"continuityActions":[],
+        "chapterGoal":"复用当前正式计划","activeTaskRefs":["task:actual"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
         "sceneExecution":[],"horizonPreview":[
             {"slotNo":1,"objective":"继续行动","tentative":true},
@@ -792,12 +1041,75 @@ fn seed_b08_long_form_project(
 }
 
 fn seed_future_reservation_authority(connection: &Connection, project_id: &str) {
-    let payload = json!({"planningMaturity":"APPROVED","futureReservations":[{"reservationId":"reservation:future:1","mayForeshadow":true,"mayReveal":false,"reservedForVolumeNo":2,"notBeforeVolumeNo":2}]});
+    let payload = b08_approved_book_plan_payload(json!([{
+        "reservationId":"reservation:future:1",
+        "description":"供下一卷揭示的线索",
+        "mayForeshadow":true,
+        "mayReveal":false,
+        "notBeforeVolumeNo":2,
+        "prerequisites":[],
+        "authorityLevel":"A"
+    }]));
     let hash = sha256_canonical(&payload).unwrap();
     let scope = json!({"level":"PROJECT"}).to_string();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:book:reservation',?1,'BookPlan','PROJECT',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, scope, hash, NOW]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('plan:book:reservation',1,?1,?2)", libsql_rusqlite::params![payload.to_string(), hash]).unwrap();
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'BookPlan','PROJECT',?2,'plan:book:reservation',1,?3)", libsql_rusqlite::params![project_id, json!({"level":"PROJECT"}).to_string(), hash]).unwrap();
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let volume_scope =
+        serde_json::to_string(&json!({"level":"VOLUME","volumeId":volume_id})).unwrap();
+    let book_ref = json!({"artifactId":"plan:book:reservation","version":1,"payloadHash":hash});
+    let intent_ref = insert_b08_contract_artifact(
+        connection,
+        project_id,
+        "volume-intent:reservation",
+        "VolumeIntent",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-intent.r1",
+            "volumeFunction":"推进当前章节任务",
+            "entryConditions":[],
+            "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
+            "mustNotBreak":[],
+            "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
+            "futureReservationRefs":["reservation:future:1"],
+            "crossVolumeResponsibilityRefs":[],
+            "targetChapterRange":{"min":1,"preferred":1,"max":1},
+            "targetWordRange":{"preferred":1000},
+            "sourceBookPlanRef":book_ref,
+            "compiledFromProjectRevision":0,
+            "sourceEvidenceRefs":[],
+            "semanticDigest":"0".repeat(64)
+        }),
+    );
+    insert_b08_contract_artifact(
+        connection,
+        project_id,
+        "volume-plan:reservation",
+        "VolumePlan",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-plan.r1",
+            "volumeIntentRef":intent_ref,
+            "routeVersion":1,
+            "tasks":[{
+                "taskId":"task:actual",
+                "class":"REQUIRED",
+                "objective":"推进当前章节任务",
+                "dependsOnTaskIds":[],
+                "continuityThreadRefs":[],
+                "reservationRefs":[],
+                "completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},
+                "estimatedChapterCost":{"preferred":1}
+            }],
+            "routeInvariants":["task-order"],
+            "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
+            "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
+        }),
+    );
 }
 
 fn seed_semantic_fact(
@@ -1781,17 +2093,17 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
         Arc::new(RecordingGateway),
     );
     let connection = state.manager.create("p-b08-long", "B08 long", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b08-long");
+    let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, "p-b08-long");
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     let book_plan_id = "plan:book:b08-long";
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+    let book_plan = b08_approved_book_plan_payload(json!([]));
     let book_plan_hash = sha256_canonical(&book_plan).unwrap();
     let volume_intent_id = "plan:volume-intent:b08-long";
-    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000}});
+    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],"mustNotBreak":[],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000},"sourceBookPlanRef":{"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash},"compiledFromProjectRevision":0,"sourceEvidenceRefs":[],"semanticDigest":"0".repeat(64)});
     let volume_intent_hash = sha256_canonical(&volume_intent).unwrap();
     let volume_plan_id = "plan:volume-plan:b08-long";
-    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":["task-order"],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
     let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
     for (artifact_id, artifact_type, scope_level, scope_key, payload, hash) in [
         (
@@ -1829,7 +2141,8 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
         &state,
         json!({
             "projectId":"p-b08-long","chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]
+            "entityIds":["entity:actual:linzhou"],"references":[],
+            "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
         }),
     )
     .unwrap();
@@ -1840,7 +2153,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
         "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":0,
         "compiledFromStateDigest":context["compiledFromStateDigest"],
         "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
-        "chapterGoal":"复用当前正式计划","activeTaskRefs":["task:actual"],"continuityActions":[],
+        "chapterGoal":"复用当前正式计划","activeTaskRefs":["task:actual"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
         "sceneExecution":[],"horizonPreview":[
             {"slotNo":1,"objective":"继续行动","tentative":true},
@@ -2699,16 +3012,26 @@ fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
             AppPaths::new(temp.path()),
             Arc::new(AuditVariantGateway { variant }),
         );
-        let connection = state.manager.create(&project_id, "B08 audit", NOW).unwrap();
-        let chapter_id = seed_chapter_and_gate(&connection, &project_id);
-        drop(connection);
+        let chapter_id = if suffix == "blocked" {
+            seed_b08_long_form_project(&state, &project_id).0
+        } else {
+            let connection = state.manager.create(&project_id, "B08 audit", NOW).unwrap();
+            let chapter_id = seed_chapter_and_gate(&connection, &project_id);
+            drop(connection);
+            chapter_id
+        };
+        let execution_mode = if suffix == "blocked" {
+            "LONG_FORM"
+        } else {
+            "OPENING_BOOTSTRAP"
+        };
         let result = execute_command_impl(
             &state,
             json!({
                 "type":"production_start","commandId":format!("cmd:b08:audit:{suffix}"),
                 "idempotencyKey":format!("key:b08:audit:{suffix}"),"projectId":project_id,
                 "expectedRevision":0,"requestedAt":NOW,
-                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+                "payload":{"chapterId":chapter_id,"executionMode":execution_mode,"entityIds":["entity:actual:linzhou"]}
             }),
         );
         if let Some(error) = expected_error {
@@ -2748,7 +3071,7 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         .manager
         .create(project_id, "B08 actual reveal", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
     seed_future_reservation_authority(&connection, project_id);
     drop(connection);
     let result = execute_command_impl(
@@ -3477,17 +3800,27 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
                 },
             }),
         );
-        let connection = state
-            .manager
-            .create(&project_id, "B08 reconciliation", NOW)
-            .unwrap();
-        let chapter_id = seed_chapter_and_gate(&connection, &project_id);
-        drop(connection);
+        let chapter_id = if suffix == "rolling" {
+            seed_b08_long_form_project(&state, &project_id).0
+        } else {
+            let connection = state
+                .manager
+                .create(&project_id, "B08 reconciliation", NOW)
+                .unwrap();
+            let chapter_id = seed_chapter_and_gate(&connection, &project_id);
+            drop(connection);
+            chapter_id
+        };
+        let execution_mode = if suffix == "rolling" {
+            "LONG_FORM"
+        } else {
+            "OPENING_BOOTSTRAP"
+        };
         let result = execute_command_impl(&state, json!({
             "type":"production_start","commandId":format!("cmd:b08:recon:{suffix}"),
             "idempotencyKey":format!("key:b08:recon:{suffix}"),"projectId":project_id,
             "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+            "payload":{"chapterId":chapter_id,"executionMode":execution_mode,"entityIds":["entity:actual:linzhou"]}
         })).unwrap();
         assert_eq!(result["finalStatus"], "committed");
         let connection = state
@@ -4419,10 +4752,17 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::new(AppPaths::new(temp.path()));
     let connection = state.manager.create("p-h03-recompile", "H03", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-h03-recompile");
+    let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, "p-h03-recompile");
+    let (volume_intent_id, volume_intent_version, volume_intent_hash) = connection
+        .query_row::<(String, i64, String), _, _>(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-h03-recompile' AND artifact_type='VolumeIntent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
-    let route = json!({"payloadSchema":"volume-plan.r1","routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let route = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":volume_intent_version,"payloadHash":volume_intent_hash},"routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
     let route_hash = sha256_canonical(&route).unwrap();
     let route_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:volume:h03','p-h03-recompile','VolumePlan','VOLUME',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3,?3)", libsql_rusqlite::params![route_scope, route_hash, NOW]).unwrap();
@@ -4448,7 +4788,7 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
         "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":1,
         "compiledFromStateDigest":context["compiledFromStateDigest"],
         "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
-        "chapterGoal":"由 B07 owner 重新编译","activeTaskRefs":["task:actual"],"continuityActions":[],
+        "chapterGoal":"由 B07 owner 重新编译","activeTaskRefs":["task:actual"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
         "sceneExecution":[],"horizonPreview":[
             {"slotNo":1,"objective":"继续当前行动","tentative":true},
@@ -4494,10 +4834,17 @@ fn h03_valid_authorization_cannot_bypass_planning_task_scope_gate() {
         .manager
         .create(project_id, "H03 negative", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, project_id);
+    let (volume_intent_id, volume_intent_version, volume_intent_hash) = connection
+        .query_row::<(String, i64, String), _, _>(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumeIntent'",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
-    let route = json!({"payloadSchema":"volume-plan.r1","routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let route = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":volume_intent_version,"payloadHash":volume_intent_hash},"routeVersion":1,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"继续当前行动","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
     let route_hash = sha256_canonical(&route).unwrap();
     let route_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:volume:h03-negative',?1,'VolumePlan','VOLUME',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, route_scope, route_hash, NOW]).unwrap();
@@ -4523,7 +4870,7 @@ fn h03_valid_authorization_cannot_bypass_planning_task_scope_gate() {
         "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,"compiledFromProjectRevision":1,
         "compiledFromStateDigest":context["compiledFromStateDigest"],
         "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
-        "chapterGoal":"越权任务","activeTaskRefs":["task:outside-route"],"continuityActions":[],
+        "chapterGoal":"越权任务","activeTaskRefs":["task:outside-route"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
         "sceneExecution":[],"horizonPreview":[
             {"slotNo":1,"objective":"继续当前行动","tentative":true},
