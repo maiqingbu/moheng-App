@@ -69,6 +69,19 @@ struct TruncatedAuditGateway;
 
 impl ProductionModelGateway for RecordingGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let active_task_progress = input
+            .pointer("/chapterPlan/activeTaskRefs")
+            .and_then(Value::as_array)
+            .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some("task:actual")));
+        let task_progress_candidates = if active_task_progress {
+            json!([{
+                "taskId":"task:actual",
+                "status":"ACTIVE",
+                "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+            }])
+        } else {
+            json!([])
+        };
         let output = match capability {
             "PLAN_STRATEGY" => json!({
                 "payloadSchema":"chapter-plan.r1",
@@ -105,7 +118,7 @@ impl ProductionModelGateway for RecordingGateway {
                 }],
                 "knowledgeCandidates":[],
                 "continuityCandidates":[],
-                "taskProgressCandidates":[],
+                "taskProgressCandidates":task_progress_candidates,
                 "revealedReservationRefs":[],
                 "evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}],
                 "auditCompleteness":"COMPLETE_WITH_DELTA",
@@ -114,6 +127,22 @@ impl ProductionModelGateway for RecordingGateway {
             other => return Err(format!("unexpected capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
+    }
+}
+
+struct TaskProgressCandidateGateway;
+
+impl ProductionModelGateway for TaskProgressCandidateGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["taskProgressCandidates"] = json!([{
+                "taskId":"task:actual",
+                "status":"ACTIVE",
+                "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+            }]);
+        }
+        Ok(response)
     }
 }
 
@@ -1937,34 +1966,60 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
         AppPaths::new(temp.path()),
         Arc::new(RecordingGateway),
     );
-    let connection = state.manager.create("p-b08", "B08", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b08");
+    let project_id = "p-b08-long";
+    let connection = state.manager.create(project_id, "B08 long", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    drop(connection);
+
+    let planning = execute_command_impl(&state, json!({
+        "type":"planning_compile_chapter_plan","commandId":"cmd:b08:planning","idempotencyKey":"key:b08:planning",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+    })).unwrap();
+    assert_eq!(planning["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "B08 long", NOW).unwrap();
+    let production_revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let volume_head_before = connection
+        .query_row::<(String, i64, String), _, _>(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumePlan'",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     drop(connection);
 
     let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:production","idempotencyKey":"key:b08:production",
-        "projectId":"p-b08","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        "projectId":project_id,"expectedRevision":production_revision,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[],"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
     })).unwrap();
     assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b08", "B08", NOW).unwrap();
+    let connection = state.manager.open(project_id, "B08 long", NOW).unwrap();
     assert_eq!(
         connection
             .query_row::<String, _, _>(
                 "SELECT status FROM chapters WHERE chapter_id=?1",
                 [&chapter_id],
                 |row| row.get(0)
-            )
-            .unwrap(),
+        )
+        .unwrap(),
         "COMMITTED"
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b08' AND artifact_type='ChapterCandidate'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChapterCandidate'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b08' AND status='COMPLETED'",
-                [],
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND status='COMPLETED'",
+                [project_id],
                 |row| row.get(0)
             )
             .unwrap(),
@@ -1973,29 +2028,117 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(
         connection
             .query_row::<String, _, _>(
-                "SELECT status FROM jobs WHERE project_id='p-b08'",
-                [],
+                "SELECT status FROM jobs WHERE project_id=?1",
+                [project_id],
                 |row| row.get(0)
             )
             .unwrap(),
         "COMPLETED"
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id='p-b08' AND domain='B08_CHAPTER_PRODUCTION'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b08' AND artifact_type='VolumePlan'", [], |row| row.get(0)).unwrap(), 0);
-    assert!(connection.query_row::<i64,_,_>("SELECT json_extract(p.payload_json,'$.hardSourceCount') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ContextManifest'", [], |row| row.get(0)).unwrap() > 0);
-    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ChapterPlan'", [], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08' AND fact_id='fact:actual:door-open'", [], |row| row.get(0)).unwrap(), 1);
-    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id='p-b08' AND state_id='task:actual'", [], |row| row.get(0)).unwrap(), "ACTIVE");
-    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ProductionReceipt'", [], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
-    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08' AND h.artifact_type='ProductionReceipt'", [], |row| row.get(0)).unwrap(), "ACTIVE");
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [project_id], |row| row.get(0)).unwrap(), 1);
+    let volume_head_after = connection
+        .query_row::<(String, i64, String), _, _>(
+            "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumePlan'",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(volume_head_after, volume_head_before);
+    assert!(connection.query_row::<i64,_,_>("SELECT json_extract(context.payload_json,'$.hardSourceCount') FROM canonical_heads h JOIN artifact_payloads plan ON plan.artifact_id=h.artifact_id AND plan.version=h.version JOIN artifact_payloads context ON context.artifact_id=json_extract(plan.payload_json,'$.contextManifestRef.artifactId') AND context.version=json_extract(plan.payload_json,'$.contextManifestRef.version') WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap() > 0);
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:door-open'", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
+    assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     drop(connection);
     let replay = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:production","idempotencyKey":"key:b08:production",
-        "projectId":"p-b08","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
+        "projectId":project_id,"expectedRevision":production_revision,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[],"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
     })).unwrap();
     assert_eq!(replay["replayed"], true);
-    println!("B08_PRODUCTION_RESULT opening=PASS candidate_isolation=PASS final_commit=PASS model_provenance=PASS receipt=PASS status=PASS");
+    println!("B08_PRODUCTION_RESULT long_form=PASS route_head_unchanged=PASS final_commit=PASS model_provenance=PASS receipt=PASS status=PASS replay=PASS");
+}
+
+#[test]
+fn b08_opening_bootstrap_without_route_rejects_task_reality() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-opening-no-route";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(TaskProgressCandidateGateway),
+    );
+    let connection = state.manager.create(project_id, "B08 opening", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, project_id);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumePlan'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    let task_state_before = connection
+        .query_row::<String, _, _>(
+            "SELECT value_json FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:opening-no-route","idempotencyKey":"key:b08:opening-no-route",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap_err();
+    assert!(error.contains("B08_TASK_SCOPE_VIOLATION"), "actual error: {error}");
+
+    let connection = state.manager.open(project_id, "B08 opening", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT value_json FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        task_state_before
+    );
+    println!("B08_OPENING_TASK_SCOPE_RESULT rejected=PASS final=0 receipt=0 domain_receipt=0 task_state_unchanged=PASS");
 }
 
 #[test]
