@@ -396,6 +396,67 @@ fn b06_long_form_selected_entity_scope_recalls_recent_reality() {
 }
 
 #[test]
+fn b06_long_form_resolves_volume_from_chapter_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-chapter-volume-scope";
+    let volume_id = "volume:chapter-scope";
+    let chapter_id = "chapter:chapter-scope:1";
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager
+        .create(project_id, "Chapter volume scope", "2026-08-29T00:00:00Z")
+        .unwrap();
+    connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:chapter-scope',?1,1,'Book','ACTIVE',?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,'book:chapter-scope',1,'Volume','PRODUCING',1,1,1000,?3,?3)", libsql_rusqlite::params![volume_id, project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'Chapter','NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![chapter_id, project_id, volume_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:chapter-scope',?1,'Lead','CHARACTER',?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:chapter-scope',?1,'entity:chapter-scope','KNOWN','{}','A',?2,?2)", libsql_rusqlite::params![project_id, "2026-08-29T00:00:00Z"]).unwrap();
+    seed_project_goal_contracts(&connection, project_id, true, &[]);
+    let task = json!({
+        "taskId":"task:chapter-scope",
+        "class":"REQUIRED",
+        "objective":"Complete the selected task",
+        "dependsOnTaskIds":[],
+        "continuityThreadRefs":[],
+        "reservationRefs":[],
+        "completionPredicate":{"kind":"TASK_DONE","value":true},
+        "estimatedChapterCost":{"preferred":1}
+    });
+    seed_volume_goal_contracts(
+        &connection,
+        project_id,
+        volume_id,
+        "intent:chapter-scope",
+        "plan:chapter-scope",
+        &[],
+        vec![task],
+    );
+    connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:chapter-scope',?1,'volume.task.progress','{\"status\":\"ACTIVE\"}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, "2026-08-29T00:00:00Z"]).unwrap();
+    drop(connection);
+
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:chapter-scope"],
+            "references":[]
+        }),
+    )
+    .unwrap();
+    assert!(context["goalContractRefs"].as_array().unwrap().iter().any(|reference| {
+        reference["artifactId"] == "intent:chapter-scope"
+    }));
+    assert_eq!(context["activeVolumeTaskRefs"], json!(["task:chapter-scope"]));
+    assert!(context["narrativeStateSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| source["ref"] == "fact:chapter-scope"));
+}
+
+#[test]
 fn b06_resume_conditions_are_typed_and_fail_closed() {
     let mut context = ResumeContext {
         current_chapter: 12,

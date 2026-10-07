@@ -2671,21 +2671,46 @@ pub(crate) fn context_input_from_authority(
 ) -> Result<crate::narrative::ContextCompilerInput, String> {
     let scope = context_scope(request, project_id);
     let scope_selection = context_scope_selection(request)?;
-    let volume_id = request
+    let mut request_scope = request.clone();
+    let volume_id = if let Some(volume_id) = request
         .get("volumeId")
         .or_else(|| request.get("currentVolumeId"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+    {
+        Some(volume_id.to_owned())
+    } else if let Some(chapter_id) = request.get("chapterId").and_then(Value::as_str) {
+        let volume_id = map_context_query(
+            crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+                connection,
+                project_id,
+                chapter_id,
+            ),
+            ContextHardSource::Contract,
+            &scope,
+        )?
+        .ok_or_else(|| {
+            format!("GOAL_CONTRACT_VOLUME_SCOPE_UNRESOLVED|chapterId={chapter_id}|scope={scope}")
+        })?;
+        Some(volume_id)
+    } else {
+        None
+    };
+    if request_scope.get("volumeId").is_none() && request_scope.get("currentVolumeId").is_none() {
+        if let Some(volume_id) = volume_id.as_deref() {
+            request_scope["volumeId"] = json!(volume_id);
+        }
+    }
+    let volume_id = volume_id.as_deref();
     let opening_bootstrap =
         request.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
     let goal_context = goal_contract_context_for_request(
         connection,
-        request,
+        &request_scope,
         project_id,
         volume_id,
         scope_selection.as_ref(),
         &scope,
     )?;
-    let mut request_scope = request.clone();
     if opening_bootstrap && request_strings(&request_scope, "entityIds").is_empty() {
         let volume_id = volume_id
             .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CANON|scope={scope}"))?;
