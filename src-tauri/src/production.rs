@@ -701,20 +701,17 @@ fn execute_reconciliation_action(
 
     if let Some(chapter_id) =
         crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
-            handle,
-            project_id,
-            volume_id,
+            handle, project_id, volume_id,
         )
         .map_err(|error| error.to_string())?
     {
-        let chapter_no =
-            crate::repositories::narrative::NarrativeRepository::chapter_number(
-                handle,
-                project_id,
-                &chapter_id,
-            )
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+        let chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
+            handle,
+            project_id,
+            &chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
         let payload = json!({
             "sourceChapterId":source_chapter_id,
             "nextChapterId":chapter_id,
@@ -729,9 +726,7 @@ fn execute_reconciliation_action(
     }
 
     let next_no = crate::repositories::narrative::NarrativeRepository::next_chapter_number(
-        handle,
-        project_id,
-        volume_id,
+        handle, project_id, volume_id,
     )
     .map_err(|error| error.to_string())?;
     let Some(next_no) = next_no else {
@@ -1217,11 +1212,8 @@ fn run_chapter_production_inner(
     let volume_id = chapter_volume
         .as_deref()
         .ok_or_else(|| "B08_CHAPTER_NOT_FOUND".to_string())?;
-    let execution_mode = crate::planning::resolve_chapter_execution_mode(
-        connection,
-        &project_id,
-        &chapter_id,
-    )?;
+    let execution_mode =
+        crate::planning::resolve_chapter_execution_mode(connection, &project_id, &chapter_id)?;
     if requested_execution_mode != execution_mode {
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
@@ -2079,8 +2071,7 @@ fn run_chapter_production_inner(
                 .into_iter()
                 .flatten()
                 .find(|condition| {
-                    condition.get("value").and_then(Value::as_str)
-                        == Some(item.task_id.as_str())
+                    condition.get("value").and_then(Value::as_str) == Some(item.task_id.as_str())
                 })
                 .and_then(|condition| condition.get("kind").and_then(Value::as_str))
                 .map(ToOwned::to_owned);
@@ -2383,8 +2374,7 @@ pub struct ReconciliationFacts {
 pub fn classify_reconciliation_facts(facts: &ReconciliationFacts) -> &'static str {
     if !facts.canon_gate_passed
         || facts.responsibility_reality.iter().any(|responsibility| {
-            responsibility.disposition.as_deref()
-                == Some("NO_LONGER_APPLICABLE_CHANGE_REQUEST")
+            responsibility.disposition.as_deref() == Some("NO_LONGER_APPLICABLE_CHANGE_REQUEST")
         })
     {
         return "CHANGE_REQUEST";

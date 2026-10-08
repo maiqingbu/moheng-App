@@ -6619,11 +6619,8 @@ fn compile_current_chapter_plan(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    let execution_mode = crate::planning::preflight_chapter_plan_owner(
-        &handle,
-        project_id,
-        chapter_id,
-    )?;
+    let execution_mode =
+        crate::planning::preflight_chapter_plan_owner(&handle, project_id, chapter_id)?;
     if execution_mode != "LONG_FORM" {
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }

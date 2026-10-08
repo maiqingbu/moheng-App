@@ -520,9 +520,7 @@ impl ProductionModelGateway for AuditVariantGateway {
                         "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                     }]);
                 }
-                "model-change-flag-only" => {
-                    response.output["changeRequested"] = json!(true)
-                }
+                "model-change-flag-only" => response.output["changeRequested"] = json!(true),
                 "multi-legal" => {
                     response.output["canonCandidates"] = json!([{
                         "factId":"fact:actual:map","subjectId":"entity:actual:linzhou",
@@ -2381,13 +2379,16 @@ fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:existing-plan-stage-count",
-        "idempotencyKey":"key:b08:existing-plan-stage-count","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]}
-    }))
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:existing-plan-stage-count",
+            "idempotencyKey":"key:b08:existing-plan-stage-count","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
@@ -3596,17 +3597,23 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         hard_context["futureReservationRefs"],
         json!(["reservation:future:1"])
     );
-    let planning = execute_command_impl(&state, json!({
-        "type":"planning_compile_chapter_plan","commandId":"cmd:b08:actual-reveal:plan",
-        "idempotencyKey":"key:b08:actual-reveal:plan","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],
-            "responsibilityRefs":[],"reservationRefs":["reservation:future:1"],
-            "entityRefs":["entity:actual:linzhou"]}}
-    }))
+    let planning = execute_command_impl(
+        &state,
+        json!({
+            "type":"planning_compile_chapter_plan","commandId":"cmd:b08:actual-reveal:plan",
+            "idempotencyKey":"key:b08:actual-reveal:plan","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],
+                "responsibilityRefs":[],"reservationRefs":["reservation:future:1"],
+                "entityRefs":["entity:actual:linzhou"]}}
+        }),
+    )
     .unwrap();
     assert_eq!(planning["finalStatus"], "committed");
-    let connection = state.manager.open(project_id, "B08 actual reveal", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 actual reveal", NOW)
+        .unwrap();
     let production_revision = connection
         .query_row::<i64, _, _>(
             "SELECT revision FROM project_meta WHERE project_id=?1",
@@ -4348,7 +4355,11 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
         connection
             .execute(
                 "UPDATE volumes SET chapter_end=?1 WHERE project_id=?2 AND volume_id=?3",
-                libsql_rusqlite::params![if suffix == "route" { 1 } else { 4 }, project_id, volume_id],
+                libsql_rusqlite::params![
+                    if suffix == "route" { 1 } else { 4 },
+                    project_id,
+                    volume_id
+                ],
             )
             .unwrap();
         drop(connection);
@@ -4360,7 +4371,10 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
                 "responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
         })).unwrap();
         assert_eq!(planning["finalStatus"], "committed");
-        let connection = state.manager.open(&project_id, "B08 reconciliation", NOW).unwrap();
+        let connection = state
+            .manager
+            .open(&project_id, "B08 reconciliation", NOW)
+            .unwrap();
         let production_revision = connection
             .query_row::<i64, _, _>(
                 "SELECT revision FROM project_meta WHERE project_id=?1",
@@ -4369,15 +4383,19 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
             )
             .unwrap();
         drop(connection);
-        let result = execute_command_impl(&state, json!({
-            "type":"production_start","commandId":format!("cmd:b08:recon:{suffix}:produce"),
-            "idempotencyKey":format!("key:b08:recon:{suffix}:produce"),"projectId":project_id,
-            "expectedRevision":production_revision,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-                "entityIds":["entity:actual:linzhou"],"references":[],
-                "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],
-                    "reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
-        })).unwrap();
+        let result = execute_command_impl(
+            &state,
+            json!({
+                "type":"production_start","commandId":format!("cmd:b08:recon:{suffix}:produce"),
+                "idempotencyKey":format!("key:b08:recon:{suffix}:produce"),"projectId":project_id,
+                "expectedRevision":production_revision,"requestedAt":NOW,
+                "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                    "entityIds":["entity:actual:linzhou"],"references":[],
+                    "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],
+                        "reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+            }),
+        )
+        .unwrap();
         assert_eq!(result["finalStatus"], "committed");
         let connection = state
             .manager
@@ -4391,7 +4409,11 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
             )
             .unwrap();
         let receipt_payload: Value = serde_json::from_str(&receipt_payload).unwrap();
-        assert_eq!(receipt_payload["reconciliation"], expected, "fixture={suffix}; reality={}", receipt_payload["reality"]);
+        assert_eq!(
+            receipt_payload["reconciliation"], expected,
+            "fixture={suffix}; reality={}",
+            receipt_payload["reality"]
+        );
         if expected != "NO_ACTION" {
             assert_eq!(
                 connection
@@ -4418,7 +4440,10 @@ fn b08_reconciliation_no_action_prepares_only_an_empty_next_chapter_row() {
         Arc::new(TaskSatisfiedGateway),
     );
     let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
-    let connection = state.manager.open(project_id, "B08 reconciliation", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 reconciliation", NOW)
+        .unwrap();
     connection
         .execute(
             "UPDATE volumes SET chapter_end=2 WHERE project_id=?1 AND volume_id=?2",
@@ -4427,22 +4452,27 @@ fn b08_reconciliation_no_action_prepares_only_an_empty_next_chapter_row() {
         .unwrap();
     drop(connection);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:reconciliation-empty-next",
-        "idempotencyKey":"key:b08:reconciliation-empty-next","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]}
-    }))
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:reconciliation-empty-next",
+            "idempotencyKey":"key:b08:reconciliation-empty-next","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
-        result["reconciliationExecution"]["status"],
-        "PREPARED",
+        result["reconciliationExecution"]["status"], "PREPARED",
         "NO_ACTION should prepare only the next chapter row: {result}"
     );
 
-    let connection = state.manager.open(project_id, "B08 reconciliation", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 reconciliation", NOW)
+        .unwrap();
     let (next_chapter_id, next_status): (String, String) = connection
         .query_row(
             "SELECT chapter_id,status FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=2",
@@ -4475,7 +4505,10 @@ fn b08_reconciliation_no_action_does_not_duplicate_an_existing_next_chapter_row(
     let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
     let next_chapter_id =
         StableIdentityFactory::from_command(StableIdKind::Chapter, "b08:existing-next").unwrap();
-    let connection = state.manager.open(project_id, "B08 reconciliation", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 reconciliation", NOW)
+        .unwrap();
     connection
         .execute(
             "UPDATE volumes SET chapter_end=2 WHERE project_id=?1 AND volume_id=?2",
@@ -4490,17 +4523,26 @@ fn b08_reconciliation_no_action_does_not_duplicate_an_existing_next_chapter_row(
         .unwrap();
     drop(connection);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:reconciliation-existing-next",
-        "idempotencyKey":"key:b08:reconciliation-existing-next","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]}
-    }))
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:reconciliation-existing-next",
+            "idempotencyKey":"key:b08:reconciliation-existing-next","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
     .unwrap();
-    assert_eq!(result["reconciliationExecution"]["status"], "ALREADY_PREPARED");
+    assert_eq!(
+        result["reconciliationExecution"]["status"],
+        "ALREADY_PREPARED"
+    );
 
-    let connection = state.manager.open(project_id, "B08 reconciliation", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 reconciliation", NOW)
+        .unwrap();
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -4533,17 +4575,23 @@ fn b08_reconciliation_no_action_at_volume_end_does_not_create_an_out_of_range_ch
     );
     let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:reconciliation-last",
-        "idempotencyKey":"key:b08:reconciliation-last","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]}
-    }))
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:reconciliation-last",
+            "idempotencyKey":"key:b08:reconciliation-last","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
 
-    let connection = state.manager.open(project_id, "B08 reconciliation", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 reconciliation", NOW)
+        .unwrap();
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -4568,16 +4616,22 @@ fn b08_reconciliation_ignores_model_authored_change_request_flag() {
     );
     let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
 
-    execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:model-change-flag",
-        "idempotencyKey":"key:b08:model-change-flag","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
-            "entityIds":["entity:actual:linzhou"],"references":[]}
-    }))
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:model-change-flag",
+            "idempotencyKey":"key:b08:model-change-flag","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[]}
+        }),
+    )
     .unwrap();
 
-    let connection = state.manager.open(project_id, "B08 model change flag", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 model change flag", NOW)
+        .unwrap();
     let reconciliation = connection
         .query_row::<String, _, _>(
             "SELECT json_extract(p.payload_json,'$.reconciliation') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'",
@@ -4594,26 +4648,38 @@ fn b08_rejects_execution_mode_that_disagrees_with_planning_owner() {
     let project_id = "p-b08-mode-mismatch";
     let gateway = Arc::new(CountingCapabilitiesGateway::default());
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
-    let connection = state.manager.create(project_id, "B08 mode mismatch", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B08 mode mismatch", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
     drop(connection);
 
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b08:mode-mismatch",
-        "idempotencyKey":"key:b08:mode-mismatch","projectId":project_id,
-        "expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP",
-            "entityIds":["entity:actual:linzhou"]}
-    }));
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:mode-mismatch",
+            "idempotencyKey":"key:b08:mode-mismatch","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP",
+                "entityIds":["entity:actual:linzhou"]}
+        }),
+    );
     assert!(
         result.is_err(),
         "caller-requested mode must not change owner mode: {result:?}"
     );
     let error = result.unwrap_err();
 
-    assert!(error.contains("B08_EXECUTION_MODE_MISMATCH"), "actual error: {error}");
+    assert!(
+        error.contains("B08_EXECUTION_MODE_MISMATCH"),
+        "actual error: {error}"
+    );
     assert!(gateway.capabilities.lock().unwrap().is_empty());
-    let connection = state.manager.open(project_id, "B08 mode mismatch", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 mode mismatch", NOW)
+        .unwrap();
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -5639,7 +5705,10 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
     let project_id = "p-b3-owner-mode";
     let gateway = Arc::new(CountingCapabilitiesGateway::default());
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
-    let connection = state.manager.create(project_id, "B3 owner mode", NOW).unwrap();
+    let connection = state
+        .manager
+        .create(project_id, "B3 owner mode", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
@@ -5721,7 +5790,10 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
     .unwrap();
     let context_id = "context:b3:owner-mode";
     let context_hash = sha256_canonical(&opening_context).unwrap();
-    let connection = state.manager.open(project_id, "B3 owner mode", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B3 owner mode", NOW)
+        .unwrap();
     let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
     connection
         .execute(
@@ -5773,18 +5845,24 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
         &digest,
         0,
     );
-    let h03_result = execute_command_impl(&state, json!({
-        "type":"repair_execute","commandId":"cmd:b3:owner-mode:h03",
-        "idempotencyKey":"key:b3:owner-mode:h03","projectId":project_id,"requestedAt":NOW,
-        "payload":{"repairPlanId":repair_plan_id,"authorizationId":authorization_id}
-    }))
+    let h03_result = execute_command_impl(
+        &state,
+        json!({
+            "type":"repair_execute","commandId":"cmd:b3:owner-mode:h03",
+            "idempotencyKey":"key:b3:owner-mode:h03","projectId":project_id,"requestedAt":NOW,
+            "payload":{"repairPlanId":repair_plan_id,"authorizationId":authorization_id}
+        }),
+    )
     .unwrap();
     let h03_error = h03_result["receipt"]["postconditions"][0]["error"]
         .as_str()
         .unwrap_or("");
 
     assert!(ui_error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"));
-    assert!(h03_error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"), "actual H03 result: {h03_result}");
+    assert!(
+        h03_error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"),
+        "actual H03 result: {h03_result}"
+    );
     assert!(gateway.capabilities.lock().unwrap().is_empty());
 }
 
@@ -5793,11 +5871,13 @@ fn b3_planning_owner_rejects_a_second_uncommitted_chapter_plan() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b3-single-executable-plan";
     let state = KernelState::new(AppPaths::new(temp.path()));
-    let (first_chapter_id, volume_id, _, _) =
-        seed_b08_long_form_project(&state, project_id);
+    let (first_chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
     let second_chapter_id =
         StableIdentityFactory::from_command(StableIdKind::Chapter, "b3:second").unwrap();
-    let connection = state.manager.open(project_id, "B3 one executable plan", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B3 one executable plan", NOW)
+        .unwrap();
     connection
         .execute(
             "UPDATE volumes SET chapter_end=2 WHERE project_id=?1 AND volume_id=?2",
@@ -5821,7 +5901,10 @@ fn b3_planning_owner_rejects_a_second_uncommitted_chapter_plan() {
     let context = query_context_manifest_impl(&state, authority.clone()).unwrap();
     let context_id = "context:b3:second-chapter";
     let context_hash = sha256_canonical(&context).unwrap();
-    let connection = state.manager.open(project_id, "B3 one executable plan", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B3 one executable plan", NOW)
+        .unwrap();
     let scope = json!({"level":"CHAPTER","chapterId":second_chapter_id}).to_string();
     connection
         .execute(

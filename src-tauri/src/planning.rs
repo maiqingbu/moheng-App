@@ -2385,26 +2385,21 @@ pub fn remaining_chapter_capacity(
     chapter_id: &str,
 ) -> Result<i64, String> {
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-        connection,
-        project_id,
-        chapter_id,
+        connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
     let chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
-        connection,
-        project_id,
-        chapter_id,
+        connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    let metadata = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
-        connection,
-        project_id,
-        &volume_id,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    let metadata =
+        crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+            connection, project_id, &volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
     Ok((metadata.chapter_end - chapter_no).max(0))
 }
 
@@ -2414,17 +2409,13 @@ pub fn resolve_chapter_execution_mode(
     chapter_id: &str,
 ) -> Result<&'static str, String> {
     crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-        connection,
-        project_id,
-        chapter_id,
+        connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
     let book_plan_ref =
         crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-            connection,
-            project_id,
-            "BookPlan",
+            connection, project_id, "BookPlan",
         )
         .map_err(|error| error.to_string())?;
     if let Some(book_plan_ref) = book_plan_ref {
@@ -2440,11 +2431,9 @@ pub fn resolve_chapter_execution_mode(
             return Ok("LONG_FORM");
         }
     }
-    let next_opening_chapter = crate::repositories::project_entry::next_opening_chapter_id(
-        connection,
-        project_id,
-    )
-    .map_err(|error| error.to_string())?;
+    let next_opening_chapter =
+        crate::repositories::project_entry::next_opening_chapter_id(connection, project_id)
+            .map_err(|error| error.to_string())?;
     if next_opening_chapter.as_deref() == Some(chapter_id)
         && crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
             connection,
@@ -2466,7 +2455,10 @@ fn validate_planning_owner_prerequisites(
     execution_mode: &str,
 ) -> Result<(), String> {
     for (artifact_type, error_code) in [
-        ("StoryConstitution", "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED"),
+        (
+            "StoryConstitution",
+            "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED",
+        ),
         ("MainContract", "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED"),
     ] {
         crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
@@ -2479,19 +2471,18 @@ fn validate_planning_owner_prerequisites(
     }
     let book_plan_ref =
         crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-            connection,
-            project_id,
-            "BookPlan",
+            connection, project_id, "BookPlan",
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_REQUIRED".to_string())?;
-    let raw_book_plan = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-        connection,
-        project_id,
-        &book_plan_ref,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_REQUIRED".to_string())?;
+    let raw_book_plan =
+        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            connection,
+            project_id,
+            &book_plan_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_REQUIRED".to_string())?;
     let (book_plan, _) = normalize_legacy_book_plan_payload(&raw_book_plan);
     validate_book_plan_r1(&book_plan)
         .map_err(|error| format!("GOAL_CONTRACT_BOOK_PLAN_INVALID|{error}"))?;
@@ -2513,9 +2504,7 @@ fn validate_planning_owner_prerequisites(
         return Err("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".into());
     }
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-        connection,
-        project_id,
-        chapter_id,
+        connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
@@ -2537,16 +2526,12 @@ fn validate_planning_owner_prerequisites(
     validate_volume_intent_semantics(&intent)
         .map_err(|_| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
     let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
-        connection,
-        project_id,
-        &volume_id,
+        connection, project_id, &volume_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "VOLUME_PLAN_NOT_FOUND".to_string())?;
     let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-        connection,
-        project_id,
-        &route_ref,
+        connection, project_id, &route_ref,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
@@ -2580,9 +2565,7 @@ pub fn recompile_chapter_plan_owner(
     let execution_mode = preflight_chapter_plan_owner(connection, project_id, chapter_id)?;
     validate_chapter_plan_target(connection, project_id, chapter_id, execution_mode)?;
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-        connection,
-        project_id,
-        chapter_id,
+        connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
@@ -2797,17 +2780,13 @@ pub fn validate_chapter_plan_target(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "B08_OPENING_ORDER_REQUIRED".to_string())?
     } else {
-    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
-            connection,
-            project_id,
-            chapter_id,
+        let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+            connection, project_id, chapter_id,
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
         crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
-            connection,
-            project_id,
-            &volume_id,
+            connection, project_id, &volume_id,
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "B08_CHAPTER_ORDER_REQUIRED".to_string())?
