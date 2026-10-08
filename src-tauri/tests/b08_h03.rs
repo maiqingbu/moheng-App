@@ -1077,6 +1077,7 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
     let payload = b08_approved_book_plan_payload(json!([{
         "reservationId":"reservation:future:1",
         "description":"供下一卷揭示的线索",
+        "reservedForVolumeNo":2,
         "mayForeshadow":true,
         "mayReveal":false,
         "notBeforeVolumeNo":2,
