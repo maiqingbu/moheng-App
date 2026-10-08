@@ -2498,7 +2498,7 @@ fn goal_contract_context_for_request(
                 book_reservations,
             )
             .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
-        let current_chapter_no = if let Some(chapter_id) = request
+        let requested_chapter_no = if let Some(chapter_id) = request
             .get("chapterId")
             .or_else(|| request.pointer("/payload/chapterId"))
             .or_else(|| request.pointer("/chapterPlan/chapterId"))
@@ -2508,7 +2508,11 @@ fn goal_contract_context_for_request(
                 connection, project_id, chapter_id,
             )
             .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+        } else {
+            None
+        };
+        let current_chapter_no = if let Some(chapter_no) = requested_chapter_no {
+            chapter_no
         } else {
             crate::repositories::narrative::NarrativeRepository::next_chapter_number(
                 connection,
