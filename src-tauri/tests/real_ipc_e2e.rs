@@ -1255,8 +1255,8 @@ fn r2_response_envelope(content: Value) -> Vec<u8> {
 }
 
 fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
-    let opening_bootstrap = input.get("executionMode").and_then(Value::as_str)
-        == Some("OPENING_BOOTSTRAP");
+    let opening_bootstrap =
+        input.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
     let task_progress_candidates = input
         .pointer("/chapterPlan/activeTaskRefs")
         .and_then(Value::as_array)
