@@ -19,11 +19,12 @@ use std::time::Instant;
 
 const NOW: &str = "2026-09-02T05:00:00Z";
 
+/// FR-STALE-005: 相同 project revision 不能覆盖相关 authority digest 的变化。
 #[test]
-fn b12_same_revision_with_changed_authority_digest_is_valid() {
+fn b12_same_revision_with_changed_authority_digest_is_stale() {
     assert_eq!(
         evaluate_plan_stale(7, &"a".repeat(64), 7, &"b".repeat(64)),
-        PlanStaleStatus::Valid
+        PlanStaleStatus::PlanStale
     );
 }
 
