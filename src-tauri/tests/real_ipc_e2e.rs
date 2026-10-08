@@ -2120,19 +2120,33 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
                 && receipt["status"] == "COMPLETED"
         })
     });
-    let prepared = if production_ok && volume_plan_committed {
-        let current_revision = manager.project_revision(&project_id).unwrap();
-        r2_bounded_invoke(
-            &webview,
-            "execute_command",
-            json!({"request":{
-                "type":"planning_prepare_next_chapter","commandId":"r2:chapter:prepare-next",
-                "idempotencyKey":"r2:chapter:prepare-next:key","projectId":project_id,
-                "expectedRevision":current_revision,"requestedAt":R2_PROVIDER_NOW,
-                "payload":{"volumeId":volume_id}
-            }}),
-            Duration::from_secs(5),
-        )
+    let prepared: Result<Value, String> = if production_ok && volume_plan_committed {
+        let connection = manager
+            .open(
+                &project_id,
+                "R2 prepared next chapter query",
+                R2_PROVIDER_NOW,
+            )
+            .expect("reopen project to inspect Q4 prepared chapter");
+        let chapter = connection
+            .query_row(
+                "SELECT chapter_id,chapter_no,status FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=2",
+                libsql_rusqlite::params![project_id, volume_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            )
+            .expect("Q4 reconciliation must create the next chapter row");
+        let chapter_plan_heads = connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChapterPlan' AND json_extract(scope_key,'$.chapterId')=?2",
+                libsql_rusqlite::params![project_id, chapter.0],
+                |row| row.get(0),
+            )
+            .expect("count ChapterPlan heads for the Q4 prepared chapter");
+        Ok(json!({
+            "finalStatus":"committed",
+            "chapter":{"chapterId":chapter.0,"chapterNo":chapter.1,"status":chapter.2},
+            "chapterPlanHeadCount":chapter_plan_heads
+        }))
     } else {
         Err("PRODUCTION_ENTRY_NOT_COMPLETED".into())
     };
@@ -2146,6 +2160,8 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
     let next_chapter_prepared = prepared.as_ref().is_ok_and(|result| {
         result["finalStatus"].as_str() == Some("committed")
             && result.pointer("/chapter/chapterNo").and_then(Value::as_i64) == Some(2)
+            && result.pointer("/chapter/status").and_then(Value::as_str) == Some("PLANNED")
+            && result["chapterPlanHeadCount"].as_i64() == Some(0)
     });
     let next_plan = if next_chapter_prepared {
         let current_revision = manager.project_revision(&project_id).unwrap();
@@ -2193,13 +2209,9 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         let settled_budget_rows = count(
             "SELECT COUNT(*) FROM budget_reservations WHERE project_id=?1 AND status='SETTLED'",
         );
-        let command_receipt_rows = connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1 AND command_id IN ('r2:production:start','r2:chapter:prepare-next','r2:chapter:compile-next')",
-                [&project_id],
-                |row| row.get(0),
-            )
-            .expect("query registered command receipt count");
+        let production_receipt_rows = count(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt' AND artifact_status='COMMITTED'",
+        );
         let total_usage_tokens = connection
             .query_row::<i64, _, _>(
                 "SELECT COALESCE(SUM(total_tokens),0) FROM model_usage WHERE project_id=?1",
@@ -2229,7 +2241,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             usage_rows,
             actual_cost_rows,
             settled_budget_rows,
-            command_receipt_rows,
+            production_receipt_rows,
             total_usage_tokens,
             model_run_rows,
             open_unknown_decisions,
@@ -2280,7 +2292,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             "usageRows": persisted_metrics.2,
             "actualCostRows": persisted_metrics.3,
             "settledBudgetRows": persisted_metrics.4,
-            "formalCommandReceiptRows": persisted_metrics.5,
+            "productionReceiptRows": persisted_metrics.5,
             "totalUsageTokens": persisted_metrics.6,
             "processArgvCanaryMatches": process_canary_matches,
             "parentEnvironmentCanaryMatches": parent_environment_match,
