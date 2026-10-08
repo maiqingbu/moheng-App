@@ -1134,6 +1134,53 @@ fn validate_plan_is_current(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn commit_chapter_after_revision_recheck(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+    chapter_id: &str,
+    volume_id: &str,
+    execution_mode: &str,
+    plan_ref: &ArtifactRef,
+    plan: &Value,
+    bundle: &mut CommitBundle,
+    now: &str,
+) -> Result<crate::generated::types::CommitReceipt, String> {
+    const MAX_REVISION_RETRIES: usize = 3;
+
+    for attempt in 0..=MAX_REVISION_RETRIES {
+        let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
+            connection, project_id,
+        )
+        .map_err(|error| error.to_string())?;
+        validate_plan_is_current(
+            connection,
+            request,
+            project_id,
+            chapter_id,
+            volume_id,
+            execution_mode,
+            plan_ref,
+            plan,
+        )?;
+        bundle.expected_project_revision = Some(revision);
+        match CommitService::commit_b08_chapter_with_deferred_b09_projection(
+            connection, bundle, volume_id, now,
+        ) {
+            Ok(receipt) => return Ok(receipt),
+            Err(crate::commit::CommitError::RevisionConflict) if attempt < MAX_REVISION_RETRIES => {
+                continue;
+            }
+            Err(crate::commit::CommitError::RevisionConflict) => {
+                return Err("REVISION_CONFLICT".into());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("REVISION_CONFLICT".into())
+}
+
 fn make_certificate(
     project_id: &str,
     policy: ArtifactRef,
@@ -2509,7 +2556,7 @@ fn run_chapter_production_inner(
     } else {
         plan_ref.payload_hash.clone()
     };
-    let bundle: CommitBundle = serde_json::from_value(json!({
+    let mut bundle: CommitBundle = serde_json::from_value(json!({
         "commitId":format!("commit:{command_id}"),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,
         "expectedProjectRevision":current_revision,"contractVersion":"m0a.v1","createdAt":now,
         "artifacts":bundle_artifacts,"headUpdates":heads,
@@ -2524,10 +2571,25 @@ fn run_chapter_production_inner(
         "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
     update_stage(connection, &project_id, &job_id, "COMMIT", &now)?;
-    let receipt = CommitService::commit_b08_chapter_with_deferred_b09_projection(
-        connection, &bundle, &volume_id, &now,
-    )
-    .map_err(|error| error.to_string())?;
+    let receipt = match commit_chapter_after_revision_recheck(
+        connection,
+        request,
+        &project_id,
+        &chapter_id,
+        &volume_id,
+        execution_mode,
+        &plan_ref,
+        &plan_payload,
+        &mut bundle,
+        &now,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) if error.starts_with("PLAN_STALE") => {
+            block_for_recompile(connection, &project_id, &job_id, &now)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     // B09 owns the rebuildable volume planning projection. Refresh it only
     // after B08's authoritative chapter CommitBundle succeeds. Its failure is
     // recoverable and does not reverse or mislabel the committed chapter. The
