@@ -899,7 +899,7 @@ fn seed_b08_goal_contracts(
                 "dependsOnTaskIds":[],
                 "continuityThreadRefs":[],
                 "reservationRefs":[],
-                "completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},
+                "completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":"task:actual","evidenceType":"ACTUAL_NARRATIVE","requiresNewEvidence":true}},
                 "estimatedChapterCost":{"preferred":1}
             }],
             "routeInvariants":["task-order"],
@@ -1070,6 +1070,7 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
     connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:actual:linzhou',?1,'林舟','CHARACTER',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
     connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,created_at,updated_at) VALUES ('fact:actual:seed',?1,'entity:actual:linzhou','location','{\"place\":\"stone-door\"}','A','2020-01-01T00:00:00Z','2021-01-01T00:00:00Z',?2,?2)", libsql_rusqlite::params![project_id, NOW]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
+    connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:prerequisite',?1,'volume.task.progress','{\"taskId\":\"task:prerequisite\",\"status\":\"SATISFIED\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id, chapter_id, NOW]).unwrap();
 
     let policy_hash = sha256_canonical(&policy_payload).unwrap();
     let scope = "{\"level\":\"PROJECT\"}";
@@ -1101,7 +1102,7 @@ fn seed_b08_long_form_project(
     let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],"mustNotBreak":[{"id":"rule:b08:actual","description":"不得改变已确认的开篇事实"}],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000},"sourceBookPlanRef":{"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash},"compiledFromProjectRevision":0,"sourceEvidenceRefs":["fact:actual:seed"],"semanticDigest":"0".repeat(64)});
     let volume_intent_hash = sha256_canonical(&volume_intent).unwrap();
     let volume_plan_id = "plan:volume-plan:b08-long";
-    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":["task-order"],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
+    let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:prerequisite","class":"OPTIONAL","objective":"已满足的先决条件","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":"task:prerequisite","evidenceType":"ACTUAL_NARRATIVE","requiresNewEvidence":true}},"estimatedChapterCost":{"preferred":1}},{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":["task:prerequisite"],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":"task:actual","evidenceType":"ACTUAL_NARRATIVE","requiresNewEvidence":true}},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":["task-order"],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
     let volume_plan_hash = sha256_canonical(&volume_plan).unwrap();
     for (artifact_id, artifact_type, scope_level, scope_key, payload, hash) in [
         (
@@ -6673,3 +6674,5 @@ fn b08_final_commit_fault_rolls_back_final_chapter_reality_and_receipt() {
 }
 #[path = "b08_h03/b04a_rv07.rs"]
 mod b04a_rv07;
+#[path = "b08_h03/b04a_rv21.rs"]
+mod b04a_rv21;

@@ -2511,6 +2511,83 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn canon_fact_object_matches(
+        connection: &Connection,
+        project_id: &str,
+        fact_id: &str,
+        expected: &Value,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let object: Option<String> = connection
+            .query_row(
+                "SELECT object_json FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
+                libsql_rusqlite::params![project_id, fact_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(object
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .is_some_and(|value| &value == expected))
+    }
+
+    pub fn canon_event_exists(
+        connection: &Connection,
+        project_id: &str,
+        event_id: Option<&str>,
+        event_type: Option<&str>,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id=?1 AND ((?2 IS NOT NULL AND event_id=?2) OR (?3 IS NOT NULL AND event_type=?3)))",
+                libsql_rusqlite::params![project_id, event_id, event_type],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn canon_relation_exists(
+        connection: &Connection,
+        project_id: &str,
+        relation_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_relations WHERE project_id=?1 AND relation_id=?2)",
+                libsql_rusqlite::params![project_id, relation_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn canon_knowledge_state_matches(
+        connection: &Connection,
+        project_id: &str,
+        knowledge_id: &str,
+        epistemic_state: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canon_knowledge WHERE project_id=?1 AND knowledge_id=?2 AND epistemic_state=?3)",
+                libsql_rusqlite::params![project_id, knowledge_id, epistemic_state],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn obligation_lifecycle_matches(
+        connection: &Connection,
+        project_id: &str,
+        obligation_id: &str,
+        lifecycle: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2 AND lifecycle=?3)",
+                libsql_rusqlite::params![project_id, obligation_id, lifecycle],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn b07_chapter_plan_payload(
         connection: &Connection,
         project_id: &str,

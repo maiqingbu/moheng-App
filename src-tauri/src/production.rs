@@ -2869,6 +2869,9 @@ fn validate_actual_extraction(
         ) {
             return Err("B08_TASK_STATUS_INVALID".into());
         }
+        if candidate.status == "SATISFIED" {
+            validate_task_completion_claim(connection, project_id, chapter_id, candidate, audit)?;
+        }
     }
     for candidate in &audit.continuity_candidates {
         exact_quote(body, &candidate.evidence)?;
@@ -2986,6 +2989,212 @@ fn validate_actual_extraction(
     }
     audit.knowledge_candidates = bound_knowledge_candidates;
     Ok(())
+}
+
+fn validate_task_completion_claim(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    chapter_id: &str,
+    candidate: &TaskProgressCandidate,
+    audit: &AuditExtraction,
+) -> Result<(), String> {
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?;
+    let route = crate::repositories::narrative::NarrativeRepository::artifact_payload(
+        connection,
+        project_id,
+        "VolumePlan",
+        &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?;
+    let task = route
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| {
+            tasks.iter().find(|task| {
+                task.get("taskId").and_then(Value::as_str) == Some(candidate.task_id.as_str())
+            })
+        })
+        .ok_or("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?;
+    let dependencies = task
+        .get("dependsOnTaskIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let dependency_states =
+        crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
+            connection,
+            project_id,
+            &dependencies,
+        )
+        .map_err(|error| error.to_string())?;
+    if dependencies.iter().any(|dependency| {
+        dependency_states
+            .iter()
+            .find(|state| state.state_id == *dependency)
+            .and_then(|state| state.value.get("status").and_then(Value::as_str))
+            != Some("SATISFIED")
+    }) {
+        return Err("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED".into());
+    }
+    let predicate = task
+        .get("completionPredicate")
+        .ok_or("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED")?;
+    let mut reality = json!({
+        "status":candidate.status,
+        "evidenceRefs":[{"rangeStart":candidate.evidence.start,"rangeEnd":candidate.evidence.end}],
+        "lastAdvancedChapterId":chapter_id
+    });
+    if predicate.get("kind").and_then(Value::as_str) != Some("TASK_EVIDENCE_RECORDED") {
+        reality["predicateSatisfied"] = Value::Bool(b03_completion_predicate_satisfied(
+            connection, project_id, predicate, audit,
+        )?);
+    }
+    let satisfied =
+        crate::planning::evaluate_b03_completion_predicate(predicate, &candidate.task_id, &reality)
+            .map_err(|_| "B08_TASK_COMPLETION_PREDICATE_INVALID")?;
+    if !satisfied {
+        return Err("B08_TASK_COMPLETION_PREDICATE_UNSATISFIED".into());
+    }
+    Ok(())
+}
+
+fn b03_completion_predicate_satisfied(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    predicate: &Value,
+    audit: &AuditExtraction,
+) -> Result<bool, String> {
+    let value = predicate.get("value").unwrap_or(&Value::Null);
+    let result = match predicate.get("kind").and_then(Value::as_str) {
+        Some("CANON_FACT_MATCH") => {
+            let fact_id = value.get("factId").and_then(Value::as_str);
+            let expected = value.get("expected");
+            if let (Some(fact_id), Some(expected)) = (fact_id, expected) {
+                if let Some(candidate) = audit
+                    .canon_candidates
+                    .iter()
+                    .find(|item| item.fact_id == fact_id)
+                {
+                    &candidate.object_json == expected
+                } else {
+                    crate::repositories::narrative::NarrativeRepository::canon_fact_object_matches(
+                        connection, project_id, fact_id, expected,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+            } else {
+                false
+            }
+        }
+        Some("CANON_EVENT_EXISTS") => {
+            let event_id = value.get("eventId").and_then(Value::as_str);
+            let event_type = value.get("eventType").and_then(Value::as_str);
+            let present_in_audit = audit.canon_candidates.iter().any(|item| {
+                item.event_type.as_deref().is_some_and(|observed| {
+                    event_type == Some(observed)
+                        || event_id.is_some_and(|id| id == format!("event:{}", item.fact_id))
+                })
+            });
+            present_in_audit
+                || crate::repositories::narrative::NarrativeRepository::canon_event_exists(
+                    connection, project_id, event_id, event_type,
+                )
+                .map_err(|error| error.to_string())?
+        }
+        Some("RELATION_STATE_MATCH") => {
+            let relation_id = value.get("relationId").and_then(Value::as_str);
+            let expected_transition = value.get("expectedTransition");
+            let observed_in_chapter =
+                relation_id
+                    .zip(expected_transition)
+                    .is_some_and(|(relation_id, expected)| {
+                        audit.canon_candidates.iter().any(|candidate| {
+                            candidate
+                                .object_json
+                                .get("relationId")
+                                .and_then(Value::as_str)
+                                == Some(relation_id)
+                                && candidate.object_json.get("transition") == Some(expected)
+                        })
+                    });
+            if observed_in_chapter {
+                true
+            } else if expected_transition.and_then(Value::as_str) == Some("EXISTS") {
+                if let Some(relation_id) = relation_id {
+                    crate::repositories::narrative::NarrativeRepository::canon_relation_exists(
+                        connection,
+                        project_id,
+                        relation_id,
+                    )
+                    .map_err(|error| error.to_string())?
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        Some("KNOWLEDGE_STATE_MATCH") => {
+            let knowledge_id = value.get("knowledgeId").and_then(Value::as_str);
+            let epistemic_state = value.get("epistemicState").and_then(Value::as_str);
+            if let (Some(knowledge_id), Some(epistemic_state)) = (knowledge_id, epistemic_state) {
+                audit.knowledge_candidates.iter().any(|item| {
+                    item.knowledge_id == knowledge_id && item.epistemic_state == epistemic_state
+                }) || crate::repositories::narrative::NarrativeRepository::canon_knowledge_state_matches(
+                    connection,
+                    project_id,
+                    knowledge_id,
+                    epistemic_state,
+                )
+                .map_err(|error| error.to_string())?
+            } else {
+                false
+            }
+        }
+        Some("FUTURE_RESERVATION_STATUS") => {
+            let reservation_id = value.get("reservationId").and_then(Value::as_str);
+            let required_status = value.get("requiredStatus").and_then(Value::as_str);
+            matches!((reservation_id, required_status), (Some(id), Some("FULFILLED" | "REVEALED")) if audit.revealed_reservation_refs.iter().any(|reference| reference == id))
+        }
+        Some("OBLIGATION_STATUS") => {
+            let obligation_id = value.get("obligationId").and_then(Value::as_str);
+            let required_status = value.get("requiredStatus").and_then(Value::as_str);
+            if let (Some(obligation_id), Some(required_status)) = (obligation_id, required_status) {
+                let observed = audit.continuity_candidates.iter().find_map(|item| {
+                    (item.thread_ref == format!("thread:{obligation_id}")).then_some({
+                        match item.disposition.as_str() {
+                            "RESOLVE" => "RESOLVED",
+                            "ADVANCE" | "DEFER_WITH_BRIDGE" => "PROGRESSING",
+                            _ => "",
+                        }
+                    })
+                });
+                if observed == Some(required_status) {
+                    true
+                } else {
+                    crate::repositories::narrative::NarrativeRepository::obligation_lifecycle_matches(
+                        connection,
+                        project_id,
+                        obligation_id,
+                        required_status,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+            } else {
+                false
+            }
+        }
+        Some("TASK_EVIDENCE_RECORDED") | None => false,
+        Some(_) => false,
+    };
+    Ok(result)
 }
 
 fn knowledge_authority_is_bound(
