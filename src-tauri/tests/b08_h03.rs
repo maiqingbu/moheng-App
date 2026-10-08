@@ -136,6 +136,21 @@ impl ProductionModelGateway for RecordingGateway {
 
 struct TaskProgressCandidateGateway;
 
+#[derive(Default)]
+struct CountingCapabilitiesGateway {
+    capabilities: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProductionModelGateway for CountingCapabilitiesGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        self.capabilities
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(capability.to_owned());
+        RecordingGateway.invoke(capability, input)
+    }
+}
+
 impl ProductionModelGateway for TaskProgressCandidateGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let mut response = RecordingGateway.invoke(capability, input)?;
@@ -716,6 +731,7 @@ fn seed_b08_goal_contracts(
     project_id: &str,
     include_book_plan: bool,
     include_volume_plan: bool,
+    book_plan_maturity: &str,
 ) {
     let project_scope = json!({"level":"PROJECT"}).to_string();
     let story_id = format!("story-constitution:{project_id}");
@@ -756,6 +772,8 @@ fn seed_b08_goal_contracts(
         }),
     );
     let book_ref = if include_book_plan {
+        let mut book_plan = b08_approved_book_plan_payload(json!([]));
+        book_plan["planningMaturity"] = json!(book_plan_maturity);
         Some(insert_b08_contract_artifact(
             connection,
             project_id,
@@ -763,7 +781,7 @@ fn seed_b08_goal_contracts(
             "BookPlan",
             "PROJECT",
             &project_scope,
-            &b08_approved_book_plan_payload(json!([])),
+            &book_plan,
         ))
     } else {
         None
@@ -814,7 +832,7 @@ fn seed_b08_goal_contracts(
             "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
             "futureReservationRefs":[],
             "crossVolumeResponsibilityRefs":[],
-            "targetChapterRange":{"min":1,"preferred":1,"max":1},
+            "targetChapterRange":{"min":1,"preferred":4,"max":4},
             "targetWordRange":{"preferred":1000},
             "sourceBookPlanRef":book_ref,
             "compiledFromProjectRevision":0,
@@ -848,7 +866,7 @@ fn seed_b08_goal_contracts(
             }],
             "routeInvariants":["task-order"],
             "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
-            "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
+            "capacityBudget":{"minChapters":1,"preferredChapters":4,"maxChapters":4}
         }),
     );
 }
@@ -887,7 +905,27 @@ fn seed_chapter_and_gate_without_volume_plan(connection: &Connection, project_id
         policy_id,
         true,
         false,
+        "APPROVED",
     )
+}
+
+fn seed_chapter_and_gate_opening_without_volume_plan(
+    connection: &Connection,
+    project_id: &str,
+) -> String {
+    let policy_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
+    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+        connection,
+        project_id,
+        default_b08_gate_policy(),
+        policy_id,
+        true,
+        false,
+        "SEED",
+    );
+    extend_seeded_chapter_volume(connection, project_id);
+    chapter_id
 }
 
 fn seed_chapter_and_gate_without_planning_contracts(
@@ -903,7 +941,24 @@ fn seed_chapter_and_gate_without_planning_contracts(
         policy_id,
         false,
         false,
+        "SEED",
     )
+}
+
+fn seed_chapter_and_gate_long_form(connection: &Connection, project_id: &str) -> String {
+    let policy_id =
+        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
+    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+        connection,
+        project_id,
+        default_b08_gate_policy(),
+        policy_id,
+        true,
+        true,
+        "APPROVED",
+    );
+    extend_seeded_chapter_volume(connection, project_id);
+    chapter_id
 }
 
 fn seed_chapter_and_gate_with_policy(
@@ -913,14 +968,17 @@ fn seed_chapter_and_gate_with_policy(
 ) -> String {
     let policy_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
-    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
         connection,
         project_id,
         policy_payload,
         policy_id,
         true,
         true,
-    )
+        "SEED",
+    );
+    extend_seeded_chapter_volume(connection, project_id);
+    chapter_id
 }
 
 fn seed_chapter_and_gate_with_policy_and_artifact_id(
@@ -929,14 +987,28 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id(
     policy_payload: Value,
     policy_id: String,
 ) -> String {
-    seed_chapter_and_gate_with_policy_and_artifact_id_inner(
+    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
         connection,
         project_id,
         policy_payload,
         policy_id,
         true,
         true,
-    )
+        "SEED",
+    );
+    extend_seeded_chapter_volume(connection, project_id);
+    chapter_id
+}
+
+fn extend_seeded_chapter_volume(connection: &Connection, project_id: &str) {
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
 }
 
 fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
@@ -946,6 +1018,7 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
     policy_id: String,
     include_book_plan: bool,
     include_volume_plan: bool,
+    book_plan_maturity: &str,
 ) -> String {
     let book_id = StableIdentityFactory::from_command(StableIdKind::Book, "b08-book").unwrap();
     let volume_id =
@@ -970,6 +1043,7 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
         project_id,
         include_book_plan,
         include_volume_plan,
+        book_plan_maturity,
     );
     chapter_id
 }
@@ -986,7 +1060,7 @@ fn seed_b08_long_form_project(
     let book_plan = b08_approved_book_plan_payload(json!([]));
     let book_plan_hash = sha256_canonical(&book_plan).unwrap();
     let volume_intent_id = "plan:volume-intent:b08-long";
-    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],"mustNotBreak":[],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000},"sourceBookPlanRef":{"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash},"compiledFromProjectRevision":0,"sourceEvidenceRefs":[],"semanticDigest":"0".repeat(64)});
+    let volume_intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务","entryConditions":[],"mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],"mustNotBreak":[{"id":"rule:b08:actual","description":"不得改变已确认的开篇事实"}],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":1,"max":1},"targetWordRange":{"preferred":1000},"sourceBookPlanRef":{"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash},"compiledFromProjectRevision":0,"sourceEvidenceRefs":["fact:actual:seed"],"semanticDigest":"0".repeat(64)});
     let volume_intent_hash = sha256_canonical(&volume_intent).unwrap();
     let volume_plan_id = "plan:volume-plan:b08-long";
     let volume_plan = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":volume_intent_id,"version":1,"payloadHash":volume_intent_hash},"routeVersion":7,"tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":["task-order"],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],"capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}});
@@ -1122,15 +1196,15 @@ fn seed_future_reservation_authority_with(
             "volumeFunction":"推进当前章节任务",
             "entryConditions":[],
             "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
-            "mustNotBreak":[],
+            "mustNotBreak":[{"id":"rule:b08:reservation","description":"不得违背已确认的开篇事实"}],
             "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
             "futureReservationRefs":intent_reservation_refs,
             "crossVolumeResponsibilityRefs":[],
-            "targetChapterRange":{"min":1,"preferred":1,"max":1},
+            "targetChapterRange":{"min":1,"preferred":4,"max":4},
             "targetWordRange":{"preferred":1000},
             "sourceBookPlanRef":book_ref,
             "compiledFromProjectRevision":0,
-            "sourceEvidenceRefs":[],
+            "sourceEvidenceRefs":["fact:actual:seed"],
             "semanticDigest":"0".repeat(64)
         }),
     );
@@ -1157,7 +1231,7 @@ fn seed_future_reservation_authority_with(
             }],
             "routeInvariants":["task-order"],
             "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
-            "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
+            "capacityBudget":{"minChapters":1,"preferredChapters":4,"maxChapters":4}
         }),
     );
 }
@@ -1428,7 +1502,7 @@ fn xiaomi_r07_retry_blocks_before_render_when_plan_is_stale() {
         .manager
         .create("p-xiaomi-r07", "Xiaomi R07", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-xiaomi-r07");
+    let chapter_id = seed_chapter_and_gate_long_form(&connection, "p-xiaomi-r07");
     let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
     let context_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "xiaomi:r07:context").unwrap();
@@ -2144,13 +2218,11 @@ fn b08_actual_audit_contract_rejects_long_policy_version_before_gateway_calls() 
 #[test]
 fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(RecordingGateway),
-    );
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-b08-long";
     let connection = state.manager.create(project_id, "B08 long", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     drop(connection);
@@ -2232,6 +2304,10 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
+    assert_eq!(
+        gateway.capabilities.lock().unwrap().as_slice(),
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+    );
     drop(connection);
     let replay = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:production","idempotencyKey":"key:b08:production",
@@ -2240,6 +2316,29 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     })).unwrap();
     assert_eq!(replay["replayed"], true);
     println!("B08_PRODUCTION_RESULT long_form=PASS route_head_unchanged=PASS final_commit=PASS model_provenance=PASS receipt=PASS status=PASS replay=PASS");
+}
+
+#[test]
+fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-existing-plan-stage-count";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:existing-plan-stage-count",
+        "idempotencyKey":"key:b08:existing-plan-stage-count","projectId":project_id,
+        "expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],"references":[]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert_eq!(
+        gateway.capabilities.lock().unwrap().as_slice(),
+        ["RENDER_CHAPTER", "AUDIT_EXTRACT"]
+    );
 }
 
 #[test]
@@ -2254,7 +2353,7 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         .manager
         .create(project_id, "B08 opening", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, project_id);
+    let chapter_id = seed_chapter_and_gate_opening_without_volume_plan(&connection, project_id);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -2839,7 +2938,7 @@ fn rv11_rejects_a_long_form_chapter_skip_before_model_runs() {
         .manager
         .create(project_id, "RV-11 order", NOW)
         .unwrap();
-    let _first_chapter = seed_chapter_and_gate(&connection, project_id);
+    let _first_chapter = seed_chapter_and_gate_long_form(&connection, project_id);
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     connection
@@ -3403,6 +3502,8 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         .create(project_id, "B08 actual reveal", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     seed_future_reservation_authority(&connection, project_id);
     drop(connection);
     let intent_hard_context = query_context_manifest_impl(
@@ -3440,13 +3541,35 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
         hard_context["futureReservationRefs"],
         json!(["reservation:future:1"])
     );
+    let planning = execute_command_impl(&state, json!({
+        "type":"planning_compile_chapter_plan","commandId":"cmd:b08:actual-reveal:plan",
+        "idempotencyKey":"key:b08:actual-reveal:plan","projectId":project_id,
+        "expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],
+            "responsibilityRefs":[],"reservationRefs":["reservation:future:1"],
+            "entityRefs":["entity:actual:linzhou"]}}
+    }))
+    .unwrap();
+    assert_eq!(planning["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "B08 actual reveal", NOW).unwrap();
+    let production_revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
     let result = execute_command_impl(
         &state,
         json!({
             "type":"production_start","commandId":"cmd:b08:actual-reveal",
             "idempotencyKey":"key:b08:actual-reveal","projectId":project_id,
-            "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+            "expectedRevision":production_revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":[],
+                "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],
+                    "reservationRefs":["reservation:future:1"],"entityRefs":["entity:actual:linzhou"]}}
         }),
     );
     assert_eq!(result.unwrap_err(), "B08_RESERVATION_VIOLATION");
@@ -4200,6 +4323,54 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
         assert_eq!(actual, expected);
     }
     println!("B08_RECONCILIATION_RESULT no_action=PASS recompile_next_chapter=PASS recompile_rolling_window=PASS replan_volume_route=PASS change_request=PASS no_b09_execution=PASS no_b11_execution=PASS status=PASS");
+}
+
+#[test]
+fn b08_rejects_execution_mode_that_disagrees_with_planning_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-mode-mismatch";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let connection = state.manager.create(project_id, "B08 mode mismatch", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b08:mode-mismatch",
+        "idempotencyKey":"key:b08:mode-mismatch","projectId":project_id,
+        "expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP",
+            "entityIds":["entity:actual:linzhou"]}
+    }));
+    assert!(
+        result.is_err(),
+        "caller-requested mode must not change owner mode: {result:?}"
+    );
+    let error = result.unwrap_err();
+
+    assert!(error.contains("B08_EXECUTION_MODE_MISMATCH"), "actual error: {error}");
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+    let connection = state.manager.open(project_id, "B08 mode mismatch", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -5189,6 +5360,161 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
         .unwrap()
         .starts_with("receipt:"));
     assert_eq!(result["receipt"]["postconditions"][0]["stale"], "VALID");
+}
+
+#[test]
+fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b3-owner-mode";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let connection = state.manager.create(project_id, "B3 owner mode", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let project_scope = json!({"level":"PROJECT"}).to_string();
+    let volume_scope = json!({"level":"VOLUME","volumeId":volume_id}).to_string();
+    let mut book_plan = b08_approved_book_plan_payload(json!([]));
+    book_plan["planningMaturity"] = json!("SEED");
+    let book_plan_ref = insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        "book-plan:b3-owner-mode",
+        "BookPlan",
+        "PROJECT",
+        &project_scope,
+        &book_plan,
+    );
+    let intent_ref = insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        "volume-intent:b3-owner-mode",
+        "VolumeIntent",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-intent.r1","volumeFunction":"推进当前章节任务",
+            "entryConditions":[],"mustAchieve":[{"id":"goal:b3:owner","description":"推进当前章节任务"}],
+            "mustNotBreak":[],"requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b3:owner"}],
+            "futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],
+            "targetChapterRange":{"min":1,"preferred":1,"max":4},
+            "targetWordRange":{"preferred":1000},"sourceBookPlanRef":book_plan_ref,
+            "compiledFromProjectRevision":0,"sourceEvidenceRefs":[],"semanticDigest":"0".repeat(64)
+        }),
+    );
+    insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        "volume-plan:b3-owner-mode",
+        "VolumePlan",
+        "VOLUME",
+        &volume_scope,
+        &json!({
+            "payloadSchema":"volume-plan.r1","volumeIntentRef":intent_ref,"routeVersion":1,
+            "tasks":[{"taskId":"task:actual","class":"REQUIRED","objective":"推进当前任务",
+                "dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],
+                "completionPredicate":{"kind":"TASK_SATISFIED","value":"task:actual"},
+                "estimatedChapterCost":{"preferred":1}}],
+            "routeInvariants":[],"requiredExitConditions":[],
+            "capacityBudget":{"minChapters":1,"preferredChapters":4,"maxChapters":4}
+        }),
+    );
+    connection
+        .execute(
+            "UPDATE chapters SET chapter_no=4 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_start=4,chapter_end=7 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let ui_error = execute_command_impl(&state, json!({
+        "type":"planning_compile_chapter_plan","commandId":"cmd:b3:owner-mode:ui",
+        "idempotencyKey":"key:b3:owner-mode:ui","projectId":project_id,
+        "expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],
+            "responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+    }))
+    .unwrap_err();
+
+    let opening_context = query_context_manifest_impl(
+        &state,
+        json!({"projectId":project_id,"chapterId":chapter_id,"volumeId":volume_id,
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[]}),
+    )
+    .unwrap();
+    let context_id = "context:b3:owner-mode";
+    let context_hash = sha256_canonical(&opening_context).unwrap();
+    let connection = state.manager.open(project_id, "B3 owner mode", NOW).unwrap();
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'ContextManifest','CHAPTER',?3,1,'m0a.artifact.v1','COMMITTED',?4,'{}',?5,?5)",
+            libsql_rusqlite::params![context_id, project_id, scope, context_hash, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![context_id, opening_context.to_string(), context_hash],
+        )
+        .unwrap();
+    drop(connection);
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1","chapterId":chapter_id,
+        "compiledFromProjectRevision":0,
+        "compiledFromStateDigest":opening_context["compiledFromStateDigest"],
+        "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
+        "chapterGoal":"推进第四章","activeTaskRefs":[],"continuityActions":[],
+        "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],
+        "reservationRefs":[],"sceneExecution":[],
+        "horizonPreview":[
+            {"slotNo":1,"objective":"推进当前行动","tentative":true},
+            {"slotNo":2,"objective":"检查行动后果","tentative":true},
+            {"slotNo":3,"objective":"形成新选择","tentative":true}
+        ]
+    });
+    let repair_plan_id = "repair-plan:b3:owner-mode";
+    let authorization_id = "repair-auth:b3:owner-mode";
+    let digest = create_h03_plan(
+        &state,
+        project_id,
+        repair_plan_id,
+        RepairOperation {
+            operation: "recompile_chapter_plan".into(),
+            target: chapter_id.clone(),
+            params: json!({"chapterId":chapter_id,"plan":plan,
+                "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[]}),
+            postconditions: json!({"kind":"chapter_plan_stale","expected":"VALID"}),
+        },
+        0,
+    );
+    authorize_h03(
+        &state,
+        project_id,
+        repair_plan_id,
+        authorization_id,
+        &digest,
+        0,
+    );
+    let h03_result = execute_command_impl(&state, json!({
+        "type":"repair_execute","commandId":"cmd:b3:owner-mode:h03",
+        "idempotencyKey":"key:b3:owner-mode:h03","projectId":project_id,"requestedAt":NOW,
+        "payload":{"repairPlanId":repair_plan_id,"authorizationId":authorization_id}
+    }))
+    .unwrap();
+    let h03_error = h03_result["receipt"]["postconditions"][0]["error"]
+        .as_str()
+        .unwrap_or("");
+
+    assert!(ui_error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"));
+    assert!(h03_error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"), "actual H03 result: {h03_result}");
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
 }
 
 #[test]

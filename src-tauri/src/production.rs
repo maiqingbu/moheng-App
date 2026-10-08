@@ -1184,11 +1184,11 @@ fn run_chapter_production_inner(
     let idempotency_key = require(request, "/idempotencyKey")?;
     let now = require(request, "/requestedAt")?;
     let chapter_id = require(request, "/payload/chapterId")?;
-    let execution_mode = request
+    let requested_execution_mode = request
         .pointer("/payload/executionMode")
         .and_then(Value::as_str)
         .unwrap_or("LONG_FORM");
-    if !matches!(execution_mode, "OPENING_BOOTSTRAP" | "LONG_FORM") {
+    if !matches!(requested_execution_mode, "OPENING_BOOTSTRAP" | "LONG_FORM") {
         return Err("B08_INVALID:/payload/executionMode".into());
     }
     let worker_id = request
@@ -1242,6 +1242,14 @@ fn run_chapter_production_inner(
     let volume_id = chapter_volume
         .as_deref()
         .ok_or_else(|| "B08_CHAPTER_NOT_FOUND".to_string())?;
+    let execution_mode = crate::planning::resolve_chapter_execution_mode(
+        connection,
+        &project_id,
+        &chapter_id,
+    )?;
+    if requested_execution_mode != execution_mode {
+        return Err("B08_EXECUTION_MODE_MISMATCH".into());
+    }
     if execution_mode == "LONG_FORM"
         && crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
             connection,
@@ -1512,7 +1520,6 @@ fn run_chapter_production_inner(
                     &volume_id,
                     execution_mode,
                 ),
-                execution_mode,
                 &planning_command_id,
                 &format!("{idempotency_key}:planning-owner"),
                 current_revision,

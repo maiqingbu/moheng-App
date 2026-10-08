@@ -5650,14 +5650,9 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     )
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-                let execution_mode = operation
-                    .params
-                    .get("executionMode")
-                    .and_then(Value::as_str)
-                    .unwrap_or("LONG_FORM");
                 let authority_request = json!({
                     "projectId":self.project_id,"chapterId":chapter_id,"volumeId":volume_id,
-                    "executionMode":execution_mode,"entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
+                    "entityIds":operation.params.get("entityIds").cloned().unwrap_or_else(|| json!([])),
                     "references":operation.params.get("references").cloned().unwrap_or_else(|| json!([]))
                 });
                 let command_id = format!(
@@ -5673,7 +5668,6 @@ impl crate::repair::TypedRepairOwner for KernelRepairOwner<'_> {
                     chapter_id,
                     plan,
                     &authority_request,
-                    execution_mode,
                     &command_id,
                     &format!("{command_id}:idempotency"),
                     revision,
@@ -6625,6 +6619,14 @@ fn compile_current_chapter_plan(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let execution_mode = crate::planning::preflight_chapter_plan_owner(
+        &handle,
+        project_id,
+        chapter_id,
+    )?;
+    if execution_mode != "LONG_FORM" {
+        return Err("B08_EXECUTION_MODE_MISMATCH".into());
+    }
     let budget_id = DurableModelRunner::chapter_budget_id(&handle, project_id, chapter_id)
         .map_err(|error| error.to_string())?;
     let authority = {
@@ -6632,7 +6634,7 @@ fn compile_current_chapter_plan(
         value["projectId"] = json!(project_id);
         value["chapterId"] = json!(chapter_id);
         value["volumeId"] = json!(&volume_id);
-        value["executionMode"] = json!("LONG_FORM");
+        value["executionMode"] = json!(execution_mode);
         value
     };
     let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
@@ -6646,56 +6648,8 @@ fn compile_current_chapter_plan(
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
-    crate::planning::validate_volume_route(&route_payload)?;
     let context_input =
         context_input_from_authority(&handle, &authority, project_id, expected_revision)?;
-    let mandatory_authority = [
-        (
-            "StoryConstitution",
-            "GOAL_CONTRACT_STORY_CONSTITUTION_REQUIRED",
-        ),
-        ("MainContract", "GOAL_CONTRACT_MAIN_CONTRACT_REQUIRED"),
-        ("BookPlan", "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"),
-    ];
-    for (artifact_type, missing_code) in mandatory_authority {
-        let reference =
-            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-                &handle,
-                project_id,
-                artifact_type,
-            )
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| missing_code.to_string())?;
-        let payload = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-            &handle, project_id, &reference,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| missing_code.to_string())?;
-        if artifact_type == "BookPlan"
-            && payload.get("planningMaturity").and_then(Value::as_str) != Some("APPROVED")
-        {
-            return Err(missing_code.into());
-        }
-    }
-    let intent_ref = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
-        &handle,
-        project_id,
-        "VolumeIntent",
-        &volume_id,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
-    let intent_payload =
-        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
-            &handle,
-            project_id,
-            &intent_ref,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".to_string())?;
-    if crate::planning::validate_volume_intent_semantics(&intent_payload).is_err() {
-        return Err("GOAL_CONTRACT_VOLUME_INTENT_REQUIRED".into());
-    }
     if context_input.state.source_refs.is_empty()
         && context_input.goal_contract_fields.is_empty()
         && context_input.plan_task_refs.is_empty()
@@ -6710,7 +6664,7 @@ fn compile_current_chapter_plan(
         expected_revision,
         &context_command_id,
         &format!("{idempotency_key}:context"),
-        "LONG_FORM",
+        execution_mode,
         requested_at,
     )?;
     let planning_revision = context_receipt.after_revision;
@@ -6756,7 +6710,7 @@ fn compile_current_chapter_plan(
         "projectId":project_id,
         "chapterId":chapter_id,
         "volumeId":volume_id,
-        "executionMode":"LONG_FORM",
+        "executionMode":execution_mode,
         "compiledFromProjectRevision":planning_revision,
         "compiledFromStateDigest":state_digest,
         "contextManifestRef":context_ref,
@@ -6807,7 +6761,6 @@ fn compile_current_chapter_plan(
         chapter_id,
         &plan,
         &authority,
-        "LONG_FORM",
         command_id,
         idempotency_key,
         planning_revision,
@@ -7628,7 +7581,6 @@ fn execute_planning_command_with_observer(
             chapter_id,
             &payload,
             &owner_request,
-            "LONG_FORM",
             command_id,
             idempotency_key,
             expected_revision.ok_or_else(|| "IPC_INVALID:expectedRevision".to_string())?,
