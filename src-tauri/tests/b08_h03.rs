@@ -2397,6 +2397,84 @@ fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
     );
 }
 
+fn seed_b08_long_form_with_legacy_signing_head(state: &KernelState, project_id: &str) -> String {
+    let (chapter_id, _, _, _) = seed_b08_long_form_project(state, project_id);
+    let legacy_payload = json!({
+        "payloadSchema":"simulated-signing-receipt.legacy",
+        "status":"PASS",
+        "verdict":"旧规则评估通过"
+    });
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        &format!("signing-receipt:{project_id}"),
+        "SimulatedSigningReceipt",
+        "PROJECT",
+        &json!({"level":"PROJECT"}).to_string(),
+        &legacy_payload,
+    );
+    drop(connection);
+    chapter_id
+}
+
+#[test]
+fn b08_legacy_signing_head_shows_stale_and_reassessment_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-legacy-signing-stale-projection";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let _chapter_id = seed_b08_long_form_with_legacy_signing_head(&state, project_id);
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    assert_eq!(center["signing"]["status"], "STALE");
+    assert_eq!(center["signing"]["verdict"], "签约规则已更新，请重新评估");
+}
+
+#[test]
+fn b08_long_form_planning_rejects_legacy_signing_head_before_model_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-legacy-signing-stale-planning";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let chapter_id = seed_b08_long_form_with_legacy_signing_head(&state, project_id);
+    let before_revision = state.manager.project_revision(project_id).unwrap();
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"planning_compile_chapter_plan",
+            "commandId":"cmd:b08:legacy-signing-stale:plan",
+            "idempotencyKey":"key:b08:legacy-signing-stale:plan",
+            "projectId":project_id,
+            "expectedRevision":before_revision,
+            "requestedAt":NOW,
+            "payload":{
+                "chapterId":chapter_id,
+                "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
+            }
+        }),
+    );
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+    assert_eq!(result.unwrap_err(), "SIGNING_EVALUATION_STALE");
+    assert_eq!(
+        state.manager.project_revision(project_id).unwrap(),
+        before_revision
+    );
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='PLAN_STRATEGY'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
 #[test]
 fn b08_opening_bootstrap_without_route_rejects_task_reality() {
     let temp = tempfile::tempdir().unwrap();

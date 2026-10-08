@@ -242,7 +242,7 @@ fn b07_volume_intent_and_route_query_use_commit_bundle_authority() {
 }
 
 #[test]
-fn b07_bookplan_approval_commits_new_approved_version() {
+fn b07_legacy_signing_head_cannot_approve_bookplan() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::new(AppPaths::new(temp.path()));
     let connection = state
@@ -402,17 +402,37 @@ fn b07_bookplan_approval_commits_new_approved_version() {
         wrong_verdict.unwrap_err(),
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
-    let result = execute_command_impl(&state, json!({"type":"planning_finalize_book_plan","commandId":"command:book","idempotencyKey":"key:book","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}})).unwrap();
-    assert_eq!(result["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open("p2", "", "2026-08-30T00:00:00Z")
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p2','SimulatedSigningReceipt','PROJECT',?1,'artifact:p2:signing',1,?2)",
+            libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", signing_hash],
+        )
+        .unwrap();
+    drop(connection);
+    let before_revision = state.manager.project_revision("p2").unwrap();
+    let rejected = execute_command_impl(
+        &state,
+        json!({"type":"planning_finalize_book_plan","commandId":"command:book","idempotencyKey":"key:book","projectId":"p2","expectedRevision":before_revision,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
+    );
+    assert_eq!(rejected.unwrap_err(), "SIGNING_EVALUATION_STALE");
+    assert_eq!(
+        state.manager.project_revision("p2").unwrap(),
+        before_revision
+    );
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:01Z")
         .unwrap();
-    let maturity: String = connection.query_row("SELECT json_extract(payload_json, '$.planningMaturity') FROM artifact_payloads WHERE artifact_id='plan:bookplan:p2' AND version=1", [], |row| row.get(0)).unwrap();
-    assert_eq!(maturity, "APPROVED");
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id='p2' AND artifact_type='BookPlan'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p2' AND artifact_type='BookPlan' AND json_extract((SELECT payload_json FROM artifact_payloads p WHERE p.artifact_id=artifacts.artifact_id AND p.version=artifacts.version),'$.planningMaturity')='APPROVED'", [], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<String,_,_>("SELECT artifact_id FROM canonical_heads WHERE project_id='p2' AND artifact_type='SimulatedSigningReceipt'", [], |row| row.get(0)).unwrap(), "artifact:p2:signing");
     println!("B07_SEMANTIC_NEGATIVE_RESULT planned_opening=PASS missing_final_ref=PASS candidate_final=PASS late_chapters=PASS late_canon_evidence=PASS no_evidence=PASS actual_command_path=PASS status=PASS");
-    println!("B07_SIGN_RESULT no_receipt=PASS wrong_verdict=PASS fake_artifact=PASS actual_pass=PASS opening_bound=PASS");
-    println!("B07_BOOKPLAN_RESULT signing_pass=PASS seed_preserved=PASS approved=PASS static_chapters=0 status=PASS");
+    println!("B07_SIGN_RESULT no_receipt=PASS wrong_verdict=PASS fake_artifact=PASS legacy_current=STALE status=PASS");
+    println!("B07_BOOKPLAN_RESULT legacy_receipt_rejected=PASS zero_revision=PASS no_approved_head=PASS status=PASS");
 }
 
 #[test]

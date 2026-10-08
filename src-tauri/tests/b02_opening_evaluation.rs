@@ -4,7 +4,7 @@ use ai_novel_production_system_core::commands::{
     query_story_directions_impl, KernelState,
 };
 use ai_novel_production_system_core::commit::CommitService;
-use ai_novel_production_system_core::generated::types::ArtifactRef;
+use ai_novel_production_system_core::generated::types::{ArtifactRef, CommitBundle};
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{
     measure_context_hard_budget, project_applicable_future_reservations, ContextCompilerInput,
@@ -590,6 +590,88 @@ fn create_opening_project(state: &KernelState) -> String {
 
 fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
     let _ = commit_three_opening_chapters_with_outputs(state, project_id);
+}
+
+fn current_b02_book_plan_payload(state: &KernelState, project_id: &str) -> Value {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let raw: String = connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn install_legacy_signing_head(state: &KernelState, project_id: &str) -> ArtifactRef {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let current_ref = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .expect("current signing receipt");
+    let current_payload =
+        NarrativeRepository::artifact_payload_by_ref(&connection, project_id, &current_ref)
+            .unwrap()
+            .expect("current signing receipt payload");
+    let legacy_payload = json!({
+        "payloadSchema":"simulated-signing-receipt.legacy",
+        "status":"PASS",
+        "verdict":"旧规则评估通过",
+        "openingChapterRefs":current_payload["openingChapterRefs"],
+        "openingCanonRefs":current_payload["openingCanonRefs"],
+        "signingEvidenceRefs":current_payload["signingEvidenceRefs"],
+        "confirmation":current_payload["confirmation"]
+    });
+    let payload_hash = sha256_canonical(&legacy_payload).unwrap();
+    let version = NarrativeRepository::next_artifact_version(
+        &connection,
+        project_id,
+        &current_ref.artifact_id,
+    )
+    .unwrap();
+    let artifact_id = current_ref.artifact_id.clone();
+    let command_id = format!("test:legacy-signing-head:{project_id}");
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":format!("{command_id}:key"),
+        "expectedProjectRevision":state.manager.project_revision(project_id).unwrap(),
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[{
+            "artifactId":artifact_id,
+            "projectId":project_id,
+            "artifactType":"SimulatedSigningReceipt",
+            "scope":{"level":"PROJECT"},
+            "version":version,
+            "schemaVersion":"m0a.artifact.v1",
+            "artifactStatus":"CANDIDATE",
+            "payload":legacy_payload,
+            "payloadHash":payload_hash,
+            "dependencyRefs":[],
+            "provenance":{"createdBy":"legacy-test-fixture","commandId":command_id},
+            "createdAt":NOW
+        }],
+        "headUpdates":[{
+            "artifactType":"SimulatedSigningReceipt",
+            "scope":{"level":"PROJECT"},
+            "artifactId":artifact_id,
+            "version":version,
+            "payloadHash":payload_hash
+        }]
+    }))
+    .unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
+    ArtifactRef {
+        artifact_id,
+        version,
+        payload_hash,
+    }
 }
 
 fn commit_three_opening_chapters_with_outputs(
@@ -2256,6 +2338,182 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
         .unwrap()
         >= 1);
     println!("B02_RESULT opening_evaluation=PASS signing_receipt=PASS real_evidence=PASS approved_book_plan=PASS seed_preserved=PASS canon_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn b02_legacy_rule_head_is_stale_then_r1_reapproval_preserves_history() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let seed_payload = current_b02_book_plan_payload(&state, &project_id);
+
+    let first_evaluation = command(
+        &state,
+        &project_id,
+        "b02:legacy-receipt:first-evaluation",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(first_evaluation["result"]["status"], "PASS");
+    let first_approval = command(
+        &state,
+        &project_id,
+        "b02:legacy-receipt:first-approval",
+        "book_plan_revise",
+        json!({}),
+    );
+    assert_eq!(first_approval["result"]["planningMaturity"], "APPROVED");
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let old_approved_ref =
+        NarrativeRepository::canonical_project_head_ref(&connection, &project_id, "BookPlan")
+            .unwrap()
+            .expect("first approved BookPlan head");
+    drop(connection);
+    let legacy_receipt_ref = install_legacy_signing_head(&state, &project_id);
+
+    let stale_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("center with legacy signing head");
+    assert_eq!(stale_center["signing"]["status"], "STALE");
+    assert_eq!(
+        stale_center["signing"]["verdict"],
+        "签约规则已更新，请重新评估"
+    );
+
+    let before_revision = revision(&state, &project_id);
+    let stale_approval = execute_command_impl(
+        &state,
+        json!({
+            "type":"book_plan_revise",
+            "commandId":"b02:legacy-receipt:stale-approval",
+            "idempotencyKey":"b02:legacy-receipt:stale-approval:key",
+            "projectId":project_id,
+            "expectedRevision":before_revision,
+            "requestedAt":NOW,
+            "payload":{"plan":seed_payload}
+        }),
+    );
+    assert_eq!(stale_approval.unwrap_err(), "SIGNING_EVALUATION_STALE");
+    assert_eq!(revision(&state, &project_id), before_revision);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        NarrativeRepository::canonical_project_head_ref(&connection, &project_id, "BookPlan")
+            .unwrap(),
+        Some(old_approved_ref.clone())
+    );
+    assert_eq!(
+        NarrativeRepository::canonical_project_head_ref(
+            &connection,
+            &project_id,
+            "SimulatedSigningReceipt"
+        )
+        .unwrap(),
+        Some(legacy_receipt_ref.clone())
+    );
+    let old_approved =
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &old_approved_ref)
+            .unwrap()
+            .expect("old approved payload remains queryable");
+    assert_eq!(old_approved["planningMaturity"], "APPROVED");
+    let legacy_receipt =
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &legacy_receipt_ref)
+            .unwrap()
+            .expect("legacy receipt remains queryable");
+    assert_eq!(legacy_receipt["status"], "PASS");
+    assert_eq!(legacy_receipt.get("evaluationRuleVersion"), None);
+    drop(connection);
+
+    let reevaluation = command(
+        &state,
+        &project_id,
+        "b02:legacy-receipt:r1-reevaluation",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(reevaluation["result"]["status"], "PASS");
+    let reevaluation_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("r1 reevaluation projection");
+    assert_eq!(reevaluation_center["bookPlan"]["reapprovalRequired"], false);
+    let platform_id = reevaluation_center["signing"]["platformMatrix"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["mainstream"] == true && entry["status"] == "PASS")
+        .and_then(|entry| entry["platformId"].as_str())
+        .expect("passing mainstream platform");
+    command(
+        &state,
+        &project_id,
+        "b02:legacy-receipt:r1-confirmation",
+        "signing_confirm",
+        json!({"platformId":platform_id}),
+    );
+    let confirmed_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("confirmed r1 receipt projection");
+    assert_eq!(confirmed_center["bookPlan"]["reapprovalRequired"], true);
+    let reapproval = command(
+        &state,
+        &project_id,
+        "b02:legacy-receipt:r1-reapproval",
+        "book_plan_revise",
+        json!({}),
+    );
+    assert_eq!(reapproval["result"]["planningMaturity"], "APPROVED");
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let new_approved_ref =
+        NarrativeRepository::canonical_project_head_ref(&connection, &project_id, "BookPlan")
+            .unwrap()
+            .expect("new approved BookPlan head");
+    assert_ne!(new_approved_ref, old_approved_ref);
+    drop(connection);
+    let final_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("center after reapproval");
+    assert_eq!(final_center["bookPlan"]["reapprovalRequired"], false);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &old_approved_ref)
+            .unwrap()
+            .unwrap()["planningMaturity"],
+        "APPROVED"
+    );
+    assert_eq!(
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &legacy_receipt_ref)
+            .unwrap()
+            .unwrap()["status"],
+        "PASS"
+    );
+    let current_signing_ref = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .expect("new signing receipt head");
+    let current_signing_payload = NarrativeRepository::artifact_payload_by_ref(
+        &connection,
+        &project_id,
+        &current_signing_ref,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        current_signing_payload["evaluationRuleVersion"],
+        "signing-eval.r1"
+    );
+    assert_eq!(current_signing_payload["confirmation"]["confirmed"], true);
 }
 
 #[test]
