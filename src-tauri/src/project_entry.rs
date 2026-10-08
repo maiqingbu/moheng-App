@@ -1366,8 +1366,14 @@ pub fn commit_story_setup(
         payload_hash: blueprint.payload_hash.clone(),
     };
     let core = story_core_from_request(request, &blueprint);
-    let story_promise = required_text(&core, "/readerPromise")?;
-    let protagonist = required_text(&core, "/protagonist")?;
+    let protagonist = required_text(&core, "/protagonist")
+        .map_err(|_| "B11_STORY_SEED_REQUIRED:storyCore.protagonist".to_string())?;
+    for field in ["desire", "mechanism", "conflict"] {
+        required_text(&core, &format!("/{field}"))
+            .map_err(|_| format!("B11_STORY_SEED_REQUIRED:storyCore.{field}"))?;
+    }
+    let story_promise = required_text(&core, "/readerPromise")
+        .map_err(|_| "B11_STORY_SEED_REQUIRED:storyCore.readerPromise".to_string())?;
     let constitution = artifact(
         project_id,
         format!("story-constitution:{project_id}:{command_id}"),
