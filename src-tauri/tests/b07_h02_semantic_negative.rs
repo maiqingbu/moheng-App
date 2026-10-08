@@ -5,7 +5,7 @@ use libsql_rusqlite::params;
 use serde_json::json;
 
 #[test]
-fn b07_g3_actual_planned_golden_three_is_rejected_by_production_command() {
+fn b07_legacy_signing_receipt_is_not_approval_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::new(AppPaths::new(temp.path()));
     let connection = state
@@ -35,7 +35,7 @@ fn b07_g3_actual_planned_golden_three_is_rejected_by_production_command() {
     );
     assert_eq!(
         result.unwrap_err(),
-        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+        "SIGNING_EVALUATION_STALE"
     );
-    println!("B07_SEMANTIC_NEGATIVE_TEST_RESULT case=G3-ACTUAL-01 planned_golden_three_rejected=PASS production_command=PASS status=PASS");
+    println!("B07_SEMANTIC_NEGATIVE_TEST_RESULT legacy_signing_receipt=STALE approval_blocked=PASS status=PASS");
 }
