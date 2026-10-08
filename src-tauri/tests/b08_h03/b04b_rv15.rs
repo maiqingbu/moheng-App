@@ -20,6 +20,13 @@ struct CommitAtGateBoundaryGateway {
     capabilities: Arc<Mutex<Vec<String>>>,
 }
 
+type GateBoundaryRun = (
+    tempfile::TempDir,
+    Result<Value, String>,
+    Arc<Mutex<Vec<String>>>,
+    KernelState,
+);
+
 impl ProductionModelGateway for CommitAtGateBoundaryGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         self.capabilities
@@ -142,14 +149,7 @@ fn production_request(project_id: &str, chapter_id: &str, volume_id: &str) -> Va
     })
 }
 
-fn run_production_at_gate_boundary(
-    mutation: MutationKind,
-) -> (
-    tempfile::TempDir,
-    Result<Value, String>,
-    Arc<Mutex<Vec<String>>>,
-    KernelState,
-) {
+fn run_production_at_gate_boundary(mutation: MutationKind) -> GateBoundaryRun {
     let temp = tempfile::tempdir().unwrap();
     let database_slot = Arc::new(Mutex::new(None));
     let capabilities = Arc::new(Mutex::new(Vec::new()));
