@@ -8165,6 +8165,21 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "thread_responsibility_adjust" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::narrative::responsibility::execute_adjustment(
+                &state.manager,
+                crate::narrative::responsibility::AdjustmentCommand {
+                    request: &request,
+                    project_id: id,
+                    command_id,
+                    idempotency_key,
+                    expected_revision,
+                    request_digest: &digest,
+                    requested_at,
+                },
+            )
+        }
         "story_directions_generate"
         | "pitch_regenerate"
         | "pitch_select"

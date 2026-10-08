@@ -221,7 +221,7 @@ fn insert_obligation(
 ) {
     connection
         .execute(
-            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','PROMISE',?2,'book-plan:b14',1,'终局连续性责任',?3,?4,?5,?5)",
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','PROMISE',?2,'book-plan:b14',1,'终局连续性责任',?3,?3,?4,?5,?5)",
             libsql_rusqlite::params![
                 obligation_id,
                 authority_level,
@@ -1282,7 +1282,7 @@ fn b14_r6_paged_foreshadow_and_mystery_sources_create_real_hard_blockers() {
         }
         let source_ref = format!("{}:r6:{ordinal:03}", source_class.to_lowercase());
         handle.execute(
-            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_event_id,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','R6_PAGED_SOURCE','A',?2,'book-plan:b14',1,'分页来源产生的硬连续性责任',?3,'PROGRESSING',?4,?4)",
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_event_id,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES (?1,'proj-b14','BOOK','R6_PAGED_SOURCE','A',?2,'book-plan:b14',1,'分页来源产生的硬连续性责任',?3,?3,'PROGRESSING',?4,?4)",
             libsql_rusqlite::params![format!("obligation:r6:{source_class}:{ordinal:03}"), source_ref, json!({"kind":"AFTER_CHAPTER","value":0}).to_string(), NOW],
         ).unwrap();
         drop(handle);

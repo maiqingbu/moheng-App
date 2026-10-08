@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const AUDIT_EXTRACT_RV07_EXTENSION: &str = "For Knowledge candidates, emit storyTime on the referenced Canon fact, acquiredStoryTime, and visibilityScope; when any value is unknown, use the literal UNKNOWN. Unknown temporal or visibility information that affects a hard constraint is unresolved and must not be omitted.";
+const AUDIT_EXTRACT_RV06_EXTENSION: &str = "For each continuity candidate, preserve the exact body evidence when available. A newly observed thread not present in continuityActions may be reported as new and must not mutate any existing thread. Include description, fulfillmentObject, and a typed resumeCondition for any candidate that claims a complete promise; supported resumeCondition kinds are NEXT_MEETING, ENTITY_PRESENT, KNOWLEDGE_ACQUIRED, TASK_SATISFIED, AFTER_CHAPTER, and IN_VOLUME. Do not assign authority A. The runtime classifies a complete candidate as B only when it has exact evidence, description, explicit fulfillmentObject, a supported typed resumeCondition, and a promoting signal; otherwise it retains the candidate as C. For new candidates with incomplete evidence, omit evidence rather than fabricating a quote; the candidate will remain C. For DEFER_WITH_BRIDGE, use the plan's bridge and do not omit it.";
 const AUDIT_EXTRACT_RV16_EXTENSION: &str = "The earlier wording about reconstructed quotes is overridden: never rely on the runtime to repair or relocate an evidence range; return exact quote text and offsets.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,7 +266,7 @@ impl OpenAiCompatibleProvider {
                 "Quote text is reconstructed from the candidate body; do not invent authority refs.",
                 "Return exact quote text and matching character offsets from the candidate body; do not invent authority refs.",
             );
-            format!("{exact_evidence_prompt}\n\n{AUDIT_EXTRACT_RV07_EXTENSION}\n\n{AUDIT_EXTRACT_RV16_EXTENSION}")
+            format!("{exact_evidence_prompt}\n\n{AUDIT_EXTRACT_RV07_EXTENSION}\n\n{AUDIT_EXTRACT_RV16_EXTENSION}\n\n{AUDIT_EXTRACT_RV06_EXTENSION}")
         } else {
             base_prompt.to_owned()
         };
@@ -638,6 +639,9 @@ mod tests {
         ));
         let system_prompt = messages[0]["content"].as_str().unwrap();
         assert!(system_prompt.contains("literal UNKNOWN"));
+        assert!(system_prompt.contains("fulfillmentObject"));
+        assert!(system_prompt.contains("typed resumeCondition"));
+        assert!(system_prompt.contains("Do not assign authority A"));
         assert!(system_prompt
             .contains("never rely on the runtime to repair or relocate an evidence range"));
         assert!(!system_prompt.contains("Quote text is reconstructed from the candidate body"));

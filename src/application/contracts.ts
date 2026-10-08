@@ -655,6 +655,16 @@ export interface ProductionCenterProjection {
     compiledFromStateDigest?: string
   } | null
   triggeredContinuity?: Array<{ threadRef: string; disposition: string; bridge?: string }>
+  newResponsibilities?: Array<{
+    threadRef: string
+    authorityLevel: 'A' | 'B' | 'C'
+    lifecycle: string
+    description: string
+    fulfillmentObject?: string | null
+    resumeCondition?: Record<string, unknown> | null
+    evidence?: { start: number; end: number; quote: string } | null
+    ruleVersion?: string | null
+  }>
   gate?: { status: 'PENDING' | 'PASS' | 'BLOCKED' | 'FAIL'; reason: string }
   stale?: { status: 'NO_PLAN' | 'PLAN_STALE' | 'VALID' | 'RECHECK_REQUIRED' | 'VALID_OR_REQUIRES_RELEVANT_RECHECK'; reason: string }
   modelRuns?: Array<{ modelRunId: string; capability: string; provider: string; model: string; status: string }>
@@ -963,6 +973,7 @@ export type CommandType =
   | 'volume_replan_route'
   | 'volume_handoff'
   | 'decision_submit'
+  | 'thread_responsibility_adjust'
   | 'revision_request'
   | 'change_request_create'
   | 'impact_preflight'

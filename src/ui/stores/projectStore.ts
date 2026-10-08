@@ -78,7 +78,7 @@ type PendingCommandConfirmation = {
 
 const isFormalWriteCommand = (type: string) =>
   type === 'opening_ready'
-  || ['production_', 'planning_', 'opening_', 'volume_', 'change_request_', 'retcon_', 'repair_'].some(prefix => type.startsWith(prefix))
+  || ['production_', 'planning_', 'opening_', 'volume_', 'change_request_', 'retcon_', 'repair_', 'thread_'].some(prefix => type.startsWith(prefix))
 
 const isTransportFailure = (error: unknown) => {
   if (!(error instanceof Error) || /^IPC_(?:INVALID|UNSUPPORTED):/.test(error.message)) return false

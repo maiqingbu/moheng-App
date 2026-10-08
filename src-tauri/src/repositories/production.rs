@@ -609,12 +609,14 @@ impl ProductionRepository {
         } else {
             "PENDING"
         };
+        let new_responsibilities = Self::latest_new_responsibilities(connection, project_id)?;
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
             "signing":signing,"bookPlan":book_plan,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
             "runtimeOperation":b02_operation.as_ref().map(|(job_id,kind,phase,status,error_code)| json!({"jobId":job_id,"kind":kind,"phase":phase,"status":status,"errorCode":error_code,"active":matches!(status.as_str(),"RUNNING"|"WAITING_MODEL")})),
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),
+            "newResponsibilities":new_responsibilities,
             "gate":{"status":gate_status,"reason":if job_status.as_deref()==Some("FAILED") {job_error.clone().unwrap_or_else(|| "MODEL_TRANSPORT_FAILED".into())} else if stale_status=="PLAN_STALE" {"PLAN_STALE / RECOMPILE_REQUIRED".into()} else {"".into()}},
             "stale":{"status":stale_status,"reason":if stale_status=="PLAN_STALE" {"Relevant authority changed"} else {""}},"modelRuns":model_runs,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"reconciliation":reconciliation,"repair":repair,
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
@@ -622,5 +624,54 @@ impl ProductionRepository {
             "openingProgress":opening_progress,
             "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
+    }
+
+    fn latest_new_responsibilities(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Value, ProductionRepositoryError> {
+        let raw: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version LEFT JOIN chapters c ON c.project_id=h.project_id AND c.chapter_id=json_extract(p.payload_json,'$.chapterId') WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt' ORDER BY COALESCE(c.chapter_no,0) DESC,a.created_at DESC,a.artifact_id DESC LIMIT 1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(json!([]));
+        };
+        let payload: Value = serde_json::from_str(&raw)
+            .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
+        let items = payload
+            .get("threadPromotionDecisions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.get("newResponsibility").and_then(Value::as_bool) == Some(true))
+            .map(|item| {
+                let thread_ref = item
+                    .get("threadRef")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let obligation_id = thread_ref.strip_prefix("thread:").unwrap_or(thread_ref);
+                let current = crate::repositories::narrative::NarrativeRepository::responsibility_adjustment_record(
+                    connection,
+                    project_id,
+                    obligation_id,
+                )
+                .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+                Ok(json!({
+                    "threadRef":thread_ref,
+                    "authorityLevel":current.as_ref().map(|record| record.authority_level.as_str()).or_else(|| item.get("authorityLevel").and_then(Value::as_str)).unwrap_or("C"),
+                    "lifecycle":current.as_ref().map(|record| record.lifecycle.as_str()).unwrap_or("PROPOSED"),
+                    "description":current.as_ref().map(|record| record.description.as_str()).or_else(|| item.get("description").and_then(Value::as_str)).unwrap_or_default(),
+                    "fulfillmentObject":current.as_ref().and_then(|record| record.fulfillment_object.clone()).map(Value::String).or_else(|| item.get("fulfillmentObject").cloned()).unwrap_or(Value::Null),
+                    "resumeCondition":current.as_ref().map(|record| record.resume_condition.clone()).or_else(|| item.get("resumeCondition").cloned()).unwrap_or(Value::Null),
+                    "evidence":current.as_ref().and_then(|record| record.evidence_refs.iter().find(|evidence| evidence.quote.is_some()).map(|evidence| json!({"start":evidence.range_start,"end":evidence.range_end,"quote":evidence.quote}))).or_else(|| item.get("evidence").cloned()).unwrap_or(Value::Null),
+                    "ruleVersion":item.get("ruleVersion").cloned().unwrap_or(Value::Null)
+                }))
+            })
+            .collect::<Result<Vec<_>, ProductionRepositoryError>>()?;
+        Ok(json!(items))
     }
 }

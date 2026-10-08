@@ -111,9 +111,12 @@ pub struct ObligationRecord {
     pub obligation_type: String,
     pub authority_level: String,
     pub lifecycle: String,
+    pub description: String,
+    pub fulfillment_object: Option<String>,
     pub source_event_id: Option<String>,
     pub resume_condition: Value,
     pub participant_entities: Vec<String>,
+    pub evidence_refs: Vec<crate::generated::types::EvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +129,26 @@ pub struct ObligationAuthorityRecord {
     pub must_resolve_before_chapter: Option<String>,
     pub prerequisites: Value,
     pub decision_ref: Option<String>,
+    pub resume_condition: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsibilityAdjustmentRecord {
+    pub obligation_id: String,
+    pub scope: String,
+    pub obligation_type: String,
+    pub authority_level: String,
+    pub lifecycle: String,
+    pub description: String,
+    pub must_resolve_before_chapter: Option<String>,
+    pub prerequisites: Value,
+    pub decision_ref: Option<String>,
+    pub resume_condition: Value,
+    pub fulfillment_object: Option<String>,
+    pub source_artifact_id: String,
+    pub source_version: i64,
+    pub evidence_refs: Vec<crate::generated::types::EvidenceRef>,
 }
 
 /// The authoritative timing fields used by Planning Pressure. The plan is a
@@ -369,24 +392,40 @@ impl NarrativeRepository {
             )
             .optional()?;
         let mut statement = connection.prepare(
-            "SELECT o.obligation_id,o.obligation_type,o.authority_level,o.lifecycle,o.source_event_id,o.prerequisites_json,(SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL) FROM narrative_obligations o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING','RESOLVED','ABANDONED') ORDER BY o.obligation_id",
+            "SELECT o.obligation_id,o.obligation_type,o.authority_level,o.lifecycle,o.source_event_id,o.resume_condition_json,(SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL),o.description,(SELECT d.payload_json FROM decisions d WHERE d.project_id=o.project_id AND d.decision_id=o.decision_ref LIMIT 1) FROM narrative_obligations o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING','RESOLVED','ABANDONED') ORDER BY o.obligation_id",
         )?;
         let mut obligations = Vec::new();
         for row in statement.query_map([project_id], |row| {
             let resume_condition: String = row.get(5)?;
             let participants: String = row.get(6)?;
+            let promotion_payload: Option<String> = row.get(8)?;
+            let fulfillment_object = promotion_payload
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|payload| {
+                    payload
+                        .get("fulfillmentObject")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                });
             Ok(ObligationRecord {
                 obligation_id: row.get(0)?,
                 obligation_type: row.get(1)?,
                 authority_level: row.get(2)?,
                 lifecycle: row.get(3)?,
+                description: row.get(7)?,
+                fulfillment_object,
                 source_event_id: row.get(4)?,
                 resume_condition: serde_json::from_str(&resume_condition)
                     .unwrap_or_else(|_| Value::Object(Default::default())),
                 participant_entities: serde_json::from_str(&participants).unwrap_or_default(),
+                evidence_refs: Vec::new(),
             })
         })? {
             obligations.push(row?);
+        }
+        for obligation in &mut obligations {
+            obligation.evidence_refs =
+                Self::obligation_evidence_refs(connection, project_id, &obligation.obligation_id)?;
         }
         let foreshadows = Self::active_foreshadows_complete(connection, project_id)?;
         let mysteries = Self::open_mysteries_complete(connection, project_id)?;
@@ -1205,25 +1244,42 @@ impl NarrativeRepository {
     ) -> Result<Vec<ObligationRecord>, NarrativeRepositoryError> {
         let entity_ids = Self::ids_json(entity_ids)?;
         let references = Self::ids_json(references)?;
-        let mut statement = connection.prepare("SELECT o.obligation_id, o.obligation_type, o.authority_level, o.lifecycle, o.source_event_id, o.resume_condition_json, (SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL) FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges AS d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) ORDER BY o.updated_at DESC, o.obligation_id LIMIT ?4")?;
+        let mut statement = connection.prepare("SELECT o.obligation_id,o.obligation_type,o.authority_level,o.lifecycle,o.source_event_id,o.resume_condition_json,(SELECT COALESCE(json_group_array(d.entity_id), '[]') FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IS NOT NULL),o.description,(SELECT d.payload_json FROM decisions d WHERE d.project_id=o.project_id AND d.decision_id=o.decision_ref LIMIT 1) FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND o.authority_level IN ('A','B') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges AS d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) ORDER BY o.updated_at DESC, o.obligation_id LIMIT ?4")?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)],
             |row| {
                 let resume_condition: String = row.get(5)?;
                 let participants: String = row.get(6)?;
+                let promotion_payload: Option<String> = row.get(8)?;
+                let fulfillment_object = promotion_payload
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .and_then(|payload| {
+                        payload
+                            .get("fulfillmentObject")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
+                    });
                 Ok(ObligationRecord {
                     obligation_id: row.get(0)?,
                     obligation_type: row.get(1)?,
                     authority_level: row.get(2)?,
                     lifecycle: row.get(3)?,
+                    description: row.get(7)?,
+                    fulfillment_object,
                     source_event_id: row.get(4)?,
                     resume_condition: serde_json::from_str(&resume_condition)
                         .unwrap_or(Value::Object(Default::default())),
                     participant_entities: serde_json::from_str(&participants).unwrap_or_default(),
+                    evidence_refs: Vec::new(),
                 })
             },
         )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut obligations = rows.collect::<Result<Vec<_>, _>>()?;
+        for obligation in &mut obligations {
+            obligation.evidence_refs =
+                Self::obligation_evidence_refs(connection, project_id, &obligation.obligation_id)?;
+        }
+        Ok(obligations)
     }
 
     pub fn has_more_obligations(
@@ -1235,7 +1291,7 @@ impl NarrativeRepository {
     ) -> Result<bool, NarrativeRepositoryError> {
         let entity_ids = Self::ids_json(entity_ids)?;
         let references = Self::ids_json(references)?;
-        connection.query_row("SELECT EXISTS(SELECT 1 FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM narrative_obligations AS o WHERE o.project_id=?1 AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND o.authority_level IN ('A','B') AND ((o.obligation_id IN (SELECT value FROM json_each(?2)) OR o.source_event_id IN (SELECT value FROM json_each(?2)) OR EXISTS (SELECT 1 FROM dependency_edges d WHERE d.project_id=o.project_id AND (d.source_ref=o.obligation_id OR d.target_ref=o.obligation_id) AND d.entity_id IN (SELECT value FROM json_each(?3)))) OR (?2='[]' AND ?3='[]')) LIMIT 1 OFFSET ?4)", libsql_rusqlite::params![project_id, references, entity_ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn active_foreshadows(
@@ -2607,18 +2663,197 @@ impl NarrativeRepository {
         obligation_id: &str,
     ) -> Result<Option<ObligationAuthorityRecord>, NarrativeRepositoryError> {
         connection.query_row(
-            "SELECT obligation_type,scope,authority_level,description,must_resolve_before_chapter,prerequisites_json,decision_ref FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+            "SELECT obligation_type,scope,authority_level,description,must_resolve_before_chapter,prerequisites_json,decision_ref,resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
             libsql_rusqlite::params![project_id, obligation_id],
             |row| {
                 let prerequisites: String = row.get(5)?;
+                let resume_condition: String = row.get(7)?;
                 Ok(ObligationAuthorityRecord {
                     obligation_type: row.get(0)?, scope: row.get(1)?, authority_level: row.get(2)?,
                     description: row.get(3)?, must_resolve_before_chapter: row.get(4)?,
                     prerequisites: serde_json::from_str(&prerequisites).unwrap_or_else(|_| Value::Array(vec![])),
                     decision_ref: row.get(6)?,
+                    resume_condition: serde_json::from_str(&resume_condition)
+                        .unwrap_or_else(|_| Value::Object(Default::default())),
                 })
             },
         ).optional().map_err(Into::into)
+    }
+
+    pub fn responsibility_adjustment_record(
+        connection: &Connection,
+        project_id: &str,
+        obligation_id: &str,
+    ) -> Result<Option<ResponsibilityAdjustmentRecord>, NarrativeRepositoryError> {
+        let record = connection
+            .query_row(
+                "SELECT o.scope,o.obligation_type,o.authority_level,o.lifecycle,o.description,o.must_resolve_before_chapter,o.prerequisites_json,o.decision_ref,o.resume_condition_json,o.source_artifact_id,o.source_version,(SELECT d.payload_json FROM decisions d WHERE d.project_id=o.project_id AND d.decision_id=o.decision_ref LIMIT 1) FROM narrative_obligations o WHERE o.project_id=?1 AND o.obligation_id=?2",
+                libsql_rusqlite::params![project_id, obligation_id],
+                |row| {
+                    let prerequisites: String = row.get(6)?;
+                    let resume_condition: String = row.get(8)?;
+                    let promotion_payload: Option<String> = row.get(11)?;
+                    let fulfillment_object = promotion_payload
+                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                        .and_then(|payload| payload.get("fulfillmentObject").and_then(Value::as_str).map(ToOwned::to_owned));
+                    Ok(ResponsibilityAdjustmentRecord {
+                        obligation_id: obligation_id.to_owned(),
+                        scope: row.get(0)?,
+                        obligation_type: row.get(1)?,
+                        authority_level: row.get(2)?,
+                        lifecycle: row.get(3)?,
+                        description: row.get(4)?,
+                        must_resolve_before_chapter: row.get(5)?,
+                        prerequisites: serde_json::from_str(&prerequisites)
+                            .unwrap_or_else(|_| Value::Array(vec![])),
+                        decision_ref: row.get(7)?,
+                        resume_condition: serde_json::from_str(&resume_condition)
+                            .unwrap_or_else(|_| Value::Object(Default::default())),
+                        fulfillment_object,
+                        source_artifact_id: row.get(9)?,
+                        source_version: row.get(10)?,
+                        evidence_refs: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+        match record {
+            Some(mut record) => {
+                record.evidence_refs =
+                    Self::obligation_evidence_refs(connection, project_id, obligation_id)?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn final_chapter_body_for_ref(
+        connection: &Connection,
+        project_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        let raw: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.artifact_type='FinalChapter'",
+                libsql_rusqlite::params![project_id, artifact_id, version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(NarrativeRepositoryError::from)?;
+        Ok(raw
+            .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+            .and_then(|payload| {
+                payload
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            }))
+    }
+
+    pub fn continuity_thread_exists(
+        connection: &Connection,
+        project_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2) OR EXISTS(SELECT 1 FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2) OR EXISTS(SELECT 1 FROM mystery_states WHERE project_id=?1 AND mystery_id=?2)",
+                libsql_rusqlite::params![project_id, thread_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn obligation_evidence_refs(
+        connection: &Connection,
+        project_id: &str,
+        obligation_id: &str,
+    ) -> Result<Vec<crate::generated::types::EvidenceRef>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT e.artifact_id,e.version,p.payload_json FROM obligation_evidence e JOIN artifact_payloads p ON p.artifact_id=e.artifact_id AND p.version=e.version WHERE e.project_id=?1 AND e.obligation_id=?2 ORDER BY e.created_at,e.evidence_id",
+        )?;
+        let rows =
+            statement.query_map(libsql_rusqlite::params![project_id, obligation_id], |row| {
+                let artifact_id: String = row.get(0)?;
+                let version: i64 = row.get(1)?;
+                let raw_payload: String = row.get(2)?;
+                let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+                let evidence = payload
+                    .get("validatedObligationEvidence")
+                    .and_then(Value::as_array)
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("obligationId").and_then(Value::as_str) == Some(obligation_id)
+                        })
+                    });
+                Ok(crate::generated::types::EvidenceRef {
+                    artifact_id,
+                    version,
+                    range_start: evidence
+                        .and_then(|item| item.get("rangeStart"))
+                        .and_then(Value::as_i64),
+                    range_end: evidence
+                        .and_then(|item| item.get("rangeEnd"))
+                        .and_then(Value::as_i64),
+                    quote: evidence
+                        .and_then(|item| item.get("quote"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                })
+            })?;
+        let mut evidence_refs = rows.collect::<Result<Vec<_>, _>>()?;
+        let source: Option<(String, i64, String, String)> = connection
+            .query_row(
+                "SELECT a.artifact_id,a.version,a.artifact_type,p.payload_json FROM narrative_obligations o JOIN artifacts a ON a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE o.project_id=?1 AND o.obligation_id=?2",
+                libsql_rusqlite::params![project_id, obligation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((artifact_id, version, artifact_type, raw_payload)) = source {
+            let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+            if artifact_type == "FinalChapter" {
+                if let Some(item) = payload
+                    .get("newResponsibilityEvidence")
+                    .and_then(Value::as_array)
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("obligationId").and_then(Value::as_str) == Some(obligation_id)
+                        })
+                    })
+                {
+                    let reference = crate::generated::types::EvidenceRef {
+                        artifact_id,
+                        version,
+                        range_start: item.get("rangeStart").and_then(Value::as_i64),
+                        range_end: item.get("rangeEnd").and_then(Value::as_i64),
+                        quote: item
+                            .get("quote")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                    };
+                    if !evidence_refs.contains(&reference) {
+                        evidence_refs.push(reference);
+                    }
+                }
+            } else if artifact_type == "NarrativeObligationSet" {
+                let historical = payload
+                    .get("sourceEvidenceRefs")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for value in historical {
+                    if let Ok(reference) =
+                        serde_json::from_value::<crate::generated::types::EvidenceRef>(value)
+                    {
+                        if !evidence_refs.contains(&reference) {
+                            evidence_refs.push(reference);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(evidence_refs)
     }
 
     /// Read timing data from the continuity authority for the planning

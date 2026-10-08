@@ -1,0 +1,313 @@
+use crate::commit::CommitService;
+use crate::generated::types::{ArtifactEnvelope, ArtifactRef, CommitBundle};
+use crate::hash::sha256_canonical;
+use crate::project_db::ProjectManager;
+use crate::repositories::narrative::NarrativeRepository;
+use crate::stable_id::{StableIdKind, StableIdentityFactory};
+use serde_json::{json, Value};
+
+pub struct AdjustmentCommand<'a> {
+    pub request: &'a Value,
+    pub project_id: &'a str,
+    pub command_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub expected_revision: Option<i64>,
+    pub request_digest: &'a str,
+    pub requested_at: &'a str,
+}
+
+pub fn execute_adjustment(
+    manager: &ProjectManager,
+    command: AdjustmentCommand<'_>,
+) -> Result<Value, String> {
+    let AdjustmentCommand {
+        request,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        request_digest,
+        requested_at,
+    } = command;
+    let expected_revision = expected_revision.ok_or_else(|| {
+        "IPC_INVALID:expectedRevision required for responsibility adjustment".to_string()
+    })?;
+    let payload = request
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "IPC_INVALID:payload".to_string())?;
+    let thread_ref = payload
+        .get("threadRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "IPC_INVALID:threadRef".to_string())?;
+    let obligation_id = thread_ref
+        .strip_prefix("thread:")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "IPC_INVALID:threadRef".to_string())?;
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "IPC_INVALID:action".to_string())?;
+    let artifact_id = StableIdentityFactory::from_command(
+        StableIdKind::Artifact,
+        &format!("narrative-obligation-set:{project_id}:{obligation_id}"),
+    )
+    .map_err(|error| error.to_string())?;
+    let connection = manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+
+    if let Some(previous) = CommitService::find_receipt(&connection, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    {
+        let previous_snapshot = previous
+            .committed_artifact_refs
+            .iter()
+            .find(|reference| reference.artifact_id == artifact_id)
+            .and_then(|reference| {
+                NarrativeRepository::artifact_payload_by_ref(&connection, project_id, reference)
+                    .ok()
+                    .flatten()
+            });
+        if previous_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.get("requestDigest"))
+            .and_then(Value::as_str)
+            == Some(request_digest)
+        {
+            return Ok(json!({
+                "commandId":previous.command_id,
+                "projectId":project_id,
+                "finalStatus":"committed",
+                "message":"责任调整正式回执已找到。",
+                "receiptId":previous.receipt_id,
+                "beforeRevision":previous.before_revision,
+                "afterRevision":previous.after_revision,
+                "replayed":true,
+                "receipt":previous
+            }));
+        }
+        return Err("IDEMPOTENCY_CONFLICT".into());
+    }
+
+    let record = NarrativeRepository::responsibility_adjustment_record(
+        &connection,
+        project_id,
+        obligation_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "B08_RESPONSIBILITY_NOT_FOUND".to_string())?;
+    if matches!(
+        record.lifecycle.as_str(),
+        "RESOLVED" | "ABANDONED" | "SUPERSEDED"
+    ) {
+        return Err("B08_RESPONSIBILITY_NOT_ACTIVE".into());
+    }
+    let target_level = match action {
+        "DOWNGRADE" => {
+            if record.authority_level != "B" {
+                return Err("B08_RESPONSIBILITY_DOWNGRADE_INVALID".into());
+            }
+            "C"
+        }
+        "UPGRADE" => {
+            if record.authority_level != "C" {
+                return Err("B08_RESPONSIBILITY_UPGRADE_INVALID".into());
+            }
+            match payload.get("authorityLevel").and_then(Value::as_str) {
+                Some("A") => "A",
+                Some("B") => "B",
+                _ => return Err("IPC_INVALID:authorityLevel".into()),
+            }
+        }
+        "DELETE" => record.authority_level.as_str(),
+        _ => return Err("IPC_INVALID:action".into()),
+    };
+    let fulfillment_object = if action == "UPGRADE" {
+        payload
+            .get("fulfillmentObject")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| record.fulfillment_object.clone())
+            .ok_or_else(|| "B08_RESPONSIBILITY_UPGRADE_OBJECT_REQUIRED".to_string())?
+    } else {
+        record.fulfillment_object.clone().unwrap_or_default()
+    };
+    let resume_condition = if action == "UPGRADE" {
+        let condition = payload
+            .get("resumeCondition")
+            .cloned()
+            .unwrap_or_else(|| record.resume_condition.clone());
+        crate::narrative::runtime::validate_resume_condition(&condition)
+            .map_err(|_| "B08_RESPONSIBILITY_UPGRADE_RESUME_CONDITION_REQUIRED")?;
+        condition
+    } else {
+        record.resume_condition.clone()
+    };
+    let mut source_evidence_refs = record.evidence_refs.clone();
+    if action == "UPGRADE"
+        && !source_evidence_refs.iter().any(|evidence| {
+            evidence.range_start.is_some()
+                && evidence.range_end.is_some()
+                && evidence
+                    .quote
+                    .as_deref()
+                    .is_some_and(|quote| !quote.trim().is_empty())
+        })
+    {
+        let supplied = payload.get("evidence").and_then(Value::as_object);
+        let (start, end, quote) = match supplied {
+            Some(evidence) => (
+                evidence
+                    .get("start")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
+                evidence
+                    .get("end")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
+                evidence.get("quote").and_then(Value::as_str),
+            ),
+            None => (None, None, None),
+        };
+        let (Some(start), Some(end), Some(quote)) = (start, end, quote) else {
+            return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into());
+        };
+        let body = NarrativeRepository::final_chapter_body_for_ref(
+            &connection,
+            project_id,
+            &record.source_artifact_id,
+            record.source_version,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".to_string())?;
+        crate::production::exact_quote_span(&body, start, end, quote)
+            .map_err(|_| "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_INVALID".to_string())?;
+        source_evidence_refs.push(crate::generated::types::EvidenceRef {
+            artifact_id: record.source_artifact_id.clone(),
+            version: record.source_version,
+            range_start: Some(start as i64),
+            range_end: Some(end as i64),
+            quote: Some(quote.to_owned()),
+        });
+    }
+    let lifecycle = if action == "DELETE" {
+        "ABANDONED"
+    } else if action == "UPGRADE" && record.lifecycle == "PROPOSED" {
+        "PROGRESSING"
+    } else {
+        record.lifecycle.as_str()
+    };
+    let project_scope_key = json!({"level":"PROJECT"}).to_string();
+    let previous_ref = NarrativeRepository::canonical_head_ref(
+        &connection,
+        project_id,
+        "NarrativeObligationSet",
+        &project_scope_key,
+    )
+    .map_err(|error| error.to_string())?;
+    let version =
+        crate::repositories::artifacts::ArtifactRepository::next_version(&connection, &artifact_id)
+            .map_err(|error| error.to_string())?;
+    let snapshot_payload = json!({
+        "payloadSchema":"narrative-obligation-adjustment.r1",
+        "obligationId":record.obligation_id,
+        "threadRef":thread_ref,
+        "action":action,
+        "previousAuthorityLevel":record.authority_level,
+        "authorityLevel":target_level,
+        "previousLifecycle":record.lifecycle,
+        "lifecycle":lifecycle,
+        "description":record.description,
+        "fulfillmentObject":fulfillment_object,
+        "resumeCondition":resume_condition,
+        "sourceRef":{"artifactId":record.source_artifact_id,"version":record.source_version},
+        "sourceEvidenceRefs":source_evidence_refs,
+        "previousAdjustmentRef":previous_ref,
+        "actor":"USER",
+        "operator":"USER",
+        "changedAt":requested_at,
+        "requestDigest":request_digest
+    });
+    let payload_hash = sha256_canonical(&snapshot_payload).map_err(|error| error.to_string())?;
+    let artifact_ref = ArtifactRef {
+        artifact_id: artifact_id.clone(),
+        version,
+        payload_hash: payload_hash.clone(),
+    };
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":artifact_id,
+        "projectId":project_id,
+        "artifactType":"NarrativeObligationSet",
+        "scope":{"level":"PROJECT"},
+        "version":version,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"MATERIALIZED",
+        "payload":snapshot_payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":[],
+        "provenance":{"createdBy":"B08::ResponsibilityAdjustmentOwner","commandId":command_id},
+        "createdAt":requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let reason = match action {
+        "DOWNGRADE" => "用户将责任从 B 级降为 C 级。",
+        "UPGRADE" => "用户手动升级责任等级。",
+        "DELETE" => "用户撤销这项责任；原审计记录与证据保留。",
+        _ => unreachable!("action was validated above"),
+    };
+    let decision_id = StableIdentityFactory::from_command(
+        StableIdKind::Decision,
+        &format!("thread-adjustment:{command_id}"),
+    )
+    .map_err(|error| error.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":idempotency_key,
+        "expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":requested_at,
+        "artifacts":[artifact],
+        "headUpdates":[{"artifactType":"NarrativeObligationSet","scope":{"level":"PROJECT"},"artifactId":artifact_ref.artifact_id,"version":artifact_ref.version,"payloadHash":artifact_ref.payload_hash}],
+        "obligationDelta":[{
+            "obligationId":record.obligation_id,
+            "scope":record.scope,
+            "obligationType":record.obligation_type,
+            "authorityLevel":target_level,
+            "lifecycle":lifecycle,
+            "description":record.description,
+            "mustResolveBeforeChapter":record.must_resolve_before_chapter,
+        "prerequisites":record.prerequisites,
+            "decisionRef":decision_id,
+            "payloadJson":{"sourceArtifactId":artifact_ref.artifact_id,"sourceVersion":artifact_ref.version,"resumeCondition":resume_condition,"fulfillmentObject":fulfillment_object,"action":action}
+        }],
+        "decisionUpdates":[{
+            "decisionId":decision_id,
+            "decisionType":"USER_THREAD_RESPONSIBILITY_ADJUSTMENT",
+            "outcome":action,
+            "reason":reason,
+            "sourceRef":thread_ref,
+            "payloadJson":{"previousAuthorityLevel":record.authority_level,"authorityLevel":target_level,"lifecycle":lifecycle,"fulfillmentObject":fulfillment_object,"resumeCondition":resume_condition,"sourceEvidenceRefs":source_evidence_refs,"actor":"USER","changedAt":requested_at,"narrativeObligationSetRef":artifact_ref}
+        }],
+        "receiptDraft":{"domain":"B08_THREAD_RESPONSIBILITY_ADJUSTMENT","payload":{"threadRef":thread_ref,"action":action,"authorityLevel":target_level,"lifecycle":lifecycle,"narrativeObligationSetRef":artifact_ref}}
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt = CommitService::commit(&connection, &bundle, requested_at)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "finalStatus":"committed",
+        "message":"责任调整已正式提交，历史版本与原始证据均已保留。",
+        "receiptId":receipt.receipt_id,
+        "beforeRevision":receipt.before_revision,
+        "afterRevision":receipt.after_revision,
+        "replayed":false,
+        "receipt":receipt
+    }))
+}

@@ -4474,7 +4474,7 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
                         "reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
             }),
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("fixture={suffix}; production error={error}"));
         assert_eq!(result["finalStatus"], "committed");
         let connection = state
             .manager
@@ -6672,6 +6672,9 @@ fn b08_final_commit_fault_rolls_back_final_chapter_reality_and_receipt() {
         0
     );
 }
+
+#[path = "b08_h03/b04a_rv06.rs"]
+mod b04a_rv06;
 #[path = "b08_h03/b04a_rv07.rs"]
 mod b04a_rv07;
 #[path = "b08_h03/b04a_rv16.rs"]

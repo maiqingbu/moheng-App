@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+pub mod responsibility;
 pub mod runtime;
 
 pub use runtime::{
@@ -18,6 +19,14 @@ pub enum ThreadPromotionDecision {
     Promote,
     DoNotPromote,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadResponsibilityLevel {
+    B,
+    C,
+}
+
+pub const THREAD_PROMOTION_RULE_VERSION: &str = "thread-promotion.r1";
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +87,35 @@ pub fn decide_thread_promotion(signal: PromotionSignal) -> ThreadPromotionDecisi
     }
 }
 
+pub fn classify_thread_responsibility(
+    signal: PromotionSignal,
+    has_exact_evidence: bool,
+    description: Option<&str>,
+    fulfillment_object: Option<&str>,
+    resume_condition: Option<&Value>,
+) -> ThreadResponsibilityLevel {
+    let has_promoting_signal = decide_thread_promotion(signal) == ThreadPromotionDecision::Promote;
+    let has_description = description.is_some_and(|value| !value.trim().is_empty());
+    let has_fulfillment_object = fulfillment_object.is_some_and(|value| !value.trim().is_empty());
+    let has_typed_resume_condition = resume_condition
+        .is_some_and(|condition| runtime::validate_resume_condition(condition).is_ok());
+    let has_only_positive_signals = !signal.ambient_description
+        && !signal.completed_trivial_event
+        && !signal.non_continuing_scene_detail;
+
+    if has_promoting_signal
+        && has_only_positive_signals
+        && has_exact_evidence
+        && has_description
+        && has_fulfillment_object
+        && has_typed_resume_condition
+    {
+        ThreadResponsibilityLevel::B
+    } else {
+        ThreadResponsibilityLevel::C
+    }
+}
+
 pub fn validate_task_progress_semantics(value: &Value) -> Result<(), String> {
     let Some(metric) = value.get("metric") else {
         return Ok(());
@@ -106,3 +144,61 @@ pub use runtime::{
     LONG_FORM_HARD_CONTRACT_FIELDS, LONG_FORM_OPENING_CANON_REFERENCE_RULES,
     OPENING_HARD_CONTRACT_FIELDS,
 };
+
+#[cfg(test)]
+mod promotion_tests {
+    use super::{classify_thread_responsibility, PromotionSignal, ThreadResponsibilityLevel};
+    use serde_json::json;
+
+    #[test]
+    fn explicit_supported_responsibility_is_b_and_incomplete_evidence_is_c() {
+        let signal = PromotionSignal {
+            explicit_promise: true,
+            ..PromotionSignal::default()
+        };
+        let condition = json!({"kind":"ENTITY_PRESENT","value":"entity:gugu"});
+        assert_eq!(
+            classify_thread_responsibility(
+                signal,
+                true,
+                Some("顾清归来时交还玉符"),
+                Some("item:jade-token"),
+                Some(&condition),
+            ),
+            ThreadResponsibilityLevel::B
+        );
+        assert_eq!(
+            classify_thread_responsibility(
+                signal,
+                false,
+                Some("顾清归来时交还玉符"),
+                Some("item:jade-token"),
+                Some(&condition),
+            ),
+            ThreadResponsibilityLevel::C
+        );
+    }
+
+    #[test]
+    fn hint_only_or_untyped_responsibility_is_c_and_system_has_no_a_result() {
+        let signal = PromotionSignal {
+            mystery_or_reveal_responsibility: true,
+            ..PromotionSignal::default()
+        };
+        assert_eq!(
+            classify_thread_responsibility(signal, true, Some("谜团仍未揭开"), None, None),
+            ThreadResponsibilityLevel::C
+        );
+        let unsupported = json!({"kind":"FREE_FORM","value":"顾清归来"});
+        assert_eq!(
+            classify_thread_responsibility(
+                signal,
+                true,
+                Some("顾清归来时交还玉符"),
+                Some("item:jade-token"),
+                Some(&unsupported),
+            ),
+            ThreadResponsibilityLevel::C
+        );
+    }
+}

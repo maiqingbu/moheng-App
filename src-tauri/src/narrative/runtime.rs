@@ -208,11 +208,19 @@ pub fn evaluate_resume_condition(
     }
 }
 
+pub fn validate_resume_condition(condition: &Value) -> Result<(), String> {
+    evaluate_resume_condition(condition, &ResumeContext::default()).map(|_| ())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContinuityThreadView {
     pub thread_id: String,
     pub thread_class: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub fulfillment_object: Option<String>,
     pub logical_status: String,
     pub source_event_ref: Option<String>,
     pub evidence_refs: Vec<EvidenceRef>,
@@ -259,17 +267,21 @@ pub fn build_continuity_threads(
                 ))
             }
         };
-        let evidence_refs = evidence
-            .iter()
-            .filter(|item| {
-                item.fact_id.as_deref() == Some(obligation.obligation_id.as_str())
-                    || item.event_id.as_deref() == obligation.source_event_id.as_deref()
-            })
-            .map(evidence_ref)
-            .collect();
+        let mut evidence_refs = obligation.evidence_refs.clone();
+        for item in evidence.iter().filter(|item| {
+            item.fact_id.as_deref() == Some(obligation.obligation_id.as_str())
+                || item.event_id.as_deref() == obligation.source_event_id.as_deref()
+        }) {
+            let reference = evidence_ref(item);
+            if !evidence_refs.contains(&reference) {
+                evidence_refs.push(reference);
+            }
+        }
         result.push(ContinuityThreadView {
             thread_id: format!("thread:{}", obligation.obligation_id),
             thread_class: obligation.obligation_type.clone(),
+            description: obligation.description.clone(),
+            fulfillment_object: obligation.fulfillment_object.clone(),
             logical_status: logical_status.into(),
             source_event_ref: obligation
                 .source_event_id
@@ -293,7 +305,7 @@ pub fn build_continuity_threads(
             "PLANTED" | "REINFORCED" | "STALE" => "OPEN",
             other => return Err(format!("unknown foreshadow status: {other}")),
         };
-        result.push(ContinuityThreadView { thread_id: format!("thread:{}", foreshadow.foreshadow_id), thread_class: "FORESHADOW".into(), logical_status: logical_status.into(), source_event_ref: None, evidence_refs: Vec::new(), participant_entities: Vec::new(), resume_condition: json!({"kind":"ENTITY_PRESENT","value":foreshadow.secret_payload_ref}), authority_level: "C".into(), current_disposition: foreshadow.status.clone(), source_refs: vec![SourceRef { kind: "foreshadow".into(), ref_: foreshadow.foreshadow_id.clone() }] });
+        result.push(ContinuityThreadView { thread_id: format!("thread:{}", foreshadow.foreshadow_id), thread_class: "FORESHADOW".into(), description: foreshadow.intent.clone(), fulfillment_object: foreshadow.secret_payload_ref.clone(), logical_status: logical_status.into(), source_event_ref: None, evidence_refs: Vec::new(), participant_entities: Vec::new(), resume_condition: json!({"kind":"ENTITY_PRESENT","value":foreshadow.secret_payload_ref}), authority_level: "C".into(), current_disposition: foreshadow.status.clone(), source_refs: vec![SourceRef { kind: "foreshadow".into(), ref_: foreshadow.foreshadow_id.clone() }] });
     }
     for mystery in mysteries {
         let logical_status = match mystery.status.as_str() {
@@ -305,6 +317,8 @@ pub fn build_continuity_threads(
         result.push(ContinuityThreadView {
             thread_id: format!("thread:{}", mystery.mystery_id),
             thread_class: mystery.mystery_type.clone(),
+            description: mystery.mystery_type.clone(),
+            fulfillment_object: mystery.core_fact_id.clone(),
             logical_status: logical_status.into(),
             source_event_ref: None,
             evidence_refs: Vec::new(),

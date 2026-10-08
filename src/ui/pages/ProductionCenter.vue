@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
@@ -7,7 +7,7 @@ import RuntimeBanner from '../components/RuntimeBanner.vue'
 import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
-import type { RunState } from '../../application/contracts'
+import type { ProductionCenterProjection, RunState } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
 
@@ -36,6 +36,16 @@ const openingProgress = computed(() => production.value?.openingProgress)
 const signing = computed(() => production.value?.signing)
 const bookPlan = computed(() => production.value?.bookPlan)
 const passingSigningPlatforms = computed(() => signing.value?.platformMatrix?.filter(item => item.mainstream && item.status === 'PASS') ?? [])
+const newResponsibilities = computed(() => production.value?.newResponsibilities ?? [])
+const newHardConstraintCount = computed(() => newResponsibilities.value.filter(item =>
+  ['A', 'B'].includes(item.authorityLevel) && !['ABANDONED', 'RESOLVED', 'SUPERSEDED'].includes(item.lifecycle),
+).length)
+const responsibilityAdjustmentInFlight = ref<string | null>(null)
+const fulfillmentObjectDraft = reactive<Record<string, string>>({})
+const resumeConditionDraft = reactive<Record<string, string>>({})
+const evidenceStartDraft = reactive<Record<string, number | undefined>>({})
+const evidenceEndDraft = reactive<Record<string, number | undefined>>({})
+const evidenceQuoteDraft = reactive<Record<string, string>>({})
 const selectedSigningPlatformId = computed(() => passingSigningPlatforms.value.some(item => item.platformId === selectedSigningPlatform.value)
   ? selectedSigningPlatform.value
   : passingSigningPlatforms.value[0]?.platformId ?? '')
@@ -144,6 +154,72 @@ function focusProductionProgress() {
 
 function focusOpeningEvaluationProgress() {
   document.querySelector<HTMLElement>('[data-opening-evaluation-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+function resumeConditionLabel(condition: Record<string, unknown> | null | undefined) {
+  if (!condition) return '未提供明确兑现条件'
+  const kind = String(condition.kind ?? '')
+  const value = condition.value
+  if (kind === 'ENTITY_PRESENT') return `当人物或实体出现（${String(value ?? '未知')}）`
+  if (kind === 'NEXT_MEETING' && value && typeof value === 'object') {
+    const meeting = value as Record<string, unknown>
+    return `当 ${String(meeting.entityA ?? '人物 A')} 与 ${String(meeting.entityB ?? '人物 B')} 再次相遇`
+  }
+  if (kind === 'KNOWLEDGE_ACQUIRED') return `当相关知识获得（${String(value ?? '未知')}）`
+  if (kind === 'TASK_SATISFIED') return `当任务完成（${String(value ?? '未知')}）`
+  if (kind === 'AFTER_CHAPTER') return `第 ${String(value ?? '未知')} 章之后`
+  if (kind === 'IN_VOLUME') return `进入卷（${String(value ?? '未知')}）`
+  return kind ? `${kind} · ${JSON.stringify(value)}` : '未提供明确兑现条件'
+}
+
+async function adjustResponsibility(
+  item: NonNullable<ProductionCenterProjection['newResponsibilities']>[number],
+  action: 'DOWNGRADE' | 'UPGRADE' | 'DELETE',
+  authorityLevel?: 'A' | 'B',
+) {
+  if (responsibilityAdjustmentInFlight.value) return
+  const key = `thread-responsibility-${item.threadRef}`
+  responsibilityAdjustmentInFlight.value = item.threadRef
+  lastCommand.value = key
+  const payload: Record<string, unknown> = { threadRef: item.threadRef, action }
+  if (action === 'UPGRADE') {
+    const fulfillmentObject = fulfillmentObjectDraft[item.threadRef]?.trim() || item.fulfillmentObject
+    if (fulfillmentObject) payload.fulfillmentObject = fulfillmentObject
+    const conditionText = resumeConditionDraft[item.threadRef]?.trim()
+    if (conditionText) {
+      try {
+        payload.resumeCondition = JSON.parse(conditionText)
+      } catch {
+        payload.resumeCondition = conditionText
+      }
+    } else if (item.resumeCondition) {
+      payload.resumeCondition = item.resumeCondition
+    }
+    if (item.evidence) {
+      payload.evidence = item.evidence
+    } else if (evidenceQuoteDraft[item.threadRef]?.trim()
+      && evidenceStartDraft[item.threadRef] !== undefined
+      && evidenceEndDraft[item.threadRef] !== undefined) {
+      payload.evidence = {
+        start: evidenceStartDraft[item.threadRef],
+        end: evidenceEndDraft[item.threadRef],
+        quote: evidenceQuoteDraft[item.threadRef],
+      }
+    }
+  }
+  try {
+    await store.runCommand(key, {
+      type: 'thread_responsibility_adjust',
+      projectId: project.value?.id,
+      expectedRevision: project.value?.revision,
+      payload: { ...payload, ...(authorityLevel ? { authorityLevel } : {}) },
+    })
+    await store.loadProduction(true)
+  } catch {
+    // CommandFeedback keeps the typed result for the user.
+  } finally {
+    responsibilityAdjustmentInFlight.value = null
+  }
 }
 
 async function startProduction() {
@@ -460,6 +536,52 @@ async function reverifyRepair() {
       <MetricCard label="准入检查" :value="gateLabel(production.gate?.status)" :note="productErrorMessage(production.gate?.reason, '等待检查结果。')" />
       <MetricCard label="后续安排" :value="reconciliationLabel(production.reconciliation)" note="系统会根据当前记录给出下一步" />
     </div>
+
+    <section v-if="newResponsibilities.length" class="card pad section" data-new-responsibilities>
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">新增约束 {{ newHardConstraintCount }} 条</h2>
+          <p class="card-subtitle">本章审计发现的连续性事项。B 级进入后续章节上下文；C 级保留为候选，不作为硬约束。</p>
+        </div>
+      </div>
+      <div v-for="item in newResponsibilities" :key="item.threadRef" class="task-row" style="align-items:flex-start;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <strong>{{ item.authorityLevel }} 级 · {{ item.threadRef }}</strong>
+          <p class="muted" style="margin:6px 0">{{ detailLabel(item.description, '审计记录中没有说明文本。') }}</p>
+          <p v-if="item.evidence?.quote" class="muted" style="margin:6px 0">原文证据：“{{ item.evidence.quote }}”</p>
+          <p v-if="item.fulfillmentObject" class="muted" style="margin:6px 0">兑现对象：{{ item.fulfillmentObject }}</p>
+          <p v-if="item.authorityLevel === 'B'" class="muted" style="margin:6px 0">兑现条件：{{ resumeConditionLabel(item.resumeCondition) }}</p>
+          <small class="muted">规则版本 {{ item.ruleVersion ?? '未知' }} · {{ statusLabel(item.lifecycle) }}</small>
+        </div>
+        <div v-if="!['ABANDONED', 'RESOLVED', 'SUPERSEDED'].includes(item.lifecycle)" class="actions">
+          <template v-if="item.authorityLevel === 'B'">
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DOWNGRADE')">降为 C 级</button>
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">撤销责任</button>
+          </template>
+          <template v-else-if="item.authorityLevel === 'C'">
+            <div class="responsibility-upgrade-fields" style="display:grid;gap:8px;flex-basis:100%;min-width:260px">
+              <label style="display:grid;gap:4px">升级时的兑现对象
+                <input v-model="fulfillmentObjectDraft[item.threadRef]" :placeholder="item.fulfillmentObject ?? '人物、事件或物件引用'" />
+              </label>
+              <label style="display:grid;gap:4px">升级时的 typed resume condition（JSON）
+                <textarea v-model="resumeConditionDraft[item.threadRef]" :placeholder="item.resumeCondition ? JSON.stringify(item.resumeCondition) : '{&quot;kind&quot;:&quot;ENTITY_PRESENT&quot;,&quot;value&quot;:&quot;entity:...&quot;}'" rows="2" />
+              </label>
+              <div v-if="!item.evidence" class="responsibility-evidence-fields">
+                <small class="muted">升级前请从来源正文填写精确引用和零起点字符范围。</small>
+                <input v-model.number="evidenceStartDraft[item.threadRef]" type="number" min="0" placeholder="证据起点" />
+                <input v-model.number="evidenceEndDraft[item.threadRef]" type="number" min="0" placeholder="证据终点" />
+                <input v-model="evidenceQuoteDraft[item.threadRef]" placeholder="逐字证据" />
+              </div>
+            </div>
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'UPGRADE', 'B')">升级为 B 级</button>
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'UPGRADE', 'A')">升级为 A 级</button>
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">撤销责任</button>
+          </template>
+          <button v-else class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">撤销责任</button>
+        </div>
+        <small v-else class="muted">责任已结束；历史审计记录与证据仍可查询。</small>
+      </div>
+    </section>
 
     <div class="production-layout section">
       <section class="card pad" data-production-progress>

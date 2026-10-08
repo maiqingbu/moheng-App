@@ -12,7 +12,7 @@ use crate::generated::types::{
     CommitBundle,
 };
 use crate::hash::sha256_canonical;
-use crate::narrative::{PromotionSignal, ThreadPromotionDecision};
+use crate::narrative::{PromotionSignal, ThreadResponsibilityLevel};
 use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectHandle, ProjectManager};
 use crate::provider::{
     OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
@@ -862,6 +862,80 @@ fn reference(artifact: &ArtifactEnvelope) -> ArtifactRef {
         version: artifact.version,
         payload_hash: artifact.payload_hash.clone(),
     }
+}
+
+struct B08ChangeRequestContext<'a> {
+    project_id: &'a str,
+    command_id: &'a str,
+    job_id: &'a str,
+    requested_at: &'a str,
+    current_revision: i64,
+    final_id: &'a str,
+    chapter_id: &'a str,
+    audit: &'a ArtifactEnvelope,
+    candidate: &'a ArtifactEnvelope,
+}
+
+fn create_b08_change_request_proposal(
+    context: &B08ChangeRequestContext<'_>,
+    index: usize,
+    item: &ContinuityCandidate,
+    summary: &str,
+    reason: &str,
+) -> Result<(ArtifactEnvelope, Value, Value), String> {
+    let artifact_id = StableIdentityFactory::from_command(
+        StableIdKind::Artifact,
+        &format!("b08-change-request:{}:{index}", context.final_id),
+    )
+    .map_err(|error| error.to_string())?;
+    let payload = json!({
+        "payloadSchema":"b12-change-request.r1",
+        "changeRequestId":artifact_id,
+        "changeType":"CHANGE",
+        "status":"PROPOSED",
+        "summary":summary,
+        "requestedChange":{"kind":"WITHDRAW_RESPONSIBILITY","responsibilityRef":item.thread_ref},
+        "responsibilityRef":item.thread_ref,
+        "basedOnRevision":context.current_revision,
+        "sourceAuditRef":reference(context.audit),
+        "sourceChapterRef":reference(context.candidate),
+        "evidence":item.evidence.as_ref().map(|evidence| {
+            json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote})
+        })
+    });
+    let artifact = artifact(
+        context.project_id,
+        artifact_id.clone(),
+        ArtifactType::ChangeRequest,
+        context.chapter_id,
+        payload,
+        context.command_id,
+        context.job_id,
+        None,
+        context.requested_at,
+        vec![reference(context.audit), reference(context.candidate)],
+    )?;
+    let artifact_head = json!({
+        "artifactType":"ChangeRequest",
+        "scope":chapter_scope(context.chapter_id),
+        "artifactId":artifact.artifact_id,
+        "version":artifact.version,
+        "payloadHash":artifact.payload_hash
+    });
+    let decision_id = StableIdentityFactory::from_command(
+        StableIdKind::Decision,
+        &format!("b08-thread-change-request:{}:{index}", context.final_id),
+    )
+    .map_err(|error| error.to_string())?;
+    let decision = json!({
+        "decisionId":decision_id,
+        "decisionType":"NO_LONGER_APPLICABLE_CHANGE_REQUEST",
+        "outcome":"PROPOSED",
+        "reason":reason,
+        "sourceRef":item.thread_ref,
+        "payloadJson":{"threadRef":item.thread_ref,"changeRequestRef":reference(&artifact),"sourceAuditRef":reference(context.audit)}
+    });
+    Ok((artifact, artifact_head, decision))
 }
 
 fn load_artifact_payload(
@@ -1885,20 +1959,43 @@ fn run_chapter_production_inner(
         &gate_policy_payload,
         &mut extraction,
     )?;
+    let planned_continuity_refs = plan_payload
+        .get("continuityActions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| action.get("threadRef").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
     let thread_promotion_decisions = extraction
         .continuity_candidates
         .iter()
         .map(|candidate| {
             let signal = candidate.promotion_signals;
-            let decision = match crate::narrative::decide_thread_promotion(signal) {
-                ThreadPromotionDecision::Promote => "PROMOTE",
-                ThreadPromotionDecision::DoNotPromote => "DO_NOT_PROMOTE",
+            let authority_level = crate::narrative::classify_thread_responsibility(
+                signal,
+                candidate
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|evidence| !evidence.rebound),
+                candidate.description.as_deref(),
+                candidate.fulfillment_object.as_deref(),
+                candidate.resume_condition.as_ref(),
+            );
+            let authority_level = match authority_level {
+                ThreadResponsibilityLevel::B => "B",
+                ThreadResponsibilityLevel::C => "C",
             };
             json!({
                 "threadRef": candidate.thread_ref,
-                "decision": decision,
+                "ruleVersion": crate::narrative::THREAD_PROMOTION_RULE_VERSION,
+                "decision": if authority_level == "B" {"PROMOTE"} else {"RETAIN_C"},
+                "authorityLevel": authority_level,
+                "newResponsibility": !planned_continuity_refs.contains(candidate.thread_ref.as_str()),
+                "description": candidate.description,
+                "fulfillmentObject": candidate.fulfillment_object,
+                "resumeCondition": candidate.resume_condition,
                 "promotionSignals": signal,
-                "evidence": {"start": candidate.evidence.start, "end": candidate.evidence.end}
+                "evidence": candidate.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))
             })
         })
         .collect::<Vec<_>>();
@@ -1907,9 +2004,16 @@ fn run_chapter_production_inner(
             .iter()
             .find(|item| item.get("threadRef").and_then(Value::as_str) == Some(thread_ref))
             .and_then(|item| item.get("decision").and_then(Value::as_str))
-            .unwrap_or("DO_NOT_PROMOTE")
+            .unwrap_or("RETAIN_C")
     };
-    let review_payload = json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":candidate_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()});
+    let promotion_authority_for = |thread_ref: &str| {
+        thread_promotion_decisions
+            .iter()
+            .find(|item| item.get("threadRef").and_then(Value::as_str) == Some(thread_ref))
+            .and_then(|item| item.get("authorityLevel").and_then(Value::as_str))
+            .unwrap_or("C")
+    };
+    let review_payload = json!({"payloadSchema":"actual-narrative-audit.r1","candidateRef":candidate_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"audit":audit_payload,"threadPromotionDecisions":thread_promotion_decisions.clone()});
     let mut audit = artifact(
         &project_id,
         audit_id,
@@ -1942,10 +2046,26 @@ fn run_chapter_production_inner(
     }
     let mut obligation_delta = Vec::new();
     let mut foreshadow_delta = Vec::new();
+    let mut decision_updates = Vec::new();
+    let mut change_request_artifacts = Vec::new();
+    let mut change_request_heads = Vec::new();
     let mut obligation_evidence_records = Vec::new();
+    let mut new_responsibility_evidence = Vec::new();
     let mut effective_continuity_refs = BTreeSet::new();
+    let change_request_context = B08ChangeRequestContext {
+        project_id: &project_id,
+        command_id: &command_id,
+        job_id: &job_id,
+        requested_at: &now,
+        current_revision,
+        final_id: &final_id,
+        chapter_id: &chapter_id,
+        audit: &audit,
+        candidate: &candidate,
+    };
     for (index, item) in extraction.continuity_candidates.iter().enumerate() {
         let promotion_decision = promotion_decision_for(&item.thread_ref);
+        let authority_level = promotion_authority_for(&item.thread_ref);
         let authority_id = item
             .thread_ref
             .strip_prefix("thread:")
@@ -1959,7 +2079,20 @@ fn run_chapter_production_inner(
         if let Some(obligation) = obligation {
             let lifecycle = match item.disposition.as_str() {
                 "RESOLVE" | "RESOLVED" => "RESOLVED",
-                "ADVANCE" | "PROGRESSING" => "PROGRESSING",
+                "ADVANCE" | "PROGRESSING" | "DEFER_WITH_BRIDGE" => "PROGRESSING",
+                "NO_LONGER_APPLICABLE_CHANGE_REQUEST" => {
+                    let (change_artifact, head, decision) = create_b08_change_request_proposal(
+                        &change_request_context,
+                        index,
+                        item,
+                        "审计发现既有连续性责任可能不再适用，等待用户确认。",
+                        "正文报告既有责任可能不再适用；责任仍保持有效，等待正式变更确认。",
+                    )?;
+                    decision_updates.push(decision);
+                    change_request_heads.push(head);
+                    change_request_artifacts.push(change_artifact);
+                    continue;
+                }
                 _ => return Err("B08_THREAD_DISPOSITION_INVALID".into()),
             };
             obligation_delta.push(json!({
@@ -1968,15 +2101,49 @@ fn run_chapter_production_inner(
                 "mustResolveBeforeChapter":obligation.must_resolve_before_chapter,
                 "prerequisites":obligation.prerequisites,
                 "decisionRef":obligation.decision_ref,
-                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE"}
+                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1,"resumeCondition":obligation.resume_condition,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE"}
             }));
             effective_continuity_refs.insert(item.thread_ref.clone());
-            obligation_evidence_records.push(json!({
-                "evidenceId":format!("obligation-evidence:{}:{}",final_id,index+1),
-                "obligationId":authority_id,
-                "evidenceType":if lifecycle == "RESOLVED" {"COMPLETION"} else {"PROGRESS"},
-                "quote":item.evidence.quote,"rangeStart":item.evidence.start,"rangeEnd":item.evidence.end
-            }));
+            if let Some(evidence) = &item.evidence {
+                obligation_evidence_records.push(json!({
+                    "evidenceId":format!("obligation-evidence:{}:{}",final_id,index+1),
+                    "obligationId":authority_id,
+                    "evidenceType":if lifecycle == "RESOLVED" {"COMPLETION"} else {"PROGRESS"},
+                    "quote":evidence.quote,"rangeStart":evidence.start,"rangeEnd":evidence.end
+                }));
+            }
+            if item.disposition == "DEFER_WITH_BRIDGE" {
+                let bridge = item
+                    .bridge
+                    .as_deref()
+                    .or_else(|| {
+                        plan_payload
+                            .get("continuityActions")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .find(|action| {
+                                action.get("threadRef").and_then(Value::as_str)
+                                    == Some(item.thread_ref.as_str())
+                            })
+                            .and_then(|action| action.get("bridge"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or_default();
+                let decision_id = StableIdentityFactory::from_command(
+                    StableIdKind::Decision,
+                    &format!("b08-thread-defer:{final_id}:{index}"),
+                )
+                .map_err(|error| error.to_string())?;
+                decision_updates.push(json!({
+                    "decisionId":decision_id,
+                    "decisionType":"THREAD_DEFER_WITH_BRIDGE",
+                    "outcome":"DEFERRED",
+                    "reason":"连续性责任已通过桥接继续保留。",
+                    "sourceRef":item.thread_ref,
+                    "payloadJson":{"bridge":bridge,"sourceChapterRef":reference(&candidate),"sourceAuditRef":reference(&audit),"evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
+                }));
+            }
             continue;
         }
         let foreshadow = crate::repositories::narrative::NarrativeRepository::foreshadow_authority(
@@ -1986,35 +2153,107 @@ fn run_chapter_production_inner(
         )
         .map_err(|error| error.to_string())?;
         if let Some(foreshadow) = foreshadow {
+            if item.disposition == "NO_LONGER_APPLICABLE_CHANGE_REQUEST" {
+                let (change_artifact, head, decision) = create_b08_change_request_proposal(
+                    &change_request_context,
+                    index,
+                    item,
+                    "审计发现既有伏笔责任可能不再适用，等待用户确认。",
+                    "正文报告伏笔责任可能不再适用；责任仍保持有效，等待正式变更确认。",
+                )?;
+                decision_updates.push(decision);
+                change_request_heads.push(head);
+                change_request_artifacts.push(change_artifact);
+                continue;
+            }
             foreshadow_delta.push(json!({
                 "foreshadowId":authority_id,"intent":foreshadow.intent,
                 "status":if matches!(item.disposition.as_str(),"RESOLVE"|"RESOLVED") {"RECOVERED"} else {"REINFORCED"},
                 "plantChapterId":foreshadow.plant_chapter_id,"recoverWindowEndChapter":foreshadow.recover_window_end_chapter,
                 "secretPayloadRef":foreshadow.secret_payload_ref,
                 "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE",
-                    "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}}
+                    "resumeCondition":json!({"kind":"ENTITY_PRESENT","value":foreshadow.secret_payload_ref}),
+                    "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
             }));
             effective_continuity_refs.insert(item.thread_ref.clone());
+            if item.disposition == "DEFER_WITH_BRIDGE" {
+                let bridge = item
+                    .bridge
+                    .as_deref()
+                    .or_else(|| {
+                        plan_payload
+                            .get("continuityActions")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .find(|action| {
+                                action.get("threadRef").and_then(Value::as_str)
+                                    == Some(item.thread_ref.as_str())
+                            })
+                            .and_then(|action| action.get("bridge"))
+                            .and_then(Value::as_str)
+                    })
+                    .unwrap_or_default();
+                let decision_id = StableIdentityFactory::from_command(
+                    StableIdKind::Decision,
+                    &format!("b08-thread-defer:{final_id}:{index}"),
+                )
+                .map_err(|error| error.to_string())?;
+                decision_updates.push(json!({"decisionId":decision_id,"decisionType":"THREAD_DEFER_WITH_BRIDGE","outcome":"DEFERRED","reason":"伏笔责任已通过桥接继续保留。","sourceRef":item.thread_ref,"payloadJson":{"bridge":bridge,"sourceChapterRef":reference(&candidate),"sourceAuditRef":reference(&audit)}}));
+            }
             continue;
         }
-        if promotion_decision != "PROMOTE" {
-            // Audit evidence is retained, but a non-promoted ordinary action
-            // must not mutate Continuity Reality.
-            continue;
-        }
+        let description = item
+            .description
+            .as_deref()
+            .filter(|description| !description.trim().is_empty())
+            .or_else(|| {
+                item.evidence
+                    .as_ref()
+                    .map(|evidence| evidence.quote.as_str())
+            })
+            .unwrap_or(&item.thread_ref);
+        let resume_condition = item.resume_condition.clone().unwrap_or(Value::Null);
+        let lifecycle = if authority_level == "B" {
+            "PROGRESSING"
+        } else {
+            "PROPOSED"
+        };
+        let promotion_decision_id = StableIdentityFactory::from_command(
+            StableIdKind::Decision,
+            &format!("thread-promotion:{final_id}:{index}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let promotion_decision_ref = promotion_decision_id.clone();
+        decision_updates.push(json!({
+            "decisionId":promotion_decision_id,
+            "decisionType":"THREAD_PROMOTION_RULE",
+            "outcome":authority_level,
+            "reason":if authority_level == "B" {"精确证据、兑现对象、兑现条件与定级信号均齐备。"} else {"证据、兑现对象或兑现条件不完整，保留为 C 级候选。"},
+            "sourceRef":item.thread_ref,
+            "payloadJson":{"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionSignals":item.promotion_signals,"evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote})),"fulfillmentObject":item.fulfillment_object,"resumeCondition":resume_condition}
+        }));
         obligation_delta.push(json!({
             "obligationId":authority_id,
             "scope":"CHAPTER",
-            "obligationType":"PROMOTED_CONTINUITY",
-            "authorityLevel":"C",
-            "lifecycle":"PROGRESSING",
-            "description":format!("由本章审计确认的跨章责任：{}", item.thread_ref),
+            "obligationType":if authority_level == "B" {"PROMOTED_CONTINUITY"} else {"CONTINUITY_CANDIDATE"},
+            "authorityLevel":authority_level,
+            "lifecycle":lifecycle,
+            "description":description,
             "mustResolveBeforeChapter":Value::Null,
             "prerequisites":[],
-            "decisionRef":format!("thread-promotion:{}:{}", final_id, index + 1),
-            "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"promotionDecision":"PROMOTE","deltaMode":"NEW_CONTINUITY"}
+            "decisionRef":promotion_decision_ref,
+            "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"resumeCondition":resume_condition,"fulfillmentObject":item.fulfillment_object,"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionDecision":promotion_decision,"deltaMode":"NEW_CONTINUITY"}
         }));
-        effective_continuity_refs.insert(item.thread_ref.clone());
+        if let Some(evidence) = &item.evidence {
+            new_responsibility_evidence.push(json!({
+                "obligationId":authority_id,
+                "quote":evidence.quote,"rangeStart":evidence.start,"rangeEnd":evidence.end
+            }));
+        }
+        if authority_level == "B" {
+            effective_continuity_refs.insert(item.thread_ref.clone());
+        }
     }
     let evidence_records = extraction
         .canon_candidates
@@ -2032,7 +2271,7 @@ fn run_chapter_production_inner(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -2177,10 +2416,10 @@ fn run_chapter_production_inner(
             "kind":"CONTINUITY",
             "threadRef":item.thread_ref,
             "actualObserved":item.disposition,
-            "evidence":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+            "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))
         })
     }));
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -2204,11 +2443,12 @@ fn run_chapter_production_inner(
         certificate_evidence,
         &now,
     )?;
-    let heads = vec![
+    let mut heads = vec![
         json!({"artifactType":"FinalChapter","scope":chapter_scope(&chapter_id),"artifactId":final_artifact.artifact_id,"version":1,"payloadHash":final_artifact.payload_hash}),
         json!({"artifactType":"ChapterExitState","scope":chapter_scope(&chapter_id),"artifactId":exit_artifact.artifact_id,"version":1,"payloadHash":exit_artifact.payload_hash}),
         json!({"artifactType":"ProductionReceipt","scope":chapter_scope(&chapter_id),"artifactId":receipt_artifact.artifact_id,"version":1,"payloadHash":receipt_artifact.payload_hash}),
     ];
+    heads.extend(change_request_heads);
     let mut bundle_artifacts = Vec::new();
     let final_ref = reference(&final_artifact);
     let canon_delta = extraction.canon_candidates.iter().map(|item| json!({
@@ -2260,6 +2500,7 @@ fn run_chapter_production_inner(
         bundle_artifacts.push(quality);
     }
     bundle_artifacts.extend([audit, final_artifact, exit_artifact, receipt_artifact]);
+    bundle_artifacts.extend(change_request_artifacts);
     let dependency_source_hash = if gateway.fault_injection() == Some("dependency_source_hash") {
         "0".repeat(64)
     } else {
@@ -2273,6 +2514,7 @@ fn run_chapter_production_inner(
         "knowledgeDelta":knowledge_delta,
         "obligationDelta":obligation_delta,
         "foreshadowDelta":foreshadow_delta,
+        "decisionUpdates":decision_updates,
         "stateDelta":state_delta,
         "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":dependency_source_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
@@ -2429,6 +2671,8 @@ struct EvidenceSpan {
     start: usize,
     end: usize,
     quote: String,
+    #[serde(default)]
+    rebound: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -2475,9 +2719,18 @@ struct KnowledgeCandidate {
 struct ContinuityCandidate {
     thread_ref: String,
     disposition: String,
-    evidence: EvidenceSpan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence: Option<EvidenceSpan>,
     #[serde(default)]
     promotion_signals: PromotionSignal,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    fulfillment_object: Option<String>,
+    #[serde(default)]
+    resume_condition: Option<Value>,
+    #[serde(default)]
+    bridge: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -2548,6 +2801,22 @@ fn validate_audit_completeness(
     if dropped {
         return Err("B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT".into());
     }
+    if audit_payload
+        .pointer("/normalization/invalidContinuityEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err("B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT".into());
+    }
+    if audit_payload
+        .pointer("/normalization/reboundEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND".into());
+    }
     if audit.unresolved_hard || audit.audit_completeness == AuditCompleteness::UnresolvedHard {
         return Err("B08_AUDIT_UNRESOLVED_HARD".into());
     }
@@ -2585,6 +2854,8 @@ fn validate_audit_completeness(
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     let body_chars = body.chars().collect::<Vec<_>>();
+    let mut rebound_evidence = 0_u64;
+    let mut invalid_continuity_evidence = 0_u64;
     let normalize_evidence = |value: &Value| -> Option<Value> {
         let start = value.get("start")?.as_u64()? as usize;
         let end = value.get("end")?.as_u64()? as usize;
@@ -2659,9 +2930,29 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             if !required.iter().all(|key| object.contains_key(*key)) {
                 return false;
             }
+            if field == "continuityCandidates" {
+                if let Some(raw_evidence) = object.get("evidence") {
+                    match normalize_evidence(raw_evidence) {
+                        Some(evidence) => {
+                            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
+                                rebound_evidence += 1;
+                            }
+                            object.insert("evidence".into(), evidence);
+                        }
+                        None => {
+                            invalid_continuity_evidence += 1;
+                            object.remove("evidence");
+                        }
+                    }
+                }
+                return true;
+            }
             let Some(evidence) = object.get("evidence").and_then(normalize_evidence) else {
                 return false;
             };
+            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
+                rebound_evidence += 1;
+            }
             object.insert("evidence".into(), evidence);
             if field == "knowledgeCandidates" {
                 let Some(state) = object.get("epistemicState").and_then(Value::as_str) else {
@@ -2680,8 +2971,6 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             true
         });
         dropped.insert(field.into(), json!(before - items.len()));
-    #[serde(default)]
-    rebound: bool,
     }
     let (normalized_ranges, dropped_ranges) = payload
         .get("evidenceRanges")
@@ -2691,6 +2980,10 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                 .iter()
                 .filter_map(&normalize_evidence)
                 .collect::<Vec<_>>();
+            rebound_evidence += ranges
+                .iter()
+                .filter(|range| range.get("rebound").and_then(Value::as_bool) == Some(true))
+                .count() as u64;
             let dropped = items.len() - ranges.len();
             (Some(ranges), dropped)
         })
@@ -2728,6 +3021,7 @@ pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Re
             start,
             end,
             quote: quote.to_owned(),
+            rebound: false,
         },
     )
 }
@@ -2812,22 +3106,6 @@ fn validate_actual_extraction(
             candidate.entity_id.as_deref() == Some(candidate.subject_id.as_str());
         if !subject_exists && !subject_created_in_commit {
             return Err("B08_CANON_SUBJECT_NOT_FOUND".into());
-    if audit_payload
-        .pointer("/normalization/invalidContinuityEvidence")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        > 0
-    {
-        return Err("B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT".into());
-    }
-    if audit_payload
-        .pointer("/normalization/reboundEvidence")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        > 0
-    {
-        return Err("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND".into());
-    }
         }
         let (current, truncated) = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key_bounded(
             connection,
@@ -2865,8 +3143,6 @@ fn validate_actual_extraction(
             .as_ref()
             .expect("canon semantics is required for Canon candidates");
         let candidate_input = crate::canon_semantics::CandidateSemanticInput {
-    let mut rebound_evidence = 0_u64;
-    let mut invalid_continuity_evidence = 0_u64;
             object_json: &candidate.object_json,
             story_time: candidate.story_time.as_deref(),
             valid_from_chapter_no: candidate_from_chapter_no,
@@ -2912,9 +3188,53 @@ fn validate_actual_extraction(
         }
     }
     for candidate in &audit.continuity_candidates {
-        exact_quote(body, &candidate.evidence)?;
-        if !continuity.contains(candidate.thread_ref.as_str()) {
-            return Err("B08_THREAD_TRANSITION_OUTSIDE_PLAN".into());
+        let planned = continuity.contains(candidate.thread_ref.as_str());
+        if let Some(evidence) = &candidate.evidence {
+            exact_quote(body, evidence)?;
+        } else if planned {
+            return Err("B08_AUDIT_INCOMPLETE".into());
+        }
+        if !matches!(
+            candidate.disposition.as_str(),
+            "ADVANCE" | "RESOLVE" | "DEFER_WITH_BRIDGE" | "NO_LONGER_APPLICABLE_CHANGE_REQUEST"
+        ) {
+            return Err("B08_THREAD_DISPOSITION_INVALID".into());
+        }
+        if !planned {
+            let authority_id = candidate
+                .thread_ref
+                .strip_prefix("thread:")
+                .ok_or("B08_THREAD_DISPOSITION_INVALID")?;
+            if crate::repositories::narrative::NarrativeRepository::continuity_thread_exists(
+                connection,
+                project_id,
+                authority_id,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                return Err("B08_THREAD_TRANSITION_OUTSIDE_PLAN".into());
+            }
+        }
+        if candidate.disposition == "DEFER_WITH_BRIDGE" {
+            let bridge = candidate
+                .bridge
+                .as_deref()
+                .or_else(|| {
+                    plan.get("continuityActions")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .find(|action| {
+                            action.get("threadRef").and_then(Value::as_str)
+                                == Some(candidate.thread_ref.as_str())
+                        })
+                        .and_then(|action| action.get("bridge"))
+                        .and_then(Value::as_str)
+                })
+                .filter(|bridge| !bridge.trim().is_empty());
+            if bridge.is_none() {
+                return Err("B08_THREAD_DISPOSITION_INVALID".into());
+            }
         }
     }
     for reference in &audit.revealed_reservation_refs {
@@ -2932,29 +3252,9 @@ fn validate_actual_extraction(
     let pending_facts = audit
         .canon_candidates
         .iter()
-            if field == "continuityCandidates" {
-                if let Some(raw_evidence) = object.get("evidence") {
-                    match normalize_evidence(raw_evidence) {
-                        Some(evidence) => {
-                            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
-                                rebound_evidence += 1;
-                            }
-                            object.insert("evidence".into(), evidence);
-                        }
-                        None => {
-                            invalid_continuity_evidence += 1;
-                            object.remove("evidence");
-                        }
-                    }
-                }
-                return true;
-            }
         .map(|item| item.fact_id.clone())
         .collect::<BTreeSet<_>>();
     let knowledge_candidates = std::mem::take(&mut audit.knowledge_candidates);
-            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
-                rebound_evidence += 1;
-            }
     let mut bound_knowledge_candidates = Vec::new();
     for candidate in knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
@@ -2982,10 +3282,6 @@ fn validate_actual_extraction(
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_UNBOUND".into());
         }
         let pending_fact_time = audit
-            rebound_evidence += ranges
-                .iter()
-                .filter(|range| range.get("rebound").and_then(Value::as_bool) == Some(true))
-                .count() as u64;
             .canon_candidates
             .iter()
             .find(|fact| fact.fact_id == candidate.fact_id)
@@ -3021,7 +3317,6 @@ fn validate_actual_extraction(
         if candidate
             .visibility_scope
             .as_deref()
-            rebound: false,
             .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
             || acquired_time.is_none()
             || fact_time.is_none()
@@ -3576,6 +3871,31 @@ mod tests {
     }
 
     #[test]
+    fn audit_evidence_rebinding_is_marked_and_makes_audit_incomplete() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "qualityFindings":[],
+                "canonCandidates":[],
+                "knowledgeCandidates":[],
+                "continuityCandidates":[],
+                "taskProgressCandidates":[],
+                "revealedReservationRefs":[],
+                "evidenceRanges":[{"start":900,"end":901,"quote":"证据"}],
+                "auditCompleteness":"COMPLETE_NO_CHANGE",
+                "unresolvedHard":false
+            }),
+            "正文包含证据。",
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
+        let audit: AuditExtraction = serde_json::from_value(normalized.clone()).unwrap();
+        assert_eq!(
+            validate_audit_completeness(&normalized, &audit).unwrap_err(),
+            "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+        );
+    }
+
+    #[test]
     fn audit_normalization_rebinds_ellipsis_quote_only_when_segments_are_present() {
         let normalized = normalize_audit_model_output(
             json!({
@@ -3640,31 +3960,6 @@ mod tests {
             "你好世界",
         );
         assert_eq!(unknown["knowledgeCandidates"], json!([]));
-    }
-
-    #[test]
-    fn audit_evidence_rebinding_is_marked_and_makes_audit_incomplete() {
-        let normalized = normalize_audit_model_output(
-            json!({
-                "qualityFindings":[],
-                "canonCandidates":[],
-                "knowledgeCandidates":[],
-                "continuityCandidates":[],
-                "taskProgressCandidates":[],
-                "revealedReservationRefs":[],
-                "evidenceRanges":[{"start":900,"end":901,"quote":"证据"}],
-                "auditCompleteness":"COMPLETE_NO_CHANGE",
-                "unresolvedHard":false
-            }),
-            "正文包含证据。",
-        );
-        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
-        assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
-        let audit: AuditExtraction = serde_json::from_value(normalized.clone()).unwrap();
-        assert_eq!(
-            validate_audit_completeness(&normalized, &audit).unwrap_err(),
-            "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
-        );
     }
 
     #[test]
