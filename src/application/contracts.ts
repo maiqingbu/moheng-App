@@ -29,7 +29,7 @@ export type BlockReason =
   | 'RETRY_EXHAUSTED'
   | 'PERSISTENCE_FAILURE'
 
-export type SigningStatus = 'NOT_STARTED' | 'IN_REVIEW' | 'REVISE' | 'REJECTED' | 'PASS' | 'STALE'
+export type SigningStatus = 'NOT_STARTED' | 'IN_REVIEW' | 'REVISE' | 'REJECTED' | 'PASS' | 'FAIL' | 'NOT_VERIFIED' | 'STALE'
 export type CommandStatus = 'idle' | 'submitting' | 'accepted' | 'processing' | 'committed' | 'blocked' | 'failed'
 export type ProjectLifecycle = 'ACTIVE' | 'ARCHIVED'
 
@@ -492,6 +492,30 @@ export interface SigningProjection {
   openingChapterRefs?: string[]
   openingCanonRefs?: string[]
   signingEvidenceRefs?: string[]
+  coreStatus?: 'PASS' | 'FAIL' | 'NOT_VERIFIED'
+  itemResults?: Array<{
+    itemId: string
+    result: 'PASS' | 'FAIL' | 'NOT_VERIFIED'
+    reason: string
+    evidence?: Array<{
+      chapterNo: number
+      chapterId: string
+      rangeStart: number
+      rangeEnd: number
+      exactQuote: string
+    }>
+    details?: Record<string, unknown>
+  }>
+  platformMatrix?: Array<{
+    platformId: string
+    displayName: string
+    mainstream: boolean
+    status: 'PASS' | 'FAIL' | 'NOT_VERIFIED'
+    items: Array<{ itemId: string; result: 'PASS' | 'FAIL' | 'NOT_VERIFIED'; reason: string }>
+    submissionWords?: { minimum: number | null; current: number; distance: number | null }
+  }>
+  confirmation?: { confirmed: boolean; confirmedBy?: string | null; confirmedAt?: string | null; platformId?: string | null }
+  declarationPrompt?: string
   receiptRef?: { artifactId: string; version: number; payloadHash: string }
   evaluation?: {
     status: 'NOT_STARTED' | 'IN_REVIEW' | 'COMPLETED' | 'FAILED'
@@ -506,10 +530,13 @@ export interface SigningProjection {
     pitchVersion?: string
     constitutionVersion?: string
     namingVersion?: string
-    openingContractVersion?: string
+    openingContractVersion?: string | number | null
     chapterHashes: string[]
     reviewReportId?: string | null
     receiptHash?: string
+    confirmedPlatform?: string | null
+    ruleSetVersion?: string
+    ruleSetDigest?: string
   }
 }
 
@@ -947,6 +974,7 @@ export type CommandType =
   | 'retcon_apply'
   | 'dependency_summary_bootstrap'
   | 'opening_evaluate'
+  | 'signing_confirm'
   | 'backup_create'
   | 'integrity_check_run'
   | 'endgame_contract_create'

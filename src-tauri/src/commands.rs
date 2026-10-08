@@ -717,7 +717,7 @@ pub fn query_command_receipt_impl(state: &KernelState, request: Value) -> Result
 
 pub fn query_production_center_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?.to_string();
-    state
+    let mut projection = state
         .manager
         .with_read_connection(&project_id, "1970-01-01T00:00:00Z", |connection| {
             crate::repositories::production::ProductionRepository::center_projection(
@@ -726,7 +726,40 @@ pub fn query_production_center_impl(state: &KernelState, request: Value) -> Resu
             )
             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if projection
+        .pointer("/signing/status")
+        .and_then(Value::as_str)
+        == Some("PASS")
+    {
+        if let Some(receipt_ref) =
+            projection
+                .pointer("/signing/receiptRef")
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<crate::generated::types::ArtifactRef>(value).ok()
+                })
+        {
+            let current = state.manager.with_read_connection(
+                &project_id,
+                "1970-01-01T00:00:00Z",
+                |connection| {
+                    crate::signing::signing_evaluation_is_current_in_project(
+                        connection,
+                        &project_id,
+                        &receipt_ref,
+                    )
+                    .map_err(ManagerError::ProjectCommand)
+                },
+            );
+            if !current.unwrap_or(false) {
+                projection["signing"]["status"] = json!("STALE");
+                projection["signing"]["verdict"] =
+                    json!("签约评估绑定的正文、合同、规则或平台档案已变化，请重新评估。");
+            }
+        }
+    }
+    Ok(projection)
 }
 
 pub fn query_search_fulltext_impl(state: &KernelState, request: Value) -> Result<Value, String> {
@@ -7111,16 +7144,49 @@ fn execute_planning_command_with_observer(
             Ok::<_, String>(reachable && crate::repositories::narrative::NarrativeRepository::opening_canon_reference_exists(&handle, project_id, reference).map_err(|e| e.to_string())?)
         })?;
         let receipt_passes = evidence_refs.iter().try_fold(false, |passed, reference| {
-            Ok::<_, String>(
-                passed
-                    || crate::repositories::narrative::NarrativeRepository::signing_receipt_passes(
-                        &handle,
-                        project_id,
-                        reference,
-                        &canon_refs,
-                    )
-                    .map_err(|e| e.to_string())?,
+            if passed {
+                return Ok::<_, String>(true);
+            }
+            let Some(current_ref) = signing_head
+                .as_ref()
+                .filter(|head| head.artifact_id == *reference)
+            else {
+                return crate::repositories::narrative::NarrativeRepository::signing_receipt_passes(
+                    &handle,
+                    project_id,
+                    reference,
+                    &canon_refs,
+                )
+                .map_err(|error| error.to_string());
+            };
+            let signing_payload =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    &handle,
+                    project_id,
+                    current_ref,
+                )
+                .map_err(|error| error.to_string())?;
+            let is_signing_eval_r1 = signing_payload
+                .as_ref()
+                .and_then(|payload| payload.get("evaluationRuleVersion"))
+                .and_then(Value::as_str)
+                == Some(crate::signing::SIGNING_RULESET_VERSION);
+            let current = !is_signing_eval_r1
+                || crate::signing::signing_receipt_is_current_and_confirmed_in_project(
+                    &handle,
+                    project_id,
+                    current_ref,
+                )?;
+            if !current {
+                return Ok(false);
+            }
+            crate::repositories::narrative::NarrativeRepository::signing_receipt_passes(
+                &handle,
+                project_id,
+                reference,
+                &canon_refs,
             )
+            .map_err(|error| error.to_string())
         })?;
         if canon_refs.len() < 3 || !canon_reachable || !receipt_passes {
             return Err("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE".into());
@@ -8156,7 +8222,17 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             // product FrontendPort exposes `opening_evaluate` as the single
             // formal mutation; legacy IPC callers may still be routed here.
             project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
-            crate::signing::execute_opening_evaluation(&state.manager, &request)
+            crate::signing::execute_opening_evaluation(
+                &state.manager,
+                &state.paths,
+                state.production_gateway.as_ref(),
+                &state.skill_bundle_loader,
+                &request,
+            )
+        }
+        "signing_confirm" => {
+            project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::signing::confirm_signing_platform(&state.manager, &request)
         }
         // `planning_finalize_book_plan` is an INTERNAL_COMPAT alias;
         // `book_plan_revise` is the only product command for this operation.

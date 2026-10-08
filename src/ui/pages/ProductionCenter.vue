@@ -17,6 +17,7 @@ const project = computed(() => store.project)
 const production = computed(() => store.production)
 const productionLoadError = ref('')
 const lastCommand = ref('none')
+const selectedSigningPlatform = ref('')
 const repairReverifyInFlight = ref(false)
 const commandState = computed(() => store.commandState(lastCommand.value))
 const repairExecutionPending = computed(() => {
@@ -25,6 +26,7 @@ const repairExecutionPending = computed(() => {
 })
 const productionStartState = computed(() => store.commandState('production-start'))
 const evaluationCommandState = computed(() => store.commandState('opening-evaluate'))
+const signingConfirmationCommandState = computed(() => store.commandState('signing-confirm'))
 const bookPlanCommandState = computed(() => store.commandState('book-plan-revise'))
 const qualityDimensions = computed(() => Object.entries(production.value?.quality?.dimensions ?? {}))
 const qualityFindings = computed(() => production.value?.quality?.findings ?? [])
@@ -33,6 +35,10 @@ const repairAffectedScopes = computed(() => production.value?.repair?.affectedSc
 const openingProgress = computed(() => production.value?.openingProgress)
 const signing = computed(() => production.value?.signing)
 const bookPlan = computed(() => production.value?.bookPlan)
+const passingSigningPlatforms = computed(() => signing.value?.platformMatrix?.filter(item => item.mainstream && item.status === 'PASS') ?? [])
+const selectedSigningPlatformId = computed(() => passingSigningPlatforms.value.some(item => item.platformId === selectedSigningPlatform.value)
+  ? selectedSigningPlatform.value
+  : passingSigningPlatforms.value[0]?.platformId ?? '')
 const stageLabel = (value: unknown) => ({ CONTEXT: '准备创作上下文', PLAN: '编译章节计划', RENDER: '生成正文', CANDIDATE: '整理正文候选', AUDIT: '审计与事实提取', GATE: '一致性与准入校验', COMMIT: '正式提交', RECONCILE: '状态回写与后续判断', COMPLETED: '本章完成', OPENING: '开篇准备', OPENING_PRODUCTION: '开篇创作', VOLUME_PRODUCTION: '长篇创作', IDLE: '等待开始' } as Record<string, string>)[String(value)] ?? '进行中'
 const gateLabel = (value: unknown) => ({ PASS: '已通过', BLOCKED: '暂时阻断', PENDING: '等待检查', FAIL: '未通过' } as Record<string, string>)[String(value)] ?? '等待检查'
 const reconciliationLabel = (value: unknown) => ({ NO_ACTION: '无需处理', RECOMPILE_NEXT_CHAPTER: '需要重新规划下一章', RECOMPILE_ROLLING_WINDOW: '需要更新后续预览', REPLAN_VOLUME_ROUTE: '需要调整本卷路线', CHANGE_REQUEST: '需要正式变更确认' } as Record<string, string>)[String(value)] ?? '等待判断'
@@ -80,7 +86,11 @@ const canEvaluateOpening = computed(() => openingProgress.value?.completed === o
   && openingProgress.value?.total === 3
   && signing.value?.status !== 'PASS')
 const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
+  && signing.value?.confirmation?.confirmed === true
   && bookPlan.value?.status !== 'APPROVED')
+const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
+  && signing.value?.confirmation?.confirmed !== true
+  && passingSigningPlatforms.value.length > 0)
 const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
 const authoritativeRunState = computed<RunState>(() => {
   switch (production.value?.jobStatus) {
@@ -172,7 +182,7 @@ function evaluationStatusLabel() {
   if (signing.value?.status === 'STALE') return '签约依据已失效'
   if (signing.value?.evaluation?.status === 'FAILED') return '评估未完成'
   if (evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW') return '正在评估'
-  if (signing.value?.status === 'PASS' || signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '评估完成'
+  if (['PASS', 'FAIL', 'NOT_VERIFIED', 'REVISE', 'REJECTED'].includes(String(signing.value?.status))) return '评估完成'
   return '等待三章完成'
 }
 
@@ -180,8 +190,27 @@ function signingVerdictLabel() {
   if (signing.value?.status === 'STALE') return '需要重新评估'
   if (signing.value?.evaluation?.status === 'FAILED') return '评估失败，尚无有效结论'
   if (signing.value?.status === 'PASS') return 'PASS'
-  if (signing.value?.status === 'REVISE' || signing.value?.status === 'REJECTED') return '需要修订'
+  if (signing.value?.status === 'FAIL') return 'FAIL'
+  if (signing.value?.status === 'NOT_VERIFIED') return '无法验证，不能确认签约'
+  if (signing.value?.status === 'REVISE') return '未通过（历史评估）'
+  if (signing.value?.status === 'REJECTED') return '未通过'
   return '尚未评估'
+}
+
+function signingItemLabel(itemId: string) {
+  const labels: Record<string, string> = {
+    'C0-2': '内容禁区', 'C0-3': '原创性', 'F1-1': '章节字数与标题', 'F1-2': '标点与排版',
+    'F1-3': '提纲式写文', 'F1-4': '剧情复述', 'F1-5': '句式重复',
+    'R2-1': '注水', 'R2-2': '流水账', 'R2-3': '逻辑连贯', 'R2-4': '语言机械', 'R2-5': '表述清晰', 'R2-6': '风格统一',
+    'E3-1': '主线清晰', 'E3-2': '情绪与代入', 'E3-3': '情节流畅', 'E3-4': '开篇切入', 'E3-5': '核心看点', 'E3-6': '情绪回报',
+    'E3-7': '章末钩子', 'E3-8': '人物辨识度', 'E3-9': '长篇可扩展', 'E3-11': '危机感',
+  }
+  if (itemId.startsWith('E3-10:')) return '平台定位匹配'
+  return labels[itemId] ?? itemId
+}
+
+function itemResultLabel(result: unknown) {
+  return ({ PASS: '通过', FAIL: '未通过', NOT_VERIFIED: '无法验证' } as Record<string, string>)[String(result)] ?? '待检查'
 }
 
 function evaluationStepClass(status: unknown) {
@@ -214,6 +243,20 @@ async function evaluateOpening() {
     // Store-owned command feedback keeps the typed failure visible.
   } finally {
     if (!store.production?.runtimeOperation?.active) runtimePoller.stop()
+  }
+}
+
+async function confirmSigning() {
+  if (!canConfirmSigning.value || !selectedSigningPlatformId.value) return
+  lastCommand.value = 'signing-confirm'
+  try {
+    await store.runCommand(lastCommand.value, {
+      type: 'signing_confirm',
+      payload: { platformId: selectedSigningPlatformId.value },
+    })
+    await store.loadProduction(true)
+  } catch {
+    // Store-owned command feedback keeps the typed failure visible.
   }
 }
 
@@ -339,9 +382,10 @@ async function reverifyRepair() {
           <h2 class="card-title" style="margin-top:6px">开篇评估</h2>
           <p class="card-subtitle">只读取三章已正式提交的正文、事实与证据；评估结果和签约回执来自后端正式记录。</p>
         </div>
-        <span class="badge" :class="signing?.status === 'PASS' ? 'success' : signing?.status === 'REVISE' || signing?.status === 'REJECTED' ? 'warning' : 'info'">{{ evaluationStatusLabel() }}</span>
+        <span class="badge" :class="signing?.status === 'PASS' ? 'success' : signing?.status === 'FAIL' || signing?.status === 'NOT_VERIFIED' || signing?.status === 'STALE' || signing?.status === 'REVISE' || signing?.status === 'REJECTED' ? 'warning' : 'info'">{{ evaluationStatusLabel() }}</span>
       </div>
       <CommandFeedback :state="evaluationCommandState" @confirm="store.confirmCommandResult('opening-evaluate')" />
+      <CommandFeedback :state="signingConfirmationCommandState" @confirm="store.confirmCommandResult('signing-confirm')" />
       <CommandFeedback :state="bookPlanCommandState" @confirm="store.confirmCommandResult('book-plan-revise')" />
       <div class="evaluation-steps" v-if="signing?.evaluation?.steps?.length" data-opening-evaluation-progress>
         <div v-for="step in signing.evaluation.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
@@ -350,8 +394,31 @@ async function reverifyRepair() {
         </div>
       </div>
       <div class="task-row" aria-live="polite"><strong>评估结果</strong><span>{{ signingVerdictLabel() }} · {{ signing?.verdict || '等待三章正式提交后开始评估。' }}</span></div>
+      <div v-if="signing?.coreStatus" class="task-row"><strong>通用核心</strong><span>{{ itemResultLabel(signing.coreStatus) }}</span></div>
+      <div v-if="signing?.platformMatrix?.length" class="signing-matrix" aria-label="平台适配矩阵">
+        <h3 class="section-title">平台适配矩阵</h3>
+        <article v-for="platform in signing.platformMatrix" :key="platform.platformId" class="signing-platform">
+          <div class="task-row"><strong>{{ platform.displayName }}</strong><span>{{ itemResultLabel(platform.status) }}<span v-if="platform.submissionWords?.minimum !== null && platform.submissionWords?.minimum !== undefined"> · 距投稿门槛约 {{ platform.submissionWords.distance }} 字</span></span></div>
+          <div v-for="item in platform.items" :key="`${platform.platformId}:${item.itemId}`" class="signing-item-detail">
+            <strong>{{ signingItemLabel(item.itemId) }} · {{ itemResultLabel(item.result) }}</strong>
+            <span>{{ item.reason }}</span>
+          </div>
+        </article>
+      </div>
+      <div v-if="signing?.itemResults?.length" class="signing-results" aria-label="逐项评估结果">
+        <h3 class="section-title">逐项评估与原文依据</h3>
+        <article v-for="item in signing.itemResults" :key="item.itemId" class="signing-item-detail">
+          <strong>{{ signingItemLabel(item.itemId) }} · {{ itemResultLabel(item.result) }}</strong>
+          <span>{{ item.reason }}</span>
+          <blockquote v-for="(evidence, index) in item.evidence ?? []" :key="`${item.itemId}:${index}`">
+            第 {{ evidence.chapterNo }} 章：{{ evidence.exactQuote }}
+          </blockquote>
+        </article>
+      </div>
       <div class="task-row"><strong>评估依据摘要</strong><span>三章 {{ signing?.summary?.chapters ?? '未提供' }} · 事实 {{ signing?.summary?.canonRefs ?? '未提供' }} 条 · 证据 {{ signing?.summary?.evidenceRefs ?? '未提供' }} 条</span></div>
       <div class="task-row"><strong>正式签约回执</strong><span>{{ signing?.receipt?.id ? `${signing.receipt.id} · 已提交` : '尚未生成' }}</span></div>
+      <div v-if="signing?.confirmation?.confirmed" class="task-row"><strong>签约确认</strong><span>已确认 {{ signing.confirmation.platformId }} · {{ signing.confirmation.confirmedAt }}</span></div>
+      <div v-if="signing?.declarationPrompt" class="task-row"><strong>AI 生成声明提示</strong><span>{{ signing.declarationPrompt }}</span></div>
       <div class="task-row"><strong>正式总纲</strong><span>{{ signing?.status === 'STALE' ? '历史版本保留，等待依据复核' : bookPlan?.status === 'APPROVED' ? '已生成正式版本' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
       <div v-if="bookPlan?.steps?.length" class="evaluation-steps" aria-label="正式总纲运行步骤">
         <div v-for="step in bookPlan.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
@@ -361,6 +428,13 @@ async function reverifyRepair() {
       </div>
       <div class="actions" style="margin-top:14px">
         <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">{{ evaluationActionLabel() }}</button>
+        <label v-if="canConfirmSigning" class="field signing-platform-select">
+          <span class="field-label">确认签约平台</span>
+          <select :value="selectedSigningPlatformId" class="select" @change="selectedSigningPlatform = ($event.target as HTMLSelectElement).value">
+            <option v-for="platform in passingSigningPlatforms" :key="platform.platformId" :value="platform.platformId">{{ platform.displayName }}</option>
+          </select>
+        </label>
+        <button v-if="canConfirmSigning" class="btn primary" @click="confirmSigning">确认签约</button>
         <button v-if="canFinalizeBookPlan" class="btn primary" @click="finalizeBookPlan">{{ bookPlanActionLabel() }}</button>
       </div>
     </section>

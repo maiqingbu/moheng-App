@@ -2527,6 +2527,7 @@ fn validate_planning_owner_prerequisites(
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
     validate_volume_route(&route)?;
+    crate::signing::require_current_signing_for_long_form_if_present(connection, project_id)?;
     Ok(())
 }
 

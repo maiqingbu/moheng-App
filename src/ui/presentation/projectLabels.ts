@@ -31,9 +31,11 @@ export const runStateLabels: Record<RunState, string> = {
 export const signingLabels: Record<SigningStatus, string> = {
   NOT_STARTED: '未评估',
   IN_REVIEW: '评估中',
-  REVISE: '需要修订',
+  REVISE: '未通过（历史评估）',
   REJECTED: '未通过',
   PASS: '已通过',
+  FAIL: '评估未通过',
+  NOT_VERIFIED: '无法确认',
   STALE: '需要重新评估'
 }
 

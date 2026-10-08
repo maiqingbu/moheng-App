@@ -1,0 +1,67 @@
+{
+  "version": "signing-eval.r1",
+  "authoredMode": "TEXT_MODEL_GENERATED",
+  "levels": [
+    {
+      "id": "C0",
+      "name": "合规",
+      "deterministic": ["C0-1", "C0-3"],
+      "model": ["C0-2"],
+      "noticeOnly": ["C0-4"]
+    },
+    {
+      "id": "F1",
+      "name": "格式与结构",
+      "deterministic": true,
+      "anyFailFailsCore": true,
+      "items": [
+        {"itemId":"F1-1","description":"三章有标题且单章 2000–5000 字；低于 800 字硬失败。","minimumChars":2000,"maximumChars":5000,"hardFailBelowChars":800,"status":"calibrating"},
+        {"itemId":"F1-2","description":"重复标点、全半角标点混用、异常空行、残留 Markdown。","maximumFindings":0,"status":"calibrating"},
+        {"itemId":"F1-3","description":"不得出现提纲式小标题、编号列表、第一幕或场景一等标记。","maximumFindings":0,"status":"calibrating"},
+        {"itemId":"F1-4","description":"章首不应大段复述前章。","maximumOverlappingChars":180,"status":"calibrating"},
+        {"itemId":"F1-5","description":"检测句式模板化及跨章重复片段。","repeatedPhraseOccurrences":3,"phraseChars":12,"status":"calibrating"}
+      ]
+    },
+    {
+      "id": "R2",
+      "name": "文笔与可读性",
+      "model": true,
+      "items": [
+        {"itemId":"R2-1","description":"无推进作用的环境与心理描写占比过高。","sourceLevel":"NEWS","sourceUrl":"https://news.bjd.com.cn/2026/05/26/11767229.shtml","checkedAt":"2026-10-08"},
+        {"itemId":"R2-2","description":"每章列不出推动故事的事件。","sourceLevel":"NEWS","sourceUrl":"https://news.bjd.com.cn/2026/05/26/11767229.shtml","checkedAt":"2026-10-08"},
+        {"itemId":"R2-3","description":"前后脱节、动机断裂或时间线错乱；B08 未决硬问题直接 FAIL。","sourceLevel":"NEWS","sourceUrl":"https://www.xhby.net/content/s6a85248de4b02a27aa5a24f3.html","checkedAt":"2026-10-08"},
+        {"itemId":"R2-4","description":"行文机械、套话或空泛词堆叠。","sourceLevel":"NEWS","sourceUrl":"https://www.xhby.net/content/s6a85248de4b02a27aa5a24f3.html","checkedAt":"2026-10-08"},
+        {"itemId":"R2-5","description":"表述清晰，不存在需要重读的歧义。","sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08"},
+        {"itemId":"R2-6","description":"三章语体、视角、语气保持统一。","sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08","threshold":{"status":"calibrating"}}
+      ]
+    },
+    {
+      "id": "E3",
+      "name": "编辑签约要素",
+      "model": true,
+      "items": [
+        {"itemId":"E3-1","description":"第 1 章交代主角、处境与目标，三章围绕一条主线。","critical":true,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-2","description":"主角情绪具体可感，复杂情感有层次。","critical":true,"sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08"},
+        {"itemId":"E3-3","description":"情节流畅，无大幅跳跃或未交代转场。","critical":true,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-4","description":"第 1 章开头进入冲突、异常或悬念。","critical":true,"sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08"},
+        {"itemId":"E3-5","description":"Story Seed 核心机制在三章内呈现并起作用。","critical":true,"sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/zongheng/执笔定乾坤","checkedAt":"2026-10-08"},
+        {"itemId":"E3-6","description":"三章内至少两次与类型相符的情绪回报。","critical":true,"sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08"},
+        {"itemId":"E3-7","description":"每章结尾留下继续阅读的理由。","critical":false,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-8","description":"主要人物说话方式与行动逻辑可区分。","critical":false,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-9","description":"BookPlan SEED 能支撑长篇。","critical":false,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-10","description":"类型、读者向、尺度与平台档案定位一致。","critical":false,"platformSpecific":true,"sourceLevel":"EXPERIENCE","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","checkedAt":"2026-10-08"},
+        {"itemId":"E3-11","description":"主角面临明确、迫近且有代价的威胁。","critical":true,"sourceLevel":"USER_REJECTION","sourceUrl":"user://rejection/qimao/暴富从封杀开始","checkedAt":"2026-10-08"}
+      ]
+    }
+  ],
+  "decisions": {
+    "platformCompatibilityIsHardGate": true,
+    "overallPassRequiresCorePassAndAtLeastOneMainstreamPlatformPass": true,
+    "unknownRequiredItemBlocksPass": true,
+    "evidenceQuoteMustMatchExactSourceSpan": true,
+    "automaticQuoteCorrection": false,
+    "aiDetectionEvasion": false,
+    "declarationPromptOnly": "C0-4",
+    "declarationPrompt": "本作品包含 AI 模型生成正文。投稿或发布前，请按目标平台与适用规定如实声明。"
+  }
+}

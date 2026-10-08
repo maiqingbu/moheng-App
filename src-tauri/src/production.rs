@@ -2701,6 +2701,17 @@ fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
     Ok(())
 }
 
+pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Result<(), String> {
+    exact_quote(
+        body,
+        &EvidenceSpan {
+            start,
+            end,
+            quote: quote.to_owned(),
+        },
+    )
+}
+
 fn validate_actual_extraction(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,

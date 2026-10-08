@@ -1,0 +1,13 @@
+{
+  "platformId": "FANQIE",
+  "displayName": "番茄小说",
+  "version": "fanqie.r1",
+  "mainstream": true,
+  "compatibility": "PASS_IF_CORE_PASS",
+  "rules": [
+    {"id":"C0-1","description":"正文由模型生成并非全面禁止；粗制滥造、格式混乱、空洞水文等会被治理。","sourceUrl":"https://news.bjd.com.cn/2026/05/26/11767229.shtml","sourceLevel":"NEWS","checkedAt":"2026-10-08"},
+    {"id":"low-quality-governance","description":"治理描述包括机械生硬、模板化、排版错乱、无意义注水、前后脱节、逻辑错乱、结构崩坏。","sourceUrl":"https://www.xhby.net/content/s6a85248de4b02a27aa5a24f3.html","sourceLevel":"NEWS","checkedAt":"2026-10-08"},
+    {"id":"submission-words","description":"约 2 万字可申请，经验阈值。","minimumWords":20000,"status":"calibrating","sourceUrl":"https://www.toutiao.com/zixun/7494868866817460265/","sourceLevel":"EXPERIENCE","checkedAt":"2026-10-08"}
+  ],
+  "readerPositioning": {"description":"大众网文读者；以类型承诺清晰、推进紧凑为评估背景。","sourceUrl":"https://www.xhby.net/content/s6a85248de4b02a27aa5a24f3.html","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+}

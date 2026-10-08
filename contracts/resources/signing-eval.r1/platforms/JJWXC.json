@@ -1,0 +1,11 @@
+{
+  "platformId": "JJWXC",
+  "displayName": "晋江文学城（参考）",
+  "version": "jjwxc-reference.r1",
+  "mainstream": false,
+  "compatibility": "FAIL",
+  "rules": [
+    {"id":"C0-1","description":"AI 试运行规则只允许校对、要素生成、粗纲，不允许 AI 直接生成情节。","sourceUrl":"https://www.sohu.com/a/867999552_121956424","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+  ],
+  "readerPositioning": {"description":"本档案仅作参考，不参与主流平台 PASS 汇总。","sourceUrl":"https://www.sohu.com/a/867999552_121956424","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+}

@@ -1,0 +1,12 @@
+{
+  "platformId": "ZONGHENG",
+  "displayName": "纵横中文网",
+  "version": "zongheng.r1",
+  "mainstream": true,
+  "compatibility": "NOT_VERIFIED",
+  "rules": [
+    {"id":"C0-1","description":"官方帮助中心未说明 AI 正文政策，兼容性保持未验证。","sourceUrl":"https://doc.zongheng.com/help/2/SIGN_UP.html","sourceLevel":"OFFICIAL","checkedAt":"2026-10-08"},
+    {"id":"submission-words","description":"站内更新满 3 万字可审核；分成投稿 3 万字正文和大纲，买断 6 万字正文和大纲。","minimumWords":30000,"buyoutWords":60000,"status":"calibrating","sourceUrl":"https://doc.zongheng.com/help/2/SIGN_UP.html","sourceLevel":"OFFICIAL","checkedAt":"2026-10-08"}
+  ],
+  "readerPositioning": {"description":"官方签约帮助页提供投稿条件，未提供 AI 兼容结论。","sourceUrl":"https://doc.zongheng.com/help/2/SIGN_UP.html","sourceLevel":"OFFICIAL","checkedAt":"2026-10-08"}
+}

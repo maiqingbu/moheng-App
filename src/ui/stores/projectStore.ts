@@ -760,7 +760,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   function inFlightCommandKey(request: CommandRequest): string | null {
-    if (!['opening_ready', 'opening_start_creating', 'production_start', 'opening_evaluate', 'book_plan_revise', 'planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter', 'planning_compile_chapter_plan'].includes(request.type)) return null
+    if (!['opening_ready', 'opening_start_creating', 'production_start', 'opening_evaluate', 'signing_confirm', 'book_plan_revise', 'planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter', 'planning_compile_chapter_plan'].includes(request.type)) return null
     const projectId = request.projectId ?? currentProjectId.value
     if (!projectId) return null
     const chapterId = request.type === 'production_start' ? request.payload?.chapterId : undefined

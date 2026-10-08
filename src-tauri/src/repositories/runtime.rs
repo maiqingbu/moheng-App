@@ -1319,6 +1319,19 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    pub fn has_unknown_remote_run(
+        connection: &Connection,
+        project_id: &str,
+        capability: &str,
+    ) -> Result<bool, RuntimeError> {
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability=?2 AND status='UNKNOWN_REMOTE_OUTCOME'",
+            libsql_rusqlite::params![project_id, capability],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn persisted_raw_response(
         connection: &Connection,
         model_run_id: &str,

@@ -257,6 +257,73 @@ pub struct CanonEventRecord {
 pub struct NarrativeRepository;
 
 impl NarrativeRepository {
+    pub fn chapter_title(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT title FROM chapters WHERE project_id=?1 AND chapter_id=?2 AND status='COMMITTED'",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Reads bounded bodies from canonical FinalChapter heads for the
+    /// deterministic signing originality check. A truncated result cannot be
+    /// treated as proof of originality.
+    pub fn canonical_final_bodies(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<(String, String)>, bool), NarrativeRepositoryError> {
+        let bound = limit.clamp(1, 10_000);
+        let mut statement = connection.prepare(
+            "SELECT h.artifact_id,p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version AND a.payload_hash=h.payload_hash AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version AND p.payload_hash=a.payload_hash WHERE h.project_id=?1 AND h.artifact_type='FinalChapter' ORDER BY h.artifact_id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| {
+            let artifact_id: String = row.get(0)?;
+            let payload: String = row.get(1)?;
+            Ok((artifact_id, payload))
+        })?;
+        let mut bodies = Vec::new();
+        for row in rows {
+            let (artifact_id, raw_payload) = row?;
+            let payload: Value = serde_json::from_str(&raw_payload)?;
+            if let Some(body) = payload.get("body").and_then(Value::as_str) {
+                bodies.push((artifact_id, body.to_owned()));
+            }
+        }
+        let truncated = bodies.len() > bound as usize;
+        bodies.truncate(bound as usize);
+        Ok((bodies, truncated))
+    }
+
+    pub fn canonical_final_head_refs(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<(Vec<ArtifactRef>, bool), NarrativeRepositoryError> {
+        let bound = limit.clamp(1, 10_000);
+        let mut statement = connection.prepare(
+            "SELECT h.artifact_id,h.version,h.payload_hash FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version AND a.payload_hash=h.payload_hash AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE h.project_id=?1 AND h.artifact_type='FinalChapter' ORDER BY h.artifact_id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, bound + 1], |row| {
+            Ok(ArtifactRef {
+                artifact_id: row.get(0)?,
+                version: row.get(1)?,
+                payload_hash: row.get(2)?,
+            })
+        })?;
+        let mut refs = rows.collect::<Result<Vec<_>, _>>()?;
+        let truncated = refs.len() > bound as usize;
+        refs.truncate(bound as usize);
+        Ok((refs, truncated))
+    }
+
     pub fn recent_committed_chapters(
         connection: &Connection,
         project_id: &str,
@@ -2224,7 +2291,7 @@ impl NarrativeRepository {
         }
         let payload: Option<String> = connection
             .query_row(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED'",
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED' ORDER BY a.version DESC LIMIT 1",
                 libsql_rusqlite::params![project_id, receipt_id],
                 |row| row.get(0),
             )
@@ -2235,7 +2302,7 @@ impl NarrativeRepository {
         let payload: Value = serde_json::from_str(&payload)?;
         let stored_hash: Option<String> = connection
             .query_row(
-                "SELECT a.payload_hash FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version AND p.payload_hash=a.payload_hash WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED'",
+                "SELECT a.payload_hash FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version AND p.payload_hash=a.payload_hash WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type='SimulatedSigningReceipt' AND a.artifact_status='COMMITTED' ORDER BY a.version DESC LIMIT 1",
                 libsql_rusqlite::params![project_id, receipt_id],
                 |row| row.get(0),
             )
@@ -2251,6 +2318,35 @@ impl NarrativeRepository {
         }
         let verdict_pass = payload.get("status").and_then(Value::as_str) == Some("PASS")
             || payload.get("verdict").and_then(Value::as_str) == Some("PASS");
+        let confirmed_platform = payload
+            .pointer("/confirmation/platformId")
+            .and_then(Value::as_str);
+        let confirmation_passes = if payload.get("evaluationRuleVersion").and_then(Value::as_str)
+            == Some("signing-eval.r1")
+        {
+            payload
+                .pointer("/confirmation/confirmed")
+                .and_then(Value::as_bool)
+                == Some(true)
+                && confirmed_platform.is_some_and(|platform_id| {
+                    ["FANQIE", "QIDIAN", "QIMAO", "ZONGHENG"].contains(&platform_id)
+                        && payload
+                            .get("platformMatrix")
+                            .and_then(Value::as_array)
+                            .is_some_and(|matrix| {
+                                matrix.iter().any(|entry| {
+                                    entry.get("platformId").and_then(Value::as_str)
+                                        == Some(platform_id)
+                                        && entry.get("mainstream").and_then(Value::as_bool)
+                                            == Some(true)
+                                        && entry.get("status").and_then(Value::as_str)
+                                            == Some("PASS")
+                                })
+                            })
+                })
+        } else {
+            true
+        };
         let opening_chapter_refs = payload
             .get("openingChapterRefs")
             .and_then(Value::as_array)
@@ -2306,7 +2402,7 @@ impl NarrativeRepository {
                     })
             })
             .unwrap_or(false);
-        Ok(verdict_pass && opening_chapters && receipt_canon_refs)
+        Ok(verdict_pass && confirmation_passes && opening_chapters && receipt_canon_refs)
     }
 
     pub fn latest_artifact_payload(

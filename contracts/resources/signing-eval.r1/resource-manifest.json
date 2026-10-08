@@ -1,0 +1,13 @@
+{
+  "version": "signing-eval.r1",
+  "files": {
+    "core.json": "719a821406c56514c552d3e3f0d2bf2251f937d4b5207d066e969936c1f353c7",
+    "model-output.schema.json": "52bc266f9778e236b8bd78aefdbe219b63f3a3aa3ec3b698748fcccab42a4241",
+    "fixtures/rejection-mappings.json": "cd901fd81c6bc060f610319eed55b95fbfaa6285028b1b5597bddf7363478c38",
+    "platforms/FANQIE.json": "8e4cb190bd545675c52afdba148e88d7cefc5dcc76053ad321f1e36f2db34e44",
+    "platforms/QIDIAN.json": "3059cf10d8d882f4df4d888d33ef2adfedb587effc5c130e710faa23b94e5643",
+    "platforms/QIMAO.json": "21547ab383457f96e979d900dfdf1e10f3d49d91b84539f35fc447e186d6fcd8",
+    "platforms/ZONGHENG.json": "b4d0b6c304ee942671015e7e397a789bca47722e315590ff35596bfd01c48594",
+    "platforms/JJWXC.json": "bd67c6806184f6068a5386dafa6ea504b1b75be08b81748c94f71a1bfa7da0ce"
+  }
+}

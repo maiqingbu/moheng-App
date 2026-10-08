@@ -1,0 +1,24 @@
+{
+  "version": "signing-eval.r1",
+  "fixtures": [
+    {
+      "platformId": "QIMAO",
+      "workTitle": "暴富从封杀开始",
+      "reasons": [
+        {"quote":"文笔表述的清晰度略有不足","itemId":"R2-5"},
+        {"quote":"在描绘复杂情感时不够细腻","itemId":"E3-2"},
+        {"quote":"在风格上不够统一","itemId":"R2-6"},
+        {"quote":"故事开篇的切入点缺乏足够的吸引力","itemId":"E3-4"},
+        {"quote":"危机感有点欠缺","itemId":"E3-11"},
+        {"quote":"爽点不够","itemId":"E3-6"}
+      ]
+    },
+    {
+      "platformId": "ZONGHENG",
+      "workTitle": "执笔定乾坤",
+      "reasons": [
+        {"quote":"故事看点有些不足","itemId":"E3-5"}
+      ]
+    }
+  ]
+}

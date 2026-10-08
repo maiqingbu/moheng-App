@@ -424,6 +424,8 @@ impl ProductionRepository {
                     .or(Some(runtime.4.as_str()))
             })
             .unwrap_or("NOT_STARTED");
+        let legacy_revise = signing_status == "REVISE";
+        let signing_status = if legacy_revise { "FAIL" } else { signing_status };
         let signing_evaluation = if let Some((_, _, phase, status, _)) = signing_operation {
             json!({
                 "status": if status == "FAILED" { "FAILED" } else if status == "COMPLETED" { "COMPLETED" } else { "IN_REVIEW" },
@@ -451,13 +453,23 @@ impl ProductionRepository {
                 "signedAt":payload.and_then(|value| value.get("evaluatedAt")).cloned().unwrap_or(Value::Null),
                 "chapterHashes":payload.and_then(|value| value.get("chapterEvidence")).and_then(Value::as_array).map(|items| items.iter().filter_map(|item| item.pointer("/finalChapterRef/payloadHash").cloned()).collect::<Vec<_>>()).unwrap_or_default(),
                 "reviewReportId":payload.and_then(|value| value.get("reviewReportRef")).cloned().unwrap_or(Value::Null),
+                "platformPolicyVersion":payload.and_then(|value| value.get("evaluationRuleVersion")).cloned().unwrap_or(Value::Null),
+                "ruleSetVersion":payload.and_then(|value| value.get("ruleSetVersion")).cloned().unwrap_or(Value::Null),
+                "ruleSetDigest":payload.and_then(|value| value.get("ruleSetDigest")).cloned().unwrap_or(Value::Null),
+                "openingContractVersion":payload.and_then(|value| value.pointer("/binding/openingContractRef/version")).cloned().unwrap_or(Value::Null),
+                "confirmedPlatform":payload.and_then(|value| value.pointer("/confirmation/platformId")).cloned().unwrap_or(Value::Null),
                 "receiptHash":payload.and_then(|value| value.get("receiptHash")).cloned().unwrap_or_else(|| json!(reference.payload_hash))
             })
         });
         let signing = json!({
             "status":signing_status,
-            "verdict":signing_payload.as_ref().and_then(|payload| payload.get("verdict")).cloned().unwrap_or_else(|| json!("等待三章正式提交后开始开篇评估。")),
+            "verdict":if legacy_revise {json!("历史签约评估未通过（旧版 REVISE）。")} else {signing_payload.as_ref().and_then(|payload| payload.get("verdict")).cloned().unwrap_or_else(|| json!("等待三章正式提交后开始开篇评估。"))},
             "summary":signing_payload.as_ref().and_then(|payload| payload.get("summary")).cloned().unwrap_or_else(|| json!({})),
+            "coreStatus":signing_payload.as_ref().and_then(|payload| payload.get("coreStatus")).cloned().unwrap_or(Value::Null),
+            "itemResults":signing_payload.as_ref().and_then(|payload| payload.get("itemResults")).cloned().unwrap_or_else(|| json!([])),
+            "platformMatrix":signing_payload.as_ref().and_then(|payload| payload.get("platformMatrix")).cloned().unwrap_or_else(|| json!([])),
+            "confirmation":signing_payload.as_ref().and_then(|payload| payload.get("confirmation")).cloned().unwrap_or(Value::Null),
+            "declarationPrompt":signing_payload.as_ref().and_then(|payload| payload.get("declarationPrompt")).cloned().unwrap_or(Value::Null),
             "evaluation":signing_evaluation,
             "openingChapterRefs":signing_payload.as_ref().and_then(|payload| payload.get("openingChapterRefs")).cloned().unwrap_or_else(|| json!([])),
             "openingCanonRefs":signing_payload.as_ref().and_then(|payload| payload.get("openingCanonRefs")).cloned().unwrap_or_else(|| json!([])),

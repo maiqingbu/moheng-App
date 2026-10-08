@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "S35 signing review output",
+  "type": "object",
+  "required": [
+    "skillId", "skillVersion", "bundleDigest", "taskId", "status", "sourceRefs",
+    "assumptions", "payload", "findings", "contextRefs", "runtimeCheckRequests",
+    "confidence", "nextSkillHints"
+  ],
+  "properties": {
+    "skillId": {"const":"S35"},
+    "skillVersion": {"type":"string","pattern":"^\\d+\\.\\d+\\.\\d+$"},
+    "bundleDigest": {"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "taskId": {"type":"string","minLength":1},
+    "status": {"enum":["OK","NEEDS_INPUT","NOT_APPLICABLE","ADVISORY_ESCALATION"]},
+    "sourceRefs": {"type":"array","items":{"type":"string"}},
+    "assumptions": {"type":"array","items":{"type":"string"}},
+    "payload": {
+      "type":"object",
+      "required":[
+        "quality_vector", "findings", "promise_coverage", "desire_state", "repetition",
+        "signing_recommendation", "repair_scope", "signingEvaluationItems"
+      ],
+      "properties": {
+        "quality_vector": {"type":"object"},
+        "findings": {"type":"array","items":{"type":"object"}},
+        "promise_coverage": {"type":"object"},
+        "desire_state": {"type":"object"},
+        "repetition": {"type":"object"},
+        "signing_recommendation": {"type":"object"},
+        "repair_scope": {"type":"array"},
+        "signingEvaluationItems": {
+          "type":"array",
+          "items": {
+            "type":"object",
+            "required":["itemId","result","reason","evidence"],
+            "properties": {
+              "itemId": {"type":"string","minLength":1},
+              "result": {"enum":["PASS","FAIL","NOT_VERIFIED"]},
+              "reason": {"type":"string"},
+              "evidence": {
+                "type":"array",
+                "items": {
+                  "type":"object",
+                  "required":["chapterNo","rangeStart","rangeEnd","exactQuote"],
+                  "properties": {
+                    "chapterNo":{"type":"integer","minimum":1,"maximum":3},
+                    "rangeStart":{"type":"integer","minimum":0},
+                    "rangeEnd":{"type":"integer","minimum":1},
+                    "exactQuote":{"type":"string","minLength":1}
+                  },
+                  "additionalProperties":false
+                }
+              }
+            },
+            "additionalProperties":false
+          }
+        }
+      },
+      "additionalProperties":true
+    },
+    "findings": {"type":"array","items":{"type":"object"}},
+    "contextRefs": {"type":"array","items":{"type":"string"}},
+    "runtimeCheckRequests": {
+      "type":"array",
+      "items": {
+        "type":"object",
+        "required":["kind","reason","refs"],
+        "properties": {
+          "kind":{"enum":["CANON_CONFLICT","KNOWLEDGE_BOUNDARY","THREAD_STATE","TASK_REALITY","RESERVATION","INTEGRITY","PLAN_STALE","EVIDENCE_GAP"]},
+          "reason":{"type":"string","minLength":1},
+          "refs":{"type":"array","items":{"type":"string"}}
+        },
+        "additionalProperties":false
+      }
+    },
+    "confidence":{"type":"number","minimum":0,"maximum":1},
+    "nextSkillHints":{"type":"array","items":{"type":"string"}}
+  },
+  "additionalProperties":false
+}

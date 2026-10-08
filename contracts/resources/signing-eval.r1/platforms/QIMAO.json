@@ -1,0 +1,12 @@
+{
+  "platformId": "QIMAO",
+  "displayName": "七猫中文网",
+  "version": "qimao.r1",
+  "mainstream": true,
+  "compatibility": "NOT_VERIFIED",
+  "rules": [
+    {"id":"C0-1","description":"未查到平台 AI 治理细则；编辑公开表态不能替代平台规则。","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","sourceLevel":"NEWS","checkedAt":"2026-10-08"},
+    {"id":"submission-words","description":"约 2 万字门槛来自经验。","minimumWords":20000,"status":"calibrating","sourceUrl":"https://www.toutiao.com/zixun/7494868866817460265/","sourceLevel":"EXPERIENCE","checkedAt":"2026-10-08"}
+  ],
+  "readerPositioning": {"description":"缺少可核验的平台官方读者定位规则。","sourceUrl":"https://www.toutiao.com/zixun/7489750258910726179/","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+}

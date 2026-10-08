@@ -1,0 +1,12 @@
+{
+  "platformId": "QIDIAN",
+  "displayName": "起点中文网",
+  "version": "qidian.r1",
+  "mainstream": true,
+  "compatibility": "FAIL",
+  "rules": [
+    {"id":"C0-1","description":"反对使用 AI 或自动化手段替代真人完成核心内容产出；本批创作方式为正文由模型生成。","sourceUrl":"https://www.dzwww.com/news/yw/202608/t20260819_18034853.htm","sourceLevel":"NEWS","checkedAt":"2026-10-08"},
+    {"id":"governance","description":"相关处置包括停推荐、撤榜、屏蔽、下架。","sourceUrl":"https://www.dzwww.com/news/yw/202608/t20260819_18034853.htm","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+  ],
+  "readerPositioning": {"description":"按起点公开治理规则评估真人核心内容创作要求。","sourceUrl":"https://www.dzwww.com/news/yw/202608/t20260819_18034853.htm","sourceLevel":"NEWS","checkedAt":"2026-10-08"}
+}
