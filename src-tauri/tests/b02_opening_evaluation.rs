@@ -29,6 +29,86 @@ struct B02Gateway {
     reality_variant: &'static str,
 }
 
+fn signing_fixture_body(chapter_no: usize, reality_variant: &str) -> String {
+    let opening = if reality_variant == "A" {
+        match chapter_no {
+            1 => "林舟在雨夜翻开账本，发现账本缺页，页边的墨迹指向顾清。".to_string(),
+            2 => "顾清把旧账册摊在桌上，承认缺失页码与昨夜的争执有关。".to_string(),
+            3 => "林舟沿门缝找到被顾清夺走的账页，决定继续追查证据。".to_string(),
+            _ => format!("第{chapter_no}章，林舟带着前三章留下的证据继续追查账本。"),
+        }
+    } else {
+        match chapter_no {
+            1 => "林舟在雨夜守住账本，发现封条上的暗记来自旧案。".to_string(),
+            2 => "顾清拿出另一份记录，确认两人暂时结盟并共同核对。".to_string(),
+            3 => "两人带着新的线索离开档案室，决定追问账本的去向。".to_string(),
+            _ => format!("第{chapter_no}章，两人沿着新线索追查账册背后的责任。"),
+        }
+    };
+    let mut body = opening;
+    for index in 0..3500_u32 {
+        let offset = (index
+            .wrapping_mul(7919)
+            .wrapping_add(index.wrapping_mul(index).wrapping_mul(13))
+            .wrapping_add(chapter_no as u32 * 977))
+            % 20_992;
+        body.push(char::from_u32(0x4e00 + offset).expect("CJK fixture character"));
+    }
+    body
+}
+
+fn full_signing_items(input: &Value) -> Value {
+    let chapters = input
+        .pointer("/taskContext/chapters")
+        .and_then(Value::as_array)
+        .expect("signing chapters");
+    let chapter = &chapters[0];
+    let body = chapter["body"].as_str().expect("chapter body");
+    let quote = body.chars().take(40).collect::<String>();
+    let range_end = quote.chars().count();
+    let mut ids = vec![
+        "C0-2", "R2-1", "R2-2", "R2-3", "R2-4", "R2-5", "R2-6", "E3-1", "E3-2", "E3-3", "E3-4",
+        "E3-5", "E3-6", "E3-7", "E3-8", "E3-9", "E3-11",
+    ];
+    ids.extend([
+        "E3-10:FANQIE",
+        "E3-10:QIDIAN",
+        "E3-10:QIMAO",
+        "E3-10:ZONGHENG",
+        "E3-10:JJWXC",
+    ]);
+    let signing_items = ids.into_iter().map(|item_id| json!({
+        "itemId":item_id,
+        "result":"PASS",
+        "reason":"确定性测试评估器返回有据结论。",
+        "evidence":[{"chapterNo":chapter["chapterNo"],"rangeStart":0,"rangeEnd":range_end,"exactQuote":quote}]
+    })).collect::<Vec<_>>();
+    json!({
+        "skillId":input["skillId"],
+        "skillVersion":input["skillVersion"],
+        "bundleDigest":input["bundleDigest"],
+        "taskId":input["taskContext"]["taskId"],
+        "status":"OK",
+        "sourceRefs":[],
+        "assumptions":[],
+        "payload":{
+            "quality_vector":{},
+            "findings":[],
+            "promise_coverage":{},
+            "desire_state":{},
+            "repetition":{},
+            "signing_recommendation":{},
+            "repair_scope":[],
+            "signingEvaluationItems":signing_items
+        },
+        "findings":[],
+        "contextRefs":[],
+        "runtimeCheckRequests":[],
+        "confidence":1.0,
+        "nextSkillHints":[]
+    })
+}
+
 impl B02Gateway {
     fn new(emit_evidence: bool, reality_variant: &'static str) -> Self {
         Self {
@@ -90,19 +170,11 @@ impl ProductionModelGateway for B02Gateway {
                 ]
             }),
             "RENDER_CHAPTER" => json!({
-                "body": if self.reality_variant == "A" {
-                    format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", self.audit_calls.load(Ordering::SeqCst) + 1)
-                } else {
-                    format!("林舟在雨夜守住账本，发现第{}章留下的真实盟约。", self.audit_calls.load(Ordering::SeqCst) + 1)
-                }
+                "body":signing_fixture_body(self.audit_calls.load(Ordering::SeqCst) + 1, self.reality_variant)
             }),
             "AUDIT_EXTRACT" => {
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
-                let body = if self.reality_variant == "A" {
-                    format!("林舟在雨夜翻开账本，发现第{}章留下的真实证据。", chapter_no)
-                } else {
-                    format!("林舟在雨夜守住账本，发现第{}章留下的真实盟约。", chapter_no)
-                };
+                let body = signing_fixture_body(chapter_no, self.reality_variant);
                 let canon_candidates = if self.emit_evidence {
                     let mut candidates = vec![json!({
                         "factId":format!("fact:b02:opening:{}", chapter_no),
@@ -176,9 +248,72 @@ impl ProductionModelGateway for B02Gateway {
                     "unresolvedHard":false
                 })
             }
+            "OPENING_SIGNING_EVALUATION" => full_signing_items(input),
             other => return Err(format!("unexpected B02 capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
+    }
+}
+
+struct NoSigningEvidenceGateway {
+    inner: B02Gateway,
+}
+
+impl ProductionModelGateway for NoSigningEvidenceGateway {
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.inner.resolve_profile()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "OPENING_SIGNING_EVALUATION" {
+            let mut output = full_signing_items(input);
+            output["payload"]["signingEvaluationItems"] = json!([]);
+            return Ok(ProductionModelResponse::deterministic(output));
+        }
+        self.inner.invoke(capability, input)
+    }
+}
+
+struct ShortSigningBodyGateway {
+    inner: B02Gateway,
+}
+
+impl ProductionModelGateway for ShortSigningBodyGateway {
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.inner.resolve_profile()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "RENDER_CHAPTER" {
+            return Ok(ProductionModelResponse::deterministic(
+                json!({"body":"林舟推开石门"}),
+            ));
+        }
+        let mut response = self.inner.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let body = "林舟推开石门";
+            let evidence = json!({
+                "start":0,
+                "end":body.chars().count(),
+                "quote":body
+            });
+            for candidate in response.output["canonCandidates"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+            {
+                candidate["evidence"] = evidence.clone();
+            }
+            for candidate in response.output["knowledgeCandidates"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+            {
+                candidate["evidence"] = evidence.clone();
+            }
+            response.output["evidenceRanges"] = json!([evidence]);
+        }
+        Ok(response)
     }
 }
 
@@ -196,7 +331,7 @@ impl LongEvidenceGateway {
     fn new() -> Self {
         Self {
             inner: B02Gateway::new(true, "A"),
-            long_body: "雨夜里的工作室留下了必须追查的现实痕迹。".repeat(60),
+            long_body: signing_fixture_body(1, "A"),
             render_calls: AtomicUsize::new(0),
             audit_calls: AtomicUsize::new(0),
             planning_contexts: Mutex::new(Vec::new()),
@@ -272,6 +407,25 @@ fn state_with_variant(
     (state, temp)
 }
 
+fn state_without_signing_evidence() -> (KernelState, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("project directory");
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(NoSigningEvidenceGateway {
+            inner: B02Gateway::new(true, "A"),
+        }),
+    );
+    (state, temp)
+}
+
+fn state_with_custom_gateway(
+    gateway: Arc<dyn ProductionModelGateway>,
+) -> (KernelState, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("project directory");
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
+    (state, temp)
+}
+
 fn revision(state: &KernelState, project_id: &str) -> i64 {
     state
         .manager
@@ -286,6 +440,47 @@ fn command(
     command_type: &str,
     payload: Value,
 ) -> Value {
+    if command_type == "book_plan_revise" {
+        let projection = query_production_center_impl(
+            state,
+            json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+        )
+        .expect("pre-approval projection");
+        if projection
+            .pointer("/signing/status")
+            .and_then(Value::as_str)
+            == Some("PASS")
+            && projection
+                .pointer("/signing/confirmation/confirmed")
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            let platform_id = projection
+                .pointer("/signing/platformMatrix")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item["mainstream"] == true && item["status"] == "PASS")
+                })
+                .and_then(|item| item["platformId"].as_str())
+                .expect("a passing mainstream platform")
+                .to_owned();
+            execute_command_impl(
+                state,
+                json!({
+                    "type":"signing_confirm",
+                    "commandId":format!("{command_id}:user-confirmation"),
+                    "idempotencyKey":format!("{command_id}:user-confirmation:key"),
+                    "projectId":project_id,
+                    "expectedRevision":revision(state, project_id),
+                    "requestedAt":NOW,
+                    "payload":{"platformId":platform_id}
+                }),
+            )
+            .expect("explicit passing platform confirmation");
+        }
+    }
     execute_command_impl(
         state,
         json!({
@@ -1651,6 +1846,56 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     );
     assert_eq!(evaluation["finalStatus"], "committed");
     assert_eq!(evaluation["result"]["status"], "PASS");
+    assert_eq!(evaluation["result"]["coreStatus"], "PASS");
+    assert_eq!(
+        evaluation["result"]["evaluationRuleVersion"],
+        "signing-eval.r1"
+    );
+    let signing_model_run_id = evaluation["result"]["modelRunId"]
+        .as_str()
+        .expect("durable signing ModelRun");
+    let model_storage = state.manager.open(&project_id, "", NOW).unwrap();
+    let model_run: (String, String) = model_storage
+        .query_row(
+            "SELECT capability,status FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+            libsql_rusqlite::params![project_id, signing_model_run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        model_run,
+        ("OPENING_SIGNING_EVALUATION".into(), "COMPLETED".into())
+    );
+    let raw_response_len: i64 = model_storage
+        .query_row(
+            "SELECT length(raw_response) FROM model_responses WHERE model_run_id=?1",
+            [signing_model_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(raw_response_len > 0);
+    drop(model_storage);
+    let matrix = evaluation["result"]["platformMatrix"].as_array().unwrap();
+    for (platform_id, expected) in [
+        ("FANQIE", "PASS"),
+        ("QIDIAN", "FAIL"),
+        ("QIMAO", "NOT_VERIFIED"),
+        ("ZONGHENG", "NOT_VERIFIED"),
+    ] {
+        let platform = matrix
+            .iter()
+            .find(|item| item["platformId"] == platform_id)
+            .unwrap();
+        assert_eq!(platform["status"], expected);
+    }
+    assert_eq!(evaluation["result"]["confirmation"]["confirmed"], false);
+    let core_items = evaluation["result"]["itemResults"].as_array().unwrap();
+    let safety_item = core_items
+        .iter()
+        .find(|item| item["itemId"] == "C0-2")
+        .unwrap();
+    assert_eq!(safety_item["result"], "PASS");
+    assert!(!safety_item["evidence"].as_array().unwrap().is_empty());
     let signing_receipt_id = evaluation["result"]["receiptRef"]["artifactId"]
         .as_str()
         .expect("signing receipt ref");
@@ -1673,6 +1918,7 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     .expect("production center after evaluation");
     assert_eq!(center["projectPhase"], "SIGNING");
     assert_eq!(center["signing"]["status"], "PASS");
+    assert_eq!(center["signing"]["confirmation"]["confirmed"], false);
     assert_eq!(center["signing"]["receipt"]["id"], signing_receipt_id);
     assert_eq!(
         center["signing"]["openingChapterRefs"]
@@ -1696,6 +1942,78 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
             >= 3,
     );
     assert_eq!(center["bookPlan"]["status"], "PENDING");
+
+    let before_unconfirmed_approval = revision(&state, &project_id);
+    let unconfirmed_approval = execute_command_impl(
+        &state,
+        json!({
+            "type":"book_plan_revise",
+            "commandId":"b02:book-plan-revise:unconfirmed",
+            "idempotencyKey":"b02:book-plan-revise:unconfirmed:key",
+            "projectId":project_id,
+            "expectedRevision":before_unconfirmed_approval,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    );
+    assert_eq!(
+        unconfirmed_approval.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    assert_eq!(revision(&state, &project_id), before_unconfirmed_approval);
+    let unconfirmed_db = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        unconfirmed_db
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(p.payload_json,'$.planningMaturity')='APPROVED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        unconfirmed_db
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='SimulatedSigningReceipt' AND artifact_status='COMMITTED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    drop(unconfirmed_db);
+
+    let before_wrong_platform = revision(&state, &project_id);
+    let wrong_platform = execute_command_impl(
+        &state,
+        json!({
+            "type":"signing_confirm",
+            "commandId":"b02:signing-confirm:wrong-platform",
+            "idempotencyKey":"b02:signing-confirm:wrong-platform:key",
+            "projectId":project_id,
+            "expectedRevision":before_wrong_platform,
+            "requestedAt":NOW,
+            "payload":{"platformId":"QIDIAN"}
+        }),
+    );
+    assert_eq!(
+        wrong_platform.unwrap_err(),
+        "SIGNING_CONFIRMATION_PLATFORM_NOT_PASS"
+    );
+    assert_eq!(revision(&state, &project_id), before_wrong_platform);
+    let wrong_platform_db = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        wrong_platform_db
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='SimulatedSigningReceipt' AND artifact_status='COMMITTED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    drop(wrong_platform_db);
 
     let explicit_wrong_receipt = execute_command_impl(
         &state,
@@ -1723,6 +2041,19 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     );
     assert_eq!(approved["finalStatus"], "committed");
     assert_eq!(approved["result"]["planningMaturity"], "APPROVED");
+    let confirmed_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("production center after user confirmation");
+    assert_eq!(
+        confirmed_center["signing"]["confirmation"]["confirmed"],
+        true
+    );
+    assert_eq!(
+        confirmed_center["signing"]["confirmation"]["platformId"],
+        "FANQIE"
+    );
 
     let after = state.manager.open(&project_id, "", NOW).expect("reopen db");
     let canon_after: i64 = after
@@ -1735,6 +2066,17 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     assert_eq!(
         canon_after, canon_before,
         "plan commit must not mutate Canon"
+    );
+    assert_eq!(
+        after
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='SimulatedSigningReceipt' AND artifact_status='COMMITTED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        2,
+        "unconfirmed evaluation history remains beside the confirmed receipt version"
     );
     let seed_exists: i64 = after
         .query_row(
@@ -1861,7 +2203,147 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
     assert_eq!(final_center["bookPlan"]["status"], "APPROVED");
     assert_eq!(final_center["bookPlan"]["seedPreserved"], true);
     assert_eq!(final_center["projectPhase"], "POST_SIGNING_PLANNING");
+
+    command(
+        &state,
+        &project_id,
+        "b02:story-setup:change-contract",
+        "story_setup_save",
+        json!({"storyCore":{
+            "protagonist":"林舟",
+            "desire":"找回被移走的完整账册",
+            "mechanism":"每次核验都会留下可追踪代价",
+            "conflict":"旧秩序试图掩盖账册的真实来源",
+            "readerPromise":"每章回收一条证据并留下新的选择",
+            "forbiddenReveals":["前三章不揭开账册来源"]
+        }}),
+    );
+    let after_contract_change = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("production center after contract change");
+    assert_eq!(after_contract_change["signing"]["status"], "STALE");
+    assert_eq!(
+        after_contract_change["signing"]["receipt"]["id"], signing_receipt_id,
+        "the prior signing receipt remains in history after its contract binding changes"
+    );
+    let history_db = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        ai_novel_production_system_core::signing::require_current_signing_for_long_form_if_present(
+            &history_db,
+            &project_id,
+        )
+        .unwrap_err(),
+        "SIGNING_EVALUATION_STALE"
+    );
+    assert_eq!(
+        history_db
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='SimulatedSigningReceipt' AND artifact_status='COMMITTED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert!(history_db
+        .query_row::<i64, _, _>(
+            "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(p.payload_json,'$.planningMaturity')='APPROVED'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+        >= 1);
     println!("B02_RESULT opening_evaluation=PASS signing_receipt=PASS real_evidence=PASS approved_book_plan=PASS seed_preserved=PASS canon_unchanged=PASS status=PASS");
+}
+
+#[test]
+fn b3b_signing_missing_exact_item_evidence_cannot_pass() {
+    let (state, _temp) = state_without_signing_evidence();
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:no-evidence",
+        "opening_evaluate",
+        json!({}),
+    );
+
+    assert_eq!(evaluation["result"]["status"], "NOT_VERIFIED");
+    assert!(evaluation["result"]["platformMatrix"].as_array().is_some());
+    let before_approval = revision(&state, &project_id);
+    let approval = execute_command_impl(
+        &state,
+        json!({
+            "type":"book_plan_revise",
+            "commandId":"b3b:signing:no-evidence:approve",
+            "idempotencyKey":"b3b:signing:no-evidence:approve:key",
+            "projectId":project_id,
+            "expectedRevision":before_approval,
+            "requestedAt":NOW,
+            "payload":{}
+        }),
+    );
+    assert_eq!(
+        approval.unwrap_err(),
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    assert_eq!(revision(&state, &project_id), before_approval);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan' AND json_extract(p.payload_json,'$.planningMaturity')='APPROVED'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn b3b_first_layer_failure_does_not_create_a_signing_model_run() {
+    let (state, _temp) = state_with_custom_gateway(Arc::new(ShortSigningBodyGateway {
+        inner: B02Gateway::new(true, "A"),
+    }));
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let before = state.manager.open(&project_id, "", NOW).unwrap();
+    let before_runs: i64 = before
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='OPENING_SIGNING_EVALUATION'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(before_runs, 0);
+    drop(before);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:f1-block",
+        "opening_evaluate",
+        json!({}),
+    );
+
+    assert_eq!(evaluation["result"]["status"], "FAIL");
+    assert_eq!(evaluation["result"]["modelRunId"], Value::Null);
+    let after = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        after
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='OPENING_SIGNING_EVALUATION'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 fn approved_payload_for_variant(variant: &'static str) -> Value {
@@ -1927,28 +2409,58 @@ fn b02_approved_book_plan_references_opening_canon_without_copying_text() {
 }
 
 #[test]
-fn b02_opening_evaluation_persists_revise_when_real_evidence_is_incomplete() {
+fn b02_opening_evaluation_persists_not_verified_without_committed_canon() {
     let (state, _temp) = state(false);
     let project_id = create_opening_project(&state);
     commit_three_opening_chapters(&state, &project_id);
 
+    let before = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        before
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_evidence WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(before);
+
     let evaluation = command(
         &state,
         &project_id,
-        "b02:opening-evaluate:revise",
+        "b02:opening-evaluate:not-verified",
         "opening_evaluate",
         json!({}),
     );
     assert_eq!(evaluation["finalStatus"], "committed");
-    assert_eq!(evaluation["result"]["status"], "REVISE");
+    assert_eq!(evaluation["result"]["status"], "NOT_VERIFIED");
+    assert_eq!(
+        evaluation["result"]["reasonCode"],
+        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
+    );
+    assert_eq!(evaluation["result"]["modelRunId"], Value::Null);
     assert!(evaluation["result"]["receiptRef"]["artifactId"].is_string());
+    let after = state.manager.open(&project_id, "", NOW).unwrap();
+    assert_eq!(
+        after
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='OPENING_SIGNING_EVALUATION'",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(after);
 
     let center = query_production_center_impl(
         &state,
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
     )
     .expect("production center after revise evaluation");
-    assert_eq!(center["signing"]["status"], "REVISE");
+    assert_eq!(center["signing"]["status"], "NOT_VERIFIED");
     assert_eq!(center["signing"]["evaluation"]["status"], "COMPLETED");
     assert_eq!(center["bookPlan"]["status"], "PENDING");
     let finalize = execute_command_impl(
@@ -1967,12 +2479,12 @@ fn b02_opening_evaluation_persists_revise_when_real_evidence_is_incomplete() {
         finalize.unwrap_err(),
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
-    println!("B02_REVISE_RESULT incomplete_evidence=PASS receipt_committed=PASS plan_blocked=PASS status=PASS");
+    println!("B02_SIGNING_RESULT missing_committed_canon=NOT_VERIFIED zero_model_runs=PASS receipt_committed=PASS plan_blocked=PASS status=PASS");
 }
 
 #[test]
 fn b02_signing_runtime_phases_are_backend_projected_with_one_active_step() {
-    let (state, _temp) = state(true);
+    let (state, temp) = state(true);
     let project_id = create_opening_project(&state);
     commit_three_opening_chapters(&state, &project_id);
     let request = raw_command_request(
@@ -1983,20 +2495,31 @@ fn b02_signing_runtime_phases_are_backend_projected_with_one_active_step() {
         json!({}),
     );
     let mut observed = Vec::new();
-    let result = execute_opening_evaluation_with_observer(&state.manager, &request, &mut |phase| {
-        let projection = query_production_center_impl(
-            &state,
-            json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
-        )
-        .expect("phase projection");
-        let active = projection["signing"]["evaluation"]["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|step| step["status"] == "active")
-            .count();
-        observed.push((phase.to_string(), active));
-    })
+    let signing_gateway = B02Gateway::new(true, "A");
+    let skill_loader =
+        ai_novel_production_system_core::creative_skills::SkillBundleLoader::development_package();
+    let paths = AppPaths::new(temp.path());
+    let result = execute_opening_evaluation_with_observer(
+        &state.manager,
+        &paths,
+        &signing_gateway,
+        &skill_loader,
+        &request,
+        &mut |phase| {
+            let projection = query_production_center_impl(
+                &state,
+                json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+            )
+            .expect("phase projection");
+            let active = projection["signing"]["evaluation"]["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["status"] == "active")
+                .count();
+            observed.push((phase.to_string(), active));
+        },
+    )
     .expect("opening evaluation");
     assert_eq!(result["result"]["status"], "PASS");
     assert_eq!(
@@ -2030,6 +2553,13 @@ fn b02_book_plan_runtime_phases_are_backend_projected_with_one_active_step() {
         "b02:opening-evaluate:before-plan",
         "opening_evaluate",
         json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "b02:signing-confirm:before-plan",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
     );
     let request = raw_command_request(
         &state,
