@@ -33,7 +33,7 @@ test('legacy REVISE signing receipts are projected and labeled as failed', () =>
   const labels = read('src/ui/presentation/projectLabels.ts')
   const page = read('src/ui/pages/ProductionCenter.vue')
   assert.match(repository, /let legacy_revise = signing_status == "REVISE"/)
-  assert.match(repository, /if legacy_revise \{ "FAIL" \} else \{ signing_status \}/)
+  assert.match(repository, /if legacy_revise\s*\{\s*"FAIL"\s*\}\s*else\s*\{\s*signing_status\s*\}/)
   assert.match(repository, /历史签约评估未通过（旧版 REVISE）/)
   assert.match(labels, /REVISE: '未通过（历史评估）'/)
   assert.match(page, /status === 'REVISE'\) return '未通过（历史评估）'/)
