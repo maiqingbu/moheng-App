@@ -29,11 +29,11 @@ impl BehaviorGateway {
         };
         let mut body = opening.to_owned();
         for index in 0..2_400_u32 {
-            let offset = (index
+            let offset = index
                 .wrapping_mul(7919)
                 .wrapping_add(index.wrapping_mul(index).wrapping_mul(13))
                 .wrapping_add(chapter_no as u32 * 977)
-                % 20_992) as u32;
+                % 20_992;
             body.push(char::from_u32(0x4e00 + offset).expect("CJK fixture character"));
         }
         body
