@@ -299,7 +299,13 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     let connection = manager
         .create("p-b04-b06-plan", "B04/B06 plan", NOW)
         .unwrap();
-    let (volume_id, chapter_id) = seed_authority(&connection, "p-b04-b06-plan");
+    let (volume_id, prior_chapter_id) = seed_authority(&connection, "p-b04-b06-plan");
+    connection
+        .execute(
+            "UPDATE chapters SET status='COMMITTED' WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params!["p-b04-b06-plan", prior_chapter_id],
+        )
+        .unwrap();
     drop(connection);
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
@@ -309,7 +315,7 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     let prepared = execute_command_impl(&state, json!({"type":"planning_prepare_next_chapter","commandId":"prepare-plan","idempotencyKey":"prepare-plan-key","projectId":"p-b04-b06-plan","expectedRevision":0,"requestedAt":NOW,"payload":{"volumeId":volume_id}})).unwrap();
     let chapter_id = prepared["chapter"]["chapterId"]
         .as_str()
-        .unwrap_or(&chapter_id);
+        .unwrap_or(&prior_chapter_id);
     let compiled = execute_command_impl(&state, json!({"type":"planning_compile_chapter_plan","commandId":"compile-plan","idempotencyKey":"compile-plan-key","projectId":"p-b04-b06-plan","expectedRevision":1,"requestedAt":NOW,"payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:b04:lead"]}}})).unwrap();
     assert_eq!(compiled["finalStatus"], "committed");
     assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
@@ -1017,7 +1023,13 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
     let connection = manager
         .create(project_id, "Aggregate HARD budget", NOW)
         .unwrap();
-    let (volume_id, _) = seed_authority(&connection, project_id);
+    let (volume_id, prior_chapter_id) = seed_authority(&connection, project_id);
+    connection
+        .execute(
+            "UPDATE chapters SET status='COMMITTED' WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, prior_chapter_id],
+        )
+        .unwrap();
     let quote = "证据内容".repeat(3_000);
     connection.execute(
         "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:budget:oversized',?1,'fact:b04:reality','chapter:b04:1','authority:book',1,'FINAL_CHAPTER',?2,0,?3,?4)",
