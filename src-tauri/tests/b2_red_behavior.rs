@@ -21,7 +21,74 @@ struct BehaviorGateway {
 
 impl BehaviorGateway {
     fn quote(chapter_no: usize) -> String {
-        format!("林舟在雨夜翻开账本，发现第{chapter_no}章留下的真实证据。")
+        let opening = match chapter_no {
+            1 => "林舟沿着雨水浸透的封条，辨认出一段旧案暗记。",
+            2 => "顾清从渡口带回旧账联，发现边角新添了一枚签名。",
+            3 => "两人在档案室核对页码后，决定追问账本缺页的去向。",
+            _ => "调查者在档案室核对旧账，决定追问缺页背后的责任。",
+        };
+        let mut body = opening.to_owned();
+        for index in 0..2_400_u32 {
+            let offset = (index
+                .wrapping_mul(7919)
+                .wrapping_add(index.wrapping_mul(index).wrapping_mul(13))
+                .wrapping_add(chapter_no as u32 * 977)
+                % 20_992) as u32;
+            body.push(char::from_u32(0x4e00 + offset).expect("CJK fixture character"));
+        }
+        body
+    }
+
+    fn signing_evaluation(input: &Value) -> Value {
+        let chapter = &input["taskContext"]["chapters"][0];
+        let body = chapter["body"].as_str().expect("signing chapter body");
+        let quote = body.chars().take(40).collect::<String>();
+        let mut item_ids = vec![
+            "C0-2", "R2-1", "R2-2", "R2-3", "R2-4", "R2-5", "R2-6", "E3-1", "E3-2", "E3-3", "E3-4",
+            "E3-5", "E3-6", "E3-7", "E3-8", "E3-9", "E3-11",
+        ];
+        item_ids.extend([
+            "E3-10:FANQIE",
+            "E3-10:QIDIAN",
+            "E3-10:QIMAO",
+            "E3-10:ZONGHENG",
+            "E3-10:JJWXC",
+        ]);
+        let items = item_ids
+            .into_iter()
+            .map(|item_id| {
+                json!({
+                    "itemId":item_id,
+                    "result":"PASS",
+                    "reason":"确定性测试评估器返回有据结论。",
+                    "evidence":[{"chapterNo":chapter["chapterNo"],"rangeStart":0,"rangeEnd":quote.chars().count(),"exactQuote":quote}]
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "skillId":input["skillId"],
+            "skillVersion":input["skillVersion"],
+            "bundleDigest":input["bundleDigest"],
+            "taskId":input["taskContext"]["taskId"],
+            "status":"OK",
+            "sourceRefs":[],
+            "assumptions":[],
+            "payload":{
+                "quality_vector":{},
+                "findings":[],
+                "promise_coverage":{},
+                "desire_state":{},
+                "repetition":{},
+                "signing_recommendation":{},
+                "repair_scope":[],
+                "signingEvaluationItems":items
+            },
+            "findings":[],
+            "contextRefs":[],
+            "runtimeCheckRequests":[],
+            "confidence":1.0,
+            "nextSkillHints":[]
+        })
     }
 }
 
@@ -166,6 +233,7 @@ impl ProductionModelGateway for BehaviorGateway {
                     "unresolvedHard":false
                 })
             }
+            "OPENING_SIGNING_EVALUATION" => Self::signing_evaluation(input),
             other => return Err(format!("unexpected behavior-test capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
@@ -319,6 +387,25 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
         json!({}),
     );
     assert_eq!(evaluated["result"]["status"], "PASS");
+    let center = query_production_center_impl(
+        state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .expect("signing evaluation projection");
+    let platform_id = center["signing"]["platformMatrix"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["mainstream"] == true && entry["status"] == "PASS")
+        .and_then(|entry| entry["platformId"].as_str())
+        .expect("a passing mainstream platform");
+    command(
+        state,
+        &project_id,
+        "b2-red:signing-confirm",
+        "signing_confirm",
+        json!({"platformId":platform_id}),
+    );
     let approved = command(
         state,
         &project_id,
