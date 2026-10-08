@@ -2993,8 +2993,22 @@ pub(crate) fn context_input_from_authority(
     let request = &request_scope;
     let future_reservation_refs = goal_context.future_reservation_refs;
     let mut omitted_soft_sources = goal_context.omitted_soft_sources;
-    let goal_contract_refs = goal_context.refs;
+    let mut goal_contract_refs = goal_context.refs;
     let goal_contract_fields = goal_context.fields;
+    let gate_policy_ref =
+        crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "GatePolicy",
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
+    if !goal_contract_refs
+        .iter()
+        .any(|reference| reference == &gate_policy_ref)
+    {
+        goal_contract_refs.push(gate_policy_ref);
+    }
     let (route_task_refs, route_task_contracts) = if let Some(volume_id) =
         volume_id.filter(|_| !opening_bootstrap)
     {
@@ -8180,6 +8194,19 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 },
             )
         }
+        "gate_policy_update" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::gate_policy::execute_update(
+                &state.manager,
+                &request,
+                id,
+                command_id,
+                idempotency_key,
+                expected_revision,
+                &digest,
+                requested_at,
+            )
+        }
         "story_directions_generate"
         | "pitch_regenerate"
         | "pitch_select"
@@ -8526,6 +8553,13 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|error| error.to_string())?,
                 Err(error) => return Err(error.to_string()),
             };
+            let gate_policy_receipt = crate::gate_policy::ensure_default_policy(
+                &handle,
+                &id,
+                &format!("{command_id}:gate-policy-default"),
+                &format!("{idempotency_key}:gate-policy-default"),
+                requested_at,
+            )?;
             let entry_receipt = if b11_entry {
                 Some(crate::project_entry::commit_initial_with_market_source(
                     &handle,
@@ -8565,6 +8599,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             if let Some(entry_receipt) = entry_receipt {
                 response["entryReceipt"] =
                     serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
+            }
+            if let Some(receipt) = gate_policy_receipt {
+                response["gatePolicyReceipt"] =
+                    serde_json::to_value(receipt).map_err(|error| error.to_string())?;
             }
             if let Some(snapshot) = market_source_snapshot.as_ref() {
                 response["marketSourceStatus"] = json!(snapshot.source_status);

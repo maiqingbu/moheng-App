@@ -1298,6 +1298,9 @@ fn run_chapter_production_inner(
     if requested_execution_mode != execution_mode {
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
+    if execution_mode == "LONG_FORM" {
+        crate::gate_policy::require_long_form_policy_supported(connection, &project_id)?;
+    }
     if execution_mode == "LONG_FORM"
         && crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
             connection,

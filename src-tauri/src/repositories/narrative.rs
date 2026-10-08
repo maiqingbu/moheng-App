@@ -45,6 +45,13 @@ pub struct SemanticCanonFactRecord {
     pub valid_to_chapter_no: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SemanticCanonFactGroup {
+    pub subject_id: String,
+    pub predicate: String,
+    pub facts: Vec<SemanticCanonFactRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeRecord {
@@ -546,6 +553,62 @@ impl NarrativeRepository {
         let truncated = facts.len() > limit as usize;
         facts.truncate(limit as usize);
         Ok((facts, truncated))
+    }
+
+    pub fn current_canon_semantic_groups_bounded(
+        connection: &Connection,
+        project_id: &str,
+        predicates: &[String],
+        limit: usize,
+    ) -> Result<(Vec<SemanticCanonFactGroup>, bool), NarrativeRepositoryError> {
+        let predicates_json = serde_json::to_string(predicates)?;
+        let query_limit = (limit as i64).saturating_add(1);
+        let mut statement = connection.prepare(
+            "SELECT f.subject_id,f.predicate,f.fact_id,f.object_json,f.valid_from_chapter_id,f.valid_to_chapter_id,f.story_time_from,f.story_time_to,from_chapter.chapter_no,to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.superseded_by IS NULL AND f.predicate IN (SELECT value FROM json_each(?2)) ORDER BY f.subject_id,f.predicate,f.fact_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, predicates_json, query_limit],
+            |row| {
+                let object_json: String = row.get(3)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    SemanticCanonFactRecord {
+                        fact_id: row.get(2)?,
+                        object_json: serde_json::from_str(&object_json).unwrap_or(Value::Null),
+                        valid_from_chapter_id: row.get(4)?,
+                        valid_to_chapter_id: row.get(5)?,
+                        story_time_from: row.get(6)?,
+                        story_time_to: row.get(7)?,
+                        valid_from_chapter_no: row.get(8)?,
+                        valid_to_chapter_no: row.get(9)?,
+                    },
+                ))
+            },
+        )?;
+        let mut facts = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(NarrativeRepositoryError::from)?;
+        let truncated = facts.len() > limit;
+        facts.truncate(limit);
+        let mut groups = BTreeMap::<(String, String), Vec<SemanticCanonFactRecord>>::new();
+        for (subject_id, predicate, fact) in facts {
+            groups
+                .entry((subject_id, predicate))
+                .or_default()
+                .push(fact);
+        }
+        Ok((
+            groups
+                .into_iter()
+                .map(|((subject_id, predicate), facts)| SemanticCanonFactGroup {
+                    subject_id,
+                    predicate,
+                    facts,
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     pub fn canon_fact_timing(

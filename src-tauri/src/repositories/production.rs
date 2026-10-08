@@ -99,6 +99,30 @@ impl ProductionRepository {
             runtime.4,
             runtime.5,
         );
+        let gate_policy = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "GatePolicy",
+        )
+        .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
+        .and_then(|reference| {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection,
+                project_id,
+                &reference,
+            )
+            .ok()
+            .flatten()
+            .map(|payload| {
+                json!({
+                    "version":reference.version,
+                    "policyId":payload.get("policyId").cloned().unwrap_or(Value::Null),
+                    "needsUpgrade":payload.get("policyId").and_then(Value::as_str)==Some("b11-opening"),
+                    "resourceRef":payload.get("resourceRef").cloned().unwrap_or(Value::Null),
+                    "rules":payload.pointer("/canonSemantics/rules").cloned().unwrap_or_else(|| json!([]))
+                })
+            })
+        });
         let opening_progress =
             crate::repositories::project_entry::opening_progress(connection, project_id)
                 .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
@@ -612,7 +636,7 @@ impl ProductionRepository {
         let new_responsibilities = Self::latest_new_responsibilities(connection, project_id)?;
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
-            "signing":signing,"bookPlan":book_plan,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
+            "signing":signing,"bookPlan":book_plan,"gatePolicy":gate_policy,"projectPhase":runtime.5,"activeWork":{"label":if job_status.as_deref()==Some("FAILED") { "FAILED" } else { &current_stage },"detail":active_detail},
             "runtimeOperation":b02_operation.as_ref().map(|(job_id,kind,phase,status,error_code)| json!({"jobId":job_id,"kind":kind,"phase":phase,"status":status,"errorCode":error_code,"active":matches!(status.as_str(),"RUNNING"|"WAITING_MODEL")})),
             "productionStage":current_stage,"jobStatus":job_status,"jobError":job_error,"isActive":is_active,"canRetry":can_retry,"lastStage":current_stage,"nextChapter":next_chapter_projection,"chapterPlan":plan_projection,
             "triggeredContinuity":plan_projection.as_ref().and_then(|plan| plan.get("continuityActions")).cloned().unwrap_or_else(|| json!([])),

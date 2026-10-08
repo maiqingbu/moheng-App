@@ -1,0 +1,8 @@
+{
+  "resourceId": "gate-policy-default.r1",
+  "version": 1,
+  "digestAlgorithm": "sha256-raw",
+  "files": {
+    "policy.json": "2bf4176ecf7d660d618f356b75ae1cf740b97210f73cde31ba2c5580180dc4cd"
+  }
+}

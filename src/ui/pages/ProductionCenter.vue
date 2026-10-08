@@ -41,6 +41,9 @@ const newHardConstraintCount = computed(() => newResponsibilities.value.filter(i
   ['A', 'B'].includes(item.authorityLevel) && !['ABANDONED', 'RESOLVED', 'SUPERSEDED'].includes(item.lifecycle),
 ).length)
 const responsibilityAdjustmentInFlight = ref<string | null>(null)
+const gatePolicyUpdateInFlight = ref(false)
+const gatePolicyRuleDraft = ref('{"predicate":"alive","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}')
+const gatePolicyDraftError = ref('')
 const fulfillmentObjectDraft = reactive<Record<string, string>>({})
 const resumeConditionDraft = reactive<Record<string, string>>({})
 const evidenceStartDraft = reactive<Record<string, number | undefined>>({})
@@ -220,6 +223,48 @@ async function adjustResponsibility(
   } finally {
     responsibilityAdjustmentInFlight.value = null
   }
+}
+
+async function updateGatePolicy(action: 'ADOPT_DEFAULT' | 'UPSERT_RULE' | 'DISABLE_RULE', fields: Record<string, unknown>) {
+  if (gatePolicyUpdateInFlight.value) return
+  const commandKey = `gate-policy-${action.toLowerCase()}-${Date.now()}`
+  gatePolicyUpdateInFlight.value = true
+  lastCommand.value = commandKey
+  try {
+    await store.runCommand(commandKey, {
+      type: 'gate_policy_update',
+      payload: { action, ...fields },
+    })
+    await store.loadProduction(true)
+  } catch {
+    // CommandFeedback displays the typed backend result.
+  } finally {
+    gatePolicyUpdateInFlight.value = false
+  }
+}
+
+async function adoptDefaultGatePolicy() {
+  await updateGatePolicy('ADOPT_DEFAULT', {})
+}
+
+async function saveGatePolicyRule() {
+  gatePolicyDraftError.value = ''
+  let rule: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(gatePolicyRuleDraft.value)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('规则必须是 JSON 对象')
+    rule = parsed as Record<string, unknown>
+  } catch (error) {
+    gatePolicyDraftError.value = error instanceof Error ? error.message : '规则 JSON 格式无效'
+    return
+  }
+  await updateGatePolicy('UPSERT_RULE', { rule })
+}
+
+async function disableGatePolicyRule(rule: Record<string, unknown>) {
+  const predicate = typeof rule.predicate === 'string' ? rule.predicate : ''
+  if (!predicate) return
+  await updateGatePolicy('DISABLE_RULE', { predicate })
 }
 
 async function startProduction() {
@@ -451,6 +496,34 @@ async function reverifyRepair() {
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
     <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />
+
+    <section v-if="production.gatePolicy" class="card pad section" data-gate-policy>
+      <div class="card-head">
+        <div>
+          <span class="eyebrow">一致性规则</span>
+          <h2 class="card-title" style="margin-top:6px">GatePolicy · 第 {{ production.gatePolicy.version }} 版</h2>
+          <p class="card-subtitle">规则版本与摘要会绑定到规划和正式检查记录。</p>
+        </div>
+        <span class="badge" :class="production.gatePolicy.needsUpgrade ? 'warning' : 'success'">{{ production.gatePolicy.needsUpgrade ? '需要升级' : '当前规则有效' }}</span>
+      </div>
+      <div v-if="production.gatePolicy.needsUpgrade" class="task-row" style="align-items:flex-start;flex-wrap:wrap">
+        <span>当前长篇规则仍是旧开篇策略。采用默认规则集会创建新的 GatePolicy 版本，并保留旧版本供查询。</span>
+        <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="adoptDefaultGatePolicy">采用默认规则集</button>
+      </div>
+      <template v-else>
+        <p v-if="production.gatePolicy.resourceRef" class="muted">默认资源 {{ production.gatePolicy.resourceRef.version }} · SHA-256 {{ production.gatePolicy.resourceRef.sha256 }}</p>
+        <div v-for="rule in production.gatePolicy.rules" :key="String(rule.predicate)" class="task-row" style="align-items:flex-start">
+          <code>{{ JSON.stringify(rule) }}</code>
+          <button class="btn" :disabled="gatePolicyUpdateInFlight" @click="disableGatePolicyRule(rule)">停用</button>
+        </div>
+        <label class="section" style="display:grid;gap:8px">
+          新增或修改谓词规则（JSON）
+          <textarea v-model="gatePolicyRuleDraft" rows="4" autocomplete="off" spellcheck="false" />
+        </label>
+        <p v-if="gatePolicyDraftError" class="banner warning" role="alert">{{ gatePolicyDraftError }}</p>
+        <button class="btn primary" :disabled="gatePolicyUpdateInFlight" @click="saveGatePolicyRule">保存规则新版本</button>
+      </template>
+    </section>
 
     <section class="card pad section opening-evaluation-panel" data-opening-evaluation>
       <div class="card-head">

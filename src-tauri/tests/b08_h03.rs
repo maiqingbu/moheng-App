@@ -6683,3 +6683,5 @@ mod b04a_rv16;
 mod b04a_rv21;
 #[path = "b08_h03/b04b_rv33.rs"]
 mod b04b_rv33;
+#[path = "b08_h03/b04b_rv08.rs"]
+mod b04b_rv08;

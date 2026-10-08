@@ -1530,29 +1530,48 @@ pub fn commit_opening_ready(
         now,
     )?;
     let opening_ref = artifact_ref(&opening);
-    let gate_policy = artifact(
-        project_id,
-        format!("gate-policy:{project_id}:{command_id}"),
-        "GatePolicy",
-        project_scope(),
-        json!({"payloadSchema":"gate-policy.r1","policyId":"b11-opening","rules":["story-core-bound","opening-ready","existing-b08-production-root"],"canonSemantics":{"policyVersion":"canon-semantics.r1","rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},{"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"found_evidence","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"protected_oath","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"appears_in_opening","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"distrusts","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"allied_with","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"opening_event","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}]},"createdAt":now}),
-        vec![opening_ref.clone()],
-        "B11::OpeningPreparationOwner",
-        &opening_command_id,
-        now,
-    )?;
-    let gate_ref = artifact_ref(&gate_policy);
+    let current_gate_policy_ref =
+        crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "GatePolicy",
+        )
+        .map_err(|error| error.to_string())?;
+    let (gate_policy, gate_ref) = if let Some(reference) = current_gate_policy_ref {
+        (None, reference)
+    } else {
+        let artifact_id = format!("gate-policy:{project_id}:{command_id}");
+        let version = crate::repositories::artifacts::ArtifactRepository::next_version(
+            connection,
+            &artifact_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let policy = crate::gate_policy::default_policy_artifact(
+            project_id,
+            artifact_id,
+            version,
+            &opening_command_id,
+            now,
+        )?;
+        let reference = artifact_ref(&policy);
+        (Some(policy), reference)
+    };
+    let mut first_artifacts = vec![opening];
+    let mut first_heads = vec![
+        json!({"artifactType":"OpeningContract","scope":project_scope(),"artifactId":opening_ref.artifact_id,"version":opening_ref.version,"payloadHash":opening_ref.payload_hash}),
+    ];
+    if let Some(policy) = gate_policy {
+        first_artifacts.push(policy);
+        first_heads.push(json!({"artifactType":"GatePolicy","scope":project_scope(),"artifactId":gate_ref.artifact_id,"version":gate_ref.version,"payloadHash":gate_ref.payload_hash}));
+    }
     let first_commit = bundle(
         project_id,
         &opening_command_id,
         &format!("{idempotency_key}:opening-contract"),
         Some(expected_revision),
         now,
-        vec![opening, gate_policy],
-        Some(vec![
-            json!({"artifactType":"OpeningContract","scope":project_scope(),"artifactId":opening_ref.artifact_id,"version":opening_ref.version,"payloadHash":opening_ref.payload_hash}),
-            json!({"artifactType":"GatePolicy","scope":project_scope(),"artifactId":gate_ref.artifact_id,"version":gate_ref.version,"payloadHash":gate_ref.payload_hash}),
-        ]),
+        first_artifacts,
+        Some(first_heads),
         None,
         "B11_OPENING_READY",
         json!({"openingReady":true,"chapterId":topology.chapter_id})

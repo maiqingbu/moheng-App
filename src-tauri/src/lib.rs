@@ -6,6 +6,7 @@ pub mod commit;
 pub mod creative_skills;
 pub mod endgame;
 pub mod export;
+pub mod gate_policy;
 pub mod generated;
 pub mod harness;
 pub mod health;

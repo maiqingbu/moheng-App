@@ -2445,6 +2445,9 @@ fn validate_planning_owner_prerequisites(
     chapter_id: &str,
     execution_mode: &str,
 ) -> Result<(), String> {
+    if execution_mode == "LONG_FORM" {
+        crate::gate_policy::require_long_form_policy_supported(connection, project_id)?;
+    }
     for (artifact_type, error_code) in [
         (
             "StoryConstitution",

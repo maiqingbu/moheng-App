@@ -611,6 +611,13 @@ export interface ProductionCenterProjection {
     reapprovalRequired?: boolean
     steps?: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' | 'waiting' }>
   }
+  gatePolicy?: {
+    version: number
+    policyId: string | null
+    needsUpgrade: boolean
+    resourceRef: { version: string; sha256: string } | null
+    rules: Array<Record<string, unknown>>
+  } | null
   runtimeOperation?: {
     jobId: string
     kind: 'B02::OPENING_EVALUATION' | 'B02::BOOK_PLAN'
@@ -974,6 +981,7 @@ export type CommandType =
   | 'volume_handoff'
   | 'decision_submit'
   | 'thread_responsibility_adjust'
+  | 'gate_policy_update'
   | 'revision_request'
   | 'change_request_create'
   | 'impact_preflight'
