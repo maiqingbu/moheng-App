@@ -2502,8 +2502,8 @@ fn goal_contract_context_for_request(
             .get("chapterId")
             .or_else(|| request.pointer("/payload/chapterId"))
             .or_else(|| request.pointer("/chapterPlan/chapterId"))
-                .and_then(Value::as_str)
-            {
+            .and_then(Value::as_str)
+        {
             crate::repositories::narrative::NarrativeRepository::chapter_number(
                 connection, project_id, chapter_id,
             )
@@ -2511,11 +2511,11 @@ fn goal_contract_context_for_request(
             .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
         } else {
             crate::repositories::narrative::NarrativeRepository::next_chapter_number(
-                    connection,
-                    project_id,
+                connection,
+                project_id,
                 volume_id.unwrap_or_default(),
-                )
-                .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
             .unwrap_or(i64::MAX)
         };
         let revealed_reservation_refs =
@@ -2565,11 +2565,11 @@ fn goal_contract_context_for_request(
             ));
         }
         if selection_reservations
-                .iter()
-                .any(|reservation| !available_reservations.contains_key(reservation))
-            {
-                return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
-            }
+            .iter()
+            .any(|reservation| !available_reservations.contains_key(reservation))
+        {
+            return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
+        }
         if let Some(allowed) = request
             .get("chapterPlan")
             .and_then(|plan| plan.get("hardScope"))
