@@ -509,6 +509,26 @@ impl NarrativeRepository {
         Ok((facts, truncated))
     }
 
+    pub fn canon_fact_timing(
+        connection: &Connection,
+        project_id: &str,
+        fact_id: &str,
+    ) -> Result<Option<CanonFactTimingRecord>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT COALESCE(f.story_time_from,(SELECT e.story_time FROM canon_evidence ce JOIN canon_events e ON e.project_id=ce.project_id AND e.event_id=ce.event_id WHERE ce.project_id=f.project_id AND ce.fact_id=f.fact_id ORDER BY e.event_ordinal,e.event_id,ce.evidence_id LIMIT 1)),c.chapter_no FROM canon_facts f LEFT JOIN chapters c ON c.project_id=f.project_id AND c.chapter_id=f.source_chapter_id WHERE f.project_id=?1 AND f.fact_id=?2",
+                libsql_rusqlite::params![project_id, fact_id],
+                |row| {
+                    Ok(CanonFactTimingRecord {
+                        story_time: row.get(0)?,
+                        source_chapter_no: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn goal_contract_refs(
         connection: &Connection,
         project_id: &str,
@@ -2567,4 +2587,11 @@ impl NarrativeRepository {
             |row| Ok(ForeshadowAuthorityRecord { intent: row.get(0)?, status: row.get(1)?, plant_chapter_id: row.get(2)?, recover_window_end_chapter: row.get(3)?, secret_payload_ref: row.get(4)? }),
         ).optional().map_err(Into::into)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonFactTimingRecord {
+    pub story_time: Option<String>,
+    pub source_chapter_no: Option<i64>,
 }

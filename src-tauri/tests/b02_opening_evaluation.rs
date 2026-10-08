@@ -185,6 +185,7 @@ impl ProductionModelGateway for B02Gateway {
                         "predicate":if self.reality_variant == "A" { "found_evidence" } else { "protected_oath" },
                         "objectJson":if self.reality_variant == "A" { json!({"state":"账本缺页"}) } else { json!({"state":"账本仍在手中"}) },
                         "authorityLevel":"C",
+                        "storyTime":format!("2026-01-{:02}T00:00:00Z", chapter_no),
                         "evidence":{"start":0,"end":body.chars().count(),"quote":body}
                     })];
                     if chapter_no == 1 {
@@ -236,6 +237,7 @@ impl ProductionModelGateway for B02Gateway {
                         "factId":"fact:b02:opening:1",
                         "epistemicState":"KNOWS",
                         "visibilityScope":"CHARACTER:entity:b02:linzhou",
+                        "acquiredStoryTime":"2026-01-02T00:00:00Z",
                         "evidence":{"start":0,"end":body.chars().count(),"quote":body}
                     }));
                 }

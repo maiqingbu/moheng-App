@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const AUDIT_EXTRACT_RV07_EXTENSION: &str = "For Knowledge candidates, emit storyTime on the referenced Canon fact, acquiredStoryTime, and visibilityScope; when any value is unknown, use the literal UNKNOWN. Unknown temporal or visibility information that affects a hard constraint is unresolved and must not be omitted.";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProviderErrorKind {
@@ -256,10 +258,16 @@ impl OpenAiCompatibleProvider {
     }
 
     fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
+        let base_prompt = Self::structured_prompt(&request.capability);
+        let system_prompt = if request.capability == "AUDIT_EXTRACT" {
+            format!("{base_prompt}\n\n{AUDIT_EXTRACT_RV07_EXTENSION}")
+        } else {
+            base_prompt.to_owned()
+        };
         let mut payload = json!({
             "model": request.model_id,
             "messages": [
-                {"role":"system","content":Self::structured_prompt(&request.capability)},
+                {"role":"system","content":system_prompt},
                 {"role":"user","content":request.prompt}
             ],
             "temperature": 0
@@ -623,6 +631,8 @@ mod tests {
         assert!(messages[0]["content"].as_str().unwrap().contains(
             "Every Canon predicate MUST exactly match a predicate in auditPolicyContract.canonSemanticPolicy.rules"
         ));
+        let system_prompt = messages[0]["content"].as_str().unwrap();
+        assert!(system_prompt.contains("literal UNKNOWN"));
         let user_input: Value =
             serde_json::from_str(messages[1]["content"].as_str().unwrap()).unwrap();
         assert_eq!(user_input, expected_user_input);

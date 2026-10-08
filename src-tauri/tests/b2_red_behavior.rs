@@ -170,6 +170,7 @@ impl ProductionModelGateway for BehaviorGateway {
                     "predicate":"found_evidence",
                     "objectJson":{"state":"账本缺页"},
                     "authorityLevel":"C",
+                    "storyTime":format!("2026-01-{:02}T00:00:00Z", chapter_no),
                     "evidence":evidence
                 })];
                 if chapter_no == 1 {
@@ -216,6 +217,7 @@ impl ProductionModelGateway for BehaviorGateway {
                         "factId":"fact:b2:red:opening:1",
                         "epistemicState":"KNOWS",
                         "visibilityScope":"CHARACTER:entity:b02:linzhou",
+                        "acquiredStoryTime":"2026-01-02T00:00:00Z",
                         "evidence":evidence
                     })]
                 } else {

@@ -2768,6 +2768,11 @@ fn validate_actual_extraction(
         .filter(|item| item.get("action").and_then(Value::as_str) == Some("REVEAL"))
         .filter_map(|item| item.get("reservationRef").and_then(Value::as_str))
         .collect::<BTreeSet<_>>();
+    let current_chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
 
     for candidate in &audit.canon_candidates {
         canon_semantics
@@ -2913,15 +2918,68 @@ fn validate_actual_extraction(
             &pending_entities,
             &pending_facts,
         ) {
-            continue;
+            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_UNBOUND".into());
         }
-        let fact_time = audit
+        let pending_fact_time = audit
             .canon_candidates
             .iter()
             .find(|fact| fact.fact_id == candidate.fact_id)
             .and_then(|fact| fact.story_time.as_deref());
-        if matches!((candidate.acquired_story_time.as_deref(), fact_time), (Some(acquired), Some(fact)) if acquired < fact)
+        let fact_timing = if pending_fact_time.is_some() {
+            Some(crate::repositories::narrative::CanonFactTimingRecord {
+                story_time: pending_fact_time.map(ToOwned::to_owned),
+                source_chapter_no: Some(current_chapter_no),
+            })
+        } else {
+            crate::repositories::narrative::NarrativeRepository::canon_fact_timing(
+                connection,
+                project_id,
+                &candidate.fact_id,
+            )
+            .map_err(|error| error.to_string())?
+        };
+        let fact_timing = fact_timing.ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
+        if fact_timing
+            .source_chapter_no
+            .is_some_and(|source| source > current_chapter_no)
         {
+            return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
+        }
+        let acquired_time = candidate
+            .acquired_story_time
+            .as_deref()
+            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
+        let fact_time = fact_timing
+            .story_time
+            .as_deref()
+            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
+        if candidate
+            .visibility_scope
+            .as_deref()
+            .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
+            || acquired_time.is_none()
+            || fact_time.is_none()
+        {
+            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        }
+        let visibility_scope = candidate.visibility_scope.as_deref().unwrap_or_default();
+        let valid_visibility_scope = visibility_scope == "PUBLIC"
+            || visibility_scope.strip_prefix("CHARACTER:") == Some(candidate.knower_id.as_str())
+            || if let Some(visible_chapter) = visibility_scope.strip_prefix("CHAPTER:") {
+                crate::repositories::narrative::NarrativeRepository::chapter_number(
+                    connection,
+                    project_id,
+                    visible_chapter,
+                )
+                .map_err(|error| error.to_string())?
+                .is_some()
+            } else {
+                false
+            };
+        if !valid_visibility_scope {
+            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_VISIBILITY".into());
+        }
+        if acquired_time.unwrap() < fact_time.unwrap() {
             return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
         }
         bound_knowledge_candidates.push(candidate);
