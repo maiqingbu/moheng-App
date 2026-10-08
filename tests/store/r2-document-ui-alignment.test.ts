@@ -381,7 +381,7 @@ describe('R2 文档修订对应的前端行为', () => {
   it('Given 签约已失效 When 展示 Then 明确要求重新评估', async () => {
     production({ signing: { status: 'STALE', verdict: '' }, bookPlan: { status: 'APPROVED' } })
     const page = await render(ProductionCenter)
-    expect(page.textContent).toContain('签约依据已失效')
+    expect(page.textContent).toContain('签约规则已更新，请重新评估')
     expect(page.textContent).not.toContain('正式总纲已完成')
   })
   it('Given 评估失败 When 展示 Then 不显示等待三章完成', async () => {
