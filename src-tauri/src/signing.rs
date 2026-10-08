@@ -1567,8 +1567,7 @@ pub fn execute_opening_evaluation_with_observer(
     } else {
         overall_status(core_verdict, &matrix)
     };
-    let reason_code = missing_committed_canon
-        .then_some("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE");
+    let reason_code = missing_committed_canon.then_some("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE");
     let verdict = match overall {
         "PASS" => "通用核心通过，且至少一个主流平台适配结果通过；等待用户确认目标平台。",
         "FAIL" => "存在确定失败项或关键签约项失败，当前评估不通过。",

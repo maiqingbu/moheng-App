@@ -425,7 +425,11 @@ impl ProductionRepository {
             })
             .unwrap_or("NOT_STARTED");
         let legacy_revise = signing_status == "REVISE";
-        let signing_status = if legacy_revise { "FAIL" } else { signing_status };
+        let signing_status = if legacy_revise {
+            "FAIL"
+        } else {
+            signing_status
+        };
         let signing_evaluation = if let Some((_, _, phase, status, _)) = signing_operation {
             json!({
                 "status": if status == "FAILED" { "FAILED" } else if status == "COMPLETED" { "COMPLETED" } else { "IN_REVIEW" },
