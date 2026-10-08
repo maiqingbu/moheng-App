@@ -689,8 +689,49 @@ fn execute_reconciliation_action(
     command_id: &str,
     now: &str,
 ) -> Result<Value, String> {
+    if action != "NO_ACTION" {
+        let payload =
+            json!({"sourceChapterId":source_chapter_id,"status":"DEFERRED","reason":action});
+        DurableJobService::record_reconciliation_action(
+            handle, project_id, command_id, action, &payload, now,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(payload);
+    }
+
+    if let Some(chapter_id) =
+        crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
+            handle,
+            project_id,
+            volume_id,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        let chapter_no =
+            crate::repositories::narrative::NarrativeRepository::chapter_number(
+                handle,
+                project_id,
+                &chapter_id,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+        let payload = json!({
+            "sourceChapterId":source_chapter_id,
+            "nextChapterId":chapter_id,
+            "nextChapterNo":chapter_no,
+            "status":"ALREADY_PREPARED"
+        });
+        DurableJobService::record_reconciliation_action(
+            handle, project_id, command_id, action, &payload, now,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(payload);
+    }
+
     let next_no = crate::repositories::narrative::NarrativeRepository::next_chapter_number(
-        handle, project_id, volume_id,
+        handle,
+        project_id,
+        volume_id,
     )
     .map_err(|error| error.to_string())?;
     let Some(next_no) = next_no else {
@@ -701,16 +742,6 @@ fn execute_reconciliation_action(
         .map_err(|error| error.to_string())?;
         return Ok(payload);
     };
-    if !matches!(action, "NO_ACTION" | "RECOMPILE_NEXT_CHAPTER") {
-        let payload =
-            json!({"sourceChapterId":source_chapter_id,"status":"DEFERRED","reason":action});
-        DurableJobService::record_reconciliation_action(
-            handle, project_id, command_id, action, &payload, now,
-        )
-        .map_err(|error| error.to_string())?;
-        return Ok(payload);
-    }
-
     let chapter_id = StableIdentityFactory::from_command(
         StableIdKind::Chapter,
         &format!("{project_id}:{volume_id}:chapter:{next_no}"),
@@ -726,11 +757,12 @@ fn execute_reconciliation_action(
         "payload":{"volumeId":volume_id}
     });
     let prepare_digest = sha256_canonical(&prepare_request).map_err(|error| error.to_string())?;
+    let prepare_idempotency_key = format!("{prepare_command_id}:key");
     let prepare_spec = ProjectCommandSpec {
         project_id,
         result_project_id: project_id,
         command_id: &prepare_command_id,
-        idempotency_key: &format!("{prepare_command_id}:key"),
+        idempotency_key: &prepare_idempotency_key,
         command_type: "planning_prepare_next_chapter",
         request_digest: &prepare_digest,
         expected_revision: Some(
@@ -762,69 +794,12 @@ fn execute_reconciliation_action(
         ProjectCommandOutcome::Replayed(receipt) => receipt,
         ProjectCommandOutcome::Committed { receipt, .. } => receipt,
     };
-    let current_revision = prepare_receipt.after_revision;
-    let authority = json!({"projectId":project_id,"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","chapterGoalHint":"根据 Reality t+1 重新评估下一步行动。"});
-    let context_command_id = format!("{command_id}:reconciliation:context");
-    let context_input = crate::commands::context_input_from_authority(
-        handle,
-        &authority,
-        project_id,
-        current_revision,
-    )?;
-    let context_ref = crate::narrative::commit_context_manifest_owner(
-        handle,
-        project_id,
-        &authority,
-        current_revision,
-        &context_command_id,
-        &format!("{context_command_id}:key"),
-        "LONG_FORM",
-        now,
-    )?
-    .1;
-    let plan_revision =
-        crate::repositories::narrative::NarrativeRepository::project_revision(handle, project_id)
-            .map_err(|error| error.to_string())?;
-    let plan_digest = crate::narrative::relevant_state_digest(&context_input)?;
-    let plan = json!({
-        "payloadSchema":"chapter-plan.r1",
-        "chapterId":chapter_id,
-        "compiledFromProjectRevision":plan_revision,
-        "compiledFromStateDigest":plan_digest,
-        "contextManifestRef":context_ref,
-        "chapterGoal":"根据 Reality t+1 重新评估下一步行动。",
-        "activeTaskRefs":context_input.active_task_refs,
-        "continuityActions":context_input.continuity_threads.iter().map(|thread| json!({"threadRef":thread.thread_id,"disposition":"DEFER_WITH_BRIDGE","bridge":"reconciliation next plan"})).collect::<Vec<_>>(),
-        "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],
-        "horizonPreview":[
-            {"slotNo":1,"objective":"根据本章结果重新评估下一步行动。","tentative":true},
-            {"slotNo":2,"objective":"保持长期悬念，并为后续冲突留出空间。","tentative":true},
-            {"slotNo":3,"objective":"让新的选择产生可验证的叙事后果。","tentative":true}
-        ]
-    });
-    let plan_command_id = format!("{command_id}:reconciliation:plan");
-    let plan_receipt = crate::planning::recompile_chapter_plan_owner(
-        handle,
-        project_id,
-        &chapter_id,
-        &plan,
-        &authority,
-        "LONG_FORM",
-        &plan_command_id,
-        &format!("{plan_command_id}:key"),
-        plan_revision,
-        now,
-        None,
-    )?;
     let payload = json!({
         "sourceChapterId":source_chapter_id,
         "nextChapterId":chapter_id,
         "nextChapterNo":next_no,
-        "status":"EXECUTED",
-        "prepareReceiptId":prepare_receipt.receipt_id,
-        "contextManifestRef":context_ref,
-        "chapterPlanRefs":plan_receipt.committed_artifact_refs,
-        "planRevision":plan_receipt.after_revision
+        "status":"PREPARED",
+        "prepareReceiptId":prepare_receipt.receipt_id
     });
     DurableJobService::record_reconciliation_action(
         handle, project_id, command_id, action, &payload, now,
@@ -2093,16 +2068,66 @@ fn run_chapter_production_inner(
         &now,
         vec![reference(&audit)],
     )?;
-    let required_blocked = extraction
+    let task_reality = extraction
         .task_progress_candidates
         .iter()
-        .any(|item| item.status == "BLOCKED");
-    let reconciliation = crate::planning::classify_plan_reality(
-        extraction.next_chapter_recompile_required,
-        required_blocked,
-        extraction.capacity_exhausted,
-        extraction.change_requested,
-    );
+        .map(|item| {
+            let expected = plan_payload
+                .get("requiredStateOutcomes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|condition| {
+                    condition.get("value").and_then(Value::as_str)
+                        == Some(item.task_id.as_str())
+                })
+                .and_then(|condition| condition.get("kind").and_then(Value::as_str))
+                .map(ToOwned::to_owned);
+            ReconciliationTaskReality {
+                task_id: item.task_id.clone(),
+                status: item.status.clone(),
+                expected,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut responsibility_reality = extraction
+        .continuity_candidates
+        .iter()
+        .map(|item| ReconciliationResponsibilityReality {
+            thread_ref: item.thread_ref.clone(),
+            observed: true,
+            disposition: Some(item.disposition.clone()),
+        })
+        .collect::<Vec<_>>();
+    for reference in plan_payload
+        .pointer("/hardScope/responsibilityRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !responsibility_reality.iter().any(|item| {
+            item.thread_ref == reference
+                || item.thread_ref.strip_prefix("thread:") == Some(reference)
+                || reference.strip_prefix("thread:") == Some(item.thread_ref.as_str())
+        }) {
+            responsibility_reality.push(ReconciliationResponsibilityReality {
+                thread_ref: reference.to_owned(),
+                observed: false,
+                disposition: None,
+            });
+        }
+    }
+    let reconciliation = classify_reconciliation_facts(&ReconciliationFacts {
+        task_reality,
+        remaining_chapter_capacity: crate::planning::remaining_chapter_capacity(
+            connection,
+            &project_id,
+            &chapter_id,
+        )?,
+        canon_gate_passed: true,
+        responsibility_reality,
+    });
     let mut reality = extraction
         .task_progress_candidates
         .iter()
@@ -2332,18 +2357,69 @@ pub fn validate_candidate_evidence_range(
     Ok(())
 }
 
-pub fn reconciliation_for_actual_state(
-    stale: bool,
-    required_blocked: bool,
-    capacity_exhausted: bool,
-    change_requested: bool,
-) -> &'static str {
-    crate::planning::classify_plan_reality(
-        stale,
-        required_blocked,
-        capacity_exhausted,
-        change_requested,
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationTaskReality {
+    pub task_id: String,
+    pub status: String,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationResponsibilityReality {
+    pub thread_ref: String,
+    pub observed: bool,
+    pub disposition: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationFacts {
+    pub task_reality: Vec<ReconciliationTaskReality>,
+    pub remaining_chapter_capacity: i64,
+    pub canon_gate_passed: bool,
+    pub responsibility_reality: Vec<ReconciliationResponsibilityReality>,
+}
+
+pub fn classify_reconciliation_facts(facts: &ReconciliationFacts) -> &'static str {
+    if !facts.canon_gate_passed
+        || facts.responsibility_reality.iter().any(|responsibility| {
+            responsibility.disposition.as_deref()
+                == Some("NO_LONGER_APPLICABLE_CHANGE_REQUEST")
+        })
+    {
+        return "CHANGE_REQUEST";
+    }
+    if facts
+        .responsibility_reality
+        .iter()
+        .any(|responsibility| !responsibility.observed)
+        || facts
+            .task_reality
+            .iter()
+            .any(|task| task.status == "BLOCKED")
+    {
+        return "RECOMPILE_ROLLING_WINDOW";
+    }
+    if facts.remaining_chapter_capacity <= 0
+        && facts
+            .task_reality
+            .iter()
+            .any(|task| task.status != "SATISFIED")
+    {
+        return "REPLAN_VOLUME_ROUTE";
+    }
+    if facts.task_reality.iter().any(|task| {
+        task.expected.as_deref().is_some_and(|expected| {
+            expected != "UNSPECIFIED"
+                && expected.strip_prefix("TASK_").unwrap_or(expected) != task.status
+        })
+    }) {
+        return "RECOMPILE_NEXT_CHAPTER";
+    }
+    "NO_ACTION"
+}
+
+pub fn reconciliation_for_actual_state(facts: &ReconciliationFacts) -> &'static str {
+    classify_reconciliation_facts(facts)
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -2433,12 +2509,6 @@ struct AuditExtraction {
     evidence_ranges: Vec<EvidenceSpan>,
     audit_completeness: AuditCompleteness,
     unresolved_hard: bool,
-    #[serde(default)]
-    capacity_exhausted: bool,
-    #[serde(default)]
-    change_requested: bool,
-    #[serde(default)]
-    next_chapter_recompile_required: bool,
 }
 
 fn validate_audit_candidate_binding(

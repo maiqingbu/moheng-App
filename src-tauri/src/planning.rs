@@ -2408,25 +2408,6 @@ pub fn remaining_chapter_capacity(
     Ok((metadata.chapter_end - chapter_no).max(0))
 }
 
-pub fn classify_plan_reality(
-    stale: bool,
-    required_blocked: bool,
-    capacity_exhausted: bool,
-    change_requested: bool,
-) -> &'static str {
-    if change_requested {
-        "CHANGE_REQUEST"
-    } else if capacity_exhausted {
-        "REPLAN_VOLUME_ROUTE"
-    } else if required_blocked {
-        "RECOMPILE_ROLLING_WINDOW"
-    } else if stale {
-        "RECOMPILE_NEXT_CHAPTER"
-    } else {
-        "NO_ACTION"
-    }
-}
-
 pub fn resolve_chapter_execution_mode(
     connection: &Connection,
     project_id: &str,
@@ -3287,30 +3268,6 @@ mod tests {
             compile_planning_pressure(1, 10, &route, &intent, &[], &[], &object)
                 ["reservationPressure"],
             1
-        );
-    }
-
-    #[test]
-    fn plan_reality_classifier_keeps_route_replan_as_recommendation() {
-        assert_eq!(
-            classify_plan_reality(false, false, false, false),
-            "NO_ACTION"
-        );
-        assert_eq!(
-            classify_plan_reality(true, false, false, false),
-            "RECOMPILE_NEXT_CHAPTER"
-        );
-        assert_eq!(
-            classify_plan_reality(false, true, false, false),
-            "RECOMPILE_ROLLING_WINDOW"
-        );
-        assert_eq!(
-            classify_plan_reality(false, false, true, false),
-            "REPLAN_VOLUME_ROUTE"
-        );
-        assert_eq!(
-            classify_plan_reality(false, false, false, true),
-            "CHANGE_REQUEST"
         );
     }
 
