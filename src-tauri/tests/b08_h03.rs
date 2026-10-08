@@ -5869,15 +5869,46 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct B3OpeningSnapshot {
     revision: i64,
-    artifact_count: i64,
-    canonical_head_count: i64,
+    artifact_rows: String,
+    artifact_payload_rows: String,
+    canonical_head_rows: String,
     chapter_status: String,
-    canon_counts: [i64; 8],
-    state_delta_count: i64,
+    canon_rows: String,
+    state_delta_rows: String,
     job_count: i64,
     model_run_count: i64,
     project_command_receipt_count: i64,
     domain_receipt_count: i64,
+}
+
+fn b3_table_rows_snapshot(connection: &Connection, sql: &str, project_id: &str) -> String {
+    let mut statement = connection.prepare(sql).unwrap();
+    let columns = statement
+        .column_names()
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let rows = statement
+        .query_map([project_id], |row| {
+            let mut object = serde_json::Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                let value = match row.get_ref(index)? {
+                    libsql_rusqlite::types::ValueRef::Null => Value::Null,
+                    libsql_rusqlite::types::ValueRef::Integer(value) => json!(value),
+                    libsql_rusqlite::types::ValueRef::Real(value) => json!(value),
+                    libsql_rusqlite::types::ValueRef::Text(value) => {
+                        json!(String::from_utf8_lossy(value).into_owned())
+                    }
+                    libsql_rusqlite::types::ValueRef::Blob(value) => json!(hex::encode(value)),
+                };
+                object.insert(column.clone(), value);
+            }
+            Ok(Value::Object(object))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    serde_json::to_string(&rows).unwrap()
 }
 
 fn b3_formal_side_effect_snapshot(
@@ -5904,22 +5935,50 @@ fn b3_formal_side_effect_snapshot(
             |row| row.get(0),
         )
         .unwrap();
+    let canon_tables = [
+        "canon_entities",
+        "canon_aliases",
+        "canon_facts",
+        "canon_relations",
+        "canon_knowledge",
+        "canon_events",
+        "canon_evidence",
+        "canon_timepoints",
+    ];
+    let canon_rows = canon_tables
+        .iter()
+        .map(|table| {
+            let sql = format!("SELECT * FROM {table} WHERE project_id=?1 ORDER BY rowid");
+            (
+                table.to_string(),
+                b3_table_rows_snapshot(connection, &sql, project_id),
+            )
+        })
+        .collect::<Vec<_>>();
     B3OpeningSnapshot {
         revision,
-        artifact_count: count("SELECT COUNT(*) FROM artifacts WHERE project_id=?1"),
-        canonical_head_count: count("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1"),
+        artifact_rows: b3_table_rows_snapshot(
+            connection,
+            "SELECT * FROM artifacts WHERE project_id=?1 ORDER BY rowid",
+            project_id,
+        ),
+        artifact_payload_rows: b3_table_rows_snapshot(
+            connection,
+            "SELECT p.* FROM artifact_payloads p JOIN artifacts a ON a.artifact_id=p.artifact_id WHERE a.project_id=?1 ORDER BY p.rowid",
+            project_id,
+        ),
+        canonical_head_rows: b3_table_rows_snapshot(
+            connection,
+            "SELECT * FROM canonical_heads WHERE project_id=?1 ORDER BY rowid",
+            project_id,
+        ),
         chapter_status,
-        canon_counts: [
-            count("SELECT COUNT(*) FROM canon_entities WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_aliases WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_relations WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_events WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_evidence WHERE project_id=?1"),
-            count("SELECT COUNT(*) FROM canon_timepoints WHERE project_id=?1"),
-        ],
-        state_delta_count: count("SELECT COUNT(*) FROM state_deltas WHERE project_id=?1"),
+        canon_rows: serde_json::to_string(&canon_rows).unwrap(),
+        state_delta_rows: b3_table_rows_snapshot(
+            connection,
+            "SELECT * FROM state_deltas WHERE project_id=?1 ORDER BY rowid",
+            project_id,
+        ),
         job_count: count("SELECT COUNT(*) FROM jobs WHERE project_id=?1"),
         model_run_count: count("SELECT COUNT(*) FROM model_runs WHERE project_id=?1"),
         project_command_receipt_count: count(
