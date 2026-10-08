@@ -306,6 +306,12 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
             libsql_rusqlite::params!["p-b04-b06-plan", prior_chapter_id],
         )
         .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=6 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params!["p-b04-b06-plan", volume_id],
+        )
+        .unwrap();
     drop(connection);
     let gateway = Arc::new(PlanningGateway {
         calls: AtomicUsize::new(0),
@@ -370,8 +376,22 @@ fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
     let project_b = manager
         .create("p-b2-direction-b", "B2 direction B", NOW)
         .unwrap();
-    let (_, chapter_a) = seed_authority_for_direction(&project_a, "p-b2-direction-a", "方向甲");
-    let (_, chapter_b) = seed_authority_for_direction(&project_b, "p-b2-direction-b", "方向乙");
+    let (volume_a, chapter_a) =
+        seed_authority_for_direction(&project_a, "p-b2-direction-a", "方向甲");
+    let (volume_b, chapter_b) =
+        seed_authority_for_direction(&project_b, "p-b2-direction-b", "方向乙");
+    project_a
+        .execute(
+            "UPDATE volumes SET chapter_end=5 WHERE project_id='p-b2-direction-a' AND volume_id=?1",
+            [&volume_a],
+        )
+        .unwrap();
+    project_b
+        .execute(
+            "UPDATE volumes SET chapter_end=5 WHERE project_id='p-b2-direction-b' AND volume_id=?1",
+            [&volume_b],
+        )
+        .unwrap();
     drop(project_a);
     drop(project_b);
 
@@ -1028,6 +1048,12 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
         .execute(
             "UPDATE chapters SET status='COMMITTED' WHERE project_id=?1 AND chapter_id=?2",
             libsql_rusqlite::params![project_id, prior_chapter_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=6 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
         )
         .unwrap();
     let quote = "证据内容".repeat(3_000);
