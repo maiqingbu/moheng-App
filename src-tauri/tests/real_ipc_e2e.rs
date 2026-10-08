@@ -1255,27 +1255,38 @@ fn r2_response_envelope(content: Value) -> Vec<u8> {
 }
 
 fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
+    let opening_bootstrap = input.get("executionMode").and_then(Value::as_str)
+        == Some("OPENING_BOOTSTRAP");
+    let task_progress_candidates = input
+        .pointer("/chapterPlan/activeTaskRefs")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some(task_id)));
     match capability {
         "PLAN_STRATEGY" => {
-            let active_tasks = input
-                .get("activeTaskRefs")
-                .and_then(Value::as_array)
-                .cloned()
-                .or_else(|| {
-                    input
-                        .pointer("/volumePlanRoute/tasks")
-                        .and_then(Value::as_array)
-                        .map(|tasks| {
-                            tasks
-                                .iter()
-                                .filter(|task| {
-                                    task.get("class").and_then(Value::as_str) == Some("REQUIRED")
-                                })
-                                .filter_map(|task| task.get("taskId").cloned())
-                                .collect()
-                        })
-                })
-                .unwrap_or_else(|| vec![json!(task_id)]);
+            let active_tasks = if opening_bootstrap {
+                Vec::new()
+            } else {
+                input
+                    .get("activeTaskRefs")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .or_else(|| {
+                        input
+                            .pointer("/volumePlanRoute/tasks")
+                            .and_then(Value::as_array)
+                            .map(|tasks| {
+                                tasks
+                                    .iter()
+                                    .filter(|task| {
+                                        task.get("class").and_then(Value::as_str)
+                                            == Some("REQUIRED")
+                                    })
+                                    .filter_map(|task| task.get("taskId").cloned())
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_else(|| vec![json!(task_id)])
+            };
             json!({
                 "payloadSchema":"chapter-plan.r1",
                 "chapterId":input["chapterId"],
@@ -1307,7 +1318,7 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
             }],
             "knowledgeCandidates":[],"continuityCandidates":[],
-            "taskProgressCandidates":[{"taskId":task_id,"status":"ACTIVE","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}],
+            "taskProgressCandidates":if task_progress_candidates {json!([{"taskId":task_id,"status":"ACTIVE","evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}])} else {json!([])},
             "revealedReservationRefs":[],"evidenceRanges":[{"start":0,"end":6,"quote":"林舟推开石门"}],
             "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false
         }),
@@ -1598,33 +1609,62 @@ fn r2_seed_async_provider_project(
     connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,source_chapter_id,created_at,updated_at) VALUES (?1,?2,?3,'location','{\"place\":\"石门\"}','A','2020-01-01T00:00:00Z','2021-01-01T00:00:00Z',?4,?5,?5)", libsql_rusqlite::params![format!("fact:r2:{project_id}:seed"),project_id,entity_id,chapter_id,R2_PROVIDER_NOW]).unwrap();
     connection.execute("INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES ('task:actual',?1,'volume.task.progress','{\"taskId\":\"task:actual\",\"status\":\"ACTIVE\",\"evidenceRefs\":[],\"remainingConditions\":[]}',?2,'{}',?3,?3)", libsql_rusqlite::params![project_id,chapter_id,R2_PROVIDER_NOW]).unwrap();
     let project_scope = r#"{"level":"PROJECT"}"#;
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","futureReservations":[]});
+    let book_plan_id = format!("book-plan:r2:{project_id}");
+    let book_plan = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"林舟核对石门线索并承担调查代价",
+        "protagonistMacroDirection":"主动追查并验证现场证据",
+        "endingBoundary":"依据证据完成当前卷目标",
+        "mustAchieve":[{"id":"goal:r2:actual","description":"完成石门线索的下一步核对"}],
+        "mustNotBreak":[{"id":"rule:r2:actual","description":"不得违背已确认事实"}],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[],
+        "futureReservations":[],
+        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
+        "globalLengthBudget":{"preferredWords":120000}
+    });
     let book_plan_hash = r2_insert_artifact(
         connection,
         project_id,
-        &format!("book-plan:r2:{project_id}"),
+        &book_plan_id,
         "BookPlan",
         "PROJECT",
         project_scope,
         &book_plan,
     );
-    r2_insert_artifact(
+    let story_id = format!("story-constitution:r2:{project_id}");
+    let story_hash = r2_insert_artifact(
         connection,
         project_id,
-        &format!("story-constitution:r2:{project_id}"),
+        &story_id,
         "StoryConstitution",
         "PROJECT",
         project_scope,
-        &json!({"payloadSchema":"story-constitution.r1","storyCore":{"protagonist":"林舟","desire":"查明石门后的线索"}}),
+        &json!({"payloadSchema":"story-constitution.r1","storyCore":{"protagonist":"林舟","desire":"查明石门后的线索","mechanism":"行动留下可验证证据","conflict":"调查受到既有秩序阻碍","readerPromise":"每章推进真实任务并承担代价","worldRules":[],"forbiddenReveals":[]}}),
     );
-    r2_insert_artifact(
+    let story_ref = json!({"artifactId":story_id,"version":1,"payloadHash":story_hash});
+    let book_plan_ref = json!({"artifactId":book_plan_id,"version":1,"payloadHash":book_plan_hash});
+    let main_id = format!("main-contract:r2:{project_id}");
+    let main_hash = r2_insert_artifact(
         connection,
         project_id,
-        &format!("main-contract:r2:{project_id}"),
+        &main_id,
         "MainContract",
         "PROJECT",
         project_scope,
-        &json!({"payloadSchema":"main-contract.r1","hardRules":["保持已证实事实"]}),
+        &json!({"payloadSchema":"main-contract.r1","storyConstitutionRef":story_ref,"scope":"BOOK","hardRules":["保持已证实事实"],"softPreferences":[]}),
+    );
+    let main_ref = json!({"artifactId":main_id,"version":1,"payloadHash":main_hash});
+    r2_insert_artifact(
+        connection,
+        project_id,
+        &format!("opening-contract:r2:{project_id}"),
+        "OpeningContract",
+        "PROJECT",
+        project_scope,
+        &json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":story_ref,"mainContractRef":main_ref,"bookPlanRef":book_plan_ref,"openingReady":true,"firstChapterGoal":"让林舟主动核对石门线索","firstThreeChapterPromise":"逐步验证石门线索并留下代价","forbiddenReveals":[]}),
     );
     let gate_policy = json!({"payloadSchema":"gate-policy.r1","policyId":"r2-local","rules":["candidate-audit","chapter-final"],"canonSemantics":{"policyVersion":"canon-semantics.r1","rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},{"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},{"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},{"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}]}});
     r2_insert_artifact(
@@ -1715,7 +1755,21 @@ fn r2_seed_planning_project(
     ).unwrap();
 
     let project_scope = r#"{"level":"PROJECT"}"#;
-    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+    let book_plan = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"林舟核对石门线索并留下下一步调查依据",
+        "protagonistMacroDirection":"主动追查并验证现场证据",
+        "endingBoundary":"依据证据完成当前卷目标",
+        "mustAchieve":[{"id":"goal:r2-planning","description":"留下下一步调查所需证据"}],
+        "mustNotBreak":[{"id":"rule:r2-planning","description":"不得改变上一章已确认事实"}],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[],
+        "futureReservations":[],
+        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
+        "globalLengthBudget":{"preferredWords":120000}
+    });
     let book_plan_id = format!("book-plan:r2-planning:{project_id}");
     let book_plan_hash = r2_insert_artifact(
         connection,
