@@ -2104,7 +2104,7 @@ mod tests {
         assert!(deterministic_model_gate(
             &deterministic,
             &chapters,
-            &json!({"openingContractComplete":true,"chaptersComplete":true})
+            &json!({"openingContractComplete":true,"openingCanonCommitted":true,"chaptersComplete":true})
         )
         .is_some_and(|reason| reason.contains("不调用模型")));
     }
