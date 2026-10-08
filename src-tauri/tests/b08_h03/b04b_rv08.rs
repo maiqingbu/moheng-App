@@ -453,8 +453,14 @@ fn b08_rv08_legacy_b11_policy_blocks_long_form_until_explicit_default_adoption()
         capabilities.lock().unwrap().is_empty(),
         "neither blocked entry may call a model"
     );
-    let connection = state.manager.open(project_id, "RV-08 blocked entries", NOW).unwrap();
-    assert_eq!(project_write_snapshot(&connection, project_id), before_blocked_entries);
+    let connection = state
+        .manager
+        .open(project_id, "RV-08 blocked entries", NOW)
+        .unwrap();
+    assert_eq!(
+        project_write_snapshot(&connection, project_id),
+        before_blocked_entries
+    );
     drop(connection);
 
     let adopted = execute_command_impl(
