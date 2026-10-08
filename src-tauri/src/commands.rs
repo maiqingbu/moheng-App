@@ -754,8 +754,7 @@ pub fn query_production_center_impl(state: &KernelState, request: Value) -> Resu
             );
             if !current.unwrap_or(false) {
                 projection["signing"]["status"] = json!("STALE");
-                projection["signing"]["verdict"] =
-                    json!("签约评估绑定的正文、合同、规则或平台档案已变化，请重新评估。");
+                projection["signing"]["verdict"] = json!("签约规则已更新，请重新评估");
             }
         }
     }
@@ -7062,11 +7061,56 @@ fn execute_planning_command_with_observer(
         b03_volume_job = Some((job_id, worker_id));
     }
     if artifact_type == "BookPlan" {
-        let seed_ref =
+        let signing_head =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                &handle,
+                project_id,
+                "SimulatedSigningReceipt",
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(signing_ref) = signing_head.as_ref() {
+            let signing_payload =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    &handle,
+                    project_id,
+                    signing_ref,
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "SIGNING_EVALUATION_STALE".to_string())?;
+            if signing_payload
+                .get("evaluationRuleVersion")
+                .and_then(Value::as_str)
+                != Some(crate::signing::SIGNING_RULESET_VERSION)
+            {
+                return Err("SIGNING_EVALUATION_STALE".into());
+            }
+        }
+        let current_book_plan_ref =
             crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
                 &handle, project_id, "BookPlan",
             )
             .map_err(|error| error.to_string())?;
+        let current_book_plan_payload = if let Some(reference) = current_book_plan_ref.as_ref() {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                &handle, project_id, reference,
+            )
+            .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        let seed_ref = if current_book_plan_payload
+            .as_ref()
+            .and_then(|current| current.get("planningMaturity"))
+            .and_then(Value::as_str)
+            == Some("SEED")
+        {
+            current_book_plan_ref.clone()
+        } else {
+            crate::repositories::narrative::NarrativeRepository::latest_book_plan_seed_ref(
+                &handle, project_id,
+            )
+            .map_err(|error| error.to_string())?
+        };
         if payload.is_null() {
             let reference = seed_ref
                 .clone()
@@ -7085,13 +7129,6 @@ fn execute_planning_command_with_observer(
         }
         let mut canon_refs = string_array(request.pointer("/payload/openingCanonRefs"));
         let mut evidence_refs = string_array(request.pointer("/payload/signingEvidenceRefs"));
-        let signing_head =
-            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-                &handle,
-                project_id,
-                "SimulatedSigningReceipt",
-            )
-            .map_err(|error| error.to_string())?;
         if canon_refs.is_empty() && evidence_refs.is_empty() {
             let signing_ref = signing_head
                 .clone()
@@ -7151,6 +7188,16 @@ fn execute_planning_command_with_observer(
                 .as_ref()
                 .filter(|head| head.artifact_id == *reference)
             else {
+                if crate::repositories::narrative::NarrativeRepository::committed_signing_receipt_ref(
+                    &handle,
+                    project_id,
+                    reference,
+                )
+                .map_err(|error| error.to_string())?
+                .is_some()
+                {
+                    return Err("SIGNING_EVALUATION_STALE".into());
+                }
                 return crate::repositories::narrative::NarrativeRepository::signing_receipt_passes(
                     &handle,
                     project_id,

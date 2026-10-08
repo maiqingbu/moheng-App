@@ -87,7 +87,7 @@ const canEvaluateOpening = computed(() => openingProgress.value?.completed === o
   && signing.value?.status !== 'PASS')
 const canFinalizeBookPlan = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed === true
-  && bookPlan.value?.status !== 'APPROVED')
+  && (bookPlan.value?.status !== 'APPROVED' || bookPlan.value?.reapprovalRequired === true))
 const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed !== true
   && passingSigningPlatforms.value.length > 0)
@@ -179,7 +179,7 @@ async function startProduction() {
 }
 
 function evaluationStatusLabel() {
-  if (signing.value?.status === 'STALE') return '签约依据已失效'
+  if (signing.value?.status === 'STALE') return '签约规则已更新，请重新评估'
   if (signing.value?.evaluation?.status === 'FAILED') return '评估未完成'
   if (evaluationInFlight.value || signing.value?.evaluation?.status === 'IN_REVIEW') return '正在评估'
   if (['PASS', 'FAIL', 'NOT_VERIFIED', 'REVISE', 'REJECTED'].includes(String(signing.value?.status))) return '评估完成'
@@ -224,6 +224,7 @@ function evaluationActionLabel() {
 }
 
 function bookPlanActionLabel() {
+  if (bookPlan.value?.reapprovalRequired === true) return '更新正式总纲'
   return bookPlanInFlight.value || production.value?.runtimeOperation?.kind === 'B02::BOOK_PLAN'
     ? '查看正式总纲进度'
     : '生成正式总纲'
@@ -419,7 +420,7 @@ async function reverifyRepair() {
       <div class="task-row"><strong>正式签约回执</strong><span>{{ signing?.receipt?.id ? `${signing.receipt.id} · 已提交` : '尚未生成' }}</span></div>
       <div v-if="signing?.confirmation?.confirmed" class="task-row"><strong>签约确认</strong><span>已确认 {{ signing.confirmation.platformId }} · {{ signing.confirmation.confirmedAt }}</span></div>
       <div v-if="signing?.declarationPrompt" class="task-row"><strong>AI 生成声明提示</strong><span>{{ signing.declarationPrompt }}</span></div>
-      <div class="task-row"><strong>正式总纲</strong><span>{{ signing?.status === 'STALE' ? '历史版本保留，等待依据复核' : bookPlan?.status === 'APPROVED' ? '已生成正式版本' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
+      <div class="task-row"><strong>正式总纲</strong><span>{{ signing?.status === 'STALE' ? '历史版本保留，等待依据复核' : bookPlan?.reapprovalRequired ? '新签约回执可生成新版本，旧版本仍保留' : bookPlan?.status === 'APPROVED' ? '已生成正式版本' : '等待评估通过后生成' }}<span v-if="bookPlan?.seedPreserved"> · 开篇草稿历史已保留</span></span></div>
       <div v-if="bookPlan?.steps?.length" class="evaluation-steps" aria-label="正式总纲运行步骤">
         <div v-for="step in bookPlan.steps" :key="step.id" class="evaluation-step" :class="evaluationStepClass(step.status)">
           <span class="evaluation-step-marker">{{ step.status === 'done' ? '✓' : step.status === 'active' ? '…' : '·' }}</span>

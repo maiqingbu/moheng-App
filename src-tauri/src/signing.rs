@@ -133,17 +133,6 @@ fn ref_from_value(value: &Value) -> Option<ArtifactRef> {
     })
 }
 
-fn is_formal_legacy_signing_receipt(payload: &Value) -> bool {
-    payload
-        .get("sourceRefs")
-        .and_then(Value::as_object)
-        .is_some()
-        && payload
-            .get("chapterEvidence")
-            .and_then(Value::as_array)
-            .is_some()
-}
-
 fn dedupe_refs(refs: impl IntoIterator<Item = ArtifactRef>) -> Vec<ArtifactRef> {
     let mut seen = BTreeSet::new();
     refs.into_iter()
@@ -1783,7 +1772,7 @@ pub fn signing_evaluation_is_current_in_project(
     }
     if payload.get("evaluationRuleVersion").and_then(Value::as_str) != Some(SIGNING_RULESET_VERSION)
     {
-        return Ok(!is_formal_legacy_signing_receipt(&payload));
+        return Ok(false);
     }
     let (current_binding, current_digest) = match load_current_binding(connection, project_id) {
         Ok(binding) => binding,
@@ -1796,9 +1785,8 @@ pub fn signing_evaluation_is_current_in_project(
     )
 }
 
-/// Applies freshness and confirmation to newly issued signing-eval.r1
-/// receipts before a LONG_FORM plan is consumed. Pre-B3-B approvals remain
-/// historical inputs and are not rewritten by this batch.
+/// Requires a current signing-eval.r1 receipt before a LONG_FORM plan is consumed.
+/// Historical receipts remain available for review but cannot authorize new plans.
 pub fn require_current_signing_for_long_form_if_present(
     connection: &Connection,
     project_id: &str,
@@ -1810,6 +1798,7 @@ pub fn require_current_signing_for_long_form_if_present(
     )
     .map_err(|error| error.to_string())?
     else {
+        // RV-32 owns the no-receipt behavior; keep its current no-op in this batch.
         return Ok(());
     };
     let Some(payload) =
@@ -1820,7 +1809,7 @@ pub fn require_current_signing_for_long_form_if_present(
     };
     if payload.get("evaluationRuleVersion").and_then(Value::as_str) != Some(SIGNING_RULESET_VERSION)
     {
-        return Ok(());
+        return Err("SIGNING_EVALUATION_STALE".into());
     }
     if payload.get("status").and_then(Value::as_str) != Some("PASS") {
         return Err("SIGNING_EVALUATION_REQUIRED".into());

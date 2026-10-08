@@ -511,6 +511,42 @@ impl ProductionRepository {
                 }
             })
             .unwrap_or("PENDING");
+        let signing_is_current_and_confirmed = signing_ref
+            .as_ref()
+            .zip(signing_payload.as_ref())
+            .is_some_and(|(reference, payload)| {
+                payload.get("evaluationRuleVersion").and_then(Value::as_str)
+                    == Some(crate::signing::SIGNING_RULESET_VERSION)
+                    && payload.get("status").and_then(Value::as_str) == Some("PASS")
+                    && payload
+                        .pointer("/confirmation/confirmed")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    && crate::signing::signing_evaluation_is_current_in_project(
+                        connection, project_id, reference,
+                    )
+                    .unwrap_or(false)
+            });
+        let book_plan_uses_current_signing = if let (Some(book_plan), Some(signing)) =
+            (book_plan_ref.as_ref(), signing_ref.as_ref())
+        {
+            connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM artifact_dependencies WHERE source_artifact_id=?1 AND source_version=?2 AND target_artifact_id=?3 AND target_version=?4 AND target_payload_hash=?5)",
+                    libsql_rusqlite::params![
+                        book_plan.artifact_id,
+                        book_plan.version,
+                        signing.artifact_id,
+                        signing.version,
+                        signing.payload_hash
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )?
+        } else {
+            false
+        };
+        let book_plan_reapproval_required = book_plan_status == "APPROVED"
+            && signing_is_current_and_confirmed
+            && !book_plan_uses_current_signing;
         let book_plan_operation = b02_operation
             .as_ref()
             .filter(|(_, kind, _, _, _)| kind == crate::repositories::runtime::B02_BOOK_PLAN_KIND);
@@ -533,6 +569,7 @@ impl ProductionRepository {
             "status":book_plan_status,
             "ref":book_plan_ref.as_ref().map(|reference| json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash})),
             "seedPreserved":seed_count > 0,
+            "reapprovalRequired":book_plan_reapproval_required,
             "steps":book_plan_steps
         });
         let next_chapter_has_volume_plan = if let Some((_, _, _, volume_id)) = next_chapter.as_ref()

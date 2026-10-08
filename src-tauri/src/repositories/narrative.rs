@@ -2413,6 +2413,26 @@ impl NarrativeRepository {
         connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 ORDER BY h.scope_key LIMIT 1", libsql_rusqlite::params![project_id, artifact_type], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
     }
 
+    pub fn latest_book_plan_seed_ref(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT a.artifact_id,a.version,a.payload_hash FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND a.artifact_status='COMMITTED' AND json_extract(p.payload_json,'$.planningMaturity')='SEED' ORDER BY a.created_at DESC,a.version DESC,a.artifact_id DESC LIMIT 1",
+                [project_id],
+                |row| {
+                    Ok(ArtifactRef {
+                        artifact_id: row.get(0)?,
+                        version: row.get(1)?,
+                        payload_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn artifact_payload_by_ref(
         connection: &Connection,
         project_id: &str,

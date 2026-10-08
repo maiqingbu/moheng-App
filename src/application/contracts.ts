@@ -608,6 +608,7 @@ export interface ProductionCenterProjection {
     status: 'PENDING' | 'APPROVED'
     ref?: { artifactId: string; version: number; payloadHash: string } | null
     seedPreserved?: boolean
+    reapprovalRequired?: boolean
     steps?: Array<{ id: string; label: string; status: 'pending' | 'active' | 'done' | 'failed' | 'waiting' }>
   }
   runtimeOperation?: {
