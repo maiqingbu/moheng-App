@@ -33,9 +33,6 @@ fn b07_legacy_signing_receipt_is_not_approval_evidence() {
         &state,
         json!({"type":"planning_finalize_book_plan","commandId":"semantic:g3:planned","idempotencyKey":"semantic:g3:planned","projectId":"semantic-p1","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:semantic:1","fact:semantic:2","fact:semantic:3"],"signingEvidenceRefs":["artifact:semantic:signing"]}}),
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "SIGNING_EVALUATION_STALE"
-    );
+    assert_eq!(result.unwrap_err(), "SIGNING_EVALUATION_STALE");
     println!("B07_SEMANTIC_NEGATIVE_TEST_RESULT legacy_signing_receipt=STALE approval_blocked=PASS status=PASS");
 }
