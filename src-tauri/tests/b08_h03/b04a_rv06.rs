@@ -495,6 +495,10 @@ fn b08_user_responsibility_adjustments_are_versioned_and_replayable() {
         .open(project_id, "B08 adjustment", NOW)
         .unwrap();
     seed_b4a_existing_obligation(&connection, project_id);
+    connection.execute(
+        "INSERT INTO decisions(decision_id,project_id,decision_type,outcome,reason,source_ref,payload_json,created_at,updated_at) VALUES ('decision:rv33:audited-existing-responsibility',?1,'THREAD_PROMOTION_RULE','B','B4-A 用户调整控制项应代表审计新增责任','thread:promise:existing','{\"ruleVersion\":\"thread-promotion.r1\"}',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
     drop(connection);
     let downgrade = json!({
         "type":"thread_responsibility_adjust","commandId":"cmd:b08:adjust:1",

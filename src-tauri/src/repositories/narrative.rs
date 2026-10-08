@@ -2727,6 +2727,25 @@ impl NarrativeRepository {
         }
     }
 
+    pub fn responsibility_adjustment_is_user_editable(
+        connection: &Connection,
+        project_id: &str,
+        obligation_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let thread_ref = format!("thread:{obligation_id}");
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=?1 AND d.source_ref=?2 AND d.decision_type='THREAD_PROMOTION_RULE' AND d.outcome IN ('B','C') AND json_extract(d.payload_json,'$.ruleVersion')=?3) OR EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=?1 AND d.source_ref=?2 AND d.decision_type='USER_THREAD_RESPONSIBILITY_ADJUSTMENT' AND d.outcome='UPGRADE')",
+                libsql_rusqlite::params![
+                    project_id,
+                    thread_ref,
+                    crate::narrative::THREAD_PROMOTION_RULE_VERSION
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn final_chapter_body_for_ref(
         connection: &Connection,
         project_id: &str,

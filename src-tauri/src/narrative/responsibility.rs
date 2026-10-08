@@ -104,6 +104,16 @@ pub fn execute_adjustment(
     ) {
         return Err("B08_RESPONSIBILITY_NOT_ACTIVE".into());
     }
+    if matches!(action, "DELETE" | "DOWNGRADE")
+        && !NarrativeRepository::responsibility_adjustment_is_user_editable(
+            &connection,
+            project_id,
+            obligation_id,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        return Err("B08_RESPONSIBILITY_CHANGE_REQUEST_REQUIRED".into());
+    }
     let target_level = match action {
         "DOWNGRADE" => {
             if record.authority_level != "B" {

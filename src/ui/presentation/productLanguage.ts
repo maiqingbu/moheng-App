@@ -75,6 +75,7 @@ const errorLabels: Record<string, string> = {
   AUDIT_INCOMPLETE: '正文审计未完成，不能作为无变更结果提交。',
   AUDIT_STALE: '正文已变化，需重新审计最终版本。',
   CANON_CONFLICT: '正文与正式事实存在冲突，请核对依据并通过正式变更流程处理。',
+  B08_RESPONSIBILITY_CHANGE_REQUEST_REQUIRED: '这项责任来自正式来源，不能直接撤销或降级；请通过变更请求提交调整。',
   FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
   CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
   UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
