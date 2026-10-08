@@ -5518,6 +5518,97 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
 }
 
 #[test]
+fn b3_planning_owner_rejects_a_second_uncommitted_chapter_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b3-single-executable-plan";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let (first_chapter_id, volume_id, _, _) =
+        seed_b08_long_form_project(&state, project_id);
+    let second_chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "b3:second").unwrap();
+    let connection = state.manager.open(project_id, "B3 one executable plan", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=2 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'第二章','NORMAL','PLANNED',0,?4,?4)",
+            libsql_rusqlite::params![second_chapter_id, project_id, volume_id, NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let authority = json!({
+        "projectId":project_id,"chapterId":second_chapter_id,"volumeId":volume_id,
+        "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[],
+        "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],
+            "reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
+    });
+    let context = query_context_manifest_impl(&state, authority.clone()).unwrap();
+    let context_id = "context:b3:second-chapter";
+    let context_hash = sha256_canonical(&context).unwrap();
+    let connection = state.manager.open(project_id, "B3 one executable plan", NOW).unwrap();
+    let scope = json!({"level":"CHAPTER","chapterId":second_chapter_id}).to_string();
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'ContextManifest','CHAPTER',?3,1,'m0a.artifact.v1','COMMITTED',?4,'{}',?5,?5)",
+            libsql_rusqlite::params![context_id, project_id, scope, context_hash, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![context_id, context.to_string(), context_hash],
+        )
+        .unwrap();
+    let plan = json!({
+        "payloadSchema":"chapter-plan.r1","chapterId":second_chapter_id,
+        "compiledFromProjectRevision":0,
+        "compiledFromStateDigest":context["compiledFromStateDigest"],
+        "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
+        "chapterGoal":"推进第二章","activeTaskRefs":["task:actual"],
+        "continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],
+        "knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],
+        "horizonPreview":[
+            {"slotNo":1,"objective":"推进当前行动","tentative":true},
+            {"slotNo":2,"objective":"检查行动后果","tentative":true},
+            {"slotNo":3,"objective":"形成新选择","tentative":true}
+        ]
+    });
+    let expected_revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(
+        &connection,
+        project_id,
+    )
+    .unwrap();
+    let result = ai_novel_production_system_core::planning::recompile_chapter_plan_owner(
+        &connection,
+        project_id,
+        &second_chapter_id,
+        &plan,
+        &authority,
+        "cmd:b3:second-chapter-plan",
+        "key:b3:second-chapter-plan",
+        expected_revision,
+        NOW,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "the owner must reject a second executable Plan; first chapter: {first_chapter_id}"
+    );
+    let error = result.unwrap_err();
+
+    assert!(
+        error.contains("B08_CHAPTER_ORDER_REQUIRED")
+            || error.contains("B07_EXECUTABLE_PLAN_EXISTS"),
+        "actual error: {error}; first chapter still has an executable head: {first_chapter_id}"
+    );
+}
+
+#[test]
 fn h03_valid_authorization_cannot_bypass_planning_task_scope_gate() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-h03-recompile-negative";

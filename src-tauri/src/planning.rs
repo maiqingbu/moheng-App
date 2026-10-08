@@ -2597,6 +2597,7 @@ pub fn recompile_chapter_plan_owner(
     model_run_id: Option<&str>,
 ) -> Result<CommitReceipt, String> {
     let execution_mode = preflight_chapter_plan_owner(connection, project_id, chapter_id)?;
+    validate_chapter_plan_target(connection, project_id, chapter_id, execution_mode)?;
     let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
         connection,
         project_id,
@@ -2804,6 +2805,53 @@ pub fn recompile_chapter_plan_owner(
     CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())
 }
 
+pub fn validate_chapter_plan_target(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    execution_mode: &str,
+) -> Result<(), String> {
+    let next_chapter = if execution_mode == "OPENING_BOOTSTRAP" {
+        crate::repositories::project_entry::next_opening_chapter_id(connection, project_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "B08_OPENING_ORDER_REQUIRED".to_string())?
+    } else {
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+            connection,
+            project_id,
+            chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+        crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
+            connection,
+            project_id,
+            &volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "B08_CHAPTER_ORDER_REQUIRED".to_string())?
+    };
+    if next_chapter != chapter_id {
+        return Err(if execution_mode == "OPENING_BOOTSTRAP" {
+            "B08_OPENING_ORDER_REQUIRED"
+        } else {
+            "B08_CHAPTER_ORDER_REQUIRED"
+        }
+        .into());
+    }
+    let other_executable_plan_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM canonical_heads h JOIN chapters c ON c.project_id=h.project_id AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND c.chapter_id!=?2 AND c.status IN ('PLANNED','PRODUCING','PAUSED'))",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if other_executable_plan_exists {
+        return Err("B07_EXECUTABLE_PLAN_EXISTS".into());
+    }
+    Ok(())
+}
+
 /// B07 owner entry used by B11's opening bootstrap. The caller supplies the
 /// context reference produced by B06; this owner builds only the current
 /// ChapterPlan and routes it through the same validation/commit function used
@@ -2852,7 +2900,7 @@ pub fn commit_opening_chapter_plan_owner(
         .map(|thread| {
             json!({
                 "threadRef":thread.thread_id,
-                "disposition":"KEEP_OPEN",
+                "disposition":"ADVANCE",
             })
         })
         .collect::<Vec<_>>();

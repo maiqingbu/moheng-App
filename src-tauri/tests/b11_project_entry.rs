@@ -1521,6 +1521,70 @@ fn b11_opening_uses_real_b07_chapter_plan_owner() {
 }
 
 #[test]
+fn b11_opening_plan_accepts_a_valid_disposition_when_a_thread_exists() {
+    let state = state();
+    let project_id = create_opening_ready_fixture(&state, "cmd:b11:opening-thread-disposition");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (chapter_id, plan_payload, story_artifact_id, story_version): (String, String, String, i64) =
+        connection
+            .query_row(
+                "SELECT c.chapter_id,plan_payload.payload_json,story_head.artifact_id,story_head.version FROM chapters c JOIN canonical_heads plan_head ON plan_head.project_id=c.project_id AND plan_head.artifact_type='ChapterPlan' AND plan_head.scope_level='CHAPTER' AND json_extract(plan_head.scope_key,'$.chapterId')=c.chapter_id JOIN artifact_payloads plan_payload ON plan_payload.artifact_id=plan_head.artifact_id AND plan_payload.version=plan_head.version JOIN canonical_heads story_head ON story_head.project_id=c.project_id AND story_head.artifact_type='StoryConstitution' WHERE c.project_id=?1 AND c.chapter_no=1",
+                [&project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+    connection
+        .execute(
+            "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,resume_condition_json,lifecycle,created_at,updated_at) VALUES ('obligation:b11:opening-thread',?1,'BOOK','PROMISE','A',?2,?3,'开篇承诺需要持续推进','[]','{\"kind\":\"AFTER_CHAPTER\",\"value\":0}','APPROVED',?4,?4)",
+            libsql_rusqlite::params![project_id, story_artifact_id, story_version, NOW],
+        )
+        .unwrap();
+    let revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let plan_payload: serde_json::Value = serde_json::from_str(&plan_payload).unwrap();
+    let context_ref = serde_json::from_value(plan_payload["contextManifestRef"].clone()).unwrap();
+    let authority = json!({
+        "projectId":project_id,"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP",
+        "scope":"CHAPTER","entityIds":[],"references":[]
+    });
+
+    let result = ai_novel_production_system_core::planning::commit_opening_chapter_plan_owner(
+        &connection,
+        &project_id,
+        &chapter_id,
+        &context_ref,
+        &authority,
+        revision,
+        "cmd:b11:opening-thread-disposition:recompile",
+        "key:b11:opening-thread-disposition:recompile",
+        NOW,
+    );
+    assert!(
+        result.is_ok(),
+        "opening plan must use a contract-valid disposition when a thread exists: {result:?}"
+    );
+    let receipt = result.unwrap();
+    assert_eq!(receipt.committed_artifact_refs.len(), 1);
+
+    let committed_plan = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::b07_chapter_plan_payload(
+        &connection,
+        &project_id,
+        &chapter_id,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        committed_plan["continuityActions"][0]["disposition"],
+        "ADVANCE"
+    );
+}
+
+#[test]
 fn b11_no_fake_owner_label() {
     let source = include_str!("../src/project_entry.rs");
     assert!(!source.contains("\"artifactType\":\"ContextManifest\""));
