@@ -1630,6 +1630,28 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
+    pub fn future_reservation_volume_numbers(
+        connection: &Connection,
+        project_id: &str,
+        reservations: &[Value],
+    ) -> Result<BTreeMap<String, i64>, NarrativeRepositoryError> {
+        let mut volume_numbers = BTreeMap::new();
+        for volume_id in reservations
+            .iter()
+            .filter_map(|item| item.get("reservedForVolumeId").and_then(Value::as_str))
+            .filter(|volume_id| !volume_id.trim().is_empty())
+        {
+            let volume_no =
+                Self::volume_number(connection, project_id, volume_id)?.ok_or_else(|| {
+                    NarrativeRepositoryError::Invariant(
+                        "FUTURE_RESERVATION_VOLUME_NOT_FOUND".into(),
+                    )
+                })?;
+            volume_numbers.insert(volume_id.to_owned(), volume_no);
+        }
+        Ok(volume_numbers)
+    }
+
     pub fn volume_target_chapters(
         connection: &Connection,
         project_id: &str,
@@ -1957,6 +1979,77 @@ impl NarrativeRepository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn revealed_reservation_refs_before_chapter(
+        connection: &Connection,
+        project_id: &str,
+        current_volume_no: i64,
+        current_chapter_no: i64,
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT audit_payload.payload_json
+             FROM canonical_heads receipt_head
+             JOIN artifact_payloads receipt_payload
+               ON receipt_payload.artifact_id=receipt_head.artifact_id
+              AND receipt_payload.version=receipt_head.version
+              AND receipt_payload.payload_hash=receipt_head.payload_hash
+             JOIN chapters prior_chapter
+               ON prior_chapter.project_id=receipt_head.project_id
+              AND prior_chapter.chapter_id=json_extract(receipt_head.scope_key,'$.chapterId')
+             JOIN volumes prior_volume
+               ON prior_volume.project_id=prior_chapter.project_id
+              AND prior_volume.volume_id=prior_chapter.volume_id
+             LEFT JOIN artifacts audit_artifact
+               ON audit_artifact.project_id=receipt_head.project_id
+              AND audit_artifact.artifact_id=json_extract(receipt_payload.payload_json,'$.auditRef.artifactId')
+              AND audit_artifact.version=CAST(json_extract(receipt_payload.payload_json,'$.auditRef.version') AS INTEGER)
+              AND audit_artifact.payload_hash=json_extract(receipt_payload.payload_json,'$.auditRef.payloadHash')
+              AND audit_artifact.artifact_type='ReviewReport'
+             LEFT JOIN artifact_payloads audit_payload
+               ON audit_payload.artifact_id=audit_artifact.artifact_id
+              AND audit_payload.version=audit_artifact.version
+              AND audit_payload.payload_hash=audit_artifact.payload_hash
+             WHERE receipt_head.project_id=?1
+               AND receipt_head.artifact_type='ProductionReceipt'
+               AND receipt_head.scope_level='CHAPTER'
+               AND (prior_volume.volume_no<?2
+                 OR (prior_volume.volume_no=?2 AND prior_chapter.chapter_no<?3))
+             ORDER BY prior_volume.volume_no,prior_chapter.chapter_no",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, current_volume_no, current_chapter_no],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        let mut revealed = BTreeSet::new();
+        for row in rows {
+            let raw = row?.ok_or_else(|| {
+                NarrativeRepositoryError::Invariant(
+                    "PRODUCTION_RECEIPT_AUDIT_REF_UNAVAILABLE".into(),
+                )
+            })?;
+            let report: Value = serde_json::from_str(&raw)?;
+            let refs = report
+                .pointer("/audit/revealedReservationRefs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    NarrativeRepositoryError::Invariant(
+                        "PRODUCTION_RECEIPT_AUDIT_RESERVATIONS_INVALID".into(),
+                    )
+                })?;
+            for reference in refs {
+                let reference = reference
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        NarrativeRepositoryError::Invariant(
+                            "PRODUCTION_RECEIPT_AUDIT_RESERVATIONS_INVALID".into(),
+                        )
+                    })?;
+                revealed.insert(reference.to_owned());
+            }
+        }
+        Ok(revealed)
     }
 
     pub fn next_artifact_version(

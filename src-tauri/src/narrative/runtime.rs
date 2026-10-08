@@ -433,11 +433,11 @@ pub fn context_hard_scope(input: &ContextCompilerInput) -> Value {
 
 pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 4096;
 pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 32768;
-pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r6";
+pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r7";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
 pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r2";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
-pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r2";
+pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r3";
 pub const OPENING_HARD_CONTRACT_FIELDS: &[&str] = &[
     "StoryConstitution.storyCore.protagonist",
     "StoryConstitution.storyCore.desire",
@@ -475,6 +475,8 @@ pub fn project_applicable_future_reservations(
     book_plan: &Value,
     current_volume_no: i64,
     volume_numbers: &BTreeMap<String, i64>,
+    explicit_refs: &BTreeSet<String>,
+    revealed_refs: &BTreeSet<String>,
 ) -> Result<(Vec<Value>, usize), String> {
     let reservations = book_plan
         .get("futureReservations")
@@ -504,7 +506,11 @@ pub fn project_applicable_future_reservations(
             return Err(unavailable());
         }
         let reserved_for_no = reserved_for_no.or(reserved_for_id_no);
-        if reserved_for_no.is_some_and(|number| number > current_volume_no) {
+        let explicitly_selected = explicit_refs.contains(reservation_id);
+        if !explicitly_selected
+            && (revealed_refs.contains(reservation_id)
+                || reserved_for_no.is_some_and(|number| number > current_volume_no))
+        {
             excluded += 1;
             continue;
         }
@@ -530,6 +536,15 @@ pub fn project_applicable_future_reservations(
         ] {
             if let Some(value) = item.get(field).filter(|value| !value.is_null()) {
                 projection.insert(field.into(), value.clone());
+            }
+        }
+        if item
+            .get("reservedForVolumeNo")
+            .and_then(Value::as_i64)
+            .is_none()
+        {
+            if let Some(reserved_for_id_no) = reserved_for_id_no {
+                projection.insert("reservedForVolumeNo".into(), json!(reserved_for_id_no));
             }
         }
         projection.insert("mayForeshadow".into(), json!(may_foreshadow));
@@ -1263,17 +1278,84 @@ mod b2_context_tests {
         assert_eq!(original, relevant_state_digest(&input).unwrap());
 
         let next_classification = ContextDigestConfig {
-            contract_classification_version: "b06-contract-hard-fields.r3",
+            contract_classification_version: "b06-contract-hard-fields.r4",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let reclassified = relevant_state_digest_with_config(&input, next_classification).unwrap();
         assert_ne!(original, reclassified);
 
         let next_compiler = ContextDigestConfig {
-            compiler_version: "b06-context-compiler.r7",
+            compiler_version: "b06-context-compiler.r8",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let recompiled = relevant_state_digest_with_config(&input, next_compiler).unwrap();
         assert_ne!(original, recompiled);
+    }
+
+    #[test]
+    fn rv09_future_reservation_default_scope_excludes_future_and_revealed_items() {
+        let book_plan = json!({"futureReservations":[
+            {"reservationId":"reservation:earlier","reservedForVolumeNo":2,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":true,"mayReveal":true},
+            {"reservationId":"reservation:current","reservedForVolumeNo":3,"notBeforeVolumeNo":3,"prerequisites":[],"mayForeshadow":true,"mayReveal":true},
+            {"reservationId":"reservation:future","reservedForVolumeNo":4,"notBeforeVolumeNo":4,"prerequisites":[],"mayForeshadow":true,"mayReveal":true},
+            {"reservationId":"reservation:revealed","reservedForVolumeNo":2,"notBeforeVolumeNo":2,"prerequisites":[],"mayForeshadow":true,"mayReveal":true},
+            {"reservationId":"reservation:unbounded","prerequisites":[],"mayForeshadow":true,"mayReveal":true}
+        ]});
+        let revealed = BTreeSet::from(["reservation:revealed".to_string()]);
+        let (reservations, excluded) = project_applicable_future_reservations(
+            &book_plan,
+            3,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &revealed,
+        )
+        .unwrap();
+        let refs = reservations
+            .iter()
+            .filter_map(|reservation| reservation["reservationId"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs,
+            vec![
+                "reservation:current",
+                "reservation:earlier",
+                "reservation:unbounded"
+            ]
+        );
+        assert_eq!(excluded, 2);
+    }
+
+    #[test]
+    fn rv09_explicit_future_reservation_keeps_gate_metadata_in_hard_projection() {
+        let book_plan = json!({"futureReservations":[{
+            "reservationId":"reservation:future:5",
+            "reservedForVolumeId":"volume:5",
+            "notBeforeVolumeNo":5,
+            "prerequisites":["fact:before-reveal"],
+            "mayForeshadow":true,
+            "mayReveal":false
+        }]});
+        let explicit = BTreeSet::from(["reservation:future:5".to_string()]);
+        let volume_numbers = BTreeMap::from([("volume:5".to_string(), 5)]);
+        let (reservations, excluded) = project_applicable_future_reservations(
+            &book_plan,
+            1,
+            &volume_numbers,
+            &explicit,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(excluded, 0);
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(reservations[0]["reservationId"], "reservation:future:5");
+        assert_eq!(reservations[0]["reservedForVolumeId"], "volume:5");
+        assert_eq!(reservations[0]["reservedForVolumeNo"], 5);
+        assert_eq!(reservations[0]["notBeforeVolumeNo"], 5);
+        assert_eq!(
+            reservations[0]["prerequisites"],
+            json!(["fact:before-reveal"])
+        );
+        assert_eq!(reservations[0]["mayForeshadow"], true);
+        assert_eq!(reservations[0]["mayReveal"], false);
     }
 }

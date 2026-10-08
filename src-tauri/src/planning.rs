@@ -1690,7 +1690,19 @@ fn validate_chapter_plan_change_semantics(
             .unwrap_or_default()
     })
     .collect::<Vec<_>>();
-    validate_reservation_actions(candidate, &reservations, current_volume_no)?;
+    let reservation_volume_numbers =
+        crate::repositories::narrative::NarrativeRepository::future_reservation_volume_numbers(
+            connection,
+            project_id,
+            &reservations,
+        )
+        .map_err(|error| error.to_string())?;
+    validate_reservation_actions_with_volume_numbers(
+        candidate,
+        &reservations,
+        current_volume_no,
+        &reservation_volume_numbers,
+    )?;
     Ok(ChapterPlanChangeSemantics {
         route_task_refs_checked: route_task_ids.len(),
         triggered_continuity_checked: triggered_threads.len(),
@@ -1869,6 +1881,20 @@ pub fn validate_reservation_actions(
     reservations: &[Value],
     current_volume_no: i64,
 ) -> Result<(), String> {
+    validate_reservation_actions_with_volume_numbers(
+        plan,
+        reservations,
+        current_volume_no,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn validate_reservation_actions_with_volume_numbers(
+    plan: &Value,
+    reservations: &[Value],
+    current_volume_no: i64,
+    volume_numbers: &BTreeMap<String, i64>,
+) -> Result<(), String> {
     let reservation_map = reservations
         .iter()
         .filter_map(|item| {
@@ -1907,10 +1933,28 @@ pub fn validate_reservation_actions(
         let Some(reservation) = reservation_map.get(reference) else {
             return Err("FUTURE_RESERVATION_VIOLATION".into());
         };
-        let before_reserved_volume = reservation
+        let reserved_for_volume_no = reservation
             .get("reservedForVolumeNo")
-            .and_then(Value::as_i64)
-            .is_some_and(|volume| current_volume_no < volume);
+            .and_then(Value::as_i64);
+        let reserved_for_volume_id_no = reservation
+            .get("reservedForVolumeId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .and_then(|id| volume_numbers.get(id).copied());
+        if (reservation
+            .get("reservedForVolumeId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+            && reserved_for_volume_id_no.is_none())
+            || (reserved_for_volume_no.is_some()
+                && reserved_for_volume_id_no.is_some()
+                && reserved_for_volume_no != reserved_for_volume_id_no)
+        {
+            return Err("FUTURE_RESERVATION_VIOLATION".into());
+        }
+        let reserved_for_volume_no = reserved_for_volume_no.or(reserved_for_volume_id_no);
+        let before_reserved_volume =
+            reserved_for_volume_no.is_some_and(|volume| current_volume_no < volume);
         let before_not_before = reservation
             .get("notBeforeVolumeNo")
             .and_then(Value::as_i64)
@@ -2521,7 +2565,19 @@ pub fn recompile_chapter_plan_owner(
             .unwrap_or_default()
     })
     .collect::<Vec<_>>();
-    validate_reservation_actions(&bound_plan, &reservations, current_volume_no)?;
+    let reservation_volume_numbers =
+        crate::repositories::narrative::NarrativeRepository::future_reservation_volume_numbers(
+            connection,
+            project_id,
+            &reservations,
+        )
+        .map_err(|error| error.to_string())?;
+    validate_reservation_actions_with_volume_numbers(
+        &bound_plan,
+        &reservations,
+        current_volume_no,
+        &reservation_volume_numbers,
+    )?;
     let artifact_id = format!("plan:chapterplan:{chapter_id}");
     let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
         connection,
@@ -2841,6 +2897,32 @@ mod tests {
                 &["thread:promise".into()]
             ),
             Err("TASK_SCOPE_VIOLATION".into())
+        );
+    }
+
+    #[test]
+    fn chapter_plan_rejects_reveal_before_reserved_volume_id() {
+        let mut plan = chapter_plan();
+        plan["reservationRefs"] = json!(["reservation:future:id"]);
+        plan["sceneExecution"] = json!([{
+            "action":"REVEAL",
+            "reservationRef":"reservation:future:id"
+        }]);
+        let reservations = [json!({
+            "reservationId":"reservation:future:id",
+            "reservedForVolumeId":"volume:5",
+            "mayForeshadow":true,
+            "mayReveal":true
+        })];
+        let volume_numbers = BTreeMap::from([("volume:5".to_string(), 5)]);
+        assert_eq!(
+            validate_reservation_actions_with_volume_numbers(
+                &plan,
+                &reservations,
+                1,
+                &volume_numbers,
+            ),
+            Err("FUTURE_RESERVATION_VIOLATION".into())
         );
     }
 

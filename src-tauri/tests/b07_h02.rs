@@ -478,6 +478,7 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
     });
     let context_request = json!({"projectId":"p3","volumeId":volume_id,"chapterId":chapter_id,"scope":"CHAPTER","entityIds":[],"references":[],"scopeSelection":scope_selection});
     let manifest = query_context_manifest_impl(&state, context_request.clone()).unwrap();
+    assert_eq!(manifest["futureReservationRefs"], json!(["secret:v5"]));
     assert!(manifest["omittedSoftSources"]
         .as_array()
         .unwrap()
@@ -586,11 +587,124 @@ fn b07_chapter_plan_reads_route_and_manifest_from_authority() {
         )
         .unwrap();
     drop(connection);
+    let before_future_reveal = {
+        let connection = state
+            .manager
+            .open("p3", "", "2026-08-30T00:00:04Z")
+            .unwrap();
+        let heads: String = connection
+            .query_row(
+                "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id='p3' ORDER BY artifact_type,scope_key)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM project_meta WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let chapters: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id='p3' AND artifact_type='ChapterPlan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let model_runs: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let canon_facts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state_deltas: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (
+            heads,
+            revision,
+            chapters,
+            model_runs,
+            canon_facts,
+            state_deltas,
+        )
+    };
     let reveal = execute_command_impl(
         &state,
         json!({"type":"planning_compile_chapter_plan","commandId":"command:chapter:reveal:p3","idempotencyKey":"key:chapter:reveal:p3","projectId":"p3","expectedRevision":3,"requestedAt":"2026-08-30T00:00:04Z","payload":{"chapterId":chapter_id,"modelRunId":refreshed_model_run_id,"scopeSelection":scope_selection,"plan":reveal_plan}}),
     );
     assert_eq!(reveal.unwrap_err(), "FUTURE_RESERVATION_VIOLATION");
+    let after_future_reveal = {
+        let connection = state
+            .manager
+            .open("p3", "", "2026-08-30T00:00:04Z")
+            .unwrap();
+        let heads: String = connection
+            .query_row(
+                "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id='p3' ORDER BY artifact_type,scope_key)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM project_meta WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let chapters: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id='p3' AND artifact_type='ChapterPlan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let model_runs: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let canon_facts: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state_deltas: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id='p3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (
+            heads,
+            revision,
+            chapters,
+            model_runs,
+            canon_facts,
+            state_deltas,
+        )
+    };
+    assert_eq!(after_future_reveal, before_future_reveal);
     let connection = state
         .manager
         .open("p3", "", "2026-08-30T00:00:04Z")

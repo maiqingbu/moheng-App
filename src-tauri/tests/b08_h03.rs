@@ -1074,7 +1074,21 @@ fn seed_b08_long_form_project(
 }
 
 fn seed_future_reservation_authority(connection: &Connection, project_id: &str) {
-    let payload = b08_approved_book_plan_payload(json!([{
+    seed_future_reservation_authority_with(
+        connection,
+        project_id,
+        vec!["reservation:future:1".to_string()],
+        Vec::new(),
+    );
+}
+
+fn seed_future_reservation_authority_with(
+    connection: &Connection,
+    project_id: &str,
+    intent_reservation_refs: Vec<String>,
+    additional_reservations: Vec<Value>,
+) {
+    let mut reservations = vec![json!({
         "reservationId":"reservation:future:1",
         "description":"供下一卷揭示的线索",
         "reservedForVolumeNo":2,
@@ -1083,7 +1097,9 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
         "notBeforeVolumeNo":2,
         "prerequisites":[],
         "authorityLevel":"A"
-    }]));
+    })];
+    reservations.extend(additional_reservations);
+    let payload = b08_approved_book_plan_payload(json!(reservations));
     let hash = sha256_canonical(&payload).unwrap();
     let scope = json!({"level":"PROJECT"}).to_string();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('plan:book:reservation',?1,'BookPlan','PROJECT',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4,?4)", libsql_rusqlite::params![project_id, scope, hash, NOW]).unwrap();
@@ -1108,7 +1124,7 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
             "mustAchieve":[{"id":"goal:b08:actual","description":"推进当前章节任务"}],
             "mustNotBreak":[],
             "requiredExitConditions":[{"kind":"GOAL_ACHIEVED","value":"goal:b08:actual"}],
-            "futureReservationRefs":["reservation:future:1"],
+            "futureReservationRefs":intent_reservation_refs,
             "crossVolumeResponsibilityRefs":[],
             "targetChapterRange":{"min":1,"preferred":1,"max":1},
             "targetWordRange":{"preferred":1000},
@@ -1143,6 +1159,167 @@ fn seed_future_reservation_authority(connection: &Connection, project_id: &str) 
             "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
             "capacityBudget":{"minChapters":1,"preferredChapters":1,"maxChapters":1}
         }),
+    );
+}
+
+fn seed_b08_future_reservation_scope_fixture(
+    state: &KernelState,
+    project_id: &str,
+    intent_reservation_refs: Vec<String>,
+) -> (String, String, String) {
+    let connection = state
+        .manager
+        .create(project_id, "B08 reservation scope", NOW)
+        .unwrap();
+    let prior_chapter_id =
+        seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let current_chapter_id = StableIdentityFactory::from_command(
+        StableIdKind::Chapter,
+        &format!("b08-reservation-scope-current:{project_id}"),
+    )
+    .unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'Chapter 2','NORMAL','PLANNED',0,?4,?4)",
+        libsql_rusqlite::params![current_chapter_id, project_id, volume_id, NOW],
+    ).unwrap();
+    seed_future_reservation_authority_with(
+        &connection,
+        project_id,
+        intent_reservation_refs,
+        vec![
+            json!({
+                "reservationId":"reservation:revealed",
+                "description":"已在前章揭示的线索",
+                "reservedForVolumeNo":1,
+                "mayForeshadow":true,
+                "mayReveal":true,
+                "notBeforeVolumeNo":1,
+                "prerequisites":[],
+                "authorityLevel":"A"
+            }),
+            json!({
+                "reservationId":"reservation:unbounded",
+                "description":"不限卷的未揭示责任",
+                "mayForeshadow":true,
+                "mayReveal":true,
+                "prerequisites":[],
+                "authorityLevel":"A"
+            }),
+        ],
+    );
+    let prior_scope = serde_json::to_string(&json!({
+        "level":"CHAPTER",
+        "chapterId":prior_chapter_id
+    }))
+    .unwrap();
+    let review_ref = insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        &format!("review:reservation-scope:{project_id}"),
+        "ReviewReport",
+        "CHAPTER",
+        &prior_scope,
+        &json!({"audit":{"revealedReservationRefs":["reservation:revealed"]}}),
+    );
+    insert_b08_contract_artifact(
+        &connection,
+        project_id,
+        &format!("receipt:reservation-scope:{project_id}"),
+        "ProductionReceipt",
+        "CHAPTER",
+        &prior_scope,
+        &json!({"auditRef":review_ref}),
+    );
+    drop(connection);
+    (prior_chapter_id, current_chapter_id, volume_id)
+}
+
+#[test]
+fn b08_default_reservation_scope_excludes_unreferenced_future_and_revealed_items() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-reservation-default-scope";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let (_prior_chapter_id, chapter_id, volume_id) =
+        seed_b08_future_reservation_scope_fixture(&state, project_id, Vec::new());
+    let manifest = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "volumeId":volume_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],
+            "references":[]
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["futureReservationRefs"],
+        json!(["reservation:unbounded"])
+    );
+}
+
+#[test]
+fn b08_scope_selection_can_include_a_later_volume_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-reservation-explicit-scope";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let (_prior_chapter_id, chapter_id, volume_id) =
+        seed_b08_future_reservation_scope_fixture(&state, project_id, Vec::new());
+    let manifest = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "volumeId":volume_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],
+            "references":[],
+            "scopeSelection":{
+                "taskRefs":["task:actual"],
+                "responsibilityRefs":[],
+                "reservationRefs":["reservation:future:1"],
+                "entityRefs":["entity:actual:linzhou"]
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["futureReservationRefs"],
+        json!(["reservation:future:1"])
+    );
+}
+
+#[test]
+fn b08_chapter_plan_reservation_ref_can_include_a_later_volume_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-reservation-plan-scope";
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let (_prior_chapter_id, chapter_id, volume_id) =
+        seed_b08_future_reservation_scope_fixture(&state, project_id, Vec::new());
+    let manifest = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "volumeId":volume_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],
+            "references":[],
+            "chapterPlan":{
+                "activeTaskRefs":["task:actual"],
+                "continuityActions":[],
+                "reservationRefs":["reservation:future:1"],
+                "entityRefs":["entity:actual:linzhou"]
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["futureReservationRefs"],
+        json!(["reservation:future:1"])
     );
 }
 
@@ -3228,6 +3405,41 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
     let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
     seed_future_reservation_authority(&connection, project_id);
     drop(connection);
+    let intent_hard_context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],
+            "references":[]
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        intent_hard_context["futureReservationRefs"],
+        json!(["reservation:future:1"])
+    );
+    let hard_context = query_context_manifest_impl(
+        &state,
+        json!({
+            "projectId":project_id,
+            "chapterId":chapter_id,
+            "executionMode":"LONG_FORM",
+            "entityIds":["entity:actual:linzhou"],
+            "scopeSelection":{
+                "taskRefs":["task:actual"],
+                "responsibilityRefs":[],
+                "reservationRefs":["reservation:future:1"],
+                "entityRefs":["entity:actual:linzhou"]
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        hard_context["futureReservationRefs"],
+        json!(["reservation:future:1"])
+    );
     let result = execute_command_impl(
         &state,
         json!({

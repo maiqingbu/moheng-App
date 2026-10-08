@@ -1137,21 +1137,38 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
                 let mut reservation = actual_reservation.clone();
                 if index > 0 {
                     reservation["reservationId"] = json!(format!("f03:reservation:{}", index + 1));
-                    reservation["reservedForVolumeNo"] = json!(reservation_volume_no + index);
+                    let reserved_for_volume_no = if index == 1 {
+                        reservation_volume_no - 1
+                    } else {
+                        reservation_volume_no + index - 1
+                    };
+                    reservation["reservedForVolumeNo"] = json!(reserved_for_volume_no);
+                    if index == 1 {
+                        reservation["notBeforeVolumeNo"] = json!(reserved_for_volume_no);
+                    }
                 }
                 reservation
             })
             .collect::<Vec<_>>());
+        let previous_volume_reservation = ten_volume_book["futureReservations"][1]["reservationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let volume_two_revealed = BTreeSet::from([previous_volume_reservation]);
         let (one_volume_reservations, one_excluded) = project_applicable_future_reservations(
             &one_volume_book,
             reservation_volume_no,
             &BTreeMap::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
         )
         .unwrap();
         let (ten_volume_reservations, ten_excluded) = project_applicable_future_reservations(
             &ten_volume_book,
             reservation_volume_no,
             &BTreeMap::new(),
+            &BTreeSet::new(),
+            &volume_two_revealed,
         )
         .unwrap();
         assert_eq!(one_volume_reservations, ten_volume_reservations);
@@ -1188,7 +1205,7 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
             ten_volume_usage.serialized_bytes
         );
         println!(
-            "F03_BOOKPLAN_HARD_SCALE currentVolume={reservation_volume_no} volumes=1 seeds=1 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2} volumes=10 seeds=10 excludedFutureReservations=9 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
+            "F03_BOOKPLAN_HARD_SCALE currentVolume={reservation_volume_no} volumes=1 seeds=1 estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2} volumes=10 seeds=10 excludedByScopeOrReveal={ten_excluded} estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
             one_volume_usage.estimated_tokens,
             one_volume_usage.serialized_bytes,
             one_volume_usage.estimated_tokens as f64 * 100.0
@@ -1200,6 +1217,60 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
             ten_volume_usage.estimated_tokens as f64 * 100.0
                 / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
             ten_volume_usage.serialized_bytes as f64 * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
+        );
+
+        let last_volume_no = ten_volume_book["futureReservations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|reservation| reservation["reservedForVolumeNo"].as_i64())
+            .max()
+            .unwrap();
+        assert_eq!(last_volume_no, 10, "F03 fixture must measure volume 10");
+        let last_volume_revealed = ten_volume_book["futureReservations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(9)
+            .filter_map(|reservation| reservation["reservationId"].as_str())
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>();
+        let (last_volume_reservations, last_volume_excluded) =
+            project_applicable_future_reservations(
+                &ten_volume_book,
+                last_volume_no,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &last_volume_revealed,
+            )
+            .unwrap();
+        assert_eq!(last_volume_reservations.len(), 1);
+        assert_eq!(last_volume_excluded, 9);
+        let last_volume_input = with_reservations(input.clone(), &last_volume_reservations);
+        let last_volume_usage = measure_context_hard_budget(&last_volume_input).unwrap();
+        assert!(
+            last_volume_usage.estimated_tokens
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT,
+            "F03 last volume exceeds HARD token limit: {last_volume_usage:?}"
+        );
+        assert!(
+            last_volume_usage.serialized_bytes
+                <= ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT,
+            "F03 last volume exceeds HARD byte limit: {last_volume_usage:?}"
+        );
+        println!(
+            "F03_BOOKPLAN_HARD_LAST_VOLUME currentVolume={last_volume_no} volumes=10 seeds=10 revealedPriorReservations={} includedReservations={} excludedReservations={} estimatedTokens={} serializedBytes={} tokenPercent={:.2} bytePercent={:.2}",
+            last_volume_revealed.len(),
+            last_volume_reservations.len(),
+            last_volume_excluded,
+            last_volume_usage.estimated_tokens,
+            last_volume_usage.serialized_bytes,
+            last_volume_usage.estimated_tokens as f64
+                * 100.0
+                / ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT as f64,
+            last_volume_usage.serialized_bytes as f64
+                * 100.0
                 / ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as f64
         );
 

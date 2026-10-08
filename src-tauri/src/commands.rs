@@ -1155,7 +1155,6 @@ fn context_scope_selection(request: &Value) -> Result<Option<ContextScopeSelecti
             for (requested, available) in [
                 (&selection.task_refs, &allowed.task_refs),
                 (&selection.responsibility_refs, &allowed.responsibility_refs),
-                (&selection.reservation_refs, &allowed.reservation_refs),
                 (&selection.entity_refs, &allowed.entity_refs),
             ] {
                 if requested.as_ref().is_some_and(|requested| {
@@ -1168,6 +1167,9 @@ fn context_scope_selection(request: &Value) -> Result<Option<ContextScopeSelecti
                     return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
                 }
             }
+            // Reservation refs are validated against the current BookPlan
+            // below. A valid later-volume ref may expand a prior scope and
+            // must reach the compiler so its full gate contract enters HARD.
         }
         return Ok(Some(selection));
     }
@@ -1215,6 +1217,27 @@ fn context_scope_selection(request: &Value) -> Result<Option<ContextScopeSelecti
         reservation_refs: Some(plan_strings("reservationRefs")?),
         entity_refs: Some(plan_strings("entityRefs")?),
     }))
+}
+
+fn context_plan_reservation_refs(request: &Value) -> Result<Vec<String>, String> {
+    let refs = request
+        .get("chapterPlan")
+        .and_then(|plan| plan.get("reservationRefs"))
+        .or_else(|| request.pointer("/payload/plan/reservationRefs"))
+        .or_else(|| request.pointer("/plan/reservationRefs"));
+    match refs {
+        None => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| "CONTEXT_SCOPE_SELECTION_INVALID".to_string())
+            })
+            .collect(),
+        Some(_) => Err("CONTEXT_SCOPE_SELECTION_INVALID".into()),
+    }
 }
 
 fn request_resume_context(request: &Value) -> ResumeContext {
@@ -2458,36 +2481,64 @@ fn goal_contract_context_for_request(
             Some(&json!(required_exits)),
         )?;
         let intent_reservations = contract_string_array(intent, "futureReservationRefs", scope)?;
+        let selection_reservations = selection
+            .and_then(|selection| selection.reservation_refs.clone())
+            .unwrap_or_default();
+        let plan_reservations = context_plan_reservation_refs(request)?;
         let intent_responsibilities =
             contract_string_array(intent, "crossVolumeResponsibilityRefs", scope)?;
         let book_reservations = book
             .get("futureReservations")
             .and_then(Value::as_array)
             .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
-        let mut volume_numbers = BTreeMap::new();
-        for item in book_reservations {
-            if let Some(reserved_for_id) = item
-                .get("reservedForVolumeId")
+        let volume_numbers =
+            crate::repositories::narrative::NarrativeRepository::future_reservation_volume_numbers(
+                connection,
+                project_id,
+                book_reservations,
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let current_chapter_no = if let Some(chapter_id) = request
+            .get("chapterId")
+            .or_else(|| request.pointer("/payload/chapterId"))
+            .or_else(|| request.pointer("/chapterPlan/chapterId"))
                 .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
             {
-                let number = crate::repositories::narrative::NarrativeRepository::volume_number(
+            crate::repositories::narrative::NarrativeRepository::chapter_number(
+                connection, project_id, chapter_id,
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+            .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
+        } else {
+            crate::repositories::narrative::NarrativeRepository::next_chapter_number(
                     connection,
                     project_id,
-                    reserved_for_id,
+                volume_id.unwrap_or_default(),
                 )
                 .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?
-                .ok_or_else(|| {
-                    format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}")
-                })?;
-                volume_numbers.insert(reserved_for_id.to_owned(), number);
-            }
-        }
+            .unwrap_or(i64::MAX)
+        };
+        let revealed_reservation_refs =
+            crate::repositories::narrative::NarrativeRepository::revealed_reservation_refs_before_chapter(
+                connection,
+                project_id,
+                current_volume_no,
+                current_chapter_no,
+            )
+            .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
+        let explicit_reservation_refs = intent_reservations
+            .iter()
+            .chain(selection_reservations.iter())
+            .chain(plan_reservations.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let (projected_reservations, excluded_other_volume_reservations) =
             crate::narrative::project_applicable_future_reservations(
                 &book,
                 current_volume_no,
                 &volume_numbers,
+                &explicit_reservation_refs,
+                &revealed_reservation_refs,
             )
             .map_err(|_| format!("CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"))?;
         let available_reservations = projected_reservations
@@ -2505,24 +2556,64 @@ fn goal_contract_context_for_request(
         if intent_reservations
             .iter()
             .any(|reservation| !available_reservations.contains_key(reservation))
+            || plan_reservations
+                .iter()
+                .any(|reservation| !available_reservations.contains_key(reservation))
         {
             return Err(format!(
                 "CONTEXT_SOURCE_UNAVAILABLE|source=CONTRACT|scope={scope}"
             ));
         }
-        let mut selected_reservations = if let Some(selection) = selection {
-            let requested = selection.reservation_refs.clone().unwrap_or_default();
-            if requested
+        if selection_reservations
                 .iter()
                 .any(|reservation| !available_reservations.contains_key(reservation))
             {
                 return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
             }
-            requested
+        if let Some(allowed) = request
+            .get("chapterPlan")
+            .and_then(|plan| plan.get("hardScope"))
+            .and_then(|hard_scope| hard_scope.get("reservationRefs"))
+            .and_then(Value::as_array)
+        {
+            let allowed = allowed
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>();
+            for reservation_id in selection_reservations
+                .iter()
+                .chain(plan_reservations.iter())
+            {
+                if allowed.contains(reservation_id.as_str()) {
+                    continue;
+                }
+                let reservation = available_reservations
+                    .get(reservation_id)
+                    .ok_or_else(|| "CONTEXT_SCOPE_SELECTION_INVALID".to_string())?;
+                let reserved_for_no = reservation
+                    .get("reservedForVolumeNo")
+                    .and_then(Value::as_i64)
+                    .or_else(|| {
+                        reservation
+                            .get("reservedForVolumeId")
+                            .and_then(Value::as_str)
+                            .and_then(|id| volume_numbers.get(id).copied())
+                    });
+                let not_before_no = reservation.get("notBeforeVolumeNo").and_then(Value::as_i64);
+                if !reserved_for_no.is_some_and(|number| number > current_volume_no)
+                    && !not_before_no.is_some_and(|number| number > current_volume_no)
+                {
+                    return Err("CONTEXT_SCOPE_SELECTION_INVALID".into());
+                }
+            }
+        }
+        let mut selected_reservations = if selection.is_some() {
+            selection_reservations
         } else {
             available_reservations.keys().cloned().collect::<Vec<_>>()
         };
         selected_reservations.extend(intent_reservations.iter().cloned());
+        selected_reservations.extend(plan_reservations);
         selected_reservations.sort();
         selected_reservations.dedup();
         for reservation_id in &selected_reservations {
@@ -2620,8 +2711,8 @@ fn goal_contract_context_for_request(
             record_omitted_contract_field(
                 &mut omitted_soft_sources,
                 &book_ref,
-                "BookPlan.futureReservations.otherVolumes",
-                "其它卷的预留内容不属于当前卷 HARD。",
+                "BookPlan.futureReservations.outsideDefaultScope",
+                "未被当前 Plan 引用的后续卷预留和已有权威揭示的预留不进入默认 HARD。",
             );
         }
         for (field, reason) in [
@@ -7499,7 +7590,19 @@ fn execute_planning_command_with_observer(
                 .unwrap_or_default()
         })
         .collect::<Vec<_>>();
-        crate::planning::validate_reservation_actions(&payload, &reservations, current_volume_no)?;
+        let reservation_volume_numbers =
+            crate::repositories::narrative::NarrativeRepository::future_reservation_volume_numbers(
+                &handle,
+                project_id,
+                &reservations,
+            )
+            .map_err(|error| error.to_string())?;
+        crate::planning::validate_reservation_actions_with_volume_numbers(
+            &payload,
+            &reservations,
+            current_volume_no,
+            &reservation_volume_numbers,
+        )?;
     }
     if artifact_type == "ChapterPlan" {
         let chapter_id = request
