@@ -2007,12 +2007,31 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
     let volume_plan_committed = volume_plan_result
         .as_ref()
         .is_ok_and(|result| result["finalStatus"].as_str() == Some("committed"));
-    let production_revision = if volume_plan_committed {
+    let chapter_plan_result = if volume_plan_committed {
+        r2_bounded_invoke(
+            &webview,
+            "execute_command",
+            json!({"request":{
+                "type":"planning_compile_chapter_plan","commandId":"r2:chapter:compile-first",
+                "idempotencyKey":"r2:chapter:compile-first:key","projectId":project_id,
+                "expectedRevision":manager.project_revision(&project_id).unwrap(),
+                "requestedAt":R2_PROVIDER_NOW,
+                "payload":{"chapterId":chapter_id,"chapterGoalHint":"推开石门并保存可核对线索。"}
+            }}),
+            Duration::from_secs(8),
+        )
+    } else {
+        Err("VOLUME_PLAN_NOT_COMMITTED".into())
+    };
+    let chapter_plan_committed = chapter_plan_result
+        .as_ref()
+        .is_ok_and(|result| result["finalStatus"].as_str() == Some("committed"));
+    let production_revision = if chapter_plan_committed {
         manager.project_revision(&project_id).unwrap()
     } else {
         intent_revision
     };
-    let production = if created.is_ok() && volume_plan_committed {
+    let production = if created.is_ok() && volume_plan_committed && chapter_plan_committed {
         r2_bounded_invoke(
             &webview,
             "execute_command",
@@ -2020,7 +2039,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
                 "type":"production_start","commandId":"r2:production:start",
                 "idempotencyKey":"r2:production:start:key","projectId":project_id,
                 "expectedRevision":production_revision,"requestedAt":R2_PROVIDER_NOW,
-                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"targetChineseCharacters":800,"chapterGoalHint":"推开石门并保存可核对线索。"}
+                "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","skillsEnabled":false,"targetChineseCharacters":800,"chapterGoalHint":"推开石门并保存可核对线索。"}
             }}),
             Duration::from_secs(8),
         )
@@ -2234,6 +2253,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
             "projectCreated": created.is_ok(),
             "volumeIntentCommitted": volume_intent_committed,
             "volumePlanCommitted": volume_plan_committed,
+            "chapterPlanCommitted": chapter_plan_committed,
             "productionIpcOutcome": production_ipc_outcome,
             "productionErrorClass": r2_safe_error_class(production.as_ref().err()),
             "productionErrorDetail": r2_safe_error_detail(production.as_ref().err(), &canary),
