@@ -7564,6 +7564,7 @@ fn execute_planning_command_with_observer(
             chapter_id,
             &route_task_ids,
             &triggered_threads,
+            crate::planning::remaining_chapter_capacity(&handle, project_id, chapter_id)?,
         )?;
         crate::planning::validate_task_reality(&payload, &route, &task_states)?;
         let current_volume_no = crate::repositories::narrative::NarrativeRepository::volume_number(

@@ -171,20 +171,6 @@ pub fn normalize_chapter_plan_model_output(
             }
         }
         *items = normalized_items;
-        items.truncate(8);
-        let fallbacks = [
-            "根据本章结果重新评估下一步行动。",
-            "保持长期悬念，并为后续冲突留出空间。",
-            "让新的选择产生可验证的叙事后果。",
-        ];
-        while items.len() < 3 {
-            let index = items.len();
-            items.push(json!({
-                "slotNo":index + 1,
-                "objective":fallbacks[index],
-                "tentative":true
-            }));
-        }
     }
     if triggered_thread_refs.is_empty()
         && plan
@@ -1637,7 +1623,13 @@ fn validate_chapter_plan_change_semantics(
         .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
         .map(|thread| thread.thread_id.clone())
         .collect::<Vec<_>>();
-    validate_current_chapter_plan(candidate, chapter_id, &route_task_ids, &triggered_threads)?;
+    validate_current_chapter_plan(
+        candidate,
+        chapter_id,
+        &route_task_ids,
+        &triggered_threads,
+        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+    )?;
     let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
         connection,
         project_id,
@@ -2320,22 +2312,13 @@ pub fn validate_current_chapter_plan(
     current_chapter_id: &str,
     route_task_ids: &[String],
     triggered_threads: &[String],
+    remaining_chapter_capacity: i64,
 ) -> Result<(), String> {
     validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(current_chapter_id) {
         return Err("CHAPTER_PLAN_CURRENT_ONLY".into());
     }
-    let horizon = plan
-        .get("horizonPreview")
-        .and_then(Value::as_array)
-        .ok_or("CHAPTER_PLAN_HORIZON_REQUIRED")?;
-    if !(3..=8).contains(&horizon.len())
-        || horizon
-            .iter()
-            .any(|slot| slot.get("tentative").and_then(Value::as_bool) != Some(true))
-    {
-        return Err("ROLLING_HORIZON_TENTATIVE_REQUIRED".into());
-    }
+    validate_chapter_plan_horizon(plan, remaining_chapter_capacity)?;
     let route = route_task_ids.iter().collect::<BTreeSet<_>>();
     if plan
         .get("activeTaskRefs")
@@ -2373,6 +2356,56 @@ pub fn validate_current_chapter_plan(
         }
     }
     Ok(())
+}
+
+pub fn validate_chapter_plan_horizon(
+    plan: &Value,
+    remaining_chapter_capacity: i64,
+) -> Result<(), String> {
+    let horizon = plan
+        .get("horizonPreview")
+        .and_then(Value::as_array)
+        .ok_or("CHAPTER_PLAN_HORIZON_REQUIRED")?;
+    let capacity = remaining_chapter_capacity.clamp(0, 8) as usize;
+    let minimum = if capacity >= 3 { 3 } else { 0 };
+    if horizon.len() < minimum
+        || horizon.len() > capacity
+        || horizon
+            .iter()
+            .any(|slot| slot.get("tentative").and_then(Value::as_bool) != Some(true))
+    {
+        return Err("ROLLING_HORIZON_CAPACITY_INVALID".into());
+    }
+    Ok(())
+}
+
+pub fn remaining_chapter_capacity(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<i64, String> {
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection,
+        project_id,
+        chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
+        connection,
+        project_id,
+        chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let metadata = crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+        connection,
+        project_id,
+        &volume_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    Ok((metadata.chapter_end - chapter_no).max(0))
 }
 
 pub fn classify_plan_reality(
@@ -2510,7 +2543,13 @@ pub fn recompile_chapter_plan_owner(
     bound_plan["entityRefs"] = hard_scope["entityRefs"].clone();
     bound_plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
     bound_plan["hardScope"] = hard_scope;
-    validate_current_chapter_plan(&bound_plan, chapter_id, &route_task_ids, &triggered_threads)?;
+    validate_current_chapter_plan(
+        &bound_plan,
+        chapter_id,
+        &route_task_ids,
+        &triggered_threads,
+        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+    )?;
     if let Some(route) = route_payload.as_ref() {
         let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
             connection,
@@ -2894,7 +2933,8 @@ mod tests {
                 &plan,
                 "chapter:1",
                 &["task:required".into()],
-                &["thread:promise".into()]
+                &["thread:promise".into()],
+                8,
             ),
             Err("TASK_SCOPE_VIOLATION".into())
         );
@@ -2935,7 +2975,8 @@ mod tests {
                 &plan,
                 "chapter:1",
                 &["task:required".into()],
-                &["thread:promise".into()]
+                &["thread:promise".into()],
+                8,
             ),
             Err("CONTINUITY_BRIDGE_REQUIRED".into())
         );
@@ -2945,7 +2986,8 @@ mod tests {
             &plan,
             "chapter:1",
             &["task:required".into()],
-            &["thread:promise".into()]
+            &["thread:promise".into()],
+            8,
         )
         .is_err());
     }

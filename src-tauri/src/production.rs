@@ -1497,6 +1497,7 @@ fn run_chapter_production_inner(
                     .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
                     .map(|thread| thread.thread_id.clone())
                     .collect::<Vec<_>>(),
+                crate::planning::remaining_chapter_capacity(connection, &project_id, &chapter_id)?,
             )?;
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
             let planning_receipt = crate::planning::recompile_chapter_plan_owner(
