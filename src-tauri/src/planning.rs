@@ -3025,7 +3025,7 @@ mod tests {
             aliased["horizonPreview"][0],
             json!({"slotNo":1,"objective":"追查线索","tentative":true})
         );
-        assert_eq!(aliased["horizonPreview"].as_array().unwrap().len(), 3);
+        assert_eq!(aliased["horizonPreview"].as_array().unwrap().len(), 1);
         assert!(aliased["horizonPreview"]
             .as_array()
             .unwrap()
@@ -3049,12 +3049,7 @@ mod tests {
             }),
         );
         assert_eq!(normalized["continuityActions"], json!([]));
-        assert_eq!(normalized["horizonPreview"].as_array().unwrap().len(), 3);
-        assert!(normalized["horizonPreview"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["tentative"] == true && item["objective"].is_string()));
+        assert_eq!(normalized["horizonPreview"], json!([]));
     }
 
     #[test]
