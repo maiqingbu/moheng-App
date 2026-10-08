@@ -331,6 +331,20 @@ pub fn next_opening_chapter_id(
         .map_err(Into::into)
 }
 
+pub fn is_opening_chapter(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<bool, ProjectEntryRepositoryError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_id=?2 AND chapter_no BETWEEN 1 AND ?3 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1))",
+            libsql_rusqlite::params![project_id, chapter_id, OPENING_CHAPTER_COUNT],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
 pub fn opening_topology(
     connection: &Connection,
     project_id: &str,

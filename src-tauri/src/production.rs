@@ -1309,6 +1309,9 @@ fn run_chapter_production_inner(
         .map_err(|error| error.to_string())?;
 
     update_stage(connection, &project_id, &job_id, "CONTEXT", &now)?;
+    if execution_mode == "OPENING_BOOTSTRAP" {
+        crate::planning::preflight_chapter_plan_owner(connection, &project_id, &chapter_id)?;
+    }
     let mut current_revision =
         crate::repositories::narrative::NarrativeRepository::project_revision(
             connection,

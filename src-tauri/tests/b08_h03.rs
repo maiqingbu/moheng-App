@@ -5866,6 +5866,236 @@ fn b3_owner_ignores_caller_mode_for_unapproved_long_form_recompilation() {
     assert!(gateway.capabilities.lock().unwrap().is_empty());
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct B3OpeningSnapshot {
+    revision: i64,
+    artifact_count: i64,
+    canonical_head_count: i64,
+    chapter_status: String,
+    canon_counts: [i64; 8],
+    state_delta_count: i64,
+    job_count: i64,
+    model_run_count: i64,
+    project_command_receipt_count: i64,
+    domain_receipt_count: i64,
+}
+
+fn b3_formal_side_effect_snapshot(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> B3OpeningSnapshot {
+    let revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let count = |sql: &str| {
+        connection
+            .query_row::<i64, _, _>(sql, [project_id], |row| row.get(0))
+            .unwrap()
+    };
+    let chapter_status = connection
+        .query_row::<String, _, _>(
+            "SELECT status FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    B3OpeningSnapshot {
+        revision,
+        artifact_count: count("SELECT COUNT(*) FROM artifacts WHERE project_id=?1"),
+        canonical_head_count: count("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1"),
+        chapter_status,
+        canon_counts: [
+            count("SELECT COUNT(*) FROM canon_entities WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_aliases WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_relations WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_events WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_evidence WHERE project_id=?1"),
+            count("SELECT COUNT(*) FROM canon_timepoints WHERE project_id=?1"),
+        ],
+        state_delta_count: count("SELECT COUNT(*) FROM state_deltas WHERE project_id=?1"),
+        job_count: count("SELECT COUNT(*) FROM jobs WHERE project_id=?1"),
+        model_run_count: count("SELECT COUNT(*) FROM model_runs WHERE project_id=?1"),
+        project_command_receipt_count: count(
+            "SELECT COUNT(*) FROM project_command_receipts WHERE project_id=?1",
+        ),
+        domain_receipt_count: count("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1"),
+    }
+}
+
+#[test]
+fn b3_opening_chapter_scope_enforces_order_and_mode_before_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b3-opening-mode-order";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let connection = state
+        .manager
+        .create(project_id, "B3 opening order", NOW)
+        .unwrap();
+    let first_chapter_id =
+        seed_chapter_and_gate_opening_without_volume_plan(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    let second_chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "b3-opening-chapter-2").unwrap();
+    connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'第二章','NORMAL','PLANNED',0,?4,?4)",
+            libsql_rusqlite::params![second_chapter_id, project_id, volume_id, NOW],
+        )
+        .unwrap();
+    let before = b3_formal_side_effect_snapshot(&connection, project_id, &second_chapter_id);
+    assert_eq!(before.model_run_count, 0);
+    drop(connection);
+
+    let opening_error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b3:opening-order",
+            "idempotencyKey":"key:b3:opening-order","projectId":project_id,
+            "expectedRevision":before.revision,"requestedAt":NOW,
+            "payload":{"chapterId":second_chapter_id,"executionMode":"OPENING_BOOTSTRAP",
+                "entityIds":[],"references":[]}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        opening_error.contains("B08_OPENING_ORDER_REQUIRED"),
+        "actual error: {opening_error}"
+    );
+    let connection = state
+        .manager
+        .open(project_id, "B3 opening order", NOW)
+        .unwrap();
+    assert_eq!(
+        b3_formal_side_effect_snapshot(&connection, project_id, &second_chapter_id),
+        before
+    );
+    drop(connection);
+
+    let long_form_error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b3:opening-mode-mismatch",
+            "idempotencyKey":"key:b3:opening-mode-mismatch","projectId":project_id,
+            "expectedRevision":before.revision,"requestedAt":NOW,
+            "payload":{"chapterId":second_chapter_id,"executionMode":"LONG_FORM",
+                "entityIds":[],"references":[]}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        long_form_error.contains("B08_EXECUTION_MODE_MISMATCH"),
+        "actual error: {long_form_error}"
+    );
+
+    let connection = state
+        .manager
+        .open(project_id, "B3 opening order", NOW)
+        .unwrap();
+    assert_eq!(
+        b3_formal_side_effect_snapshot(&connection, project_id, &second_chapter_id),
+        before
+    );
+    let owner_error = ai_novel_production_system_core::planning::recompile_chapter_plan_owner(
+        &connection,
+        project_id,
+        &second_chapter_id,
+        &Value::Null,
+        &json!({"executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[]}),
+        "cmd:b3:opening-plan-order",
+        "key:b3:opening-plan-order",
+        before.revision,
+        NOW,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        owner_error.contains("B08_OPENING_ORDER_REQUIRED"),
+        "actual owner error: {owner_error}"
+    );
+    assert_eq!(
+        b3_formal_side_effect_snapshot(&connection, project_id, &second_chapter_id),
+        before
+    );
+    drop(connection);
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+    assert_ne!(first_chapter_id, second_chapter_id);
+}
+
+#[test]
+fn b3_opening_chapter_without_opening_contract_reports_contract_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b3-opening-contract-missing";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let connection = state
+        .manager
+        .create(project_id, "B3 opening contract", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_opening_without_volume_plan(&connection, project_id);
+    connection
+        .execute(
+            "DELETE FROM canonical_heads WHERE project_id=?1 AND artifact_type='OpeningContract'",
+            [project_id],
+        )
+        .unwrap();
+    let before = b3_formal_side_effect_snapshot(&connection, project_id, &chapter_id);
+    assert_eq!(before.model_run_count, 0);
+    drop(connection);
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b3:opening-contract-missing",
+            "idempotencyKey":"key:b3:opening-contract-missing","projectId":project_id,
+            "expectedRevision":before.revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP",
+                "entityIds":[],"references":[]}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("GOAL_CONTRACT_OPENING_CONTRACT_REQUIRED"),
+        "actual error: {error}"
+    );
+    assert!(!error.contains("GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED"));
+
+    let connection = state
+        .manager
+        .open(project_id, "B3 opening contract", NOW)
+        .unwrap();
+    let after = b3_formal_side_effect_snapshot(&connection, project_id, &chapter_id);
+    let mut expected_after = before.clone();
+    expected_after.job_count += 1;
+    assert_eq!(after, expected_after);
+    let job_id =
+        StableIdentityFactory::from_command(StableIdKind::Job, "cmd:b3:opening-contract-missing")
+            .unwrap();
+    let (job_status, failure_stage, failure_code): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status,current_stage,error_code FROM jobs WHERE project_id=?1 AND job_id=?2",
+            libsql_rusqlite::params![project_id, job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(job_status, "FAILED");
+    assert_eq!(failure_stage, "CONTEXT");
+    assert_eq!(
+        failure_code.as_deref(),
+        Some("GOAL_CONTRACT_OPENING_CONTRACT_REQUIRED")
+    );
+    drop(connection);
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+}
+
 #[test]
 fn b3_planning_owner_rejects_a_second_uncommitted_chapter_plan() {
     let temp = tempfile::tempdir().unwrap();

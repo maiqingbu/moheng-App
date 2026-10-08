@@ -2431,17 +2431,8 @@ pub fn resolve_chapter_execution_mode(
             return Ok("LONG_FORM");
         }
     }
-    let next_opening_chapter =
-        crate::repositories::project_entry::next_opening_chapter_id(connection, project_id)
-            .map_err(|error| error.to_string())?;
-    if next_opening_chapter.as_deref() == Some(chapter_id)
-        && crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-            connection,
-            project_id,
-            "OpeningContract",
-        )
+    if crate::repositories::project_entry::is_opening_chapter(connection, project_id, chapter_id)
         .map_err(|error| error.to_string())?
-        .is_some()
     {
         return Ok("OPENING_BOOTSTRAP");
     }
