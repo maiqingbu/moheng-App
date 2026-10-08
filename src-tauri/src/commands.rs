@@ -6716,6 +6716,7 @@ fn compile_current_chapter_plan(
         "contextManifestRef":context_ref,
         "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
         "volumePlanRoute":scoped_route_payload,
+        "horizonPreviewCapacity":crate::planning::remaining_chapter_capacity(&handle, project_id, chapter_id)?,
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
     let planning_result = crate::production::execute_production_model_with_profile(

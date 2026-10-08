@@ -2885,6 +2885,14 @@ pub fn commit_opening_chapter_plan_owner(
             })
         })
         .collect::<Vec<_>>();
+    let opening_horizon = [
+        json!({"slotNo":1,"objective":"展示当前异常并迫使主角选择","tentative":true}),
+        json!({"slotNo":2,"objective":"给出局部回报并留下代价","tentative":true}),
+        json!({"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}),
+    ]
+    .into_iter()
+    .take(remaining_chapter_capacity(connection, project_id, chapter_id)?.clamp(0, 8) as usize)
+    .collect::<Vec<_>>();
     let plan = json!({
         "payloadSchema":"chapter-plan.r1",
         "chapterId":chapter_id,
@@ -2899,11 +2907,7 @@ pub fn commit_opening_chapter_plan_owner(
         "knowledgeBoundaries":[],
         "reservationRefs":[],
         "sceneExecution":[],
-        "horizonPreview":[
-            {"slotNo":1,"objective":"展示当前异常并迫使主角选择","tentative":true},
-            {"slotNo":2,"objective":"给出局部回报并留下代价","tentative":true},
-            {"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}
-        ]
+        "horizonPreview":opening_horizon
     });
     if context_payload
         .get("compiledFromStateDigest")

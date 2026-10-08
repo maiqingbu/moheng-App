@@ -1202,6 +1202,15 @@ fn seed_future_reservation_authority_with(
     intent_reservation_refs: Vec<String>,
     additional_reservations: Vec<Value>,
 ) {
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![
+                project_id,
+                StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap()
+            ],
+        )
+        .unwrap();
     let mut reservations = vec![json!({
         "reservationId":"reservation:future:1",
         "description":"供下一卷揭示的线索",
@@ -2265,6 +2274,12 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
     drop(connection);
 
     let planning = execute_command_impl(&state, json!({
@@ -5538,6 +5553,14 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
     let state = KernelState::new(AppPaths::new(temp.path()));
     let connection = state.manager.create("p-h03-recompile", "H03", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, "p-h03-recompile");
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id='p-h03-recompile' AND volume_id=?1",
+            [&volume_id],
+        )
+        .unwrap();
     let (volume_intent_id, volume_intent_version, volume_intent_hash) = connection
         .query_row::<(String, i64, String), _, _>(
             "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id='p-h03-recompile' AND artifact_type='VolumeIntent'",
@@ -5866,6 +5889,14 @@ fn h03_valid_authorization_cannot_bypass_planning_task_scope_gate() {
         .create(project_id, "H03 negative", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate_without_volume_plan(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
     let (volume_intent_id, volume_intent_version, volume_intent_hash) = connection
         .query_row::<(String, i64, String), _, _>(
             "SELECT artifact_id,version,payload_hash FROM canonical_heads WHERE project_id=?1 AND artifact_type='VolumeIntent'",
