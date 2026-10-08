@@ -1257,6 +1257,11 @@ fn r2_response_envelope(content: Value) -> Vec<u8> {
 fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
     let opening_bootstrap =
         input.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
+    let horizon_preview_capacity = input
+        .get("horizonPreviewCapacity")
+        .and_then(Value::as_i64)
+        .unwrap_or(3)
+        .clamp(0, 3) as usize;
     let task_progress_candidates = input
         .pointer("/chapterPlan/activeTaskRefs")
         .and_then(Value::as_array)
@@ -1287,6 +1292,14 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                     })
                     .unwrap_or_else(|| vec![json!(task_id)])
             };
+            let horizon_preview = vec![
+                json!({"slotNo":1,"objective":"观察石门后的线索","tentative":true}),
+                json!({"slotNo":2,"objective":"核对线索来源","tentative":true}),
+                json!({"slotNo":3,"objective":"留下下一步调查方向","tentative":true}),
+            ]
+            .into_iter()
+            .take(horizon_preview_capacity)
+            .collect::<Vec<_>>();
             json!({
                 "payloadSchema":"chapter-plan.r1",
                 "chapterId":input["chapterId"],
@@ -1301,11 +1314,7 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
                 "sceneExecution":[],
-                "horizonPreview":[
-                    {"slotNo":1,"objective":"观察石门后的线索","tentative":true},
-                    {"slotNo":2,"objective":"核对线索来源","tentative":true},
-                    {"slotNo":3,"objective":"留下下一步调查方向","tentative":true}
-                ]
+                "horizonPreview":horizon_preview
             })
         }
         "RENDER_CHAPTER" => json!({"body":"林舟推开石门，记录下石门之后的唯一可验证线索。"}),
