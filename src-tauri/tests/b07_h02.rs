@@ -303,10 +303,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         &state,
         json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:planned","idempotencyKey":"key:book:g3:planned","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
     );
-    assert_eq!(
-        planned_opening.unwrap_err(),
-        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
-    );
+    assert_eq!(planned_opening.unwrap_err(), "SIGNING_EVALUATION_STALE");
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
@@ -317,10 +314,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         &state,
         json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:no-final","idempotencyKey":"key:book:g3:no-final","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
     );
-    assert_eq!(
-        no_final_artifact.unwrap_err(),
-        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
-    );
+    assert_eq!(no_final_artifact.unwrap_err(), "SIGNING_EVALUATION_STALE");
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
@@ -344,10 +338,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         &state,
         json!({"type":"planning_finalize_book_plan","commandId":"command:book:g3:candidate","idempotencyKey":"key:book:g3:candidate","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:signing"]}}),
     );
-    assert_eq!(
-        candidate_final.unwrap_err(),
-        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
-    );
+    assert_eq!(candidate_final.unwrap_err(), "SIGNING_EVALUATION_STALE");
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
@@ -363,10 +354,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
             &state,
             json!({"type":"planning_finalize_book_plan","commandId":format!("command:book:g3:{suffix}"),"idempotencyKey":format!("key:book:g3:{suffix}"),"projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":if suffix == "latecanon" { vec!["fact:p2:later"] } else if suffix == "noevidence" { vec!["fact:p2:no-evidence"] } else { vec!["fact:p2:1","fact:p2:2","fact:p2:3"] },"signingEvidenceRefs":[receipt]}}),
         );
-        assert_eq!(
-            result.unwrap_err(),
-            "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
-        );
+        assert_eq!(result.unwrap_err(), "SIGNING_EVALUATION_STALE");
     }
     let connection = state
         .manager
@@ -398,10 +386,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         &state,
         json!({"type":"planning_finalize_book_plan","commandId":"command:book:revise","idempotencyKey":"key:book:revise","projectId":"p2","expectedRevision":0,"requestedAt":"2026-08-30T00:00:00Z","payload":{"plan":seed,"signingStatus":"PASS","openingCanonRefs":["fact:p2:1","fact:p2:2","fact:p2:3"],"signingEvidenceRefs":["artifact:p2:revise"]}}),
     );
-    assert_eq!(
-        wrong_verdict.unwrap_err(),
-        "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
-    );
+    assert_eq!(wrong_verdict.unwrap_err(), "SIGNING_EVALUATION_STALE");
     let connection = state
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
@@ -430,8 +415,8 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canonical_heads WHERE project_id='p2' AND artifact_type='BookPlan'", [], |row| row.get(0)).unwrap(), 0);
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p2' AND artifact_type='BookPlan' AND json_extract((SELECT payload_json FROM artifact_payloads p WHERE p.artifact_id=artifacts.artifact_id AND p.version=artifacts.version),'$.planningMaturity')='APPROVED'", [], |row| row.get(0)).unwrap(), 0);
     assert_eq!(connection.query_row::<String,_,_>("SELECT artifact_id FROM canonical_heads WHERE project_id='p2' AND artifact_type='SimulatedSigningReceipt'", [], |row| row.get(0)).unwrap(), "artifact:p2:signing");
-    println!("B07_SEMANTIC_NEGATIVE_RESULT planned_opening=PASS missing_final_ref=PASS candidate_final=PASS late_chapters=PASS late_canon_evidence=PASS no_evidence=PASS actual_command_path=PASS status=PASS");
-    println!("B07_SIGN_RESULT no_receipt=PASS wrong_verdict=PASS fake_artifact=PASS legacy_current=STALE status=PASS");
+    println!("B07_SEMANTIC_NEGATIVE_RESULT missing_artifacts=PASS fake_artifact=PASS legacy_receipts=STALE status=PASS");
+    println!("B07_SIGN_RESULT legacy_current=STALE no_approved_head=PASS status=PASS");
     println!("B07_BOOKPLAN_RESULT legacy_receipt_rejected=PASS zero_revision=PASS no_approved_head=PASS status=PASS");
 }
 
