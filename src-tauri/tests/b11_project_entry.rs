@@ -133,6 +133,87 @@ fn create_idea_fixture(state: &KernelState, command_id: &str) -> String {
 }
 
 #[test]
+fn b3b_new_story_seed_without_mechanism_fails_without_writes() {
+    let state = state();
+    let project_id = create_idea_fixture(&state, "b3b:missing-mechanism");
+    let directions = query_story_directions_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    let pitch_id = directions["pitches"][0]["id"].as_str().unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"pitch_select",
+            "commandId":"b3b:missing-mechanism:select",
+            "idempotencyKey":"b3b:missing-mechanism:select:key",
+            "projectId":project_id,
+            "expectedRevision":1,
+            "requestedAt":NOW,
+            "payload":{"pitchIds":[pitch_id]}
+        }),
+    )
+    .unwrap();
+
+    let before_revision = state.manager.project_revision(&project_id).unwrap();
+    let before = state.manager.open(&project_id, "", NOW).unwrap();
+    let before_artifacts: i64 = before
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(before);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"story_setup_save",
+            "commandId":"b3b:missing-mechanism:setup",
+            "idempotencyKey":"b3b:missing-mechanism:setup:key",
+            "projectId":project_id,
+            "expectedRevision":before_revision,
+            "requestedAt":NOW,
+            "payload":{"storyCore":{
+                "protagonist":"被逐出宗门的炼丹师",
+                "desire":"证明废丹的价值",
+                "conflict":"宗门封锁进化秘密",
+                "readerPromise":"每次追查都付出可验证代价"
+            }}
+        }),
+    );
+
+    assert!(result
+        .unwrap_err()
+        .contains("B11_STORY_SEED_REQUIRED:storyCore.mechanism"));
+    assert_eq!(
+        state.manager.project_revision(&project_id).unwrap(),
+        before_revision
+    );
+    let after = state.manager.open(&project_id, "", NOW).unwrap();
+    let after_artifacts: i64 = after
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_artifacts, before_artifacts);
+    assert_eq!(
+        after
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1 AND artifact_type IN ('StoryConstitution','MainContract','OpeningContract','BookPlan')",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn decision_submit_retries_unknown_story_direction_in_the_same_project() {
     let state = state();
     let created = execute_command_impl(&state, idea_request("decision-retry-entry")).unwrap();
