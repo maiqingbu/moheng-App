@@ -305,7 +305,7 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
         }),
     )
     .expect_err("opening chapters must be produced in order");
-    assert_eq!(out_of_order, "B08_OPENING_ORDER_REQUIRED");
+    assert_eq!(out_of_order, "B08_EXECUTION_MODE_MISMATCH");
 
     command(
         &state,
