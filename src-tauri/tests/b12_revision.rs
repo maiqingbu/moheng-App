@@ -1265,7 +1265,7 @@ fn insert_semantic_chapter_fixture_with_responsibilities(
         .expect("insert semantic fixture book");
     handle
         .execute(
-            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,2,'第二卷','PLANNING',1,3,3000,?4,?4)",
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,2,'第二卷','PLANNING',1,4,3000,?4,?4)",
             params![volume_id, project_id, book_id, NOW],
         )
         .expect("insert semantic fixture volume");
