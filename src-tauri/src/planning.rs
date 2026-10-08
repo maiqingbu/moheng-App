@@ -2799,11 +2799,9 @@ pub fn validate_chapter_plan_target(
         }
         .into());
     }
-    let other_executable_plan_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM canonical_heads h JOIN chapters c ON c.project_id=h.project_id AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND c.chapter_id!=?2 AND c.status IN ('PLANNED','PRODUCING','PAUSED'))",
-            libsql_rusqlite::params![project_id, chapter_id],
-            |row| row.get(0),
+    let other_executable_plan_exists =
+        crate::repositories::narrative::NarrativeRepository::has_other_executable_chapter_plan(
+            connection, project_id, chapter_id,
         )
         .map_err(|error| error.to_string())?;
     if other_executable_plan_exists {

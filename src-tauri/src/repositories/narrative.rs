@@ -1920,6 +1920,20 @@ impl NarrativeRepository {
         Ok((next <= chapter_end).then_some(next))
     }
 
+    pub fn has_other_executable_chapter_plan(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM canonical_heads h JOIN chapters c ON c.project_id=h.project_id AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND c.chapter_id!=?2 AND c.status IN ('PLANNED','PRODUCING','PAUSED'))",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn ensure_planned_chapter(
         connection: &Connection,
