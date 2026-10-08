@@ -2110,7 +2110,7 @@ fn run_chapter_production_inner(
             });
         }
     }
-    let reconciliation = classify_reconciliation_facts(&ReconciliationFacts {
+    let reconciliation = classify_plan_reality(&ReconciliationFacts {
         task_reality,
         remaining_chapter_capacity: crate::planning::remaining_chapter_capacity(
             connection,
@@ -2371,7 +2371,7 @@ pub struct ReconciliationFacts {
     pub responsibility_reality: Vec<ReconciliationResponsibilityReality>,
 }
 
-pub fn classify_reconciliation_facts(facts: &ReconciliationFacts) -> &'static str {
+pub fn classify_plan_reality(facts: &ReconciliationFacts) -> &'static str {
     if !facts.canon_gate_passed
         || facts.responsibility_reality.iter().any(|responsibility| {
             responsibility.disposition.as_deref() == Some("NO_LONGER_APPLICABLE_CHANGE_REQUEST")
@@ -2410,7 +2410,7 @@ pub fn classify_reconciliation_facts(facts: &ReconciliationFacts) -> &'static st
 }
 
 pub fn reconciliation_for_actual_state(facts: &ReconciliationFacts) -> &'static str {
-    classify_reconciliation_facts(facts)
+    classify_plan_reality(facts)
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
