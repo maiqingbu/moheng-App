@@ -6674,5 +6674,7 @@ fn b08_final_commit_fault_rolls_back_final_chapter_reality_and_receipt() {
 }
 #[path = "b08_h03/b04a_rv07.rs"]
 mod b04a_rv07;
+#[path = "b08_h03/b04a_rv16.rs"]
+mod b04a_rv16;
 #[path = "b08_h03/b04a_rv21.rs"]
 mod b04a_rv21;

@@ -542,23 +542,30 @@ fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
     if segments.len() < 2 {
         return None;
     }
+    let mut selected = Vec::new();
     let mut cursor = 0usize;
-    let mut first = None;
-    let mut last = None;
+    let mut previous_end = None;
     for segment in segments {
-        let byte_start = body.get(cursor..)?.find(segment)? + cursor;
-        let byte_end = byte_start + segment.len();
-        if let Some(previous_end) = last {
-            if body[previous_end..byte_start].chars().count() > 512 {
-                return None;
-            }
-        } else {
-            first = Some(body[..byte_start].chars().count());
+        let matches = body
+            .match_indices(segment)
+            .filter(|(start, _)| *start >= cursor)
+            .filter(|(start, _)| {
+                previous_end.is_none_or(|end| body[end..*start].chars().count() <= 512)
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return None;
         }
-        last = Some(byte_end);
+        let (byte_start, matched) = matches[0];
+        let byte_end = byte_start + matched.len();
+        selected.push((byte_start, byte_end));
         cursor = byte_end;
+        previous_end = Some(byte_end);
     }
-    Some((first?, body[..last?].chars().count()))
+    let (first, _) = *selected.first()?;
+    let (_, last) = *selected.last()?;
+    Some((body[..first].chars().count(), body[..last].chars().count()))
 }
 
 fn parse_provider_model_payload_for_capability(
@@ -2583,21 +2590,29 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         let end = value.get("end")?.as_u64()? as usize;
         if start < end && end <= body_chars.len() {
             let quote = body_chars[start..end].iter().collect::<String>();
-            return Some(json!({"start":start,"end":end,"quote":quote}));
+            let supplied_quote = value.get("quote").and_then(Value::as_str);
+            return Some(json!({
+                "start":start,
+                "end":end,
+                "quote":quote,
+                "rebound":supplied_quote != Some(quote.as_str())
+            }));
         }
-        // Providers occasionally count tokens/bytes rather than Unicode
-        // characters. If the supplied span is outside the body, bind only an
-        // exact quote that is actually present; otherwise drop the candidate.
+        // A unique exact match may be retained for diagnosis, but validation
+        // marks it incomplete so a mismatched range cannot authorize a commit.
         let quote = value
             .get("quote")
             .and_then(Value::as_str)
             .filter(|quote| !quote.is_empty())?;
-        if let Some(byte_start) = body.find(quote) {
+        let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
+        if matches.len() == 1 {
+            let (byte_start, _) = matches[0];
             let char_start = body[..byte_start].chars().count();
             return Some(json!({
                 "start":char_start,
                 "end":char_start + quote.chars().count(),
-                "quote":quote
+                "quote":quote,
+                "rebound":true
             }));
         }
         let (char_start, char_end) = ellipsis_quote_span(body, quote)?;
@@ -2609,7 +2624,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         Some(json!({
             "start":char_start,
             "end":char_end,
-            "quote":actual_quote
+            "quote":actual_quote,
+            "rebound":true
         }))
     };
     let candidate_requirements = [
@@ -2664,6 +2680,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             true
         });
         dropped.insert(field.into(), json!(before - items.len()));
+    #[serde(default)]
+    rebound: bool,
     }
     let (normalized_ranges, dropped_ranges) = payload
         .get("evidenceRanges")
@@ -2683,7 +2701,9 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     payload["normalization"] = json!({
         "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
         "droppedCandidates":dropped,
-        "droppedEvidenceRanges":dropped_ranges
+        "droppedEvidenceRanges":dropped_ranges,
+        "reboundEvidence":rebound_evidence,
+        "invalidContinuityEvidence":invalid_continuity_evidence
     });
     payload
 }
@@ -2792,6 +2812,22 @@ fn validate_actual_extraction(
             candidate.entity_id.as_deref() == Some(candidate.subject_id.as_str());
         if !subject_exists && !subject_created_in_commit {
             return Err("B08_CANON_SUBJECT_NOT_FOUND".into());
+    if audit_payload
+        .pointer("/normalization/invalidContinuityEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err("B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT".into());
+    }
+    if audit_payload
+        .pointer("/normalization/reboundEvidence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        return Err("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND".into());
+    }
         }
         let (current, truncated) = crate::repositories::narrative::NarrativeRepository::current_canon_facts_for_semantic_key_bounded(
             connection,
@@ -2829,6 +2865,8 @@ fn validate_actual_extraction(
             .as_ref()
             .expect("canon semantics is required for Canon candidates");
         let candidate_input = crate::canon_semantics::CandidateSemanticInput {
+    let mut rebound_evidence = 0_u64;
+    let mut invalid_continuity_evidence = 0_u64;
             object_json: &candidate.object_json,
             story_time: candidate.story_time.as_deref(),
             valid_from_chapter_no: candidate_from_chapter_no,
@@ -2894,9 +2932,29 @@ fn validate_actual_extraction(
     let pending_facts = audit
         .canon_candidates
         .iter()
+            if field == "continuityCandidates" {
+                if let Some(raw_evidence) = object.get("evidence") {
+                    match normalize_evidence(raw_evidence) {
+                        Some(evidence) => {
+                            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
+                                rebound_evidence += 1;
+                            }
+                            object.insert("evidence".into(), evidence);
+                        }
+                        None => {
+                            invalid_continuity_evidence += 1;
+                            object.remove("evidence");
+                        }
+                    }
+                }
+                return true;
+            }
         .map(|item| item.fact_id.clone())
         .collect::<BTreeSet<_>>();
     let knowledge_candidates = std::mem::take(&mut audit.knowledge_candidates);
+            if evidence.get("rebound").and_then(Value::as_bool) == Some(true) {
+                rebound_evidence += 1;
+            }
     let mut bound_knowledge_candidates = Vec::new();
     for candidate in knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
@@ -2924,6 +2982,10 @@ fn validate_actual_extraction(
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_UNBOUND".into());
         }
         let pending_fact_time = audit
+            rebound_evidence += ranges
+                .iter()
+                .filter(|range| range.get("rebound").and_then(Value::as_bool) == Some(true))
+                .count() as u64;
             .canon_candidates
             .iter()
             .find(|fact| fact.fact_id == candidate.fact_id)
@@ -2959,6 +3021,7 @@ fn validate_actual_extraction(
         if candidate
             .visibility_scope
             .as_deref()
+            rebound: false,
             .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
             || acquired_time.is_none()
             || fact_time.is_none()
@@ -3577,6 +3640,31 @@ mod tests {
             "你好世界",
         );
         assert_eq!(unknown["knowledgeCandidates"], json!([]));
+    }
+
+    #[test]
+    fn audit_evidence_rebinding_is_marked_and_makes_audit_incomplete() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "qualityFindings":[],
+                "canonCandidates":[],
+                "knowledgeCandidates":[],
+                "continuityCandidates":[],
+                "taskProgressCandidates":[],
+                "revealedReservationRefs":[],
+                "evidenceRanges":[{"start":900,"end":901,"quote":"证据"}],
+                "auditCompleteness":"COMPLETE_NO_CHANGE",
+                "unresolvedHard":false
+            }),
+            "正文包含证据。",
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
+        let audit: AuditExtraction = serde_json::from_value(normalized.clone()).unwrap();
+        assert_eq!(
+            validate_audit_completeness(&normalized, &audit).unwrap_err(),
+            "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+        );
     }
 
     #[test]
