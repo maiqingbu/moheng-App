@@ -231,6 +231,61 @@ fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String,
     (format!("http://{address}"), calls)
 }
 
+fn local_provider_server_with_truncated_body() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_local_http_request(&mut stream);
+        observed_calls.fetch_add(1, Ordering::SeqCst);
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"partial\":";
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (format!("http://{address}"), calls)
+}
+
+#[test]
+fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
+    for status in [502, 503, 504] {
+        let (endpoint, calls) = local_provider_server_with_calls(status, "upstream failure");
+        let error = OpenAiCompatibleProvider::new(endpoint)
+            .invoke(
+                &ProviderRequest {
+                    capability: "TEST_PROVIDER".into(),
+                    model_id: "fixture-model".into(),
+                    prompt: "ping".into(),
+                    timeout_ms: 2_000,
+                },
+                "fixture-token-ephemeral",
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            ProviderErrorKind::UnknownRemoteOutcome,
+            "status={status}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "status={status}");
+    }
+
+    let (endpoint, calls) = local_provider_server_with_truncated_body();
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "body read failure".into(),
+                timeout_ms: 2_000,
+            },
+            "fixture-token-ephemeral",
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 fn disconnect_after_provider_request() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -860,6 +915,7 @@ fn formal_spec(command: &str, budget_id: Option<&str>, predicted_cost_cents: i64
         context_manifest_ref: None,
         budget_id: budget_id.map(ToOwned::to_owned),
         predicted_cost_cents,
+        cost_snapshot: None,
         attempt_no: 1,
         repair_round: 0,
     }
