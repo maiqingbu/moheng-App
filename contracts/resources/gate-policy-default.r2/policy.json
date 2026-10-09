@@ -1,0 +1,25 @@
+{
+  "payloadSchema": "gate-policy.r1",
+  "policyId": "gate-policy-default.r2",
+  "rules": ["candidate-audit", "chapter-final"],
+  "canonSemantics": {
+    "policyVersion": "canon-semantics.default.r2",
+    "rules": [
+      {"predicate": "alive", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "location", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "faction", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "identity", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "realm", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "opened", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "remembered", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "distrusts", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "allied_with", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "owns_item", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "relationship", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}},
+      {"predicate": "membership", "cardinality": "MULTI", "scope": {"kind": "OBJECT_FIELD", "field": "scope"}},
+      {"predicate": "loadout", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "status", "cardinality": "SINGLE", "scope": {"kind": "FIXED", "value": "PROJECT"}, "timeBasis": "VALIDITY_CHAPTER"},
+      {"predicate": "has_ability", "cardinality": "MULTI", "scope": {"kind": "FIXED", "value": "PROJECT"}}
+    ]
+  }
+}

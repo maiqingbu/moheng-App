@@ -1145,6 +1145,167 @@ fn validate_plan_is_current(
     Ok(())
 }
 
+fn same_retry_context_except_gate_policy(
+    previous: &Value,
+    current: &Value,
+    gate_policy_artifact_id: &str,
+) -> bool {
+    let normalize = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("compiledFromProjectRevision");
+            object.remove("compiledFromStateDigest");
+        }
+        if let Some(refs) = value
+            .get_mut("goalContractRefs")
+            .and_then(Value::as_array_mut)
+        {
+            refs.retain(|reference| {
+                reference.get("artifactId").and_then(Value::as_str) != Some(gate_policy_artifact_id)
+            });
+        }
+        value
+    };
+    normalize(previous) == normalize(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reusable_opening_plan_for_retry(
+    connection: &libsql_rusqlite::Connection,
+    request: &Value,
+    project_id: &str,
+    chapter_id: &str,
+    volume_id: &str,
+    previous_job_id: &str,
+    current_policy_ref: &ArtifactRef,
+    context_id: &str,
+    job_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    now: &str,
+    current_revision: &mut i64,
+) -> Result<Option<(ArtifactRef, Value, ArtifactRef, Value)>, String> {
+    let completed_plan = DurableModelRunner::completed_result_for_job(
+        connection,
+        project_id,
+        previous_job_id,
+        "PLAN_STRATEGY",
+    )
+    .map_err(|error| error.to_string())?;
+    let Some((planning_model_run_id, _)) = completed_plan else {
+        return Ok(None);
+    };
+    let Some(plan_ref) = crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+        connection,
+        project_id,
+        "ChapterPlan",
+        chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let mut plan_payload = load_artifact_payload(connection, project_id, &plan_ref)?;
+    if plan_payload.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
+        return Ok(None);
+    }
+    let Some(context_ref) = plan_payload
+        .get("contextManifestRef")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ArtifactRef>(value).ok())
+    else {
+        return Ok(None);
+    };
+    let previous_context_payload = load_artifact_payload(connection, project_id, &context_ref)?;
+    let compiler_input = crate::commands::context_input_from_authority(
+        connection,
+        &authority_request(
+            request,
+            project_id,
+            chapter_id,
+            volume_id,
+            "OPENING_BOOTSTRAP",
+        ),
+        project_id,
+        *current_revision,
+    )?;
+    let manifest = crate::narrative::compile_context_manifest(compiler_input)?;
+    let context_payload = serde_json::to_value(&manifest).map_err(|error| error.to_string())?;
+    if same_retry_context_except_gate_policy(
+        &previous_context_payload,
+        &context_payload,
+        &current_policy_ref.artifact_id,
+    ) {
+        let context_command_id = format!("{command_id}:retry-context");
+        let mut context = artifact(
+            project_id,
+            context_id.to_owned(),
+            ArtifactType::ContextManifest,
+            chapter_id,
+            context_payload.clone(),
+            &context_command_id,
+            job_id,
+            None,
+            now,
+            vec![],
+        )?;
+        context.provenance.created_by = "B06::ContextCompilerOwner".into();
+        let context_ref = reference(&context);
+        let context_bundle: CommitBundle = serde_json::from_value(json!({
+            "commitId":format!("commit:{context_command_id}"),
+            "projectId":project_id,
+            "commandId":context_command_id,
+            "idempotencyKey":format!("{idempotency_key}:retry-context"),
+            "expectedProjectRevision":*current_revision,
+            "contractVersion":"m0a.v1",
+            "createdAt":now,
+            "artifacts":[context],
+            "headUpdates":[{"artifactType":"ContextManifest","scope":chapter_scope(chapter_id),"artifactId":context_ref.artifact_id,"version":context_ref.version,"payloadHash":context_ref.payload_hash}]
+        }))
+        .map_err(|error| format!("B08_CONTEXT_BUNDLE_INVALID:{error}"))?;
+        let context_receipt = CommitService::commit(connection, &context_bundle, now)
+            .map_err(|error| error.to_string())?;
+        *current_revision = context_receipt.after_revision;
+
+        plan_payload["compiledFromProjectRevision"] = json!(*current_revision + 1);
+        plan_payload["compiledFromStateDigest"] = json!(manifest.compiled_from_state_digest);
+        plan_payload["contextManifestRef"] =
+            serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+        let plan_command_id = format!("{command_id}:retry-plan-rebind");
+        let planning_receipt = crate::planning::recompile_chapter_plan_owner(
+            connection,
+            project_id,
+            chapter_id,
+            &plan_payload,
+            &authority_request(
+                request,
+                project_id,
+                chapter_id,
+                volume_id,
+                "OPENING_BOOTSTRAP",
+            ),
+            &plan_command_id,
+            &format!("{idempotency_key}:retry-plan-rebind"),
+            *current_revision,
+            now,
+            Some(&planning_model_run_id),
+        )?;
+        *current_revision = planning_receipt.after_revision;
+        let plan_ref = planning_receipt
+            .committed_artifact_refs
+            .first()
+            .cloned()
+            .ok_or_else(|| "B08_PLANNING_OWNER_NO_RECEIPT".to_string())?;
+        return Ok(Some((context_ref, context_payload, plan_ref, plan_payload)));
+    }
+    Ok(Some((
+        context_ref,
+        previous_context_payload,
+        plan_ref,
+        plan_payload,
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_chapter_after_revision_recheck(
     connection: &libsql_rusqlite::Connection,
@@ -1342,11 +1503,17 @@ pub fn run_chapter_production(
         if let (Some(project_id), Some(command_id), Some(now)) = (project_id, command_id, now) {
             if let Ok(job_id) = StableIdentityFactory::from_command(StableIdKind::Job, command_id) {
                 if let Ok(connection) = manager.open(project_id, "", now) {
-                    let failure_code = error
-                        .split(':')
-                        .next()
-                        .filter(|code| !code.trim().is_empty())
-                        .unwrap_or("B08_PRODUCTION_FAILED");
+                    let failure_code = if error.starts_with(
+                        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=",
+                    ) {
+                        error.as_str()
+                    } else {
+                        error
+                            .split(':')
+                            .next()
+                            .filter(|code| !code.trim().is_empty())
+                            .unwrap_or("B08_PRODUCTION_FAILED")
+                    };
                     let _ = DurableJobService::fail_active_job(
                         &connection,
                         project_id,
@@ -1570,17 +1737,66 @@ fn run_chapter_production_inner(
         StableIdKind::Artifact,
         &format!("{command_id}:receipt"),
     )?;
-    let render_run_id = StableIdentityFactory::from_command(
+    let new_render_run_id = StableIdentityFactory::from_command(
         StableIdKind::ModelRun,
         &format!("{command_id}:render"),
     )?;
-    let audit_run_id = StableIdentityFactory::from_command(
+    let new_audit_run_id = StableIdentityFactory::from_command(
         StableIdKind::ModelRun,
         &format!("{command_id}:audit"),
     )?;
 
+    let reusable_opening_plan = if execution_mode == "OPENING_BOOTSTRAP" {
+        retry_of_job_id
+            .as_deref()
+            .map(|previous_job_id| {
+                reusable_opening_plan_for_retry(
+                    connection,
+                    request,
+                    &project_id,
+                    &chapter_id,
+                    &volume_id,
+                    previous_job_id,
+                    &policy_ref,
+                    &context_id,
+                    &job_id,
+                    &command_id,
+                    &idempotency_key,
+                    &now,
+                    &mut current_revision,
+                )
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
-        if execution_mode == "OPENING_BOOTSTRAP" {
+        if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
+        {
+            let compiler_input = crate::commands::context_input_from_authority(
+                connection,
+                &authority_request(
+                    request,
+                    &project_id,
+                    &chapter_id,
+                    &volume_id,
+                    execution_mode,
+                ),
+                &project_id,
+                current_revision,
+            )?;
+            let authority_context = authority_context_payload(&compiler_input)?;
+            let audit_contract = audit_policy_contract(&policy_ref, &gate_policy_payload)?;
+            (
+                context_ref,
+                context_payload,
+                plan_ref,
+                plan_payload,
+                authority_context,
+                audit_contract,
+            )
+        } else if execution_mode == "OPENING_BOOTSTRAP" {
             let bootstrap_command_id = format!("{command_id}:bootstrap");
             let compiler_input = crate::commands::context_input_from_authority(
                 connection,
@@ -1870,21 +2086,6 @@ fn run_chapter_production_inner(
         .map_err(|error| format!("B10_SKILL_PAYLOAD:{error}"))?;
 
     update_stage(connection, &project_id, &job_id, "RENDER", &now)?;
-    let render_spec = ModelRunSpec {
-        model_run_id: render_run_id.clone(),
-        job_id: Some(job_id.clone()),
-        step_id: None,
-        provider: provider_profile.provider.clone(),
-        model: provider_profile.model.clone(),
-        idempotency_key: format!("{idempotency_key}:render"),
-        capability: "RENDER_CHAPTER".into(),
-        prompt_ref: None,
-        context_manifest_ref: Some(context_ref.artifact_id.clone()),
-        budget_id: Some(production_budget_id.clone()),
-        predicted_cost_cents: gateway.predicted_cost_cents("RENDER_CHAPTER").max(1),
-        attempt_no: 1,
-        repair_round: 0,
-    };
     let target_chinese_characters = request
         .pointer("/payload/targetChineseCharacters")
         .and_then(Value::as_i64)
@@ -1894,23 +2095,60 @@ fn run_chapter_production_inner(
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
-    let render_result = execute_production_model_with_profile(
-        connection,
-        gateway,
-        &provider_profile,
-        &render_spec,
-        "RENDER_CHAPTER",
-        render_input,
-        &now,
-    )?;
-    let body = render_result
-        .parsed
-        .and_then(|value| {
-            value
-                .get("body")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
+    let reusable_render = retry_of_job_id
+        .as_deref()
+        .map(|previous_job_id| {
+            DurableModelRunner::completed_result_for_job(
+                connection,
+                &project_id,
+                previous_job_id,
+                "RENDER_CHAPTER",
+            )
         })
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    let (render_run_id, render_payload) = if let Some((model_run_id, parsed)) = reusable_render {
+        (
+            model_run_id,
+            parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?,
+        )
+    } else {
+        let render_spec = ModelRunSpec {
+            model_run_id: new_render_run_id.clone(),
+            job_id: Some(job_id.clone()),
+            step_id: None,
+            provider: provider_profile.provider.clone(),
+            model: provider_profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:render"),
+            capability: "RENDER_CHAPTER".into(),
+            prompt_ref: None,
+            context_manifest_ref: Some(context_ref.artifact_id.clone()),
+            budget_id: Some(production_budget_id.clone()),
+            predicted_cost_cents: gateway.predicted_cost_cents("RENDER_CHAPTER").max(1),
+            attempt_no: 1,
+            repair_round: 0,
+        };
+        let result = execute_production_model_with_profile(
+            connection,
+            gateway,
+            &provider_profile,
+            &render_spec,
+            "RENDER_CHAPTER",
+            render_input,
+            &now,
+        )?;
+        (
+            new_render_run_id,
+            result
+                .parsed
+                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?,
+        )
+    };
+    let body = render_payload
+        .get("body")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
         .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
     let method_injection_provenance = creative_enrichment
         .as_ref()
@@ -2059,33 +2297,57 @@ fn run_chapter_production_inner(
             (None, None, None, None)
         };
     update_stage(connection, &project_id, &job_id, "AUDIT", &now)?;
-    let audit_spec = ModelRunSpec {
-        model_run_id: audit_run_id.clone(),
-        job_id: Some(job_id.clone()),
-        step_id: None,
-        provider: provider_profile.provider.clone(),
-        model: provider_profile.model.clone(),
-        idempotency_key: format!("{idempotency_key}:audit"),
-        capability: "AUDIT_EXTRACT".into(),
-        prompt_ref: None,
-        context_manifest_ref: Some(context_ref.artifact_id.clone()),
-        budget_id: Some(production_budget_id),
-        predicted_cost_cents: gateway.predicted_cost_cents("AUDIT_EXTRACT").max(1),
-        attempt_no: 1,
-        repair_round: 0,
+    let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
+    let reusable_audit = retry_of_job_id
+        .as_deref()
+        .map(|previous_job_id| {
+            DurableModelRunner::completed_result_for_job(
+                connection,
+                &project_id,
+                previous_job_id,
+                "AUDIT_EXTRACT",
+            )
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    let (audit_run_id, audit_payload) = if let Some((model_run_id, parsed)) = reusable_audit {
+        (
+            model_run_id,
+            parse_provider_model_payload_for_capability(parsed, "AUDIT_EXTRACT")?,
+        )
+    } else {
+        let audit_spec = ModelRunSpec {
+            model_run_id: new_audit_run_id.clone(),
+            job_id: Some(job_id.clone()),
+            step_id: None,
+            provider: provider_profile.provider.clone(),
+            model: provider_profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:audit"),
+            capability: "AUDIT_EXTRACT".into(),
+            prompt_ref: None,
+            context_manifest_ref: Some(context_ref.artifact_id.clone()),
+            budget_id: Some(production_budget_id),
+            predicted_cost_cents: gateway.predicted_cost_cents("AUDIT_EXTRACT").max(1),
+            attempt_no: 1,
+            repair_round: 0,
+        };
+        let result = execute_production_model_with_profile(
+            connection,
+            gateway,
+            &provider_profile,
+            &audit_spec,
+            "AUDIT_EXTRACT",
+            audit_input,
+            &now,
+        )?;
+        (
+            new_audit_run_id,
+            result
+                .parsed
+                .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
+        )
     };
-    let audit_result = execute_production_model_with_profile(
-        connection,
-        gateway,
-        &provider_profile,
-        &audit_spec,
-        "AUDIT_EXTRACT",
-        json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref}),
-        &now,
-    )?;
-    let audit_payload = audit_result
-        .parsed
-        .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
     let audit_payload = normalize_audit_model_output(audit_payload, &body);
     let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
@@ -3248,8 +3510,7 @@ fn validate_actual_extraction(
         canon_semantics
             .as_ref()
             .expect("canon semantics is required for Canon candidates")
-            .validate_predicate(&candidate.predicate)
-            .map_err(str::to_owned)?;
+            .validate_predicate(&candidate.predicate)?;
         exact_quote(body, &candidate.evidence)?;
         let subject_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(

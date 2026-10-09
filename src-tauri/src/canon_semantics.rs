@@ -189,11 +189,13 @@ impl CanonSemanticPolicy {
         Ok(Self { version, rules })
     }
 
-    pub fn validate_predicate(&self, predicate: &str) -> Result<(), &'static str> {
+    pub fn validate_predicate(&self, predicate: &str) -> Result<(), String> {
         self.rules
             .contains_key(predicate)
             .then_some(())
-            .ok_or("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")
+            .ok_or_else(|| {
+                format!("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate={predicate}")
+            })
     }
 
     pub fn evaluate(
@@ -529,7 +531,7 @@ mod tests {
         );
         assert_eq!(
             multi.validate_predicate("unknown").unwrap_err(),
-            "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS"
+            "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=unknown"
         );
     }
 

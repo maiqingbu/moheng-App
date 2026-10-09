@@ -9,11 +9,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub const DEFAULT_GATE_POLICY_RESOURCE_VERSION: &str = "gate-policy-default.r1";
+pub const DEFAULT_GATE_POLICY_RESOURCE_VERSION: &str = "gate-policy-default.r2";
 const DEFAULT_POLICY_BYTES: &[u8] =
-    include_bytes!("../../contracts/resources/gate-policy-default.r1/policy.json");
+    include_bytes!("../../contracts/resources/gate-policy-default.r2/policy.json");
 const DEFAULT_POLICY_MANIFEST: &str =
-    include_str!("../../contracts/resources/gate-policy-default.r1/resource-manifest.json");
+    include_str!("../../contracts/resources/gate-policy-default.r2/resource-manifest.json");
 const CANON_SCAN_LIMIT: usize = 10_000;
 
 fn current_policy(
@@ -186,9 +186,14 @@ pub fn execute_update(
     let current = current_policy(&connection, project_id)?;
     let (next_payload, decision_type, outcome) = match action {
         "ADOPT_DEFAULT" => {
-            if current.as_ref().is_some_and(|(_, current_payload)| {
-                current_payload.get("policyId").and_then(Value::as_str) != Some("b11-opening")
-            }) {
+            let can_adopt = current.as_ref().is_none_or(|(_, current_payload)| {
+                current_payload.get("policyId").and_then(Value::as_str) == Some("b11-opening")
+                    || current_payload
+                        .pointer("/resourceRef/version")
+                        .and_then(Value::as_str)
+                        == Some("gate-policy-default.r1")
+            });
+            if !can_adopt {
                 return Err("GATE_POLICY_NOT_LEGACY".into());
             }
             (

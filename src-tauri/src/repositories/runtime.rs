@@ -1346,6 +1346,27 @@ impl DurableModelRunner {
             .map_err(Into::into)
     }
 
+    pub fn completed_result_for_job(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        capability: &str,
+    ) -> Result<Option<(String, Value)>, RuntimeError> {
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT run.model_run_id, parsed.parsed_json FROM model_runs run JOIN model_parse_results parsed ON parsed.project_id=run.project_id AND parsed.model_run_id=run.model_run_id WHERE run.project_id=?1 AND run.job_id=?2 AND run.capability=?3 AND run.status='COMPLETED' AND parsed.status='OK' AND parsed.parsed_json IS NOT NULL ORDER BY run.attempt_no DESC,run.created_at DESC,run.model_run_id DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, job_id, capability],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(model_run_id, parsed)| {
+            serde_json::from_str(&parsed)
+                .map(|value| (model_run_id, value))
+                .map_err(RuntimeError::Json)
+        })
+        .transpose()
+    }
+
     /// Resolve the chapter's existing Budget Authority binding.  Production
     /// model stages must use this lookup rather than creating an unscoped
     /// reservation or accepting a caller-provided budget id.
