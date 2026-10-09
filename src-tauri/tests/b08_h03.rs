@@ -182,7 +182,7 @@ impl ProductionModelGateway for CatalogPricingGateway {
             .map_err(|error| error.to_string())?
             .push(capability.into());
         let mut response = RecordingGateway.invoke(capability, input)?;
-        response.usage.provider_reported_cost_cents = None;
+        response.usage.provider_reported_cost_cents = Some(777);
         Ok(response)
     }
 }
@@ -2447,12 +2447,23 @@ fn rv10_model_runs_bind_price_versions_and_historical_costs_are_not_recomputed()
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.actualCostStatus')='ESTIMATED'",
+                "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.actualCostStatus')='ACTUAL'",
                 [project_id],
                 |row| row.get(0),
             )
             .unwrap(),
         3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_usage WHERE project_id=?1 AND cost_cents=1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3,
+        "actual usage must be priced from the persisted user price snapshot, not provider-reported cost"
     );
     drop(connection);
 
