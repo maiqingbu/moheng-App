@@ -445,12 +445,18 @@ impl EndgameRepository {
         project_id: &str,
         book_plan: Option<&Value>,
         contract: Option<&Value>,
-    ) -> Result<(i64, i64), EndgameRepositoryError> {
+    ) -> Result<(i64, i64, bool), EndgameRepositoryError> {
         let goals = book_plan
             .and_then(|value| value.get("majorMysteryGoals"))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let other_mystery_sources: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mystery_states WHERE project_id=?1) OR EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id=?1 AND obligation_type='MYSTERY')",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        let source_available = !goals.is_empty() || other_mystery_sources;
         let mappings = contract
             .and_then(|value| value.get("mysteryMappings"))
             .and_then(Value::as_array)
@@ -481,7 +487,7 @@ impl EndgameRepository {
                 unresolved += 1;
             }
         }
-        Ok((unmapped, unresolved))
+        Ok((unmapped, unresolved, source_available))
     }
 
     fn hard_payoff_count(
@@ -965,12 +971,13 @@ impl EndgameRepository {
             .and_then(Value::as_str)
             == Some("USER_CONFIRMED");
 
-        let (unmapped_mysteries, unresolved_mapped_mysteries) = Self::mystery_count(
-            connection,
-            project_id,
-            book_plan.as_ref(),
-            endgame_contract.as_ref(),
-        )?;
+        let (unmapped_mysteries, unresolved_mapped_mysteries, mystery_source_available) =
+            Self::mystery_count(
+                connection,
+                project_id,
+                book_plan.as_ref(),
+                endgame_contract.as_ref(),
+            )?;
         let unfulfilled_hard_reservations = Self::reservation_count(
             connection,
             project_id,
@@ -980,6 +987,7 @@ impl EndgameRepository {
 
         let mut input = CompletionInput {
             source_available: true,
+            mystery_source_available,
             requested_ending_confirmed,
             endgame_contract_fresh: false,
             unmapped_mysteries,

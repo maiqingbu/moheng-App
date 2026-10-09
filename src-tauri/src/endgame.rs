@@ -9,6 +9,7 @@ pub enum CompletionStatus {
     Blocked,
     NeedsDecision,
     NeedsRecheck,
+    InsufficientData,
     SourceUnavailable,
 }
 
@@ -45,6 +46,7 @@ impl CompletionEvaluation {
 #[serde(rename_all = "camelCase")]
 pub struct CompletionInput {
     pub source_available: bool,
+    pub mystery_source_available: bool,
     pub requested_ending_confirmed: bool,
     pub endgame_contract_fresh: bool,
     pub unmapped_mysteries: i64,
@@ -145,14 +147,18 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
 
     checks.push(check(
         "MYSTERY",
-        if unmapped_mysteries > 0 {
+        if !input.mystery_source_available {
+            CompletionStatus::InsufficientData
+        } else if unmapped_mysteries > 0 {
             CompletionStatus::NeedsDecision
         } else if unresolved_mapped_mysteries > 0 {
             CompletionStatus::Blocked
         } else {
             CompletionStatus::Ready
         },
-        if unmapped_mysteries > 0 {
+        if !input.mystery_source_available {
+            "没有已记录的重要谜团来源，不能判断谜团是否已收束。"
+        } else if unmapped_mysteries > 0 {
             "有重要谜团还没有明确对应到可检查的收束责任。"
         } else if unresolved_mapped_mysteries > 0 {
             "已选择的谜团收束责任尚未达到正式完成状态。"
@@ -255,6 +261,11 @@ pub fn evaluate_completion(input: &CompletionInput) -> CompletionEvaluation {
         CompletionStatus::NeedsDecision
     } else if blocker_count > 0 {
         CompletionStatus::Blocked
+    } else if checks
+        .iter()
+        .any(|check| check.status == CompletionStatus::InsufficientData)
+    {
+        CompletionStatus::NeedsDecision
     } else {
         CompletionStatus::Ready
     };

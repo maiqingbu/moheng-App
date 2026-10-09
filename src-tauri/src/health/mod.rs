@@ -749,30 +749,37 @@ fn reader_desire_factor(snapshot: &HealthSnapshot) -> (HealthFactorResult, Vec<H
     let mut factor = if snapshot.unavailable_reader_desires > 0 {
         HealthFactorResult::unavailable("READER_DESIRE", "SOFT_ADVISORY", "卷工作区")
             .with_severity(severity)
+    } else if snapshot.open_reader_desires == 0 {
+        HealthFactorResult::insufficient("READER_DESIRE", "SOFT_ADVISORY", "卷工作区").with_copy(
+            "读者期待来源不足",
+            "当前没有未结束的正式读者期待记录，无法评估回应节点。",
+            "卷工作区",
+        )
     } else {
         HealthFactorResult::evaluated("READER_DESIRE", "SOFT_ADVISORY", severity)
     };
-    factor = factor
-        .with_copy(
-            if severity == "healthy" {
-                "读者期待记录稳定"
-            } else if snapshot.unavailable_reader_desires > 0 {
+    if snapshot.open_reader_desires > 0 || snapshot.unavailable_reader_desires > 0 {
+        factor = factor.with_copy(
+            if snapshot.unavailable_reader_desires > 0 {
                 "部分读者期待来源需要核对"
-            } else {
+            } else if snapshot.overdue_reader_desires > 0 {
                 "有读者期待到了回应节点"
+            } else {
+                "读者期待记录稳定"
             },
             &format!(
                 "当前有 {} 项未结束的读者期待，其中 {} 项已到预期回应章节。",
                 snapshot.open_reader_desires, snapshot.overdue_reader_desires
             ),
             "卷工作区",
-        )
-        .with_source_page(
-            snapshot
-                .factor_source_pages
-                .get("READER_DESIRE")
-                .unwrap_or(&HealthSourcePage::default()),
         );
+    }
+    factor = factor.with_source_page(
+        snapshot
+            .factor_source_pages
+            .get("READER_DESIRE")
+            .unwrap_or(&HealthSourcePage::default()),
+    );
     (factor, issues)
 }
 

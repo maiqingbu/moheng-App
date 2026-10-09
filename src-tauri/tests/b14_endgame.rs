@@ -5,6 +5,7 @@ use ai_novel_production_system_core::endgame::{
 fn ready_input() -> CompletionInput {
     CompletionInput {
         source_available: true,
+        mystery_source_available: true,
         requested_ending_confirmed: true,
         endgame_contract_fresh: true,
         unmapped_mysteries: 0,
