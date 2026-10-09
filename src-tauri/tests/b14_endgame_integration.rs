@@ -192,6 +192,12 @@ fn seed_ready_project_with_plan(state: &KernelState, book_plan: serde_json::Valu
         project_scope,
         &book_plan,
     );
+    handle
+        .execute(
+            "INSERT OR IGNORE INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES ('mystery:b14:resolved-fixture','proj-b14','已完成的基线谜团','RESOLVED',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
     let volume_exit =
         json!({"payloadSchema":"volume-exit-state.r1","volumeId":volume_id,"status":"CLOSED"});
     let volume_scope = format!(r#"{{"level":"VOLUME","volumeId":"{volume_id}"}}"#);
