@@ -1146,7 +1146,7 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
             json!({"prompt":"blocked"}),
             "2026-08-28T00:00:00Z",
         ),
-        Err(error) if error.contains("budget hard limit")
+        Err(error) if error.contains("BUDGET_EXCEEDED")
     ));
     assert_eq!(*calls.lock().unwrap(), 0);
 
@@ -1188,13 +1188,31 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
             .unwrap(),
         "SETTLED"
     );
-    assert_eq!(connection.query_row::<i64, _, _>("SELECT cost_cents FROM model_cost_ledger WHERE model_run_id=?1 AND cost_type='ACTUAL'", [&successful.model_run_id], |row| row.get(0)).unwrap(), 3);
+    assert_eq!(connection.query_row::<i64, _, _>("SELECT cost_cents FROM model_cost_ledger WHERE model_run_id=?1 AND cost_type='ACTUAL'", [&successful.model_run_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT json_extract(payload_json,'$.actualCostStatus') FROM production_events WHERE event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&successful.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "UNPRICED"
+    );
 
     let spent_id =
         StableIdentityFactory::from_command(StableIdKind::ModelRun, "p01-formal:spent").unwrap();
     connection.execute("INSERT INTO model_runs(model_run_id,project_id,provider,model,idempotency_key,capability,predicted_cost_cents,reserved_cost_cents,status,created_at,updated_at) VALUES (?1,'p01-formal','fixture','fixture-model','p01-formal-spent','RENDER_CHAPTER',15,15,'COMPLETED','2026-08-28T00:00:00Z','2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
     connection.execute("INSERT INTO model_usage(usage_id,project_id,model_run_id,input_tokens,output_tokens,total_tokens,latency_ms,cost_cents,recorded_at) VALUES ('usage:p01:spent','p01-formal',?1,1,1,2,1,15,'2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
     connection.execute("INSERT INTO model_cost_ledger(ledger_id,project_id,model_run_id,budget_id,cost_cents,token_total,cost_type,created_at) VALUES ('ledger:p01:spent','p01-formal',?1,'budget:p01:hard',15,2,'ACTUAL','2026-08-28T00:00:00Z')", libsql_rusqlite::params![spent_id]).unwrap();
+    ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository::write_project(
+        &connection,
+        "p01-formal",
+        &json!({"chapterBudget":0.2}),
+        "cmd:p01:set-chapter-budget",
+        "2026-08-28T00:00:00Z",
+    )
+    .unwrap();
     let cost_blocked = formal_spec("budget-cost-blocked", Some("budget:p01:hard"), 4);
     assert!(matches!(
         execute_production_model(
@@ -1205,7 +1223,7 @@ fn p01_formal_budget_binding_blocks_provider_before_send_and_settles_success_cos
             json!({"prompt":"cost blocked"}),
             "2026-08-28T00:00:00Z",
         ),
-        Err(error) if error.contains("budget hard limit")
+        Err(error) if error.contains("MODEL_PRICE_REQUIRED")
     ));
     assert_eq!(*calls.lock().unwrap(), 1);
 }
