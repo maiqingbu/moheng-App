@@ -99,7 +99,7 @@ impl ProductionModelGateway for S40RepairGateway {
                 Ok(ProductionModelResponse::deterministic(json!({
                     "start":body[..start].chars().count(),
                     "end":body[..end].chars().count(),
-                    "replacement":"决定推开石门。“我必须找到出口。”"
+                    "replacement":"决定推开石门。“我必须找到出口。”“石门后有人。”"
                 })))
             }
             "AUDIT_EXTRACT" => {
@@ -4276,7 +4276,7 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         "林舟被迫等待。门后传来脚步声。"
     );
     assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
-    let repaired_body = "林舟决定推开石门。“我必须找到出口。”门后传来脚步声。";
+    let repaired_body = "林舟决定推开石门。“我必须找到出口。”“石门后有人。”门后传来脚步声。";
     assert_eq!(
         gateway.audit_inputs.lock().unwrap()[0]["body"],
         repaired_body
