@@ -218,7 +218,11 @@ fn b13_reader_desire_without_source_is_insufficient_data() {
     assert!(desire["summary"]
         .as_str()
         .unwrap()
-        .contains("没有正式的读者期待来源"));
+        .contains("读者期待来源不足"));
+    assert!(desire["detail"]
+        .as_str()
+        .unwrap()
+        .contains("没有未结束的正式读者期待记录"));
 }
 
 #[test]
