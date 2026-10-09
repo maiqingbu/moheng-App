@@ -913,7 +913,11 @@ fn formal_spec(command: &str, budget_id: Option<&str>, predicted_cost_cents: i64
         capability: "RENDER_CHAPTER".into(),
         prompt_ref: None,
         context_manifest_ref: None,
-        budget_id: budget_id.map(ToOwned::to_owned),
+        budget_id: Some(budget_id.map(ToOwned::to_owned).unwrap_or_else(|| {
+            ai_novel_production_system_core::runtime::DurableModelRunner::project_budget_id(
+                "p01-formal",
+            )
+        })),
         predicted_cost_cents,
         cost_snapshot: None,
         attempt_no: 1,
