@@ -723,6 +723,26 @@ fn b14_mystery_mapping_requires_current_responsibility_disposition() {
 }
 
 #[test]
+fn b14_no_mystery_source_is_insufficient_data_not_ready() {
+    let (state, _root) = test_state();
+
+    let result = query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let mystery = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["kind"] == "MYSTERY")
+        .unwrap();
+
+    assert_eq!(mystery["status"], "INSUFFICIENT_DATA");
+    assert!(mystery["summary"]
+        .as_str()
+        .unwrap()
+        .contains("没有已记录的重要谜团来源"));
+    assert_ne!(mystery["status"], "READY");
+}
+
+#[test]
 fn b14_hard_responsibilities_are_instance_level_and_change_matchable() {
     let (state, _root) = test_state();
     seed_ready_project_with_plan(

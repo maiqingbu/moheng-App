@@ -198,6 +198,30 @@ fn b_r2_03_empty_project_overview_is_not_healthy() {
 }
 
 #[test]
+fn b13_reader_desire_without_source_is_insufficient_data() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:b13:reader-desire:no-source");
+
+    let result = query_book_health_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"health","pageSize":20}),
+    )
+    .unwrap();
+    let desire = result["factors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|factor| factor["factorCode"] == "READER_DESIRE")
+        .unwrap();
+
+    assert_eq!(desire["status"], "INSUFFICIENT_DATA");
+    assert!(desire["summary"]
+        .as_str()
+        .unwrap()
+        .contains("没有正式的读者期待来源"));
+}
+
+#[test]
 fn b_r2_03_unavailable_health_source_is_not_healthy_in_overview() {
     let state = state();
     let project_id = create_project(&state, "cmd:b-r2-03:unavailable-overview");
