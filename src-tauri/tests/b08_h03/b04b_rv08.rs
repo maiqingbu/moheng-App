@@ -286,6 +286,28 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
         payload["canonSemantics"]["rules"].as_array().unwrap().len(),
         15
     );
+    let default_rules = payload["canonSemantics"]["rules"].as_array().unwrap();
+    for removed_test_predicate in [
+        "found_evidence",
+        "protected_oath",
+        "appears_in_opening",
+        "opening_event",
+    ] {
+        assert!(default_rules
+            .iter()
+            .all(|rule| { rule["predicate"].as_str() != Some(removed_test_predicate) }));
+    }
+    let default_loadout = default_rules
+        .iter()
+        .find(|rule| rule["predicate"] == "loadout")
+        .unwrap();
+    assert!(default_loadout.get("mutualExclusions").is_none());
+    assert!(default_rules
+        .iter()
+        .any(|rule| rule["predicate"] == "has_ability"));
+    assert!(default_rules
+        .iter()
+        .any(|rule| rule["predicate"] == "status"));
     let policy =
         ai_novel_production_system_core::canon_semantics::CanonSemanticPolicy::from_gate_policy(
             &payload,
