@@ -4382,18 +4382,15 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         repaired["artifactId"]
     );
 
-    let repair_run: (String, Option<String>, String) = connection
+    let repair_run: (String, String, String) = connection
         .query_row(
-            "SELECT model_run_id,budget_id,status FROM model_runs WHERE project_id=?1 AND capability='REPAIR_CANDIDATE'",
+            "SELECT m.model_run_id,r.budget_ref,m.status FROM model_runs m JOIN budget_reservations r ON r.reservation_id=m.budget_reservation_id WHERE m.project_id=?1 AND m.capability='REPAIR_CANDIDATE'",
             [project_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(repair_run.2, "COMPLETED");
-    assert!(
-        repair_run.1.is_some(),
-        "repair ModelRun must carry the B5-A budget binding"
-    );
+    assert_eq!(repair_run.1, format!("budget:{chapter_id}"));
     assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
 
     let receipt_payload: Value = serde_json::from_str(
