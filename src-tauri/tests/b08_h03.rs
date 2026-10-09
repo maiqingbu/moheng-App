@@ -4236,11 +4236,12 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b5b-s40-repair";
     let gateway = S40RepairGateway::default();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(gateway.clone()),
-    );
-    let connection = state.manager.create(project_id, "B5-B S40 repair", NOW).unwrap();
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let connection = state
+        .manager
+        .create(project_id, "B5-B S40 repair", NOW)
+        .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
@@ -4257,7 +4258,12 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "REPAIR_CANDIDATE", "AUDIT_EXTRACT"]
+        [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "REPAIR_CANDIDATE",
+            "AUDIT_EXTRACT"
+        ]
     );
     assert_eq!(gateway.repair_inputs.lock().unwrap().len(), 1);
     assert_eq!(
@@ -4266,9 +4272,15 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
     );
     assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
     let repaired_body = "林舟决定推开石门。“我必须找到出口。”她望向门后传来的脚步声。";
-    assert_eq!(gateway.audit_inputs.lock().unwrap()[0]["body"], repaired_body);
+    assert_eq!(
+        gateway.audit_inputs.lock().unwrap()[0]["body"],
+        repaired_body
+    );
 
-    let connection = state.manager.open(project_id, "B5-B S40 repair", NOW).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B5-B S40 repair", NOW)
+        .unwrap();
     let candidates = {
         let mut statement = connection
             .prepare("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
@@ -4279,7 +4291,11 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
             .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
             .collect::<Vec<_>>()
     };
-    assert_eq!(candidates.len(), 2, "the source and repaired candidates remain traceable");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the source and repaired candidates remain traceable"
+    );
     let original = candidates
         .iter()
         .find(|candidate| candidate["candidatePatch"].is_null())
@@ -4328,8 +4344,14 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(audit_payload["candidateRef"]["artifactId"], repaired["artifactId"]);
-    assert_eq!(gateway.audit_inputs.lock().unwrap()[0]["candidateRef"]["artifactId"], repaired["artifactId"]);
+    assert_eq!(
+        audit_payload["candidateRef"]["artifactId"],
+        repaired["artifactId"]
+    );
+    assert_eq!(
+        gateway.audit_inputs.lock().unwrap()[0]["candidateRef"]["artifactId"],
+        repaired["artifactId"]
+    );
     let final_payload: Value = serde_json::from_str(
         &connection
             .query_row::<String, _, _>(
@@ -4340,7 +4362,10 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(final_payload["candidateRef"]["artifactId"], repaired["artifactId"]);
+    assert_eq!(
+        final_payload["candidateRef"]["artifactId"],
+        repaired["artifactId"]
+    );
 
     let repair_run: (String, Option<String>, String) = connection
         .query_row(
@@ -4350,7 +4375,10 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         )
         .unwrap();
     assert_eq!(repair_run.2, "COMPLETED");
-    assert!(repair_run.1.is_some(), "repair ModelRun must carry the B5-A budget binding");
+    assert!(
+        repair_run.1.is_some(),
+        "repair ModelRun must carry the B5-A budget binding"
+    );
     assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
 
     let receipt_payload: Value = serde_json::from_str(
