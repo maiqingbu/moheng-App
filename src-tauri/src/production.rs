@@ -2731,7 +2731,7 @@ fn run_chapter_production_inner(
                                 "start":s40_patch.start,
                                 "end":s40_patch.end,
                                 "replacement":s40_patch.replacement,
-                                "bodyDigest":patch.candidate_digest,
+                                "candidateDigest":patch.candidate_digest,
                                 "candidateBefore":candidate_before,
                                 "modelRunId":repair_run_id,
                                 "protectedSpans":s40_patch.protected_spans,
