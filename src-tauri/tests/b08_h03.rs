@@ -209,6 +209,29 @@ impl ProductionModelGateway for RecordingGateway {
                 ]
             }),
             "RENDER_CHAPTER" => json!({"body":"林舟推开石门，实际只推进了任务，没有完成它。"}),
+            "REPAIR_CANDIDATE" => json!({
+                "skillId":input["skill"]["skillId"],
+                "skillVersion":input["skill"]["skillVersion"],
+                "bundleDigest":input["skill"]["bundleDigest"],
+                "taskId":input["skillTaskContext"]["taskId"],
+                "status":"ADVISORY_ESCALATION",
+                "sourceRefs":[],
+                "assumptions":[],
+                "payload":{
+                    "repair_plan":"无法确认一个可安全应用的 Candidate span。",
+                    "target_spans":[],
+                    "protected_spans":[],
+                    "changes":[],
+                    "recheck_dimensions":input["affectedDimensions"],
+                    "escalation_if_failed":"由作者复核后再继续。"
+                },
+                "findings":[],
+                "contextRefs":input["skillTaskContext"]["boundedRefs"].as_array().unwrap()
+                    .iter().map(|reference| reference["reference"].clone()).collect::<Vec<_>>(),
+                "runtimeCheckRequests":[],
+                "confidence":0.5,
+                "nextSkillHints":[]
+            }),
             "AUDIT_EXTRACT" => json!({
                 "qualityFindings":[],
                 "canonCandidates":[{
@@ -3172,7 +3195,7 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
                 |row| row.get(0)
             )
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         connection
@@ -3201,7 +3224,12 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+        [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "REPAIR_CANDIDATE",
+            "AUDIT_EXTRACT"
+        ]
     );
     drop(connection);
     let replay = execute_command_impl(&state, json!({
@@ -3235,7 +3263,7 @@ fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["RENDER_CHAPTER", "AUDIT_EXTRACT"]
+        ["RENDER_CHAPTER", "REPAIR_CANDIDATE", "AUDIT_EXTRACT"]
     );
 }
 
@@ -3670,7 +3698,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
                 |row| row.get(0)
             )
             .unwrap(),
-        2
+        3
     );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08-long' AND h.artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), context_id);
     let volume_head_after: (String,i64,String) = connection.query_row(
@@ -4110,7 +4138,7 @@ fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
         projection["quality"]["repair"]["status"],
         "ADVISORY_ESCALATION"
     );
-    assert_eq!(projection["quality"]["repair"]["transportCalls"], 0);
+    assert_eq!(projection["quality"]["repair"]["transportCalls"], 1);
     assert_eq!(projection["quality"]["recheckedDimensions"], json!([]));
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch.status')='CANDIDATE'",
@@ -4627,7 +4655,7 @@ fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_r
                 |row| row.get(0),
             )
             .unwrap(),
-        3,
+        4,
         "post-Gate retry must not make additional model calls"
     );
     assert_eq!(
