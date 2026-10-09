@@ -268,6 +268,7 @@ fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
             .max(1),
         "PLAN_STRATEGY" => 1_500,
         "AUDIT_EXTRACT" => 1_200,
+        "REPAIR_CANDIDATE" => 1_200,
         "GENERATE_STORY_DIRECTIONS" => 2_400,
         "OPENING_SIGNING_EVALUATION" => 3_000,
         "B14_S44_ENDGAME_ADVICE" | "B14_S45_COMPLETION_QUALITY" => 1_500,

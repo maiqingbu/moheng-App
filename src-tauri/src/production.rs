@@ -605,6 +605,281 @@ pub(crate) fn parse_provider_model_payload_for_capability(
     }
 }
 
+struct S40CandidatePatch {
+    start: usize,
+    end: usize,
+    replacement: String,
+    protected_spans: Vec<Value>,
+}
+
+struct ParsedS40RepairOutput {
+    status: String,
+    skill_output: Value,
+    patch: Option<S40CandidatePatch>,
+}
+
+fn parse_s40_repair_output(
+    output: Value,
+    skill: &crate::creative_skills::SkillMetadata,
+    task_id: &str,
+    body: &str,
+    affected_dimensions: &[String],
+    allowed_context_refs: &BTreeSet<String>,
+) -> Result<ParsedS40RepairOutput, String> {
+    let object = output
+        .as_object()
+        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+    let required_top_level = [
+        "skillId",
+        "skillVersion",
+        "bundleDigest",
+        "taskId",
+        "status",
+        "sourceRefs",
+        "assumptions",
+        "payload",
+        "findings",
+        "contextRefs",
+        "runtimeCheckRequests",
+        "confidence",
+        "nextSkillHints",
+    ];
+    if object.len() != required_top_level.len()
+        || object
+            .keys()
+            .any(|key| !required_top_level.contains(&key.as_str()))
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let string_field = |field: &str| {
+        output
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
+    };
+    if string_field("skillId")? != "S40"
+        || string_field("skillVersion")? != skill.version
+        || string_field("bundleDigest")? != skill.bundle_digest
+        || string_field("taskId")? != task_id
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let status = string_field("status")?.to_string();
+    if !["OK", "NEEDS_INPUT", "NOT_APPLICABLE", "ADVISORY_ESCALATION"].contains(&status.as_str()) {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    for field in [
+        "sourceRefs",
+        "assumptions",
+        "findings",
+        "contextRefs",
+        "runtimeCheckRequests",
+        "nextSkillHints",
+    ] {
+        if !output.get(field).and_then(Value::as_array).is_some() {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+    }
+    for field in ["sourceRefs", "assumptions", "contextRefs", "nextSkillHints"] {
+        if output
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| !item.is_string()))
+        {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+    }
+    if output
+        .get("findings")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| !item.is_object()))
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let runtime_check_requests = output
+        .get("runtimeCheckRequests")
+        .and_then(Value::as_array)
+        .unwrap();
+    for request in runtime_check_requests {
+        let request_object = request
+            .as_object()
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        let kind = request
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        let reason_present = request
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.trim().is_empty());
+        let refs = request
+            .get("refs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        if request_object.len() != 3
+            || !crate::creative_skills::runtime_check_kind_allowed(kind)
+            || !reason_present
+            || refs.len() > 64
+            || refs.iter().any(|reference| !reference.is_string())
+        {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+    }
+    if output
+        .get("contextRefs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|reference| !allowed_context_refs.contains(reference))
+        })
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let confidence = output
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let payload = output
+        .get("payload")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+    for field in [
+        "repair_plan",
+        "target_spans",
+        "protected_spans",
+        "changes",
+        "recheck_dimensions",
+        "escalation_if_failed",
+    ] {
+        if !payload.contains_key(field) {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+    }
+    if payload
+        .get("escalation_if_failed")
+        .and_then(Value::as_str)
+        .is_none_or(|escalation| escalation.trim().is_empty())
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    if !payload
+        .get("target_spans")
+        .and_then(Value::as_array)
+        .is_some()
+        || !payload
+            .get("protected_spans")
+            .and_then(Value::as_array)
+            .is_some()
+        || !payload.get("changes").and_then(Value::as_array).is_some()
+        || !payload
+            .get("recheck_dimensions")
+            .and_then(Value::as_array)
+            .is_some()
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    if status != "OK" {
+        return Ok(ParsedS40RepairOutput {
+            status,
+            skill_output: output,
+            patch: None,
+        });
+    }
+    if payload
+        .get("repair_plan")
+        .and_then(Value::as_str)
+        .is_none_or(|plan| plan.trim().is_empty())
+    {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let dimensions = payload
+        .get("recheck_dimensions")
+        .and_then(Value::as_array)
+        .unwrap();
+    let mut supplied_dimensions = dimensions
+        .iter()
+        .map(|dimension| {
+            dimension
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected_dimensions = affected_dimensions.to_vec();
+    supplied_dimensions.sort();
+    supplied_dimensions.dedup();
+    expected_dimensions.sort();
+    expected_dimensions.dedup();
+    if supplied_dimensions != expected_dimensions {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let target_spans = payload
+        .get("target_spans")
+        .and_then(Value::as_array)
+        .unwrap();
+    let protected_spans = payload
+        .get("protected_spans")
+        .and_then(Value::as_array)
+        .unwrap();
+    let changes = payload.get("changes").and_then(Value::as_array).unwrap();
+    if target_spans.len() != 1 || changes.len() != 1 {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let read_span = |span: &Value| -> Result<(usize, usize), String> {
+        let start = span
+            .get("start")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        let end = span
+            .get("end")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        Ok((start, end))
+    };
+    let (start, end) = read_span(&target_spans[0])?;
+    let (change_start, change_end) = read_span(&changes[0])?;
+    let body_len = body.chars().count();
+    if start != change_start || end != change_end || start > end || end > body_len {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let mut expected_protected_spans = Vec::new();
+    if start > 0 {
+        expected_protected_spans.push((0, start));
+    }
+    if end < body_len {
+        expected_protected_spans.push((end, body_len));
+    }
+    let supplied_protected_spans = protected_spans
+        .iter()
+        .map(read_span)
+        .collect::<Result<Vec<_>, _>>()?;
+    if supplied_protected_spans != expected_protected_spans {
+        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    }
+    let replacement = changes[0]
+        .get("replacement")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?
+        .to_string();
+    Ok(ParsedS40RepairOutput {
+        status,
+        skill_output: output.clone(),
+        patch: Some(S40CandidatePatch {
+            start,
+            end,
+            replacement,
+            protected_spans: protected_spans.clone(),
+        }),
+    })
+}
+
 fn classify_provider_body(raw: &str) -> Option<&'static str> {
     if raw.trim().is_empty() {
         return Some("P01_PROVIDER_EMPTY_BODY");
@@ -2188,7 +2463,7 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?,
         )
     };
-    let body = render_payload
+    let mut body = render_payload
         .get("body")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
@@ -2228,11 +2503,15 @@ fn run_chapter_production_inner(
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
-    let candidate_ref = reference(&candidate);
+    let mut candidate_ref = reference(&candidate);
+    let initial_candidate_ref = candidate_ref.clone();
+    let mut candidate_history = Vec::new();
+    let mut repair_model_run_ids = Vec::new();
+    let mut candidate_repaired = false;
     let mut quality_report = None;
     let mut repair_evidence = Value::Null;
     if let Some(enrichment) = creative_enrichment.as_ref() {
-        let initial_report = crate::creative_skills::evaluate_narrative_quality(
+        let mut report = crate::creative_skills::evaluate_narrative_quality(
             &candidate_ref,
             &project_id,
             current_revision,
@@ -2245,43 +2524,311 @@ fn run_chapter_production_inner(
                 .collect(),
         )
         .map_err(|error| format!("B10_QUALITY_EVALUATION:{error}"))?;
-        let repair_limit = request
+        let requested_repair_limit = request
             .pointer("/payload/repairRunLimit")
             .and_then(Value::as_i64)
             .unwrap_or(enrichment.context.budget.repair_runs);
-        let affected_dimensions = initial_report.repairable_dimensions.clone();
-        let status = if affected_dimensions.is_empty() {
-            "NO_REPAIR"
-        } else {
-            "ADVISORY_ESCALATION"
-        };
-        let escalation = if status == "ADVISORY_ESCALATION" {
-            json!("S40_REPAIR_NOT_IMPLEMENTED")
-        } else {
-            Value::Null
-        };
-        let mut report = initial_report;
+        let repair_limit = requested_repair_limit
+            .max(0)
+            .min(enrichment.context.budget.repair_runs.max(0));
+        let affected_dimensions = report.repairable_dimensions.clone();
+        let mut status = "NO_REPAIR";
+        let mut escalation = Value::Null;
+        let mut repair_run = 0;
+        let mut s40_provenance = Value::Null;
+        let mut s40_output_record = Value::Null;
+        if !affected_dimensions.is_empty() {
+            if repair_limit <= 1 {
+                status = "ADVISORY_ESCALATION";
+                escalation = json!("REPAIR_RUN_LIMIT");
+            } else {
+                let s40_selection =
+                    skill_bundle_loader.select(crate::creative_skills::SkillSelectionRequest {
+                        primary: "S40".into(),
+                        support: Vec::new(),
+                        budget_reason: Some("Bounded repair for current Candidate findings".into()),
+                        context_tokens: enrichment.context.budget.context_tokens,
+                        model_calls: enrichment.context.budget.model_calls,
+                    })?;
+                let s40_resources = vec!["resources/operating_method.md".to_string()];
+                let s40_loaded =
+                    skill_bundle_loader.load_selected(&s40_selection, &s40_resources)?;
+                let s40_text = s40_loaded
+                    .skill_texts
+                    .iter()
+                    .find(|loaded| {
+                        loaded
+                            .reference
+                            .ends_with("/skills/surgical-repair/SKILL.md")
+                    })
+                    .ok_or_else(|| "B10_S40_SKILL_TEXT_MISSING".to_string())?;
+                let loaded_resources = s40_loaded
+                    .skill_texts
+                    .iter()
+                    .map(|loaded| json!({"reference":loaded.reference,"digest":loaded.digest}))
+                    .chain(s40_loaded.resources.iter().map(|loaded| {
+                        json!({
+                            "reference":loaded.reference,
+                            "digest":loaded.digest
+                        })
+                    }))
+                    .collect::<Vec<_>>();
+                s40_provenance = json!({
+                    "skillId":s40_selection.primary.id,
+                    "skillVersion":s40_selection.primary.version,
+                    "skillReference":s40_text.reference,
+                    "skillDigest":s40_text.digest,
+                    "bundleDigest":s40_selection.primary.bundle_digest,
+                    "deploymentManifestDigest":s40_loaded.identity.deployed_manifest_digest,
+                    "loadedResources":loaded_resources
+                });
+                let repair_run_id = StableIdentityFactory::from_command(
+                    StableIdKind::ModelRun,
+                    &format!("{command_id}:repair:1"),
+                )?;
+                let repair_findings = report
+                    .findings
+                    .iter()
+                    .filter(|finding| affected_dimensions.contains(&finding.dimension))
+                    .collect::<Vec<_>>();
+                let repair_input = json!({
+                    "skill":{
+                        "skillId":s40_selection.primary.id,
+                        "skillVersion":s40_selection.primary.version,
+                        "bundleDigest":s40_selection.primary.bundle_digest,
+                        "skillReference":s40_text.reference,
+                        "skillDigest":s40_text.digest,
+                        "skillText":s40_text.text,
+                        "resources":s40_loaded.resources.iter().map(|resource| json!({
+                            "reference":resource.reference,
+                            "digest":resource.digest,
+                            "text":resource.text
+                        })).collect::<Vec<_>>(),
+                        "deploymentManifestDigest":s40_loaded.identity.deployed_manifest_digest
+                    },
+                    "skillTaskContext":enrichment.context,
+                    "candidate":{"candidateRef":candidate_ref,"status":"CANDIDATE","body":body},
+                    "findings":repair_findings,
+                    "protectedSpans":[{
+                        "candidateRef":candidate_ref,
+                        "bodyDigest":body_digest,
+                        "preserveAllCharactersOutsideReturnedTargetSpan":true
+                    }],
+                    "sceneContract":{
+                        "chapterGoal":plan_payload.get("chapterGoal"),
+                        "sceneExecution":plan_payload.get("sceneExecution"),
+                        "requiredStateOutcomes":plan_payload.get("requiredStateOutcomes"),
+                        "forbiddenTransitions":plan_payload.get("forbiddenTransitions")
+                    },
+                    "chapterPlanRef":plan_ref,
+                    "chapterPlan":plan_payload,
+                    "affectedDimensions":affected_dimensions,
+                    "repairRun":1,
+                    "repairRunLimit":repair_limit
+                });
+                let repair_spec = ModelRunSpec {
+                    model_run_id: repair_run_id.clone(),
+                    job_id: Some(job_id.clone()),
+                    step_id: None,
+                    provider: provider_profile.provider.clone(),
+                    model: provider_profile.model.clone(),
+                    idempotency_key: format!("{idempotency_key}:repair:1"),
+                    capability: "REPAIR_CANDIDATE".into(),
+                    prompt_ref: None,
+                    context_manifest_ref: Some(context_ref.artifact_id.clone()),
+                    budget_id: Some(production_budget_id.clone()),
+                    predicted_cost_cents: 0,
+                    cost_snapshot: None,
+                    attempt_no: 1,
+                    repair_round: 1,
+                };
+                let repair_result = execute_production_model_with_profile(
+                    connection,
+                    gateway,
+                    &provider_profile,
+                    &repair_spec,
+                    "REPAIR_CANDIDATE",
+                    repair_input,
+                    &now,
+                )?;
+                repair_model_run_ids.push(repair_run_id.clone());
+                let patch_payload = repair_result
+                    .parsed
+                    .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+                let allowed_context_refs = enrichment
+                    .context
+                    .bounded_refs
+                    .iter()
+                    .map(|reference| reference.reference.clone())
+                    .collect::<BTreeSet<_>>();
+                let parsed_s40 = parse_s40_repair_output(
+                    patch_payload,
+                    &s40_selection.primary,
+                    &enrichment.context.task_id,
+                    &body,
+                    &affected_dimensions,
+                    &allowed_context_refs,
+                )?;
+                s40_output_record = parsed_s40.skill_output.clone();
+                let requested_escalation = parsed_s40
+                    .skill_output
+                    .pointer("/payload/escalation_if_failed")
+                    .cloned()
+                    .unwrap_or_else(|| json!("ADVISORY_ESCALATION"));
+                if parsed_s40.status != "OK" {
+                    status = "ADVISORY_ESCALATION";
+                    escalation = requested_escalation;
+                } else {
+                    let s40_patch = parsed_s40
+                        .patch
+                        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+                    if s40_patch.replacement.is_empty() {
+                        status = "ADVISORY_ESCALATION";
+                        escalation = json!("S40_NEEDS_INPUT");
+                    } else {
+                        let patch = crate::creative_skills::repair_candidate(
+                            crate::creative_skills::RepairCandidateRequest {
+                                candidate_ref: candidate_ref.artifact_id.clone(),
+                                candidate_status: "CANDIDATE".into(),
+                                body: body.clone(),
+                                finding_refs: repair_findings
+                                    .iter()
+                                    .map(|finding| finding.finding_id.clone())
+                                    .collect(),
+                                affected_dimensions: affected_dimensions.clone(),
+                                start: s40_patch.start,
+                                end: s40_patch.end,
+                                replacement: s40_patch.replacement.clone(),
+                                skill_id: s40_selection.primary.id.clone(),
+                                skill_version: s40_selection.primary.version.clone(),
+                                model: provider_profile.model.clone(),
+                                repair_run: 1,
+                                repair_run_limit: repair_limit,
+                                context_tokens: s40_selection.context_tokens,
+                                model_calls: s40_selection.model_calls,
+                            },
+                        )
+                        .map_err(|_| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+                        if patch.status != "CANDIDATE" || patch.transport_calls != 1 {
+                            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+                        }
+                        if patch.body == body {
+                            status = "ADVISORY_ESCALATION";
+                            escalation = json!("S40_NO_EFFECT");
+                        } else {
+                            let candidate_before = candidate_ref.clone();
+                            let repaired_candidate_id = StableIdentityFactory::from_command(
+                                StableIdKind::Artifact,
+                                &format!("{command_id}:candidate:repair:1"),
+                            )?;
+                            let patch_record = json!({
+                                "kind":patch.kind,
+                                "status":patch.status,
+                                "repairRun":patch.repair_run,
+                                "repairRunLimit":patch.repair_run_limit,
+                                "findingRefs":patch.finding_refs,
+                                "affectedDimensions":patch.affected_dimensions,
+                                "start":s40_patch.start,
+                                "end":s40_patch.end,
+                                "replacement":s40_patch.replacement,
+                                "bodyDigest":patch.candidate_digest,
+                                "candidateBefore":candidate_before,
+                                "modelRunId":repair_run_id,
+                                "protectedSpans":s40_patch.protected_spans,
+                                "skillOutput":s40_output_record,
+                                "skill":s40_provenance
+                            });
+                            let mut repaired_payload = candidate.payload.clone();
+                            repaired_payload["body"] = json!(patch.body);
+                            repaired_payload["bodyDigest"] =
+                                json!(sha256_canonical(&json!(patch.body))
+                                    .map_err(|error| error.to_string())?);
+                            repaired_payload["candidatePatch"] = patch_record;
+                            let mut repaired_candidate = artifact(
+                                &project_id,
+                                repaired_candidate_id,
+                                ArtifactType::ChapterCandidate,
+                                &chapter_id,
+                                repaired_payload,
+                                &command_id,
+                                &job_id,
+                                Some(&repair_run_id),
+                                &now,
+                                vec![
+                                    candidate_before.clone(),
+                                    plan_ref.clone(),
+                                    context_ref.clone(),
+                                ],
+                            )?;
+                            repaired_candidate.provenance.context_manifest_ref =
+                                Some(context_ref.artifact_id.clone());
+                            candidate_history.push(candidate);
+                            candidate = repaired_candidate;
+                            candidate_ref = reference(&candidate);
+                            body = patch.body.clone();
+                            report = crate::creative_skills::recheck_affected_dimensions(
+                                &report,
+                                &body,
+                                &enrichment.taste_profile,
+                                affected_dimensions.clone(),
+                            )
+                            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
+                            crate::creative_skills::rebind_quality_candidate(
+                                &mut report,
+                                candidate_ref.clone(),
+                            )
+                            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
+                            let unresolved_affected_dimension =
+                                affected_dimensions.iter().any(|dimension| {
+                                    report
+                                        .dimensions
+                                        .get(dimension)
+                                        .is_some_and(|item| item.score < 45)
+                                });
+                            status = if unresolved_affected_dimension {
+                                "ADVISORY_ESCALATION"
+                            } else {
+                                "REPAIRED"
+                            };
+                            if unresolved_affected_dimension {
+                                escalation = json!("REPAIR_RUN_LIMIT");
+                            }
+                            repair_run = 1;
+                            candidate_repaired = true;
+                        }
+                    }
+                }
+            }
+        }
         report.repair = Some(json!({
             "status":status,
-            "run":0,
+            "run":repair_run,
             "limit":repair_limit,
-            "transportCalls":0,
-            "candidateBefore":candidate_ref.clone(),
+            "transportCalls":repair_model_run_ids.len(),
+            "candidateBefore":initial_candidate_ref,
             "candidateAfter":candidate_ref.clone(),
             "affectedDimensions":affected_dimensions,
             "scope":affected_dimensions,
-            "recheckedDimensions":[],
-            "escalation":escalation
+            "recheckedDimensions":report.rechecked_dimensions,
+            "escalation":escalation,
+            "modelRunIds":repair_model_run_ids,
+            "skill":s40_provenance,
+            "s40Output":s40_output_record
         }));
         quality_report = Some(report);
         repair_evidence = json!({
             "status":status,
-            "run":0,
+            "run":repair_run,
             "limit":repair_limit,
-            "transportCalls":0,
+            "transportCalls":repair_model_run_ids.len(),
             "effectiveCandidateRef":candidate_ref,
+            "candidateAfter":candidate_ref,
             "affectedDimensions":affected_dimensions,
-            "escalation":escalation
+            "recheckedDimensions":quality_report.as_ref().map(|report| &report.rechecked_dimensions),
+            "escalation":escalation,
+            "modelRunIds":repair_model_run_ids,
+            "skill":s40_provenance,
+            "s40Output":s40_output_record
         });
     }
     let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
@@ -2341,19 +2888,23 @@ fn run_chapter_production_inner(
         };
     update_stage(connection, &project_id, &job_id, "AUDIT", &now)?;
     let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
-    let reusable_audit = retry_of_job_id
-        .as_deref()
-        .map(|previous_job_id| {
-            DurableModelRunner::completed_result_for_job(
-                connection,
-                &project_id,
-                previous_job_id,
-                "AUDIT_EXTRACT",
-            )
-        })
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .flatten();
+    let reusable_audit = if candidate_repaired {
+        None
+    } else {
+        retry_of_job_id
+            .as_deref()
+            .map(|previous_job_id| {
+                DurableModelRunner::completed_result_for_job(
+                    connection,
+                    &project_id,
+                    previous_job_id,
+                    "AUDIT_EXTRACT",
+                )
+            })
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .flatten()
+    };
     let (audit_run_id, audit_payload) = if let Some((model_run_id, parsed)) = reusable_audit {
         (
             model_run_id,
@@ -2865,7 +3416,9 @@ fn run_chapter_production_inner(
             "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))
         })
     }));
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":[render_run_id,audit_run_id],"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
+    model_run_refs.extend(repair_model_run_ids.iter().cloned());
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -2938,6 +3491,7 @@ fn run_chapter_production_inner(
         },
         "payloadJson":{"actualNarrative":true,"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version}
     })).collect::<Vec<_>>();
+    bundle_artifacts.extend(candidate_history);
     bundle_artifacts.push(candidate);
     if let Some(taste) = taste_artifact {
         bundle_artifacts.push(taste);
