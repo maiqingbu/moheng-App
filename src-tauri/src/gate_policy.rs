@@ -117,8 +117,9 @@ pub(crate) fn require_long_form_policy_supported(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
 ) -> Result<(), String> {
-    let (_, policy) = current_policy(connection, project_id)?
-        .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
+    let Some((_, policy)) = current_policy(connection, project_id)? else {
+        return Ok(());
+    };
     if policy.get("policyId").and_then(Value::as_str) == Some("b11-opening") {
         return Err("GATE_POLICY_UPGRADE_REQUIRED".into());
     }
@@ -185,10 +186,9 @@ pub fn execute_update(
     let current = current_policy(&connection, project_id)?;
     let (next_payload, decision_type, outcome) = match action {
         "ADOPT_DEFAULT" => {
-            let Some((_, current_payload)) = current.as_ref() else {
-                return Err("B08_GATE_POLICY_REQUIRED".into());
-            };
-            if current_payload.get("policyId").and_then(Value::as_str) != Some("b11-opening") {
+            if current.as_ref().is_some_and(|(_, current_payload)| {
+                current_payload.get("policyId").and_then(Value::as_str) != Some("b11-opening")
+            }) {
                 return Err("GATE_POLICY_NOT_LEGACY".into());
             }
             (

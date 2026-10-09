@@ -2995,19 +2995,20 @@ pub(crate) fn context_input_from_authority(
     let mut omitted_soft_sources = goal_context.omitted_soft_sources;
     let mut goal_contract_refs = goal_context.refs;
     let goal_contract_fields = goal_context.fields;
-    let gate_policy_ref =
+    if let Some(gate_policy_ref) =
         crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
             connection,
             project_id,
             "GatePolicy",
         )
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "B08_GATE_POLICY_REQUIRED".to_string())?;
-    if !goal_contract_refs
-        .iter()
-        .any(|reference| reference == &gate_policy_ref)
     {
-        goal_contract_refs.push(gate_policy_ref);
+        if !goal_contract_refs
+            .iter()
+            .any(|reference| reference == &gate_policy_ref)
+        {
+            goal_contract_refs.push(gate_policy_ref);
+        }
     }
     let (route_task_refs, route_task_contracts) = if let Some(volume_id) =
         volume_id.filter(|_| !opening_bootstrap)

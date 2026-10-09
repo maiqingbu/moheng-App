@@ -99,30 +99,32 @@ impl ProductionRepository {
             runtime.4,
             runtime.5,
         );
-        let gate_policy = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
-            connection,
-            project_id,
-            "GatePolicy",
-        )
-        .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
-        .and_then(|reference| {
-            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+        let gate_policy_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
                 connection,
                 project_id,
-                &reference,
+                "GatePolicy",
             )
-            .ok()
-            .flatten()
-            .map(|payload| {
-                json!({
-                    "version":reference.version,
-                    "policyId":payload.get("policyId").cloned().unwrap_or(Value::Null),
-                    "needsUpgrade":payload.get("policyId").and_then(Value::as_str)==Some("b11-opening"),
-                    "resourceRef":payload.get("resourceRef").cloned().unwrap_or(Value::Null),
-                    "rules":payload.pointer("/canonSemantics/rules").cloned().unwrap_or_else(|| json!([]))
-                })
+            .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+        let gate_policy = if let Some(reference) = gate_policy_ref {
+            let payload =
+                crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                    connection, project_id, &reference,
+                )
+                .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?
+                .ok_or_else(|| {
+                    ProductionRepositoryError::Narrative("B08_GATE_POLICY_REQUIRED".into())
+                })?;
+            json!({
+                "version":reference.version,
+                "policyId":payload.get("policyId").cloned().unwrap_or(Value::Null),
+                "needsUpgrade":payload.get("policyId").and_then(Value::as_str)==Some("b11-opening"),
+                "resourceRef":payload.get("resourceRef").cloned().unwrap_or(Value::Null),
+                "rules":payload.pointer("/canonSemantics/rules").cloned().unwrap_or_else(|| json!([]))
             })
-        });
+        } else {
+            json!({"version":0,"policyId":Value::Null,"needsUpgrade":true,"resourceRef":Value::Null,"rules":[]})
+        };
         let opening_progress =
             crate::repositories::project_entry::opening_progress(connection, project_id)
                 .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
