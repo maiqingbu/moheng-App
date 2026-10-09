@@ -501,7 +501,7 @@ function costText(value: number | null | undefined) {
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
     <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />
 
-    <section class="card pad section" data-cost-summary aria-label="模型成本与预算">
+    <section v-if="production.costSummary" class="card pad section" data-cost-summary aria-label="模型成本与预算">
       <div class="card-head"><div><h2 class="card-title">模型成本与预算</h2><p class="card-subtitle">预算按作品设置。已设置的上限会在发送前校验并预留预测成本。</p></div></div>
       <div class="setting-grid">
         <div class="task-row"><span>本章已用 / 预留</span><strong>{{ costText(production.costSummary.chapterUsed ?? 0) }}</strong></div>
