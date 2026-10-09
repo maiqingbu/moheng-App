@@ -1,6 +1,7 @@
 use crate::project_db::connection::{migrate_catalog, open_connection, DatabaseError};
 use crate::project_db::paths::AppPaths;
 use libsql_rusqlite::{Connection, OptionalExtension};
+use serde_json::Value;
 
 #[derive(Debug)]
 pub struct ProjectCatalogRow {
@@ -53,6 +54,39 @@ impl CatalogRepository {
             [key, value],
         )?;
         Ok(())
+    }
+
+    pub fn save_model_pricing(
+        paths: &AppPaths,
+        entries: Value,
+        command_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+        now: &str,
+    ) -> Result<Value, String> {
+        let connection = Self::open(paths, now).map_err(|error| error.to_string())?;
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| error.to_string())?;
+        match crate::model_cost::ModelPricingCatalog::save(
+            &connection,
+            entries,
+            command_id,
+            idempotency_key,
+            request_digest,
+            now,
+        ) {
+            Ok(response) => {
+                connection
+                    .execute_batch("COMMIT")
+                    .map_err(|error| error.to_string())?;
+                Ok(response)
+            }
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     pub fn register_project(

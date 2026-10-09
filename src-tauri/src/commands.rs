@@ -8054,30 +8054,14 @@ fn save_model_pricing(
         .pointer("/payload/entries")
         .cloned()
         .ok_or_else(|| "MODEL_PRICING_ENTRIES_REQUIRED".to_string())?;
-    let connection =
-        CatalogRepository::open(&state.paths, requested_at).map_err(|error| error.to_string())?;
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
-        .map_err(|error| error.to_string())?;
-    match crate::model_cost::ModelPricingCatalog::save(
-        &connection,
+    CatalogRepository::save_model_pricing(
+        &state.paths,
         entries,
         command_id,
         idempotency_key,
         request_digest,
         requested_at,
-    ) {
-        Ok(response) => {
-            connection
-                .execute_batch("COMMIT")
-                .map_err(|error| error.to_string())?;
-            Ok(response)
-        }
-        Err(error) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
