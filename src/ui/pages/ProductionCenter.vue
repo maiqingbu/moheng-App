@@ -483,6 +483,10 @@ async function reverifyRepair() {
     repairReverifyInFlight.value = false
   }
 }
+
+function costText(value: number | null | undefined) {
+  return value == null ? '未设上限' : `¥${value.toFixed(2)}`
+}
 </script>
 
 <template>
@@ -496,6 +500,16 @@ async function reverifyRepair() {
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
     <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />
+
+    <section class="card pad section" data-cost-summary aria-label="模型成本与预算">
+      <div class="card-head"><div><h2 class="card-title">模型成本与预算</h2><p class="card-subtitle">预算按作品设置。已设置的上限会在发送前校验并预留预测成本。</p></div></div>
+      <div class="setting-grid">
+        <div class="task-row"><span>本章已用 / 预留</span><strong>{{ costText(production.costSummary.chapterUsed ?? 0) }}</strong></div>
+        <div class="task-row"><span>本章上限 / 剩余</span><strong>{{ costText(production.costSummary.chapterBudget) }}<template v-if="production.costSummary.chapterRemaining != null"> · 剩余 {{ costText(production.costSummary.chapterRemaining) }}</template></strong></div>
+        <div class="task-row"><span>本月已用 / 预留</span><strong>{{ costText(production.costSummary.monthUsed ?? 0) }}</strong></div>
+        <div class="task-row"><span>本月上限 / 剩余</span><strong>{{ costText(production.costSummary.monthlyBudget) }}<template v-if="production.costSummary.monthRemaining != null"> · 剩余 {{ costText(production.costSummary.monthRemaining) }}</template></strong></div>
+      </div>
+    </section>
 
     <section v-if="production.gatePolicy" class="card pad section" data-gate-policy>
       <div class="card-head">

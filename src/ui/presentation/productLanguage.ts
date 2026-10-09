@@ -81,6 +81,8 @@ const errorLabels: Record<string, string> = {
   GATE_POLICY_CANON_CONFLICT: '新规则会与已有正式事实产生冲突，未保存。请先通过正式变更流程处理这些事实。',
   GATE_POLICY_CANON_SCAN_INCOMPLETE: '现有事实数量超出本次检查范围，规则未保存；请检查相关正式事实后重试。',
   GATE_POLICY_RULE_NOT_FOUND: '没有找到要停用的谓词规则，请刷新当前规则后重试。',
+  MODEL_PRICE_REQUIRED: '已设置作品预算，但当前模型没有价格。请先填写该模型价格，未发送请求。',
+  BUDGET_EXCEEDED: '本次模型调用会超出剩余预算，未发送请求。',
   FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
   CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
   UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',

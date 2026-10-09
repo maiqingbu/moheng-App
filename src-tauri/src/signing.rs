@@ -1481,9 +1481,8 @@ pub fn execute_opening_evaluation_with_observer(
             prompt_ref: Some("creative-skills/v1.2.0/skills/opening-evaluator/SKILL.md".into()),
             context_manifest_ref: Some(binding_digest.clone()),
             budget_id: Some(budget_id),
-            predicted_cost_cents: gateway
-                .predicted_cost_cents(SIGNING_EVALUATION_CAPABILITY)
-                .max(1),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
             attempt_no: 1,
             repair_round: 0,
         };

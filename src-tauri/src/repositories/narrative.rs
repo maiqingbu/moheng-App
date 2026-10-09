@@ -2180,7 +2180,7 @@ impl NarrativeRepository {
             ));
         }
         connection.execute(
-            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',12,500,?4)",
+            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',12,0,?4)",
             libsql_rusqlite::params![budget_id, project_id, chapter_id, now],
         )?;
         Ok(())

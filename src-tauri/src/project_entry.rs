@@ -13,7 +13,7 @@ use crate::market_source::{self, MarketSourceSnapshot};
 use crate::production::{execute_production_model_with_profile, ProductionModelGateway};
 use crate::project_db::ProjectHandle;
 use crate::repositories::project_entry::{self, EntryArtifactRow};
-use crate::repositories::runtime::{DurableJobService, JobSpec, ModelRunSpec};
+use crate::repositories::runtime::{DurableJobService, DurableModelRunner, JobSpec, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Map, Value};
 
@@ -341,10 +341,9 @@ fn generate_story_directions(
         capability: GENERATE_STORY_DIRECTIONS.into(),
         prompt_ref: None,
         context_manifest_ref: None,
-        budget_id: None,
-        predicted_cost_cents: gateway
-            .predicted_cost_cents(GENERATE_STORY_DIRECTIONS)
-            .max(1),
+        budget_id: Some(DurableModelRunner::project_budget_id(project_id)),
+        predicted_cost_cents: 0,
+        cost_snapshot: None,
         attempt_no: 1,
         repair_round: 0,
     };

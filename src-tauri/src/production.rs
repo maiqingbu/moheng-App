@@ -75,11 +75,11 @@ pub trait ProductionModelGateway: Send + Sync {
         format!("production:{capability}")
     }
 
-    /// Bounded provider/model cost policy used by the existing Budget
-    /// Authority.  A production stage may not silently become an unpriced,
-    /// zero-cost model run.
-    fn predicted_cost_cents(&self, _capability: &str) -> i64 {
-        1
+    fn model_pricing_catalog(
+        &self,
+        _now: &str,
+    ) -> Result<crate::model_cost::ModelPricingCatalog, String> {
+        Ok(crate::model_cost::ModelPricingCatalog::default())
     }
 
     fn fault_injection(&self) -> Option<&str> {
@@ -307,6 +307,16 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
 
     fn model(&self, _capability: &str) -> String {
         self.config.model_id.clone()
+    }
+
+    fn model_pricing_catalog(
+        &self,
+        now: &str,
+    ) -> Result<crate::model_cost::ModelPricingCatalog, String> {
+        match &self.settings_paths {
+            Some(paths) => crate::model_cost::ModelPricingCatalog::read_from_paths(paths, now),
+            None => Ok(crate::model_cost::ModelPricingCatalog::default()),
+        }
     }
 
     fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
@@ -579,7 +589,7 @@ fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
     Some((body[..first].chars().count(), body[..last].chars().count()))
 }
 
-fn parse_provider_model_payload_for_capability(
+pub(crate) fn parse_provider_model_payload_for_capability(
     value: Value,
     capability: &str,
 ) -> Result<Value, String> {
@@ -616,9 +626,10 @@ pub fn execute_production_model(
     input: Value,
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
+    let spec = priced_model_run_spec(gateway, spec, capability, &input, now)?;
     let mut transport = GatewayTransport::new(gateway, capability, input);
-    DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
-    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, spec, now) {
+    DurableModelRunner::prepare(connection, &spec, now).map_err(|error| error.to_string())?;
+    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, &spec, now) {
         Ok(outcome) => outcome,
         Err(error) => {
             let raw = DurableModelRunner::persisted_raw_response(connection, &spec.model_run_id)
@@ -629,13 +640,20 @@ pub fn execute_production_model(
             return Err(error.to_string());
         }
     };
+    if outcome.replayed && outcome.parsed.is_none() {
+        outcome.parsed = Some(
+            DurableModelRunner::persisted_parsed_response(connection, &spec.model_run_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "MODEL_REPLAY_RESULT_MISSING".to_string())?,
+        );
+    }
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(
             match parse_provider_model_payload_for_capability(parsed, capability) {
                 Ok(payload) => payload,
                 Err(error) => {
                     DurableModelRunner::mark_model_payload_parse_failure(
-                        connection, spec, &error, now,
+                        connection, &spec, &error, now,
                     )
                     .map_err(|runtime_error| runtime_error.to_string())?;
                     return Err(error);
@@ -655,9 +673,10 @@ pub fn execute_production_model_with_profile(
     input: Value,
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
+    let spec = priced_model_run_spec(gateway, spec, capability, &input, now)?;
     let mut transport = GatewayTransport::with_profile(gateway, profile, capability, input);
-    DurableModelRunner::prepare(connection, spec, now).map_err(|error| error.to_string())?;
-    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, spec, now) {
+    DurableModelRunner::prepare(connection, &spec, now).map_err(|error| error.to_string())?;
+    let mut outcome = match DurableModelRunner::execute(connection, &mut transport, &spec, now) {
         Ok(outcome) => outcome,
         Err(error) => {
             let raw = DurableModelRunner::persisted_raw_response(connection, &spec.model_run_id)
@@ -668,13 +687,20 @@ pub fn execute_production_model_with_profile(
             return Err(error.to_string());
         }
     };
+    if outcome.replayed && outcome.parsed.is_none() {
+        outcome.parsed = Some(
+            DurableModelRunner::persisted_parsed_response(connection, &spec.model_run_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "MODEL_REPLAY_RESULT_MISSING".to_string())?,
+        );
+    }
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(
             match parse_provider_model_payload_for_capability(parsed, capability) {
                 Ok(payload) => payload,
                 Err(error) => {
                     DurableModelRunner::mark_model_payload_parse_failure(
-                        connection, spec, &error, now,
+                        connection, &spec, &error, now,
                     )
                     .map_err(|runtime_error| runtime_error.to_string())?;
                     return Err(error);
@@ -683,6 +709,21 @@ pub fn execute_production_model_with_profile(
         );
     }
     Ok(outcome)
+}
+
+fn priced_model_run_spec(
+    gateway: &dyn ProductionModelGateway,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: &Value,
+    now: &str,
+) -> Result<ModelRunSpec, String> {
+    let catalog = gateway.model_pricing_catalog(now)?;
+    let snapshot = catalog.cost_snapshot(&spec.provider, &spec.model, capability, input);
+    let mut priced = spec.clone();
+    priced.predicted_cost_cents = snapshot.predicted_cost_cents;
+    priced.cost_snapshot = Some(snapshot);
+    Ok(priced)
 }
 
 fn require(value: &Value, path: &str) -> Result<String, String> {
@@ -1857,7 +1898,8 @@ fn run_chapter_production_inner(
                 prompt_ref: None,
                 context_manifest_ref: Some(context_ref.artifact_id.clone()),
                 budget_id: Some(production_budget_id.clone()),
-                predicted_cost_cents: gateway.predicted_cost_cents("PLAN_STRATEGY").max(1),
+                predicted_cost_cents: 0,
+                cost_snapshot: None,
                 attempt_no: 1,
                 repair_round: 0,
             };
@@ -2125,7 +2167,8 @@ fn run_chapter_production_inner(
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
             budget_id: Some(production_budget_id.clone()),
-            predicted_cost_cents: gateway.predicted_cost_cents("RENDER_CHAPTER").max(1),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
             attempt_no: 1,
             repair_round: 0,
         };
@@ -2328,7 +2371,8 @@ fn run_chapter_production_inner(
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
             budget_id: Some(production_budget_id),
-            predicted_cost_cents: gateway.predicted_cost_cents("AUDIT_EXTRACT").max(1),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
             attempt_no: 1,
             repair_round: 0,
         };

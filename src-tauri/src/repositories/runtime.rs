@@ -1,6 +1,7 @@
+use crate::model_cost::ModelCostSnapshot;
 use crate::stable_id::{validate_stable_id, StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::{Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,8 +27,10 @@ pub enum RuntimeError {
     LeaseHeld,
     #[error("UNKNOWN_REMOTE_OUTCOME requires explicit decision")]
     UnknownRemoteOutcome,
-    #[error("budget hard limit")]
+    #[error("BUDGET_EXCEEDED")]
     BudgetHardLimit,
+    #[error("MODEL_PRICE_REQUIRED:请先填写该模型价格")]
+    ModelPriceRequired,
     #[error("stable id rejected")]
     StableIdRejected,
     #[error("model retry must keep the original budget binding")]
@@ -1170,6 +1173,7 @@ pub struct ModelRunSpec {
     pub context_manifest_ref: Option<String>,
     pub budget_id: Option<String>,
     pub predicted_cost_cents: i64,
+    pub cost_snapshot: Option<ModelCostSnapshot>,
     pub attempt_no: i64,
     pub repair_round: i64,
 }
@@ -1319,6 +1323,10 @@ impl ModelTransport for FakeModelTransport {
 pub struct DurableModelRunner;
 
 impl DurableModelRunner {
+    pub fn project_budget_id(project_id: &str) -> String {
+        format!("budget:project:{project_id}")
+    }
+
     pub fn has_unknown_remote_run(
         connection: &Connection,
         project_id: &str,
@@ -1344,6 +1352,21 @@ impl DurableModelRunner {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn persisted_parsed_response(
+        connection: &Connection,
+        model_run_id: &str,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let raw: Option<String> = connection
+            .query_row(
+                "SELECT parsed_json FROM model_parse_results WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND model_run_id=?1 AND status='OK' AND parsed_json IS NOT NULL",
+                [model_run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value).map_err(RuntimeError::Json))
+            .transpose()
     }
 
     pub fn completed_result_for_job(
@@ -1392,8 +1415,29 @@ impl DurableModelRunner {
     ) -> Result<(), RuntimeError> {
         validate_model_run_id(spec)?;
         if existing_model_status(connection, spec)?.is_none() {
-            enforce_budget(connection, spec, false, now)?;
-            persist_before_send(connection, spec, now)?;
+            connection.execute_batch("BEGIN IMMEDIATE")?;
+            if existing_model_status(connection, spec)?.is_some() {
+                connection.execute_batch("COMMIT")?;
+                return Ok(());
+            }
+            match enforce_budget(connection, spec, false, now) {
+                Ok(()) => {}
+                Err(error @ (RuntimeError::BudgetHardLimit | RuntimeError::ModelPriceRequired)) => {
+                    connection.execute_batch("COMMIT")?;
+                    return Err(error);
+                }
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            match persist_before_send(connection, spec, now) {
+                Ok(()) => connection.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = connection.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -1747,18 +1791,56 @@ fn enforce_budget(
     now: &str,
 ) -> Result<(), RuntimeError> {
     let Some(budget_id) = &spec.budget_id else {
+        if spec.cost_snapshot.is_some() {
+            return Err(RuntimeError::BudgetBindingMismatch);
+        }
         return Ok(());
     };
-    let Some((hard_max, cost_budget)) = connection
+    let project_id: String =
+        connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+            row.get(0)
+        })?;
+    let budget_row: Option<(String, i64, i64, i64)> = connection
         .query_row(
-            "SELECT hard_max_model_runs, cost_budget_cents FROM chapter_production_budgets WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_id=?1",
-            [budget_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            "SELECT chapter_id, hard_max_model_runs, soft_max_model_runs, cost_budget_cents FROM chapter_production_budgets WHERE project_id=?1 AND budget_id=?2",
+            libsql_rusqlite::params![project_id, budget_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .optional()?
-    else {
+        .optional()?;
+    if budget_row.is_none() && !budget_id.starts_with("budget:project:") {
         return Err(RuntimeError::BudgetHardLimit);
+    }
+    let (chapter_id, hard_max, soft_max, legacy_cost_budget) = budget_row
+        .map(|(chapter_id, hard_max, soft_max, cost_budget)| {
+            (Some(chapter_id), hard_max, soft_max, cost_budget)
+        })
+        .unwrap_or((None, 0, 0, 0));
+    let (chapter_cost_budget, monthly_cost_budget) = if spec.cost_snapshot.is_some() {
+        (
+            if chapter_id.is_some() {
+                project_budget_cents(connection, &project_id, "chapterBudget")?
+            } else {
+                None
+            },
+            project_budget_cents(connection, &project_id, "monthlyBudget")?,
+        )
+    } else {
+        ((legacy_cost_budget > 0).then_some(legacy_cost_budget), None)
     };
+    if spec.cost_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.price_status != "PRICED"
+            && (chapter_cost_budget.is_some() || monthly_cost_budget.is_some())
+    }) {
+        record_budget_decision(
+            connection,
+            budget_id,
+            "MODEL_PRICE_REQUIRED",
+            "REPLAN_REQUIRED",
+            "请先填写该模型价格",
+        )?;
+        mark_budget_blocked(connection, spec, now)?;
+        return Err(RuntimeError::ModelPriceRequired);
+    }
     let over_limit: i64 = connection.query_row(
         "SELECT COUNT(*) FROM budget_reservations WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_ref=?1 AND status='OVER_LIMIT'",
         [budget_id],
@@ -1776,23 +1858,23 @@ fn enforce_budget(
         return Err(RuntimeError::BudgetHardLimit);
     }
     let used: i64 = connection.query_row(
-        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_ref=?1 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
-        [budget_id],
+        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+        libsql_rusqlite::params![project_id, budget_id],
         |row| row.get(0),
     )?;
     let active_reserved_cost: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_ref=?1 AND status IN ('RESERVED','OVER_LIMIT')",
-        [budget_id],
+        "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','OVER_LIMIT')",
+        libsql_rusqlite::params![project_id, budget_id],
         |row| row.get(0),
     )?;
     let actual_spent: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(cost_cents), 0) FROM model_cost_ledger WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_id=?1 AND cost_type='ACTUAL'",
-        [budget_id],
+        "SELECT COALESCE(SUM(cost_cents), 0) FROM model_cost_ledger WHERE project_id=?1 AND budget_id=?2 AND cost_type='ACTUAL'",
+        libsql_rusqlite::params![project_id, budget_id],
         |row| row.get(0),
     )?;
     let estimated_unknown_spent: i64 = connection.query_row(
-        "SELECT COALESCE(SUM(reservation.settled_cents), 0) FROM budget_reservations AS reservation LEFT JOIN model_usage AS usage ON usage.project_id=reservation.project_id AND usage.model_run_id=reservation.model_run_id WHERE reservation.project_id=(SELECT project_id FROM project_meta LIMIT 1) AND reservation.budget_ref=?1 AND reservation.status='SETTLED' AND usage.model_run_id IS NULL",
-        [budget_id],
+        "SELECT COALESCE(SUM(reservation.settled_cents), 0) FROM budget_reservations AS reservation LEFT JOIN model_usage AS usage ON usage.project_id=reservation.project_id AND usage.model_run_id=reservation.model_run_id WHERE reservation.project_id=?1 AND reservation.budget_ref=?2 AND reservation.status='SETTLED' AND usage.model_run_id IS NULL",
+        libsql_rusqlite::params![project_id, budget_id],
         |row| row.get(0),
     )?;
     let actual_spent = actual_spent + estimated_unknown_spent;
@@ -1812,9 +1894,9 @@ fn enforce_budget(
         mark_budget_blocked(connection, spec, now)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
-    if cost_budget > 0
-        && actual_spent + active_reserved_cost + spec.predicted_cost_cents > cost_budget
-    {
+    if chapter_cost_budget.is_some_and(|cost_budget| {
+        actual_spent + active_reserved_cost + spec.predicted_cost_cents > cost_budget
+    }) {
         record_budget_decision(
             connection,
             budget_id,
@@ -1829,11 +1911,6 @@ fn enforce_budget(
         mark_budget_blocked(connection, spec, now)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
-    let soft_max: i64 = connection.query_row(
-        "SELECT soft_max_model_runs FROM chapter_production_budgets WHERE project_id=(SELECT project_id FROM project_meta LIMIT 1) AND budget_id=?1",
-        [budget_id],
-        |row| row.get(0),
-    )?;
     if soft_max > 0 && used + next_runs >= soft_max {
         record_budget_decision(
             connection,
@@ -1851,7 +1928,70 @@ fn enforce_budget(
             [project_id],
         )?;
     }
+    if let Some(monthly_budget) = monthly_cost_budget {
+        let (month_spent, month_reserved) = monthly_cost_totals(connection, &project_id, now)?;
+        if month_spent + month_reserved + spec.predicted_cost_cents > monthly_budget {
+            record_budget_decision(
+                connection,
+                budget_id,
+                "MONTHLY_BUDGET_BLOCKED",
+                "REPLAN_REQUIRED",
+                "hard monthly cost limit reached",
+            )?;
+            mark_budget_blocked(connection, spec, now)?;
+            return Err(RuntimeError::BudgetHardLimit);
+        }
+    }
     Ok(())
+}
+
+fn project_budget_cents(
+    connection: &Connection,
+    project_id: &str,
+    setting_key: &str,
+) -> Result<Option<i64>, RuntimeError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key=?2",
+            libsql_rusqlite::params![project_id, setting_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&raw)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let amount = value
+        .as_f64()
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        .ok_or(RuntimeError::BudgetHardLimit)?;
+    Ok(Some((amount * 100.0).ceil() as i64))
+}
+
+fn monthly_cost_totals(
+    connection: &Connection,
+    project_id: &str,
+    now: &str,
+) -> Result<(i64, i64), RuntimeError> {
+    let actual: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(cost_cents),0) FROM model_cost_ledger WHERE project_id=?1 AND cost_type='ACTUAL' AND strftime('%Y-%m',datetime(created_at,'localtime'))=strftime('%Y-%m',datetime(?2,'localtime'))",
+        libsql_rusqlite::params![project_id, now],
+        |row| row.get(0),
+    )?;
+    let unresolved_settled: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(reservation.settled_cents),0) FROM budget_reservations reservation LEFT JOIN model_usage usage ON usage.project_id=reservation.project_id AND usage.model_run_id=reservation.model_run_id WHERE reservation.project_id=?1 AND reservation.status='SETTLED' AND usage.model_run_id IS NULL AND strftime('%Y-%m',datetime(reservation.created_at,'localtime'))=strftime('%Y-%m',datetime(?2,'localtime'))",
+        libsql_rusqlite::params![project_id, now],
+        |row| row.get(0),
+    )?;
+    let active_reserved: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(reserved_cents),0) FROM budget_reservations WHERE project_id=?1 AND status IN ('RESERVED','OVER_LIMIT') AND strftime('%Y-%m',datetime(created_at,'localtime'))=strftime('%Y-%m',datetime(?2,'localtime'))",
+        libsql_rusqlite::params![project_id, now],
+        |row| row.get(0),
+    )?;
+    Ok((actual + unresolved_settled, active_reserved))
 }
 
 fn record_budget_decision(
@@ -1900,37 +2040,60 @@ fn persist_before_send(
     spec: &ModelRunSpec,
     now: &str,
 ) -> Result<(), RuntimeError> {
-    connection.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        let project_id: String =
-            connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
-                row.get(0)
-            })?;
-        let step_id = spec.step_id.as_ref().filter(|step_id| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM job_steps WHERE project_id=?1 AND job_step_id=?2)",
-                    [&project_id, step_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false)
-        });
-        connection.execute(
+    let project_id: String =
+        connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+            row.get(0)
+        })?;
+    let step_id = spec.step_id.as_ref().filter(|step_id| {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM job_steps WHERE project_id=?1 AND job_step_id=?2)",
+                [&project_id, step_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false)
+    });
+    connection.execute(
             "INSERT INTO model_runs(model_run_id, project_id, step_id, job_id, prompt_ref, context_manifest_ref, provider, model, idempotency_key, capability, attempt_no, repair_round, predicted_cost_cents, reserved_cost_cents, budget_reservation_id, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, 'PREPARED', ?15, ?15)",
             libsql_rusqlite::params![spec.model_run_id, project_id, step_id, spec.job_id, spec.prompt_ref, spec.context_manifest_ref, spec.provider, spec.model, spec.idempotency_key, spec.capability, spec.attempt_no, spec.repair_round, spec.predicted_cost_cents, format!("reservation:{}", spec.model_run_id), now],
         )?;
-        connection.execute(
+    connection.execute(
             "INSERT INTO budget_reservations(reservation_id, project_id, model_run_id, budget_ref, reserved_cents, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'RESERVED', ?6)",
             libsql_rusqlite::params![format!("reservation:{}", spec.model_run_id), project_id, spec.model_run_id, spec.budget_id.as_deref().unwrap_or("UNSCOPED"), spec.predicted_cost_cents, now],
         )?;
-        Ok::<_, RuntimeError>(())
-    })();
-    match result {
-        Ok(()) => connection.execute_batch("COMMIT")?,
-        Err(error) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            return Err(error);
+    if let Some(snapshot) = &spec.cost_snapshot {
+        let mut budget_settings = serde_json::Map::from_iter([
+            ("monthlyBudget".into(), Value::Null),
+            ("chapterBudget".into(), Value::Null),
+        ]);
+        let mut statement = connection.prepare(
+            "SELECT setting_key,setting_value FROM project_settings WHERE project_id=?1 AND setting_key IN ('chapterBudget','monthlyBudget') ORDER BY setting_key",
+        )?;
+        let rows = statement.query_map([&project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (key, value) = row?;
+            budget_settings.insert(key, serde_json::from_str(&value).unwrap_or(Value::Null));
         }
+        drop(statement);
+        connection.execute(
+                "INSERT INTO production_events(event_id,project_id,job_id,event_type,payload_json,created_at) VALUES (?1,?2,?3,'MODEL_COST_SNAPSHOT_RECORDED',?4,?5)",
+                libsql_rusqlite::params![
+                    format!("event:cost-snapshot:{}", spec.model_run_id),
+                    project_id,
+                    spec.job_id,
+                    json!({
+                        "modelRunId":spec.model_run_id,
+                        "budgetId":spec.budget_id,
+                        "predictedCostCents":spec.predicted_cost_cents,
+                        "reservedCents":spec.predicted_cost_cents,
+                        "budgetSettings":Value::Object(budget_settings),
+                        "costSnapshot":snapshot
+                    }).to_string(),
+                    now
+                ],
+            )?;
     }
     Ok(())
 }
@@ -2060,10 +2223,27 @@ fn settle_remote_usage(
         connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
             row.get(0)
         })?;
-    let actual_cost = usage
-        .provider_reported_cost_cents
-        .filter(|cost| *cost >= 0)
-        .unwrap_or(spec.predicted_cost_cents.max(0));
+    let (actual_cost, cost_status) = match spec.cost_snapshot.as_ref() {
+        Some(snapshot) if snapshot.price_status != "PRICED" => (0, "UNPRICED"),
+        Some(snapshot) if usage.input_tokens > 0 || usage.output_tokens > 0 => (
+            snapshot
+                .actual_cost_cents(
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cached_tokens,
+                )
+                .unwrap_or(0),
+            "ACTUAL",
+        ),
+        Some(snapshot) => (snapshot.predicted_cost_cents.max(0), "ESTIMATED"),
+        None => match usage
+            .provider_reported_cost_cents
+            .filter(|cost| *cost >= 0)
+        {
+            Some(cost) => (cost, "ACTUAL"),
+            None => (spec.predicted_cost_cents.max(0), "ESTIMATED"),
+        },
+    };
     let total_tokens = usage.input_tokens.max(0) + usage.output_tokens.max(0);
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
@@ -2087,7 +2267,7 @@ fn settle_remote_usage(
         )?;
         connection.execute(
             "INSERT OR IGNORE INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, 'MODEL_USAGE_RECORDED', ?4, ?5)",
-            libsql_rusqlite::params![format!("event:usage:{}", spec.model_run_id), project_id, spec.job_id, serde_json::json!({"modelRunId":spec.model_run_id,"provider":spec.provider,"model":spec.model,"attempt":spec.attempt_no,"latencyMs":usage.latency_ms.max(0),"inputTokens":usage.input_tokens.max(0),"outputTokens":usage.output_tokens.max(0),"cachedTokens":usage.cached_tokens,"costCents":actual_cost,"providerRequestId":usage.provider_request_id,"actualCostStatus":if usage.provider_reported_cost_cents.is_some() {"ACTUAL"} else {"ESTIMATED"}}).to_string(), now],
+            libsql_rusqlite::params![format!("event:usage:{}", spec.model_run_id), project_id, spec.job_id, serde_json::json!({"modelRunId":spec.model_run_id,"provider":spec.provider,"model":spec.model,"attempt":spec.attempt_no,"latencyMs":usage.latency_ms.max(0),"inputTokens":usage.input_tokens.max(0),"outputTokens":usage.output_tokens.max(0),"cachedTokens":usage.cached_tokens,"costCents":actual_cost,"providerRequestId":usage.provider_request_id,"actualCostStatus":cost_status}).to_string(), now],
         )?;
         Ok::<_, RuntimeError>(())
     })();

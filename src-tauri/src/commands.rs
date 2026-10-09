@@ -26,7 +26,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 #[derive(Clone)]
@@ -3899,32 +3898,53 @@ fn query_b14_skill_runtime(
         "context:b14:endgame",
         &endgame_payload,
     )?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let model_run_id = StableIdentityFactory::from_command(
-        StableIdKind::ModelRun,
-        &format!("b14:{skill_id}:{project_id}:{nonce}"),
-    )?;
     let now =
         crate::repositories::endgame::EndgameRepository::project_updated_at(&handle, project_id)
             .map_err(|error| error.to_string())?;
+    let pricing_version = state
+        .production_gateway
+        .model_pricing_catalog(&now)?
+        .version;
+    let command_identity = request
+        .get("commandId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            let digest = sha256_canonical(&json!({
+                "projectId":project_id,
+                "skillId":skill_id,
+                "projectRevision":read.revision,
+                "stateDigest":read.relevant_state_digest,
+                "guidanceDigest":guidance_digest,
+                "pricingVersion":pricing_version
+            }))
+            .unwrap_or_else(|_| format!("{}:{}:{}", project_id, skill_id, read.revision));
+            format!("b14:{skill_id}:{digest}")
+        });
+    let idempotency_key = request
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{command_identity}:model-run"));
+    let model_run_id = StableIdentityFactory::from_command(
+        StableIdKind::ModelRun,
+        &format!("{command_identity}:model-run"),
+    )?;
     let spec = crate::repositories::runtime::ModelRunSpec {
         model_run_id: model_run_id.clone(),
         job_id: None,
         step_id: None,
         provider: state.production_gateway.provider().into(),
         model: state.production_gateway.model(capability),
-        idempotency_key: format!("b14:{skill_id}:{nonce}"),
+        idempotency_key,
         capability: capability.into(),
         prompt_ref: None,
         context_manifest_ref: None,
-        budget_id: None,
-        predicted_cost_cents: state
-            .production_gateway
-            .predicted_cost_cents(capability)
-            .max(0),
+        budget_id: Some(DurableModelRunner::project_budget_id(project_id)),
+        predicted_cost_cents: 0,
+        cost_snapshot: None,
         attempt_no: 1,
         repair_round: 0,
     };
@@ -6727,10 +6747,8 @@ fn compile_current_chapter_plan(
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
         budget_id: Some(budget_id),
-        predicted_cost_cents: state
-            .production_gateway
-            .predicted_cost_cents("PLAN_STRATEGY")
-            .max(1),
+        predicted_cost_cents: 0,
+        cost_snapshot: None,
         attempt_no: 1,
         repair_round: 0,
     };
@@ -7945,10 +7963,33 @@ fn save_provider_settings(
     expected_revision: Option<i64>,
     digest: &str,
 ) -> Result<Value, String> {
-    let settings = request
+    let update = request
         .pointer("/payload/settings")
         .cloned()
         .ok_or_else(|| "P01_SETTINGS_REQUIRED".to_string())?;
+    let mut settings = if let Some(project_id) = project_id {
+        let connection = state
+            .manager
+            .open(project_id, "", requested_at)
+            .map_err(|error| error.to_string())?;
+        crate::repositories::provider::ProviderSettingsRepository::read_project(
+            &connection,
+            project_id,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        crate::repositories::provider::ProviderSettingsRepository::read_global(&state.paths)
+            .map_err(|error| error.to_string())?
+    };
+    let updates = update
+        .as_object()
+        .ok_or_else(|| "P01_SETTINGS_REQUIRED".to_string())?;
+    let settings_object = settings
+        .as_object_mut()
+        .ok_or_else(|| "P01_SETTINGS_REQUIRED".to_string())?;
+    for (key, value) in updates {
+        settings_object.insert(key.clone(), value.clone());
+    }
     let config = provider_config(&settings)?;
     if let Some(api_key) = settings
         .get("apiKey")
@@ -7981,6 +8022,7 @@ fn save_provider_settings(
                     connection,
                     project_id,
                     &settings,
+                    command_id,
                     requested_at,
                 )
                 .map(|_| ())
@@ -7997,6 +8039,44 @@ fn save_provider_settings(
         Ok(
             json!({"commandId":command_id,"finalStatus":"committed","message":"Provider 设置已保存","settings":saved,"providerId":config.provider_id,"secretReturned":false}),
         )
+    }
+}
+
+fn save_model_pricing(
+    state: &KernelState,
+    request: &Value,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+    request_digest: &str,
+) -> Result<Value, String> {
+    let entries = request
+        .pointer("/payload/entries")
+        .cloned()
+        .ok_or_else(|| "MODEL_PRICING_ENTRIES_REQUIRED".to_string())?;
+    let connection =
+        CatalogRepository::open(&state.paths, requested_at).map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| error.to_string())?;
+    match crate::model_cost::ModelPricingCatalog::save(
+        &connection,
+        entries,
+        command_id,
+        idempotency_key,
+        request_digest,
+        requested_at,
+    ) {
+        Ok(response) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|error| error.to_string())?;
+            Ok(response)
+        }
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
     }
 }
 
@@ -8167,6 +8247,14 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "model_pricing_save" => save_model_pricing(
+            state,
+            &request,
+            command_id,
+            idempotency_key,
+            requested_at,
+            &digest,
+        ),
         "decision_submit" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_decision_submit(
@@ -9278,6 +9366,12 @@ pub fn query_global_settings(state: State<'_, KernelState>) -> Result<Value, Str
     let mut settings =
         crate::repositories::provider::ProviderSettingsRepository::read_global(&state.paths)
             .map_err(|error| error.to_string())?;
+    settings["modelPricing"] =
+        serde_json::to_value(crate::model_cost::ModelPricingCatalog::read_from_paths(
+            &state.paths,
+            "1970-01-01T00:00:00Z",
+        )?)
+        .map_err(|error| error.to_string())?;
     apply_provider_status(&mut settings);
     Ok(settings)
 }

@@ -175,8 +175,8 @@ export const demoBundle: ProjectBundle = {
     ]
   },
   settings: {
-    provider: 'OpenAI Compatible', model: '创作主模型', endpoint: 'https://api.example.com/v1', monthlyBudget: 200, chapterBudget: 3,
-    pauseBeforeOverrun: true, privacyMode: 'local-first', sendDraftOnly: true, exportFormat: 'DOCX', platform: '番茄小说', theme: 'light'
+    provider: 'OpenAI Compatible', model: '创作主模型', endpoint: 'https://api.example.com/v1', monthlyBudget: null, chapterBudget: null,
+    privacyMode: 'local-first', sendDraftOnly: true, exportFormat: 'DOCX', platform: '番茄小说', theme: 'light'
   }
 }
 

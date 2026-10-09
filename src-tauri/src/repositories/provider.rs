@@ -24,11 +24,11 @@ impl ProviderSettingsRepository {
     pub fn default_projection() -> Value {
         json!({
             "provider":"OpenAI Compatible","model":"gpt-4o-mini","endpoint":"",
-            "monthlyBudget":200,"chapterBudget":3,"pauseBeforeOverrun":true,
+            "monthlyBudget":null,"chapterBudget":null,
             "privacyMode":"local-first","sendDraftOnly":true,"exportFormat":"DOCX",
             "platform":"","theme":"system","providerId":"openai-compatible",
             "modelId":"gpt-4o-mini","enabled":false,"secretStatus":"NOT_CONFIGURED",
-            "capabilityStatus":"UNAVAILABLE"
+            "capabilityStatus":"UNAVAILABLE","budgetHistory":[]
         })
     }
 
@@ -43,7 +43,6 @@ impl ProviderSettingsRepository {
             "endpoint",
             "monthlyBudget",
             "chapterBudget",
-            "pauseBeforeOverrun",
             "privacyMode",
             "sendDraftOnly",
             "exportFormat",
@@ -82,20 +81,29 @@ impl ProviderSettingsRepository {
     pub fn read_global(paths: &AppPaths) -> Result<Value, ProviderSettingsError> {
         let path = Self::global_path(paths);
         if !path.is_file() {
-            return Ok(Self::default_projection());
+            return Ok(Self::global_projection(Self::default_projection()));
         }
         let raw = fs::read_to_string(path)?;
-        Ok(Self::sanitized(&serde_json::from_str(&raw)?))
+        Ok(Self::global_projection(Self::sanitized(
+            &serde_json::from_str(&raw)?,
+        )))
     }
 
     pub fn write_global(
         paths: &AppPaths,
         settings: &Value,
     ) -> Result<Value, ProviderSettingsError> {
-        let value = Self::sanitized(settings);
+        let value = Self::global_projection(Self::sanitized(settings));
         fs::create_dir_all(paths.root())?;
         fs::write(Self::global_path(paths), serde_json::to_vec_pretty(&value)?)?;
         Ok(value)
+    }
+
+    fn global_projection(mut settings: Value) -> Value {
+        settings["monthlyBudget"] = Value::Null;
+        settings["chapterBudget"] = Value::Null;
+        settings["budgetHistory"] = json!([]);
+        settings
     }
 
     pub fn read_project(
@@ -103,7 +111,7 @@ impl ProviderSettingsRepository {
         project_id: &str,
     ) -> Result<Value, ProviderSettingsError> {
         let mut value = Self::default_projection();
-        let mut statement = connection.prepare("SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key IN ('provider','model','endpoint','monthlyBudget','chapterBudget','pauseBeforeOverrun','privacyMode','sendDraftOnly','exportFormat','platform','theme','providerId','modelId','enabled','timeoutMs') ORDER BY setting_key")?;
+        let mut statement = connection.prepare("SELECT setting_key, setting_value FROM project_settings WHERE project_id=?1 AND setting_key IN ('provider','model','endpoint','monthlyBudget','chapterBudget','budgetHistory','privacyMode','sendDraftOnly','exportFormat','platform','theme','providerId','modelId','enabled','timeoutMs') ORDER BY setting_key")?;
         let rows = statement.query_map([project_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -119,16 +127,19 @@ impl ProviderSettingsRepository {
         connection: &Connection,
         project_id: &str,
         settings: &Value,
+        command_id: &str,
         now: &str,
     ) -> Result<Value, ProviderSettingsError> {
+        let current = Self::read_project(connection, project_id)?;
         let value = Self::sanitized(settings);
+        let source = settings.as_object();
+        let mut result = current.clone();
         for key in [
             "provider",
             "model",
             "endpoint",
             "monthlyBudget",
             "chapterBudget",
-            "pauseBeforeOverrun",
             "privacyMode",
             "sendDraftOnly",
             "exportFormat",
@@ -139,10 +150,35 @@ impl ProviderSettingsRepository {
             "enabled",
             "timeoutMs",
         ] {
-            if let Some(setting) = value.get(key) {
+            if source.is_some_and(|source| source.contains_key(key)) {
+                let setting = &value[key];
                 connection.execute("INSERT INTO project_settings(project_id,setting_key,setting_value,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(project_id,setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at", libsql_rusqlite::params![project_id,key,setting.to_string(),now])?;
+                result[key] = setting.clone();
             }
         }
-        Ok(value)
+        let previous_history = current["budgetHistory"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut history = previous_history.clone();
+        for key in ["chapterBudget", "monthlyBudget"] {
+            if source.is_some_and(|source| source.contains_key(key))
+                && current.get(key) != value.get(key)
+            {
+                history.push(json!({
+                    "setting":key,
+                    "oldValue":current.get(key).cloned().unwrap_or(Value::Null),
+                    "newValue":value.get(key).cloned().unwrap_or(Value::Null),
+                    "commandId":command_id,
+                    "changedAt":now
+                }));
+            }
+        }
+        if history != previous_history {
+            let history_json = Value::Array(history);
+            connection.execute("INSERT INTO project_settings(project_id,setting_key,setting_value,updated_at) VALUES (?1,'budgetHistory',?2,?3) ON CONFLICT(project_id,setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at", libsql_rusqlite::params![project_id,history_json.to_string(),now])?;
+            result["budgetHistory"] = history_json;
+        }
+        Ok(result)
     }
 }

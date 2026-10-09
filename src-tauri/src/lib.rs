@@ -11,6 +11,7 @@ pub mod generated;
 pub mod harness;
 pub mod health;
 pub mod market_source;
+pub mod model_cost;
 pub mod narrative;
 pub mod planning;
 pub mod production;

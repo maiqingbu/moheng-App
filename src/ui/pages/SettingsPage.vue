@@ -12,20 +12,31 @@ const projectStore=useProjectStore()
 const libraryStore=useProjectLibraryStore()
 const isProjectSettings=computed(()=>route.meta.scope==='project')
 const section=ref('model')
-const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:200,chapterBudget:3,pauseBeforeOverrun:true,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:30000})
+const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:null,chapterBudget:null,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:30000})
+type PricingEntry = NonNullable<SettingsProjection['modelPricing']>['entries'][number]
+const pricingEntries=ref<PricingEntry[]>([])
+const pricingVersion=ref(0)
 const apiKey=ref('')
 
 onMounted(()=>{ if(isProjectSettings.value) void projectStore.loadSettings(); else void libraryStore.loadGlobalSettings() })
 watchEffect(()=>{
   if(!isProjectSettings.value && !libraryStore.globalSettings) void libraryStore.loadGlobalSettings()
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
-  if(source) Object.assign(form,source)
+  if(source) {
+    Object.assign(form,source)
+    if(!isProjectSettings.value) {
+      pricingEntries.value=source.modelPricing?.entries.map(entry=>({...entry})) ?? []
+      pricingVersion.value=source.modelPricing?.version ?? 0
+    }
+  }
 })
 
 const saveState=computed(()=>isProjectSettings.value ? projectStore.commandState('settings-save') : libraryStore.commandState('global-settings-save'))
 const testState=computed(()=>isProjectSettings.value ? projectStore.commandState('provider-test') : libraryStore.commandState('global-provider-test'))
 const backupState=computed(()=>projectStore.commandState('project-backup'))
 const integrityState=computed(()=>projectStore.commandState('project-integrity'))
+const pricingState=computed(()=>libraryStore.commandState('model-pricing-save'))
+const pricingHistory=computed(()=>libraryStore.globalSettings?.modelPricing?.history.slice().reverse() ?? [])
 
 function providerSettings(){
   const model=form.model.trim()
@@ -36,6 +47,14 @@ async function save(){
   if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings}})
   else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,enabled:settings.enabled} }
   apiKey.value=''
+}
+function addPricingEntry(){
+  pricingEntries.value.push({providerId:form.providerId ?? 'openai-compatible',modelId:form.modelId ?? '',inputPricePerMillionTokens:null,outputPricePerMillionTokens:null,cachedInputPricePerMillionTokens:null})
+}
+function removePricingEntry(index:number){ pricingEntries.value.splice(index,1) }
+async function savePricing(){
+  await libraryStore.runCommand('model-pricing-save',{type:'model_pricing_save',payload:{entries:pricingEntries.value}})
+  await libraryStore.refreshGlobalSettings()
 }
 async function test(){
   const settings=providerSettings()
@@ -67,15 +86,44 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
         </section>
 
         <section id="setting-cost" class="setting-section">
-          <div class="card-head"><div><h2 class="card-title">成本控制</h2><p class="card-subtitle">{{ isProjectSettings ? '只统计并约束当前作品。' : '作为新作品默认预算；每部作品仍单独统计实际成本。' }}达到预算前先暂停并请求你的决定。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">项目总预算（¥）</span><input v-model.number="form.monthlyBudget" type="number" min="0" class="input" /></label><label class="field"><span class="field-label">单章预算上限（¥）</span><input v-model.number="form.chapterBudget" type="number" min="0" step=".1" class="input" /></label></div>
-          <div class="toggle-row"><div><strong>超预算前自动暂停</strong><div class="muted" style="font-size:11px">暂停后进入决策收件箱，由你决定提高预算或降低模型成本。</div></div><button class="toggle" :class="{on:form.pauseBeforeOverrun}" @click="form.pauseBeforeOverrun=!form.pauseBeforeOverrun" /></div>
+          <div class="card-head"><div><h2 class="card-title">成本控制</h2><p class="card-subtitle">{{ isProjectSettings ? '预算只作用于当前作品；设定后就是发送前执行的硬上限。' : '模型价格由你维护并按版本保留；预算需要在各作品设置中单独设定。' }}</p></div></div>
+          <div v-if="isProjectSettings" class="setting-grid">
+            <label class="field"><span class="field-label">项目总预算（¥，留空表示不设上限）</span><input v-model.number="form.monthlyBudget" type="number" min="0" step=".01" class="input" /></label>
+            <label class="field"><span class="field-label">单章预算上限（¥，留空表示不设上限）</span><input v-model.number="form.chapterBudget" type="number" min="0" step=".01" class="input" /></label>
+          </div>
+          <p v-else class="banner info" role="status">未设置任何新作品预算。打开作品的“设置 → 成本控制”即可设定或修改上限。</p>
+          <div v-if="isProjectSettings && form.budgetHistory?.length" class="section-subgroup" data-budget-history>
+            <h3>预算修改记录</h3>
+            <div v-for="(item,index) in form.budgetHistory.slice().reverse()" :key="`${item.commandId}:${index}`" class="task-row">
+              <span>{{ item.setting === 'monthlyBudget' ? '项目总预算' : '单章预算' }} · {{ item.oldValue == null ? '未设上限' : `¥${item.oldValue}` }} → {{ item.newValue == null ? '未设上限' : `¥${item.newValue}` }}</span>
+              <time class="muted">{{ item.changedAt }}</time>
+            </div>
+          </div>
+          <div v-if="!isProjectSettings" class="section-subgroup" data-model-pricing>
+            <div class="card-head"><div><h3 class="card-title">模型价格表 · v{{ pricingVersion }}</h3><p class="card-subtitle">单位：元 / 百万 tokens。价格只由你维护，不从网络抓取。</p></div><button class="btn" @click="addPricingEntry">添加模型</button></div>
+            <div v-for="(entry,index) in pricingEntries" :key="`${entry.providerId}:${entry.modelId}:${index}`" class="setting-grid pricing-entry">
+              <label class="field"><span class="field-label">服务商 ID</span><input v-model.trim="entry.providerId" class="input" /></label>
+              <label class="field"><span class="field-label">模型 ID</span><input v-model.trim="entry.modelId" class="input" /></label>
+              <label class="field"><span class="field-label">输入单价</span><input v-model.number="entry.inputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
+              <label class="field"><span class="field-label">输出单价</span><input v-model.number="entry.outputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
+              <label class="field"><span class="field-label">缓存输入单价（可选）</span><input v-model.number="entry.cachedInputPricePerMillionTokens" type="number" min="0" step=".01" class="input" /></label>
+              <button class="btn danger" type="button" @click="removePricingEntry(index)">移除</button>
+            </div>
+            <p v-if="!pricingEntries.length" class="muted">尚无定价。设置了预算而当前模型未定价时，系统会在发送请求前阻断。</p>
+            <button class="btn primary" :disabled="pricingState?.status==='submitting'" @click="savePricing">保存价格表新版本</button>
+            <CommandFeedback :state="pricingState" />
+            <div v-if="pricingHistory.length" class="section-subgroup" data-pricing-history>
+              <h4>历史版本</h4>
+              <div v-for="version in pricingHistory" :key="version.version" class="task-row">
+                <span>v{{ version.version }} · {{ version.entries.length }} 个模型</span><time class="muted">{{ version.updatedAt }}</time>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section id="setting-privacy" class="setting-section">
-          <div class="card-head"><div><h2 class="card-title">隐私设置</h2><p class="card-subtitle">本地优先：作品数据保存在本机，并以本机记录为准。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">隐私模式</span><select v-model="form.privacyMode" class="select"><option value="local-first">本地优先</option><option value="balanced">平衡模式</option></select></label></div>
-          <div class="toggle-row"><div><strong>模型请求仅发送必要内容</strong><div class="muted" style="font-size:11px">系统只提供当前任务真正需要的作品信息。</div></div><button class="toggle" :class="{on:form.sendDraftOnly}" @click="form.sendDraftOnly=!form.sendDraftOnly" /></div>
+          <div class="card-head"><div><h2 class="card-title">隐私设置</h2><p class="card-subtitle">请求内容按当前任务的正式上下文组装。</p></div></div>
+          <p class="banner info" role="status">隐私模式和“仅发送草稿”选项暂不可用。</p>
         </section>
 
         <section id="setting-export" class="setting-section">

@@ -17,6 +17,103 @@ pub struct ProductionRepository;
 
 type ProductionJobRow = (String, String, Option<String>, String, Option<String>);
 
+fn configured_budget_cents(
+    connection: &Connection,
+    project_id: &str,
+    setting_key: &str,
+) -> Result<Option<i64>, ProductionRepositoryError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key=?2",
+            libsql_rusqlite::params![project_id, setting_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|error| ProductionRepositoryError::Serialization(error.to_string()))?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let amount = value
+        .as_f64()
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        .ok_or_else(|| ProductionRepositoryError::Serialization("invalid budget setting".into()))?;
+    Ok(Some((amount * 100.0).ceil() as i64))
+}
+
+fn production_cost_summary(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: Option<&str>,
+    project_total_cents: i64,
+) -> Result<Value, ProductionRepositoryError> {
+    let chapter_budget = configured_budget_cents(connection, project_id, "chapterBudget")?;
+    let monthly_budget = configured_budget_cents(connection, project_id, "monthlyBudget")?;
+    let chapter_budget_id = if let Some(chapter_id) = chapter_id {
+        connection
+            .query_row(
+                "SELECT budget_id FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+    } else {
+        None
+    };
+    let chapter_used = if let Some(budget_id) = chapter_budget_id.as_deref() {
+        let actual: i64 = connection.query_row(
+            "SELECT COALESCE(SUM(cost_cents),0) FROM model_cost_ledger WHERE project_id=?1 AND budget_id=?2 AND cost_type='ACTUAL'",
+            libsql_rusqlite::params![project_id,budget_id],
+            |row| row.get(0),
+        )?;
+        let unknown: i64 = connection.query_row(
+            "SELECT COALESCE(SUM(reservation.settled_cents),0) FROM budget_reservations reservation LEFT JOIN model_usage usage ON usage.project_id=reservation.project_id AND usage.model_run_id=reservation.model_run_id WHERE reservation.project_id=?1 AND reservation.budget_ref=?2 AND reservation.status='SETTLED' AND usage.model_run_id IS NULL",
+            libsql_rusqlite::params![project_id,budget_id],
+            |row| row.get(0),
+        )?;
+        let reserved: i64 = connection.query_row(
+            "SELECT COALESCE(SUM(reserved_cents),0) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','OVER_LIMIT')",
+            libsql_rusqlite::params![project_id,budget_id],
+            |row| row.get(0),
+        )?;
+        actual + unknown + reserved
+    } else {
+        0
+    };
+    let month_actual: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(cost_cents),0) FROM model_cost_ledger WHERE project_id=?1 AND cost_type='ACTUAL' AND strftime('%Y-%m',datetime(created_at,'localtime'))=strftime('%Y-%m','now','localtime')",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    let month_unknown: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(reservation.settled_cents),0) FROM budget_reservations reservation LEFT JOIN model_usage usage ON usage.project_id=reservation.project_id AND usage.model_run_id=reservation.model_run_id WHERE reservation.project_id=?1 AND reservation.status='SETTLED' AND usage.model_run_id IS NULL AND strftime('%Y-%m',datetime(reservation.created_at,'localtime'))=strftime('%Y-%m','now','localtime')",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    let month_reserved: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(reserved_cents),0) FROM budget_reservations WHERE project_id=?1 AND status IN ('RESERVED','OVER_LIMIT') AND strftime('%Y-%m',datetime(created_at,'localtime'))=strftime('%Y-%m','now','localtime')",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    let month_used = month_actual + month_unknown + month_reserved;
+    let chapter_remaining = chapter_budget.map(|limit| (limit - chapter_used).max(0));
+    let monthly_remaining = monthly_budget.map(|limit| (limit - month_used).max(0));
+    Ok(json!({
+        "currentVolume":0,
+        "projectTotal":project_total_cents as f64 / 100.0,
+        "budgetRemaining":monthly_remaining.map(|value| value as f64 / 100.0),
+        "chapterUsed":chapter_used as f64 / 100.0,
+        "chapterBudget":chapter_budget.map(|value| value as f64 / 100.0),
+        "chapterRemaining":chapter_remaining.map(|value| value as f64 / 100.0),
+        "monthUsed":month_used as f64 / 100.0,
+        "monthlyBudget":monthly_budget.map(|value| value as f64 / 100.0),
+        "monthRemaining":monthly_remaining.map(|value| value as f64 / 100.0)
+    }))
+}
+
 fn b02_phase_steps(phases: &[&str], current: Option<&str>, status: &str) -> Vec<Value> {
     let current_index = current.and_then(|phase| phases.iter().position(|item| *item == phase));
     phases
@@ -635,6 +732,16 @@ impl ProductionRepository {
         } else {
             "PENDING"
         };
+        let cost_chapter_id = job
+            .as_ref()
+            .and_then(|(_, _, chapter_id, _, _)| chapter_id.as_deref())
+            .or_else(|| {
+                next_chapter_projection
+                    .as_ref()
+                    .and_then(|chapter| chapter.get("id").and_then(Value::as_str))
+            });
+        let cost_summary =
+            production_cost_summary(connection, project_id, cost_chapter_id, runtime.2)?;
         let new_responsibilities = Self::latest_new_responsibilities(connection, project_id)?;
         Ok(json!({
             "timeline":timeline,"tasks":task,"artifacts":{"items":artifact_items,"nextCursor":null,"total":artifact_items.len()},
@@ -648,7 +755,7 @@ impl ProductionRepository {
             "creativeSkills":creative_skills,"quality":quality,"tasteProfile":taste_profile,
             "readerDesire":quality.get("softAssessment").cloned().unwrap_or(Value::Null),
             "openingProgress":opening_progress,
-            "costSummary":{"currentVolume":0,"projectTotal":runtime.2 as f64 / 100.0,"budgetRemaining":0},"committedChapters":runtime.1,"candidateChapters":runtime.3
+            "costSummary":cost_summary,"committedChapters":runtime.1,"candidateChapters":runtime.3
         }))
     }
 

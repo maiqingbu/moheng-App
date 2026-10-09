@@ -635,7 +635,13 @@ export interface ProductionCenterProjection {
   costSummary: {
     currentVolume: number
     projectTotal: number
-    budgetRemaining: number
+    budgetRemaining: number | null
+    chapterUsed?: number
+    chapterBudget?: number | null
+    chapterRemaining?: number | null
+    monthUsed?: number
+    monthlyBudget?: number | null
+    monthRemaining?: number | null
   }
   productionStage?: 'CONTEXT' | 'PLAN' | 'RENDER' | 'CANDIDATE' | 'AUDIT' | 'GATE' | 'COMMIT' | 'RECONCILE' | 'COMPLETED' | 'IDLE'
   jobStatus?: string | null
@@ -759,9 +765,16 @@ export interface SettingsProjection {
   provider: string
   model: string
   endpoint: string
-  monthlyBudget: number
-  chapterBudget: number
-  pauseBeforeOverrun: boolean
+  monthlyBudget: number | null
+  chapterBudget: number | null
+  pauseBeforeOverrun?: boolean
+  budgetHistory?: Array<{ setting: 'monthlyBudget' | 'chapterBudget'; oldValue: number | null; newValue: number | null; commandId: string; changedAt: string }>
+  modelPricing?: {
+    version: number
+    updatedAt?: string | null
+    entries: Array<{ providerId: string; modelId: string; inputPricePerMillionTokens: number | null; outputPricePerMillionTokens: number | null; cachedInputPricePerMillionTokens?: number | null }>
+    history: Array<{ version: number; updatedAt: string; commandId: string; entries: Array<{ providerId: string; modelId: string; inputPricePerMillionTokens: number | null; outputPricePerMillionTokens: number | null; cachedInputPricePerMillionTokens?: number | null }> }>
+  }
   privacyMode: 'local-first' | 'balanced'
   sendDraftOnly: boolean
   exportFormat: 'DOCX' | 'Markdown' | 'TXT' | 'EPUB'
@@ -1001,6 +1014,7 @@ export type CommandType =
   | 'complete_book'
   | 'settings_save'
   | 'global_settings_save'
+  | 'model_pricing_save'
 
 export interface CommandRequest {
   type: CommandType

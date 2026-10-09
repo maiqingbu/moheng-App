@@ -491,7 +491,7 @@ export class BrowserDemoPort implements FrontendPort {
       artifacts: page(record.bundle.artifacts, request, 12),
       signing: record.bundle.signing,
       activeWork: { label: record.bundle.tasks.find(t => t.status === 'active')?.title ?? '当前没有运行中的制作步骤', detail: record.bundle.tasks.find(t => t.status === 'active')?.description ?? '可以从当前阶段继续。', chapterNumber: record.bundle.project.committedChapters + 1, progress: record.bundle.tasks.find(t => t.status === 'active')?.progress },
-      costSummary: { currentVolume: Math.min(record.bundle.project.totalCost, 48.2), projectTotal: record.bundle.project.totalCost, budgetRemaining: Math.max(0, record.bundle.settings.monthlyBudget - record.bundle.project.totalCost) }
+      costSummary: { currentVolume: Math.min(record.bundle.project.totalCost, 48.2), projectTotal: record.bundle.project.totalCost, budgetRemaining: record.bundle.settings.monthlyBudget == null ? null : Math.max(0, record.bundle.settings.monthlyBudget - record.bundle.project.totalCost) }
     })
   }
 

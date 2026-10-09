@@ -528,17 +528,11 @@ fn validate_budget(connection: &Connection, bundle: &CommitBundle) -> Result<(),
     chapter_ids.sort();
     chapter_ids.dedup();
     for chapter_id in chapter_ids {
-        let Some((budget_id, hard_max_runs, cost_budget)) = connection
+        let Some((budget_id, hard_max_runs)) = connection
             .query_row(
-                "SELECT budget_id, hard_max_model_runs, cost_budget_cents FROM chapter_production_budgets WHERE project_id = ?1 AND chapter_id = ?2",
+                "SELECT budget_id, hard_max_model_runs FROM chapter_production_budgets WHERE project_id = ?1 AND chapter_id = ?2",
                 [&bundle.project_id, &chapter_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?
         else {
@@ -563,19 +557,6 @@ fn validate_budget(connection: &Connection, bundle: &CommitBundle) -> Result<(),
             |row| row.get(0),
         )?;
         if hard_max_runs > 0 && run_count + reserved_count >= hard_max_runs {
-            return Err(CommitError::BudgetHardLimit);
-        }
-        let actual_cost: i64 = connection.query_row(
-            "SELECT COALESCE(SUM(cost_cents), 0) FROM model_cost_ledger WHERE project_id = ?1 AND budget_id = ?2 AND cost_type IN ('ACTUAL', 'OVERAGE')",
-            [&bundle.project_id, &budget_id],
-            |row| row.get(0),
-        )?;
-        let reserved_cost: i64 = connection.query_row(
-            "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id = ?1 AND budget_ref = ?2 AND status = 'RESERVED'",
-            [&bundle.project_id, &budget_id],
-            |row| row.get(0),
-        )?;
-        if cost_budget > 0 && actual_cost + reserved_cost >= cost_budget {
             return Err(CommitError::BudgetHardLimit);
         }
     }

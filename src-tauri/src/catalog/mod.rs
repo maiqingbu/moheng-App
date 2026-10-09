@@ -32,6 +32,29 @@ impl CatalogRepository {
         Ok(connection)
     }
 
+    pub fn setting(connection: &Connection, key: &str) -> Result<Option<String>, DatabaseError> {
+        connection
+            .query_row(
+                "SELECT value FROM catalog_settings WHERE key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn write_setting(
+        connection: &Connection,
+        key: &str,
+        value: &str,
+    ) -> Result<(), DatabaseError> {
+        connection.execute(
+            "INSERT INTO catalog_settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn register_project(
         connection: &Connection,
         project_id: &str,

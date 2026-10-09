@@ -68,6 +68,10 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     globalSettings.value = await frontendPort.queryGlobalSettings()
   }
 
+  async function refreshGlobalSettings() {
+    globalSettings.value = await frontendPort.queryGlobalSettings()
+  }
+
   async function testProvider(key: string, settings: ProviderSettingsInput) {
     commandStates.value[key] = { status: 'submitting', message: '正在提交诊断…' }
     try {
@@ -166,6 +170,7 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     refresh,
     loadMarket,
     loadGlobalSettings,
+    refreshGlobalSettings,
     testProvider,
     runCommand,
     commandState,
