@@ -99,10 +99,47 @@ impl ProductionModelGateway for S40RepairGateway {
                     .find(target)
                     .ok_or_else(|| "repair finding span missing".to_string())?;
                 let end = start + target.len();
+                let start = body[..start].chars().count();
+                let end = body[..end].chars().count();
+                let body_len = body.chars().count();
+                let mut protected_spans = Vec::new();
+                if start > 0 {
+                    protected_spans.push(json!({"start":0,"end":start}));
+                }
+                if end < body_len {
+                    protected_spans.push(json!({"start":end,"end":body_len}));
+                }
+                let context_refs = input["skillTaskContext"]["boundedRefs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|reference| reference["reference"].clone())
+                    .collect::<Vec<_>>();
                 Ok(ProductionModelResponse::deterministic(json!({
-                    "start":body[..start].chars().count(),
-                    "end":body[..end].chars().count(),
-                    "replacement":"决定推开石门。“我必须找到出口。”“石门后有人。”"
+                    "skillId":input["skill"]["skillId"],
+                    "skillVersion":input["skill"]["skillVersion"],
+                    "bundleDigest":input["skill"]["bundleDigest"],
+                    "taskId":input["skillTaskContext"]["taskId"],
+                    "status":"OK",
+                    "sourceRefs":[],
+                    "assumptions":[],
+                    "payload":{
+                        "repair_plan":"只修复当前 agency、pacing、dialogue 证据对应的局部段落。",
+                        "target_spans":[{"start":start,"end":end}],
+                        "protected_spans":protected_spans,
+                        "changes":[{
+                            "start":start,
+                            "end":end,
+                            "replacement":"决定推开石门。“我必须找到出口。”“石门后有人。”"
+                        }],
+                        "recheck_dimensions":input["affectedDimensions"],
+                        "escalation_if_failed":"ADVISORY_ESCALATION"
+                    },
+                    "findings":[],
+                    "contextRefs":context_refs,
+                    "runtimeCheckRequests":[],
+                    "confidence":0.9,
+                    "nextSkillHints":[]
                 })))
             }
             "AUDIT_EXTRACT" => {
