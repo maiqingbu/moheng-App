@@ -437,13 +437,10 @@ fn revision(state: &KernelState, project_id: &str) -> i64 {
 
 fn install_opening_fixture_gate_rules(state: &KernelState, project_id: &str) {
     let connection = state.manager.open(project_id, "", NOW).unwrap();
-    let has_policy = NarrativeRepository::canonical_project_head_ref(
-        &connection,
-        project_id,
-        "GatePolicy",
-    )
-    .unwrap()
-    .is_some();
+    let has_policy =
+        NarrativeRepository::canonical_project_head_ref(&connection, project_id, "GatePolicy")
+            .unwrap()
+            .is_some();
     drop(connection);
     if !has_policy {
         command(

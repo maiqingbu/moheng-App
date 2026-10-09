@@ -2166,24 +2166,26 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
     );
     drop(connection);
 
+    let revision_before_rule = state.manager.project_revision(project_id).unwrap();
     let updated = execute_command_impl(
         &state,
         json!({
             "type":"gate_policy_update","commandId":"cmd:b08:rv34-add-predicate",
             "idempotencyKey":"key:b08:rv34-add-predicate","projectId":project_id,
-            "expectedRevision":0,"requestedAt":NOW,
+            "expectedRevision":revision_before_rule,"requestedAt":NOW,
             "payload":{"action":"UPSERT_RULE","rule":{"predicate":"UNREGISTERED_SYNTHETIC_PREDICATE","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}}
         }),
     )
     .unwrap();
     assert_eq!(updated["finalStatus"], "committed");
+    let revision_before_retry = state.manager.project_revision(project_id).unwrap();
 
     let retry = execute_command_impl(
         &state,
         json!({
             "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate-retry",
             "idempotencyKey":"key:b08:rv34-unknown-predicate-retry","projectId":project_id,
-            "expectedRevision":1,"requestedAt":NOW,
+            "expectedRevision":revision_before_retry,"requestedAt":NOW,
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false,"retryOfJobId":old_job_id}
         }),
     )
