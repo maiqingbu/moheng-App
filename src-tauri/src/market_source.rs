@@ -194,18 +194,22 @@ fn fetch_writer_zone_page() -> Result<String, &'static str> {
 }
 
 fn read_bounded_response(response: reqwest::blocking::Response) -> Result<Vec<u8>, &'static str> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_SOURCE_BYTES as u64)
-    {
+    let content_length = response.content_length();
+    read_bounded_body(response, content_length)
+}
+
+fn read_bounded_body(
+    reader: impl Read,
+    content_length: Option<u64>,
+) -> Result<Vec<u8>, &'static str> {
+    if content_length.is_some_and(|length| length > MAX_SOURCE_BYTES as u64) {
         return Err("MARKET_SOURCE_HTTP_UNAVAILABLE");
     }
-    let capacity = response
-        .content_length()
+    let capacity = content_length
         .unwrap_or_default()
         .min(MAX_SOURCE_BYTES as u64) as usize;
     let mut body = Vec::with_capacity(capacity);
-    response
+    reader
         .take((MAX_SOURCE_BYTES + 1) as u64)
         .read_to_end(&mut body)
         .map_err(|_| "MARKET_SOURCE_HTTP_UNAVAILABLE")?;
