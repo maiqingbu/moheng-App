@@ -15,6 +15,9 @@ use ai_novel_production_system_core::repair::{
     operation_digest_with_postconditions, OwnerExecution, RepairAuthorization, RepairOperation,
     RepairPlan, TypedRepairOwner,
 };
+use ai_novel_production_system_core::runtime::{
+    DurableModelRunner, FakeModelTransport, ModelRunSpec,
+};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::json;
@@ -4248,6 +4251,50 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         .create(project_id, "B5-B S40 repair", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let prior_job_id =
+        StableIdentityFactory::from_command(StableIdKind::Job, "cmd:b5b:prior-audit").unwrap();
+    connection
+        .execute(
+            "INSERT INTO jobs(job_id,project_id,job_type,chapter_id,status,current_stage,attempt_no,repair_round,created_at,updated_at) VALUES (?1,?2,'CHAPTER',?3,'FAILED','AUDIT',1,0,?4,?4)",
+            libsql_rusqlite::params![prior_job_id, project_id, chapter_id, NOW],
+        )
+        .unwrap();
+    let prior_audit_id =
+        StableIdentityFactory::from_command(StableIdKind::ModelRun, "cmd:b5b:prior-audit:model")
+            .unwrap();
+    let mut prior_audit = FakeModelTransport::success(json!({
+        "qualityFindings":[],
+        "canonCandidates":[],
+        "knowledgeCandidates":[],
+        "continuityCandidates":[],
+        "taskProgressCandidates":[],
+        "revealedReservationRefs":[],
+        "evidenceRanges":[],
+        "auditCompleteness":"COMPLETE_NO_CHANGE",
+        "unresolvedHard":false
+    }));
+    DurableModelRunner::execute(
+        &connection,
+        &mut prior_audit,
+        &ModelRunSpec {
+            model_run_id: prior_audit_id.clone(),
+            job_id: Some(prior_job_id.clone()),
+            step_id: None,
+            provider: "prior-audit-provider".into(),
+            model: "prior-audit-model".into(),
+            idempotency_key: "key:b5b:prior-audit:model".into(),
+            capability: "AUDIT_EXTRACT".into(),
+            prompt_ref: None,
+            context_manifest_ref: None,
+            budget_id: Some(format!("budget:b08:{project_id}")),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
+            attempt_no: 1,
+            repair_round: 0,
+        },
+        NOW,
+    )
+    .unwrap();
     drop(connection);
 
     let result = execute_command_impl(
@@ -4256,7 +4303,7 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
             "type":"production_start","commandId":"cmd:b5b:s40-repair",
             "idempotencyKey":"key:b5b:s40-repair","projectId":project_id,
             "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":2}
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":2,"retryOfJobId":prior_job_id}
         }),
     )
     .unwrap();
@@ -4276,16 +4323,27 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         "林舟被迫等待。门后传来脚步声。"
     );
     assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
+    let connection = state
+        .manager
+        .open(project_id, "B5-B S40 repair", NOW)
+        .unwrap();
+    assert_ne!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT model_run_id FROM model_runs WHERE project_id=?1 AND capability='AUDIT_EXTRACT' AND model_run_id!=?2 ORDER BY created_at DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, prior_audit_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        prior_audit_id,
+        "repaired candidate requires a fresh audit ModelRun"
+    );
     let repaired_body = "林舟决定推开石门。“我必须找到出口。”“石门后有人。”门后传来脚步声。";
     assert_eq!(
         gateway.audit_inputs.lock().unwrap()[0]["body"],
         repaired_body
     );
 
-    let connection = state
-        .manager
-        .open(project_id, "B5-B S40 repair", NOW)
-        .unwrap();
     let candidates = {
         let mut statement = connection
             .prepare("SELECT a.artifact_id,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
