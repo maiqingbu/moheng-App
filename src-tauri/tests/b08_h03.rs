@@ -4390,7 +4390,7 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         )
         .unwrap();
     assert_eq!(repair_run.2, "COMPLETED");
-    assert_eq!(repair_run.1, format!("budget:{chapter_id}"));
+    assert_eq!(repair_run.1, format!("budget:b08:{project_id}"));
     assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
 
     let receipt_payload: Value = serde_json::from_str(
