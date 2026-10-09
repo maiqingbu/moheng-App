@@ -4288,12 +4288,19 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         .unwrap();
     let candidates = {
         let mut statement = connection
-            .prepare("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
+            .prepare("SELECT a.artifact_id,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
             .unwrap();
         statement
-            .query_map([project_id], |row| row.get::<_, String>(0))
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .unwrap()
-            .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
+            .map(|row| {
+                let (artifact_id, payload) = row.unwrap();
+                let mut payload = serde_json::from_str::<Value>(&payload).unwrap();
+                payload["artifactId"] = json!(artifact_id);
+                payload
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(
