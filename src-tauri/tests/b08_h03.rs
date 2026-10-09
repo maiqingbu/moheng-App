@@ -2231,6 +2231,70 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
 }
 
 #[test]
+fn rv10_configured_budget_without_model_price_blocks_before_provider_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-rv10-unpriced-budget";
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let connection = state
+        .manager
+        .create(project_id, "RV-10 unpriced budget", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:set-zero-monthly-budget",
+            "idempotencyKey":"key:rv10:set-zero-monthly-budget","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"settings":{"provider":"fixture","providerId":"fixture","model":"unpriced-model","modelId":"unpriced-model","endpoint":"","enabled":false,"monthlyBudget":0,"chapterBudget":null,"privacyMode":"local-first","sendDraftOnly":true,"exportFormat":"DOCX","platform":"","theme":"system"}}
+        }),
+    )
+    .unwrap();
+    let current_revision = state.manager.project_revision(project_id).unwrap();
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:rv10:unpriced-budget-production",
+            "idempotencyKey":"key:rv10:unpriced-budget-production","projectId":project_id,
+            "expectedRevision":current_revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("请先填写该模型价格"),
+        "unexpected error: {error}"
+    );
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn b08_invalid_or_over_budget_gate_policy_blocks_before_provider_calls() {
     for (suffix, policy_payload, expected_prefix) in [
         (
