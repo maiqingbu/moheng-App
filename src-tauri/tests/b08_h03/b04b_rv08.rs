@@ -179,6 +179,66 @@ fn commit_legacy_b11_policy(connection: &Connection, project_id: &str) -> Artifa
     }
 }
 
+fn commit_historical_r1_policy(connection: &Connection, project_id: &str) -> ArtifactRef {
+    let (previous_ref, _) = current_gate_policy(connection, project_id);
+    let policy_bytes =
+        std::fs::read("../contracts/resources/gate-policy-default.r1/policy.json").unwrap();
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read("../contracts/resources/gate-policy-default.r1/resource-manifest.json")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        hex::encode(sha2::Sha256::digest(&policy_bytes)),
+        manifest["files"]["policy.json"]
+    );
+    let mut payload: Value = serde_json::from_slice(&policy_bytes).unwrap();
+    payload["resourceRef"] = json!({
+        "version":"gate-policy-default.r1",
+        "sha256":manifest["files"]["policy.json"]
+    });
+    payload["previousPolicyRef"] = serde_json::to_value(&previous_ref).unwrap();
+    let hash = sha256_canonical(&payload).unwrap();
+    let version = previous_ref.version + 1;
+    let command_id = "cmd:rv34:seed-historical-r1";
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":previous_ref.artifact_id,
+        "projectId":project_id,
+        "artifactType":"GatePolicy",
+        "scope":{"level":"PROJECT"},
+        "version":version,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"MATERIALIZED",
+        "payload":payload,
+        "payloadHash":hash,
+        "dependencyRefs":[previous_ref],
+        "provenance":{"createdBy":"RV34::HistoricalPolicyFixture","commandId":command_id},
+        "createdAt":NOW
+    }))
+    .unwrap();
+    let revision = NarrativeRepository::project_revision(connection, project_id).unwrap();
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":"key:rv34:seed-historical-r1",
+        "expectedProjectRevision":revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[artifact],
+        "headUpdates":[{"artifactType":"GatePolicy","scope":{"level":"PROJECT"},"artifactId":previous_ref.artifact_id,"version":version,"payloadHash":hash}],
+        "receiptDraft":{"domain":"RV34_HISTORICAL_POLICY_FIXTURE","payload":{}}
+    }))
+    .unwrap();
+    CommitService::commit(connection, &bundle, NOW).unwrap();
+    ArtifactRef {
+        artifact_id: previous_ref.artifact_id,
+        version,
+        payload_hash: hash,
+    }
+}
+
 #[test]
 fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() {
     let temp = tempfile::tempdir().unwrap();
@@ -284,7 +344,7 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
             &json!({
                 "canonSemantics":{
                     "policyVersion":"rv08-test-loadout.r1",
-                    "rules":[{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]}]
+                    "rules":[{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]}]
                 }
             }),
         )
@@ -336,7 +396,11 @@ fn b08_rv34_existing_r1_policy_is_preserved_until_explicit_r2_adoption() {
         .manager
         .open(project_id, "RV-34 historical r1", NOW)
         .unwrap();
-    let (old_ref, old_payload) = current_gate_policy(&connection, project_id);
+    let old_ref = commit_historical_r1_policy(&connection, project_id);
+    let old_payload =
+        NarrativeRepository::artifact_payload_by_ref(&connection, project_id, &old_ref)
+            .unwrap()
+            .unwrap();
     assert_eq!(old_payload["policyId"], "gate-policy-default.r1");
     drop(connection);
 
@@ -374,7 +438,10 @@ fn b08_rv34_existing_r1_policy_is_preserved_until_explicit_r2_adoption() {
         .unwrap();
     let (current_ref, current_payload) = current_gate_policy(&connection, project_id);
     assert_eq!(current_payload["policyId"], "gate-policy-default.r2");
-    assert_eq!(current_payload["previousPolicyRef"]["artifactId"], old_ref.artifact_id);
+    assert_eq!(
+        current_payload["previousPolicyRef"]["artifactId"],
+        old_ref.artifact_id
+    );
     assert_eq!(
         NarrativeRepository::artifact_payload_by_ref(&connection, project_id, &old_ref)
             .unwrap()
