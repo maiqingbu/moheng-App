@@ -91,10 +91,15 @@ impl ProductionModelGateway for S40RepairGateway {
                     .pointer("/candidate/body")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "repair candidate body missing".to_string())?;
+                let target = "被迫等待。";
+                let start = body
+                    .find(target)
+                    .ok_or_else(|| "repair finding span missing".to_string())?;
+                let end = start + target.len();
                 Ok(ProductionModelResponse::deterministic(json!({
-                    "start":0,
-                    "end":body.chars().count(),
-                    "replacement":"林舟决定推开石门。“我必须找到出口。”她望向门后传来的脚步声。"
+                    "start":body[..start].chars().count(),
+                    "end":body[..end].chars().count(),
+                    "replacement":"决定推开石门。“我必须找到出口。"
                 })))
             }
             "AUDIT_EXTRACT" => {
@@ -4271,7 +4276,7 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         "林舟被迫等待。门后传来脚步声。"
     );
     assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
-    let repaired_body = "林舟决定推开石门。“我必须找到出口。”她望向门后传来的脚步声。";
+    let repaired_body = "林舟决定推开石门。“我必须找到出口。”门后传来脚步声。";
     assert_eq!(
         gateway.audit_inputs.lock().unwrap()[0]["body"],
         repaired_body
@@ -4306,6 +4311,9 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         .unwrap();
     assert_eq!(original["body"], "林舟被迫等待。门后传来脚步声。");
     assert_eq!(repaired["body"], repaired_body);
+    assert_eq!(repaired["candidatePatch"]["start"], 2);
+    assert_eq!(repaired["candidatePatch"]["end"], 7);
+    assert!(repaired_body.ends_with("门后传来脚步声。"));
     assert_eq!(repaired["candidatePatch"]["kind"], "CandidatePatch");
     assert_eq!(repaired["candidatePatch"]["status"], "CANDIDATE");
     assert_eq!(repaired["candidatePatch"]["repairRun"], 1);
