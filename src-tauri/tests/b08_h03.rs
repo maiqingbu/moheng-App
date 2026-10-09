@@ -4332,6 +4332,15 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
         NOW,
     )
     .unwrap();
+    assert_eq!(prior_audit.send_calls(), 1);
+    assert!(DurableModelRunner::completed_result_for_job(
+        &connection,
+        project_id,
+        &prior_job_id,
+        "AUDIT_EXTRACT"
+    )
+    .unwrap()
+    .is_some());
     drop(connection);
 
     let result = execute_command_impl(
@@ -4374,6 +4383,17 @@ fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_n
             .unwrap(),
         prior_audit_id,
         "repaired candidate requires a fresh audit ModelRun"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+                libsql_rusqlite::params![project_id, prior_audit_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "COMPLETED",
+        "the historical audit remains intact"
     );
     let repaired_body = "林舟决定推开石门。“我必须找到出口。”“石门后有人。”门后传来脚步声。";
     assert_eq!(
