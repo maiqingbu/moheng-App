@@ -2079,6 +2079,15 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
         error,
         "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE"
     );
+    let production_center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    assert!(production_center["gate"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
     let request = gateway.audit_inputs.lock().unwrap()[0].clone();
     let contract = &request["auditPolicyContract"];
     assert_eq!(
