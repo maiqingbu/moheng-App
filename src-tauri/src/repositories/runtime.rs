@@ -2227,19 +2227,12 @@ fn settle_remote_usage(
         Some(snapshot) if snapshot.price_status != "PRICED" => (0, "UNPRICED"),
         Some(snapshot) if usage.input_tokens > 0 || usage.output_tokens > 0 => (
             snapshot
-                .actual_cost_cents(
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cached_tokens,
-                )
+                .actual_cost_cents(usage.input_tokens, usage.output_tokens, usage.cached_tokens)
                 .unwrap_or(0),
             "ACTUAL",
         ),
         Some(snapshot) => (snapshot.predicted_cost_cents.max(0), "ESTIMATED"),
-        None => match usage
-            .provider_reported_cost_cents
-            .filter(|cost| *cost >= 0)
-        {
+        None => match usage.provider_reported_cost_cents.filter(|cost| *cost >= 0) {
             Some(cost) => (cost, "ACTUAL"),
             None => (spec.predicted_cost_cents.max(0), "ESTIMATED"),
         },
