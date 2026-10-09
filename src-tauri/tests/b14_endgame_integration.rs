@@ -944,8 +944,34 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
             |row| row.get(0),
         )
         .unwrap();
-    drop(after);
     assert_eq!(after_runs, before_runs + 2);
+    assert_eq!(
+        after
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs run LEFT JOIN budget_reservations reservation ON reservation.project_id=run.project_id AND reservation.model_run_id=run.model_run_id WHERE run.project_id='proj-b14' AND (reservation.budget_ref IS NULL OR reservation.budget_ref='UNSCOPED')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(after);
+    let previous_input_count = inputs.lock().unwrap().len();
+    query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
+    let after_replay = state.manager.open("proj-b14", "", NOW).unwrap();
+    assert_eq!(
+        after_replay
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='proj-b14'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        after_runs,
+        "replaying a B14 suggestion command must not create a second ModelRun"
+    );
+    drop(after_replay);
+    assert_eq!(inputs.lock().unwrap().len(), previous_input_count);
     assert!(advice["provenance"]["modelRunId"].as_str().is_some());
     assert!(quality["provenance"]["modelRunId"].as_str().is_some());
     assert!(advice["provenance"]["loadedSkillRefs"]
@@ -996,6 +1022,38 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
         .unwrap()
     );
     println!("B14_R4_RUNTIME_CHECK_HANDOFF|S44=PASS|S45=PASS|deterministic=true|modelRunsDelta=2|authorityWrite=false");
+}
+
+#[test]
+fn rv10_b14_advice_obeys_project_monthly_budget_before_model_send() {
+    let (state, _root, inputs) = test_state_with_skill_gateway();
+    seed_ready_project(&state);
+    let revision = state.manager.project_revision("proj-b14").unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:b14:monthly-budget-zero",
+            "idempotencyKey":"key:b14:monthly-budget-zero","projectId":"proj-b14",
+            "expectedRevision":revision,"requestedAt":NOW,
+            "payload":{"settings":{"provider":"fixture","providerId":"b14-test-provider","model":"b14-test-model","modelId":"b14-test-model","endpoint":"","enabled":false,"monthlyBudget":0,"chapterBudget":null}}
+        }),
+    )
+    .unwrap();
+
+    let error = query_endgame_advice_impl(&state, json!({"projectId":"proj-b14"})).unwrap_err();
+    assert!(error.contains("MODEL_PRICE_REQUIRED"));
+    assert!(inputs.lock().unwrap().is_empty());
+    let connection = state.manager.open("proj-b14", "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='proj-b14'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

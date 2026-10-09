@@ -8,6 +8,7 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
     reconciliation_for_actual_state, ProductionModelGateway, ProductionModelResponse,
+    ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
@@ -140,6 +141,50 @@ struct TaskSatisfiedGateway;
 #[derive(Default)]
 struct CountingCapabilitiesGateway {
     capabilities: Arc<Mutex<Vec<String>>>,
+}
+
+struct CatalogPricingGateway {
+    paths: AppPaths,
+    capabilities: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProductionModelGateway for CatalogPricingGateway {
+    fn provider(&self) -> &str {
+        "fixture-cost-provider"
+    }
+
+    fn model(&self, _capability: &str) -> String {
+        "priced-model".into()
+    }
+
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        Ok(ResolvedProviderProfile {
+            provider: self.provider().into(),
+            model: self.model("RENDER_CHAPTER"),
+            endpoint: "fixture://priced-model".into(),
+            timeout_ms: 1_000,
+        })
+    }
+
+    fn model_pricing_catalog(
+        &self,
+        now: &str,
+    ) -> Result<ai_novel_production_system_core::model_cost::ModelPricingCatalog, String> {
+        ai_novel_production_system_core::model_cost::ModelPricingCatalog::read_from_paths(
+            &self.paths,
+            now,
+        )
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        self.capabilities
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(capability.into());
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        response.usage.provider_reported_cost_cents = None;
+        Ok(response)
+    }
 }
 
 impl ProductionModelGateway for CountingCapabilitiesGateway {
@@ -2291,6 +2336,460 @@ fn rv10_configured_budget_without_model_price_blocks_before_provider_send() {
             )
             .unwrap(),
         0
+    );
+}
+
+#[test]
+fn rv10_price_catalog_uses_formal_versioned_history_and_idempotency() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    let first = json!({
+        "type":"model_pricing_save","commandId":"cmd:rv10:price-v1",
+        "idempotencyKey":"key:rv10:price-v1","requestedAt":NOW,
+        "payload":{"entries":[{"providerId":"qwen","modelId":"plus","inputPricePerMillionTokens":1.5,"outputPricePerMillionTokens":4,"cachedInputPricePerMillionTokens":0.5}]}
+    });
+    let saved_v1 = execute_command_impl(&state, first.clone()).unwrap();
+    assert_eq!(saved_v1["version"], 1);
+    assert_eq!(saved_v1["replayed"], false);
+
+    let saved_v2 = execute_command_impl(
+        &state,
+        json!({
+            "type":"model_pricing_save","commandId":"cmd:rv10:price-v2",
+            "idempotencyKey":"key:rv10:price-v2","requestedAt":"2026-10-09T12:00:00Z",
+            "payload":{"entries":[{"providerId":"qwen","modelId":"plus","inputPricePerMillionTokens":3,"outputPricePerMillionTokens":8,"cachedInputPricePerMillionTokens":1}]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(saved_v2["version"], 2);
+
+    let replay = execute_command_impl(&state, first).unwrap();
+    assert_eq!(replay["version"], 1);
+    assert_eq!(replay["replayed"], true);
+
+    let catalog =
+        ai_novel_production_system_core::model_cost::ModelPricingCatalog::read_from_paths(
+            &AppPaths::new(temp.path()),
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(catalog.version, 2);
+    assert_eq!(catalog.history.len(), 2);
+    assert_eq!(
+        catalog.history[0].entries[0].input_price_per_million_tokens,
+        1.5
+    );
+    assert_eq!(catalog.entries[0].input_price_per_million_tokens, 3.0);
+}
+
+#[test]
+fn rv10_model_runs_bind_price_versions_and_historical_costs_are_not_recomputed() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let gateway = Arc::new(CatalogPricingGateway {
+        paths: paths.clone(),
+        capabilities: Arc::new(Mutex::new(Vec::new())),
+    });
+    let state = KernelState::with_production_gateway(paths, gateway.clone());
+    let project_id = "p-b08-rv10-price-snapshot";
+    let connection = state
+        .manager
+        .create(project_id, "RV-10 price snapshot", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"model_pricing_save","commandId":"cmd:rv10:snapshot-price-v1",
+            "idempotencyKey":"key:rv10:snapshot-price-v1","requestedAt":NOW,
+            "payload":{"entries":[{"providerId":"fixture-cost-provider","modelId":"priced-model","inputPricePerMillionTokens":1000,"outputPricePerMillionTokens":2000,"cachedInputPricePerMillionTokens":500}]}
+        }),
+    )
+    .unwrap();
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:rv10:price-snapshot-first-run",
+            "idempotencyKey":"key:rv10:price-snapshot-first-run","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let original_costs = {
+        let mut statement = connection
+            .prepare("SELECT model_run_id,cost_cents FROM model_usage WHERE project_id=?1 ORDER BY model_run_id")
+            .unwrap();
+        statement
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(original_costs.len(), 3);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='MODEL_COST_SNAPSHOT_RECORDED' AND json_extract(payload_json,'$.costSnapshot.priceTableVersion')=1 AND json_extract(payload_json,'$.predictedCostCents')=json_extract(payload_json,'$.reservedCents') AND json_type(payload_json,'$.budgetSettings.monthlyBudget')='null' AND json_type(payload_json,'$.budgetSettings.chapterBudget')='null'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.actualCostStatus')='ESTIMATED'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"model_pricing_save","commandId":"cmd:rv10:snapshot-price-v2",
+            "idempotencyKey":"key:rv10:snapshot-price-v2","requestedAt":"2026-10-09T12:00:01Z",
+            "payload":{"entries":[{"providerId":"fixture-cost-provider","modelId":"priced-model","inputPricePerMillionTokens":10000,"outputPricePerMillionTokens":20000,"cachedInputPricePerMillionTokens":5000}]}
+        }),
+    )
+    .unwrap();
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let after_price_edit = {
+        let mut statement = connection
+            .prepare("SELECT model_run_id,cost_cents FROM model_usage WHERE project_id=?1 ORDER BY model_run_id")
+            .unwrap();
+        statement
+            .query_map([project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(after_price_edit, original_costs);
+    let later_spec = ai_novel_production_system_core::runtime::ModelRunSpec {
+        model_run_id: StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            "rv10-price-snapshot-after-update",
+        )
+        .unwrap(),
+        job_id: None,
+        step_id: None,
+        provider: "fixture-cost-provider".into(),
+        model: "priced-model".into(),
+        idempotency_key: "key:rv10-price-snapshot-after-update".into(),
+        capability: "RENDER_CHAPTER".into(),
+        prompt_ref: None,
+        context_manifest_ref: None,
+        budget_id: Some(
+            ai_novel_production_system_core::runtime::DurableModelRunner::project_budget_id(
+                project_id,
+            ),
+        ),
+        predicted_cost_cents: 0,
+        cost_snapshot: None,
+        attempt_no: 1,
+        repair_round: 0,
+    };
+    ai_novel_production_system_core::production::execute_production_model(
+        &connection,
+        gateway.as_ref(),
+        &later_spec,
+        "RENDER_CHAPTER",
+        json!({"chapterId":"chapter:price-snapshot","targetChineseCharacters":800}),
+        "2026-10-09T12:00:02Z",
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT json_extract(payload_json,'$.costSnapshot.priceTableVersion') FROM production_events WHERE project_id=?1 AND event_id=?2",
+                libsql_rusqlite::params![project_id,format!("event:cost-snapshot:{}", later_spec.model_run_id)],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        2
+    );
+    let predicted: i64 = connection
+        .query_row(
+            "SELECT predicted_cost_cents FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
+            libsql_rusqlite::params![project_id, later_spec.model_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let snapshot_prediction: i64 = connection
+        .query_row(
+            "SELECT json_extract(payload_json,'$.predictedCostCents') FROM production_events WHERE project_id=?1 AND event_id=?2",
+            libsql_rusqlite::params![project_id,format!("event:cost-snapshot:{}", later_spec.model_run_id)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(predicted > 0);
+    assert_eq!(predicted, snapshot_prediction);
+}
+
+#[test]
+fn rv10_story_direction_generation_stops_after_project_budget_is_exhausted() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CountingCapabilitiesGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let created = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_create_from_idea","commandId":"cmd:rv10:direction-project",
+            "idempotencyKey":"key:rv10:direction-project","requestedAt":NOW,
+            "payload":{"title":"RV-10 directions budget","idea":"账本线索"}
+        }),
+    )
+    .unwrap();
+    let project_id = created["projectId"].as_str().unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:direction-budget",
+            "idempotencyKey":"key:rv10:direction-budget","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"settings":{"provider":"fixture","providerId":"fixture","model":"unpriced-model","modelId":"unpriced-model","endpoint":"","enabled":false,"monthlyBudget":0,"chapterBudget":null}}
+        }),
+    )
+    .unwrap();
+    let revision = state.manager.project_revision(project_id).unwrap();
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"story_directions_generate","commandId":"cmd:rv10:directions",
+            "idempotencyKey":"key:rv10:directions","projectId":project_id,
+            "expectedRevision":revision,"requestedAt":NOW,"payload":{}
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("MODEL_PRICE_REQUIRED"));
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn rv10_project_budgets_default_unset_and_change_history_preserves_partial_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-rv10-budget-history";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "RV-10 budget history", NOW)
+        .unwrap();
+    let initial = ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository::read_project(&connection, project_id).unwrap();
+    assert!(initial["monthlyBudget"].is_null());
+    assert!(initial["chapterBudget"].is_null());
+    assert_eq!(initial["budgetHistory"], json!([]));
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:budget-history-set",
+            "idempotencyKey":"key:rv10:budget-history-set","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"settings":{"provider":"fixture","providerId":"fixture","model":"test-model","modelId":"test-model","endpoint":"","enabled":false,"monthlyBudget":2,"chapterBudget":0.5}}
+        }),
+    )
+    .unwrap();
+    let after_set = state.manager.open(project_id, "", NOW).unwrap();
+    let settings = ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository::read_project(&after_set, project_id).unwrap();
+    assert_eq!(settings["monthlyBudget"], json!(2));
+    assert_eq!(settings["chapterBudget"], json!(0.5));
+    assert_eq!(settings["budgetHistory"].as_array().unwrap().len(), 2);
+    drop(after_set);
+
+    let revision = state.manager.project_revision(project_id).unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:budget-history-provider-only",
+            "idempotencyKey":"key:rv10:budget-history-provider-only","projectId":project_id,
+            "expectedRevision":revision,"requestedAt":"2026-10-09T12:00:01Z",
+            "payload":{"settings":{"provider":"fixture-updated","providerId":"fixture","model":"test-model","modelId":"test-model","endpoint":"","enabled":false}}
+        }),
+    )
+    .unwrap();
+    let after_partial = state.manager.open(project_id, "", NOW).unwrap();
+    let settings = ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository::read_project(&after_partial, project_id).unwrap();
+    assert_eq!(settings["monthlyBudget"], json!(2));
+    assert_eq!(settings["chapterBudget"], json!(0.5));
+    assert_eq!(settings["budgetHistory"].as_array().unwrap().len(), 2);
+    drop(after_partial);
+
+    let revision = state.manager.project_revision(project_id).unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:budget-history-clear-monthly",
+            "idempotencyKey":"key:rv10:budget-history-clear-monthly","projectId":project_id,
+            "expectedRevision":revision,"requestedAt":"2026-10-09T12:00:02Z",
+            "payload":{"settings":{"monthlyBudget":null}}
+        }),
+    )
+    .unwrap();
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let settings = ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository::read_project(&connection, project_id).unwrap();
+    let history = settings["budgetHistory"].as_array().unwrap();
+    assert_eq!(settings["monthlyBudget"], Value::Null);
+    assert_eq!(settings["chapterBudget"], json!(0.5));
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[2]["setting"], "monthlyBudget");
+    assert_eq!(history[2]["oldValue"], json!(2));
+    assert_eq!(history[2]["newValue"], Value::Null);
+    assert_eq!(history[2]["changedAt"], "2026-10-09T12:00:02Z");
+}
+
+#[test]
+fn rv10_priced_call_over_monthly_budget_is_blocked_before_provider_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let gateway = Arc::new(CatalogPricingGateway {
+        paths: paths.clone(),
+        capabilities: Arc::new(Mutex::new(Vec::new())),
+    });
+    let state = KernelState::with_production_gateway(paths, gateway.clone());
+    let project_id = "p-b08-rv10-priced-budget";
+    let connection = state
+        .manager
+        .create(project_id, "RV-10 priced budget", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"model_pricing_save","commandId":"cmd:rv10:priced-table",
+            "idempotencyKey":"key:rv10:priced-table","requestedAt":NOW,
+            "payload":{"entries":[{"providerId":"fixture-cost-provider","modelId":"priced-model","inputPricePerMillionTokens":10000,"outputPricePerMillionTokens":20000}]}
+        }),
+    )
+    .unwrap();
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"settings_save","commandId":"cmd:rv10:monthly-cap",
+            "idempotencyKey":"key:rv10:monthly-cap","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"settings":{"provider":"fixture","providerId":"fixture-cost-provider","model":"priced-model","modelId":"priced-model","endpoint":"","enabled":false,"monthlyBudget":0.01,"chapterBudget":null,"privacyMode":"local-first","sendDraftOnly":true,"exportFormat":"DOCX","platform":"","theme":"system"}}
+        }),
+    )
+    .unwrap();
+
+    let current_revision = state.manager.project_revision(project_id).unwrap();
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:rv10:priced-budget-production",
+            "idempotencyKey":"key:rv10:priced-budget-production","projectId":project_id,
+            "expectedRevision":current_revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "BUDGET_EXCEEDED");
+    assert!(gateway.capabilities.lock().unwrap().is_empty());
+
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn rv10_unpriced_model_runs_without_budget_and_records_unpriced_usage() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let gateway = Arc::new(CatalogPricingGateway {
+        paths: paths.clone(),
+        capabilities: Arc::new(Mutex::new(Vec::new())),
+    });
+    let state = KernelState::with_production_gateway(paths, gateway.clone());
+    let project_id = "p-b08-rv10-unpriced-unbudgeted";
+    let connection = state
+        .manager
+        .create(project_id, "RV-10 unpriced model", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:rv10:unpriced-unbudgeted-production",
+            "idempotencyKey":"key:rv10:unpriced-unbudgeted-production","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert_eq!(gateway.capabilities.lock().unwrap().len(), 3);
+
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_usage WHERE project_id=?1 AND total_tokens>0 AND cost_cents=0",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE project_id=?1 AND event_type='MODEL_USAGE_RECORDED' AND json_extract(payload_json,'$.actualCostStatus')='UNPRICED'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
     );
 }
 

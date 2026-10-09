@@ -97,6 +97,7 @@ fn xiaomi_r02_transport_failure_reconciles_runtime_projection() {
         context_manifest_ref: None,
         budget_id: None,
         predicted_cost_cents: 1,
+        cost_snapshot: None,
         attempt_no: 1,
         repair_round: 0,
     };

@@ -47,6 +47,7 @@ fn model_spec() -> ModelRunSpec {
         context_manifest_ref: Some("context:b03:1".into()),
         budget_id: None,
         predicted_cost_cents: 1,
+        cost_snapshot: None,
         attempt_no: 0,
         repair_round: 0,
     }
@@ -986,6 +987,76 @@ fn b03_explicit_unknown_retry_is_budget_blocked_before_transport_when_hold_excee
             )
             .unwrap(),
         "BUDGET_BLOCKED"
+    );
+}
+
+#[test]
+fn b03_unknown_remote_reservation_counts_against_project_monthly_budget() {
+    let (_temp, _manager, connection) = project();
+    connection
+        .execute(
+            "INSERT INTO project_settings(project_id,setting_key,setting_value,updated_at) VALUES ('p1','monthlyBudget','1.0',?1)",
+            [NOW],
+        )
+        .unwrap();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "RUNNING",
+        NOW,
+    )
+    .unwrap();
+    let snapshot = ai_novel_production_system_core::model_cost::ModelCostSnapshot {
+        price_table_version: 1,
+        provider_id: "fake".into(),
+        model_id: "fake-model".into(),
+        price_status: "PRICED".into(),
+        input_price_per_million_tokens: Some(1.0),
+        output_price_per_million_tokens: Some(1.0),
+        cached_input_price_per_million_tokens: None,
+        estimated_input_tokens: 50,
+        estimated_output_tokens: 50,
+        predicted_cost_cents: 60,
+    };
+    let mut first_spec = model_spec();
+    first_spec.model_run_id = "mr:121212121212121212121212".into();
+    first_spec.idempotency_key = "model-key:monthly:unknown:1".into();
+    first_spec.budget_id = Some(DurableModelRunner::project_budget_id("p1"));
+    first_spec.predicted_cost_cents = snapshot.predicted_cost_cents;
+    first_spec.cost_snapshot = Some(snapshot.clone());
+    let mut first_transport = FakeModelTransport::failure(TransportFailure::UnknownRemoteOutcome);
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut first_transport, &first_spec, NOW),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(first_transport.send_calls(), 1);
+
+    let mut second_spec = first_spec.clone();
+    second_spec.model_run_id = "mr:131313131313131313131313".into();
+    second_spec.idempotency_key = "model-key:monthly:unknown:2".into();
+    second_spec.predicted_cost_cents = 50;
+    second_spec
+        .cost_snapshot
+        .as_mut()
+        .unwrap()
+        .predicted_cost_cents = 50;
+    let mut second_transport = FakeModelTransport::success(json!({"draft":"must not send"}));
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut second_transport, &second_spec, NOW),
+        Err(RuntimeError::BudgetHardLimit)
+    ));
+    assert_eq!(second_transport.send_calls(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
     );
 }
 
