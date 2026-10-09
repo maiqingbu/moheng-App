@@ -1487,26 +1487,6 @@ fn seed_chapter_and_gate_long_form(connection: &Connection, project_id: &str) ->
     chapter_id
 }
 
-fn seed_chapter_and_gate_long_form_without_signing(
-    connection: &Connection,
-    project_id: &str,
-) -> String {
-    let policy_id =
-        StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
-    let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
-        connection,
-        project_id,
-        default_b08_gate_policy(),
-        policy_id,
-        true,
-        true,
-        "APPROVED",
-    );
-    extend_seeded_chapter_volume(connection, project_id);
-    seed_b08_long_form_without_signing_fixture(connection, project_id, &chapter_id);
-    chapter_id
-}
-
 fn seed_chapter_and_gate_with_policy(
     connection: &Connection,
     project_id: &str,
@@ -1599,6 +1579,21 @@ fn seed_b08_long_form_project(
     state: &KernelState,
     project_id: &str,
 ) -> (String, String, String, (String, i64, String)) {
+    seed_b08_long_form_project_with_signing(state, project_id, true)
+}
+
+fn seed_b08_long_form_project_without_signing(
+    state: &KernelState,
+    project_id: &str,
+) -> (String, String, String, (String, i64, String)) {
+    seed_b08_long_form_project_with_signing(state, project_id, false)
+}
+
+fn seed_b08_long_form_project_with_signing(
+    state: &KernelState,
+    project_id: &str,
+    include_signing_receipt: bool,
+) -> (String, String, String, (String, i64, String)) {
     let connection = state.manager.create(project_id, "B08 long", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate_without_planning_contracts(&connection, project_id);
     let volume_id =
@@ -1642,7 +1637,11 @@ fn seed_b08_long_form_project(
         connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
         connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)", libsql_rusqlite::params![project_id,artifact_type,scope_level,scope_key,artifact_id,hash]).unwrap();
     }
-    seed_b08_long_form_signing_fixture(&connection, project_id, &chapter_id);
+    if include_signing_receipt {
+        seed_b08_long_form_signing_fixture(&connection, project_id, &chapter_id);
+    } else {
+        seed_b08_long_form_without_signing_fixture(&connection, project_id, &chapter_id);
+    }
     let volume_head_before = (volume_plan_id.to_string(), 1_i64, volume_plan_hash);
     drop(connection);
 
@@ -8215,11 +8214,11 @@ fn b6_approved_book_plan_without_signing_rejects_long_form_planning_without_writ
     let project_id = "p-b6-rv32-no-signing-planning";
     let gateway = Arc::new(CountingCapabilitiesGateway::default());
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let (chapter_id, _, _, _) = seed_b08_long_form_project_without_signing(&state, project_id);
     let connection = state
         .manager
-        .create(project_id, "B6 missing signing", NOW)
+        .open(project_id, "B6 missing signing", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate_long_form_without_signing(&connection, project_id);
     let before = b08_signing_side_effect_snapshot(&connection, project_id, &chapter_id);
     assert_eq!(before["modelRuns"], 0);
     assert_eq!(before["jobs"], 0);
@@ -8267,11 +8266,12 @@ fn b6_approved_book_plan_without_signing_rejects_production_without_writes() {
     let project_id = "p-b6-rv32-no-signing-production";
     let gateway = Arc::new(CountingCapabilitiesGateway::default());
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let (chapter_id, volume_id, _, _) =
+        seed_b08_long_form_project_without_signing(&state, project_id);
     let connection = state
         .manager
-        .create(project_id, "B6 missing signing", NOW)
+        .open(project_id, "B6 missing signing", NOW)
         .unwrap();
-    let chapter_id = seed_chapter_and_gate_long_form_without_signing(&connection, project_id);
     let before = b08_signing_side_effect_snapshot(&connection, project_id, &chapter_id);
     drop(connection);
 
@@ -8284,7 +8284,7 @@ fn b6_approved_book_plan_without_signing_rejects_production_without_writes() {
             "projectId":project_id,
             "expectedRevision":before["revision"].as_i64().unwrap(),
             "requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","volumeId":StableIdentityFactory::from_command(StableIdKind::Volume,"b08-volume").unwrap(),"entityIds":["entity:actual:linzhou"],"references":[]}
+            "payload":{"chapterId":chapter_id,"executionMode":"LONG_FORM","volumeId":volume_id,"entityIds":["entity:actual:linzhou"],"references":[]}
         }),
     );
 
@@ -8305,12 +8305,7 @@ fn b6_approved_book_plan_without_signing_shows_production_center_prompt() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b6-rv32-no-signing-center";
     let state = KernelState::new(AppPaths::new(temp.path()));
-    let connection = state
-        .manager
-        .create(project_id, "B6 missing signing", NOW)
-        .unwrap();
-    let _chapter_id = seed_chapter_and_gate_long_form_without_signing(&connection, project_id);
-    drop(connection);
+    let _ = seed_b08_long_form_project_without_signing(&state, project_id);
 
     let center = query_production_center_impl(&state, json!({"projectId":project_id})).unwrap();
 
