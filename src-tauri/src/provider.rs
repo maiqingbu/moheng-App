@@ -411,6 +411,10 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 ProviderErrorKind::RateLimited,
                 "provider rate limited",
             )),
+            502..=504 => Some(ProviderError::new(
+                ProviderErrorKind::UnknownRemoteOutcome,
+                "provider response status does not confirm request outcome",
+            )),
             500..=u16::MAX => Some(ProviderError::new(
                 ProviderErrorKind::Transport,
                 "provider server failure",
@@ -426,12 +430,15 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             .unwrap_or_else(|_| "unavailable".into());
         let response = match response.bytes() {
             Ok(response) => response,
-            Err(error) => {
+            Err(_error) => {
                 eprintln!(
                     "P01_PROVIDER_RESPONSE http_status={} content_type={} response_bytes=unknown request_payload_digest={}",
                     status, content_type, request_payload_digest
                 );
-                return Err(status_error.unwrap_or_else(|| Self::request_error(error)));
+                return Err(ProviderError::new(
+                    ProviderErrorKind::UnknownRemoteOutcome,
+                    "provider response body could not be read; request outcome is unknown",
+                ));
             }
         };
         let response_bytes = response.len();

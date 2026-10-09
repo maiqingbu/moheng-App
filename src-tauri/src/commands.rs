@@ -9427,8 +9427,37 @@ fn apply_provider_status(settings: &mut Value) {
 }
 
 #[tauri::command]
-pub fn test_provider(_state: State<'_, KernelState>, settings: Value) -> Result<Value, String> {
+pub async fn test_provider(
+    _state: State<'_, KernelState>,
+    settings: Value,
+) -> Result<Value, String> {
     let settings = settings.get("settings").cloned().unwrap_or(settings);
+    run_provider_test_on_blocking_worker(move || test_provider_sync(settings)).await
+}
+
+async fn run_provider_test_on_blocking_worker<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("P01_TEST_PROVIDER_WORKER_FAILED:{error}"))?
+}
+
+fn validate_test_provider_response(raw_response: &str) -> Result<Value, String> {
+    let envelope: Value =
+        serde_json::from_str(raw_response).map_err(|_| "P01_MALFORMED_RESPONSE".to_string())?;
+    let output =
+        crate::production::parse_provider_model_payload_for_capability(envelope, "TEST_PROVIDER")
+            .map_err(|_| "P01_MALFORMED_RESPONSE".to_string())?;
+    if output != json!({"ok":true}) {
+        return Err("P01_MALFORMED_RESPONSE".into());
+    }
+    Ok(output)
+}
+
+fn test_provider_sync(settings: Value) -> Result<Value, String> {
     let config = provider_config(&settings)?;
     if !config.enabled || config.endpoint.is_empty() {
         return Err("P01_PROVIDER_NOT_CONFIGURED".into());
@@ -9458,11 +9487,13 @@ pub fn test_provider(_state: State<'_, KernelState>, settings: Value) -> Result<
             &secret,
         )
         .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))?;
+    let response_payload = validate_test_provider_response(&response.raw_response)?;
     Ok(json!({
         "finalStatus":"committed",
         "message":"Provider 连接测试成功",
         "providerId":config.provider_id,
         "usage":response.usage,
+        "response":response_payload,
         "providerRequestId":response.provider_request_id,
         "secretReturned":false
     }))
@@ -9641,5 +9672,44 @@ mod rv30_opening_canon_tests {
             Some(&[]),
             Some(&BTreeSet::from(["fact:opening:guqing".to_string()]))
         ));
+    }
+}
+
+#[cfg(test)]
+mod rv17_provider_test_response_tests {
+    use super::{run_provider_test_on_blocking_worker, validate_test_provider_response};
+
+    #[test]
+    fn provider_connection_test_runs_provider_io_on_blocking_worker() {
+        tauri::async_runtime::block_on(async {
+            let caller_thread = format!("{:?}", std::thread::current().id());
+            let worker_thread = run_provider_test_on_blocking_worker(|| {
+                Ok(format!("{:?}", std::thread::current().id()))
+            })
+            .await
+            .unwrap();
+            assert_ne!(worker_thread, caller_thread);
+        });
+    }
+
+    #[test]
+    fn provider_test_requires_exact_ok_true_payload() {
+        assert!(validate_test_provider_response(r#"{"ok":true}"#).is_ok());
+        assert!(validate_test_provider_response(
+            r#"{"id":"local","choices":[{"message":{"content":"{\"ok\":true}"}}]}"#
+        )
+        .is_ok());
+        assert_eq!(
+            validate_test_provider_response("<html>service proxy error</html>").unwrap_err(),
+            "P01_MALFORMED_RESPONSE"
+        );
+        assert_eq!(
+            validate_test_provider_response(r#"{"ok":false}"#).unwrap_err(),
+            "P01_MALFORMED_RESPONSE"
+        );
+        assert_eq!(
+            validate_test_provider_response(r#"{"ok":true,"unexpected":true}"#).unwrap_err(),
+            "P01_MALFORMED_RESPONSE"
+        );
     }
 }
