@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Read;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const FANQIE_WRITER_ZONE_URL: &str = "https://fanqienovel.com/writer/zone/";
 const FANQIE_SOURCE_ID: &str = "fanqie-writer-zone";
@@ -163,51 +163,56 @@ pub fn current_epoch_ms() -> i64 {
 }
 
 fn fetch_writer_zone_page() -> Result<String, &'static str> {
-    const MARKER: &str = "\n__MOHENG_MARKET_HTTP_META__";
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--connect-timeout",
-            "4",
-            "--max-time",
-            "10",
-            "--max-filesize",
-            "1048576",
-            "--proto",
-            "=https",
-            "--max-redirs",
-            "0",
-            "--user-agent",
-            "Moheng/2.1 (human-initiated market discovery)",
-            "--header",
-            "Accept: text/html",
-            "--write-out",
-            "\n__MOHENG_MARKET_HTTP_META__%{http_code}|%{url_effective}|%{content_type}",
-            FANQIE_WRITER_ZONE_URL,
-        ])
-        .output()
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(true)
+        .build()
         .map_err(|_| "MARKET_SOURCE_CLIENT_UNAVAILABLE")?;
-    if !output.status.success() || output.stdout.len() > MAX_SOURCE_BYTES + 256 {
-        return Err("MARKET_SOURCE_HTTP_UNAVAILABLE");
-    }
-    let response =
-        String::from_utf8(output.stdout).map_err(|_| "MARKET_SOURCE_RESPONSE_ENCODING_INVALID")?;
-    let (body, metadata) = response
-        .rsplit_once(MARKER)
-        .ok_or("MARKET_SOURCE_RESPONSE_METADATA_MISSING")?;
-    let mut fields = metadata.splitn(3, '|');
-    let status = fields.next().unwrap_or_default();
-    let final_url = fields.next().unwrap_or_default();
-    let content_type = fields.next().unwrap_or_default();
-    if status != "200"
-        || final_url != FANQIE_WRITER_ZONE_URL
-        || !content_type.starts_with("text/html")
-        || body.len() > MAX_SOURCE_BYTES
+    let response = client
+        .get(FANQIE_WRITER_ZONE_URL)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Moheng/2.1 (human-initiated market discovery)",
+        )
+        .header(reqwest::header::ACCEPT, "text/html")
+        .send()
+        .map_err(|_| "MARKET_SOURCE_HTTP_UNAVAILABLE")?;
+    if response.status() != reqwest::StatusCode::OK
+        || response.url().as_str() != FANQIE_WRITER_ZONE_URL
+        || !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"))
     {
         return Err("MARKET_SOURCE_HTTP_UNAVAILABLE");
     }
-    Ok(body.to_string())
+    let body = read_bounded_response(response)?;
+    String::from_utf8(body).map_err(|_| "MARKET_SOURCE_RESPONSE_ENCODING_INVALID")
+}
+
+fn read_bounded_response(response: reqwest::blocking::Response) -> Result<Vec<u8>, &'static str> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_SOURCE_BYTES as u64)
+    {
+        return Err("MARKET_SOURCE_HTTP_UNAVAILABLE");
+    }
+    let capacity = response
+        .content_length()
+        .unwrap_or_default()
+        .min(MAX_SOURCE_BYTES as u64) as usize;
+    let mut body = Vec::with_capacity(capacity);
+    response
+        .take((MAX_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|_| "MARKET_SOURCE_HTTP_UNAVAILABLE")?;
+    if body.len() > MAX_SOURCE_BYTES {
+        return Err("MARKET_SOURCE_HTTP_UNAVAILABLE");
+    }
+    Ok(body)
 }
 
 /// Parses only the page's bounded JSON-backed display data. It never parses or
