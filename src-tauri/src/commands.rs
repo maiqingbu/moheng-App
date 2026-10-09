@@ -8554,7 +8554,7 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     .map_err(|error| error.to_string())?,
                 Err(error) => return Err(error.to_string()),
             };
-            let gate_policy_receipt = crate::gate_policy::ensure_default_policy(
+            crate::gate_policy::ensure_default_policy(
                 &handle,
                 &id,
                 &format!("{command_id}:gate-policy-default"),
@@ -8600,10 +8600,6 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             if let Some(entry_receipt) = entry_receipt {
                 response["entryReceipt"] =
                     serde_json::to_value(entry_receipt).map_err(|error| error.to_string())?;
-            }
-            if let Some(receipt) = gate_policy_receipt {
-                response["gatePolicyReceipt"] =
-                    serde_json::to_value(receipt).map_err(|error| error.to_string())?;
             }
             if let Some(snapshot) = market_source_snapshot.as_ref() {
                 response["marketSourceStatus"] = json!(snapshot.source_status);

@@ -1675,16 +1675,25 @@ fn r2_seed_async_provider_project(
         project_scope,
         &json!({"payloadSchema":"opening-contract.r1","storyConstitutionRef":story_ref,"mainContractRef":main_ref,"bookPlanRef":book_plan_ref,"openingReady":true,"firstChapterGoal":"让林舟主动核对石门线索","firstThreeChapterPromise":"逐步验证石门线索并留下代价","forbiddenReveals":[]}),
     );
-    let gate_policy = json!({"payloadSchema":"gate-policy.r1","policyId":"r2-local","rules":["candidate-audit","chapter-final"],"canonSemantics":{"policyVersion":"canon-semantics.r1","rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},{"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},{"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},{"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}]}});
-    r2_insert_artifact(
-        connection,
-        project_id,
-        &format!("gate-policy:r2:{project_id}"),
-        "GatePolicy",
-        "PROJECT",
-        project_scope,
-        &gate_policy,
-    );
+    let has_gate_policy: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM canonical_heads WHERE project_id=?1 AND artifact_type='GatePolicy')",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !has_gate_policy {
+        let gate_policy = json!({"payloadSchema":"gate-policy.r1","policyId":"r2-local","rules":["candidate-audit","chapter-final"],"canonSemantics":{"policyVersion":"canon-semantics.r1","rules":[{"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"},{"predicate":"remembered","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"owns_item","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}},{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]},{"predicate":"allegiance","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME","polarityField":"polarity"},{"predicate":"membership","cardinality":"MULTI","scope":{"kind":"OBJECT_FIELD","field":"scope"}}]}});
+        r2_insert_artifact(
+            connection,
+            project_id,
+            &format!("gate-policy:r2:{project_id}"),
+            "GatePolicy",
+            "PROJECT",
+            project_scope,
+            &gate_policy,
+        );
+    }
     (chapter_id, volume_id, book_plan_hash)
 }
 
