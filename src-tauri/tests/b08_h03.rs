@@ -2075,7 +2075,10 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
     })).unwrap_err();
-    assert_eq!(error, "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS");
+    assert_eq!(
+        error,
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE"
+    );
     let request = gateway.audit_inputs.lock().unwrap()[0].clone();
     let contract = &request["auditPolicyContract"];
     assert_eq!(
@@ -2117,6 +2120,103 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
         gateway.capabilities.lock().unwrap().as_slice(),
         ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
     );
+}
+
+#[test]
+fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-rv34-retry-unknown-predicate";
+    let gateway = CapturingAuditPolicyGateway {
+        unregistered_predicate: true,
+        rendered_body: Some("林舟推开石门。".into()),
+        ..Default::default()
+    };
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
+    let connection = state
+        .manager
+        .create(project_id, "RV-34 unknown predicate retry", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let first_command = "cmd:b08:rv34-unknown-predicate";
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":first_command,
+            "idempotencyKey":"key:b08:rv34-unknown-predicate","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
+    let old_job_id = StableIdentityFactory::from_command(StableIdKind::Job, first_command).unwrap();
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3
+    );
+    drop(connection);
+
+    let updated = execute_command_impl(
+        &state,
+        json!({
+            "type":"gate_policy_update","commandId":"cmd:b08:rv34-add-predicate",
+            "idempotencyKey":"key:b08:rv34-add-predicate","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"action":"UPSERT_RULE","rule":{"predicate":"UNREGISTERED_SYNTHETIC_PREDICATE","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}}
+        }),
+    )
+    .unwrap();
+    assert_eq!(updated["finalStatus"], "committed");
+
+    let retry = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate-retry",
+            "idempotencyKey":"key:b08:rv34-unknown-predicate-retry","projectId":project_id,
+            "expectedRevision":1,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false,"retryOfJobId":old_job_id}
+        }),
+    )
+    .unwrap();
+    assert_eq!(retry["finalStatus"], "committed");
+
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3,
+        "retries after a Gate correction reuse completed model outputs"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        gateway.capabilities.lock().unwrap().as_slice(),
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+    );
+    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
 }
 
 #[test]

@@ -259,6 +259,48 @@ fn revision(state: &KernelState, project_id: &str) -> i64 {
         .expect("project revision")
 }
 
+fn install_opening_fixture_gate_rules(state: &KernelState, project_id: &str, prefix: &str) {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let has_policy = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        project_id,
+        "GatePolicy",
+    )
+    .unwrap()
+    .is_some();
+    drop(connection);
+    if !has_policy {
+        command(
+            state,
+            project_id,
+            &format!("{prefix}:test-gate-policy-default"),
+            "gate_policy_update",
+            json!({"action":"ADOPT_DEFAULT"}),
+        );
+    }
+    for (index, predicate) in [
+        "found_evidence",
+        "protected_oath",
+        "appears_in_opening",
+        "opening_event",
+        "distrusts",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        command(
+            state,
+            project_id,
+            &format!("{prefix}:test-gate-rule:{index}"),
+            "gate_policy_update",
+            json!({
+                "action":"UPSERT_RULE",
+                "rule":{"predicate":predicate,"cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}
+            }),
+        );
+    }
+}
+
 fn command(
     state: &KernelState,
     project_id: &str,
@@ -301,6 +343,7 @@ fn create_story_setup_seed(state: &KernelState, prefix: &str) -> String {
     )
     .expect("create project");
     let project_id = created["projectId"].as_str().unwrap().to_owned();
+    install_opening_fixture_gate_rules(state, &project_id, prefix);
     command(
         state,
         &project_id,

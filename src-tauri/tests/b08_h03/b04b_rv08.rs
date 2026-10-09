@@ -203,17 +203,17 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
         .open(project_id, "RV-08 default policy", NOW)
         .unwrap();
     let (reference, payload) = current_gate_policy(&connection, project_id);
+    assert_eq!(payload["policyId"], "gate-policy-default.r2");
     let policy_bytes =
-        std::fs::read("../contracts/resources/gate-policy-default.r1/policy.json").unwrap();
+        std::fs::read("../contracts/resources/gate-policy-default.r2/policy.json").unwrap();
     let manifest: Value = serde_json::from_slice(
-        &std::fs::read("../contracts/resources/gate-policy-default.r1/resource-manifest.json")
+        &std::fs::read("../contracts/resources/gate-policy-default.r2/resource-manifest.json")
             .unwrap(),
     )
     .unwrap();
     let raw_digest = hex::encode(sha2::Sha256::digest(&policy_bytes));
     assert_eq!(reference.version, 1);
-    assert_eq!(payload["policyId"], "gate-policy-default.r1");
-    assert_eq!(payload["resourceRef"]["version"], "gate-policy-default.r1");
+    assert_eq!(payload["resourceRef"]["version"], "gate-policy-default.r2");
     assert_eq!(
         payload["resourceRef"]["sha256"],
         manifest["files"]["policy.json"]
@@ -224,7 +224,7 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
     );
     assert_eq!(
         payload["canonSemantics"]["rules"].as_array().unwrap().len(),
-        17
+        15
     );
     let policy =
         ai_novel_production_system_core::canon_semantics::CanonSemanticPolicy::from_gate_policy(
@@ -279,6 +279,16 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
             "NO_CONFLICT_MULTI"
         )
     );
+    let loadout_policy =
+        ai_novel_production_system_core::canon_semantics::CanonSemanticPolicy::from_gate_policy(
+            &json!({
+                "canonSemantics":{
+                    "policyVersion":"rv08-test-loadout.r1",
+                    "rules":[{"predicate":"loadout","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"},"mutualExclusions":[{"left":{"kind":"A"},"right":{"kind":"B"}}]}]
+                }
+            }),
+        )
+        .unwrap();
     let loadout_a = json!({"kind":"A"});
     let loadout_b = json!({"kind":"B"});
     let current_loadout =
@@ -287,7 +297,7 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
             ..current
         };
     assert_eq!(
-        policy.evaluate(
+        loadout_policy.evaluate(
             "loadout",
             &current_loadout,
             ai_novel_production_system_core::canon_semantics::CandidateSemanticInput {
@@ -301,6 +311,77 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
             "CONFLICT_MUTUAL_EXCLUSION"
         )
     );
+}
+
+#[test]
+fn b08_rv34_existing_r1_policy_is_preserved_until_explicit_r2_adoption() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"project_create_from_idea",
+            "commandId":"cmd:rv34:r1-project",
+            "idempotencyKey":"key:rv34:r1-project",
+            "requestedAt":NOW,
+            "payload":{"title":"RV-34 historical r1 policy"}
+        }),
+    )
+    .unwrap();
+    let project_id = result["projectId"].as_str().unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "RV-34 historical r1", NOW)
+        .unwrap();
+    let (old_ref, old_payload) = current_gate_policy(&connection, project_id);
+    assert_eq!(old_payload["policyId"], "gate-policy-default.r1");
+    drop(connection);
+
+    query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "RV-34 unchanged historical r1", NOW)
+        .unwrap();
+    assert_eq!(current_gate_policy(&connection, project_id).0, old_ref);
+    drop(connection);
+
+    let expected_revision = {
+        let connection = state.manager.open(project_id, "", NOW).unwrap();
+        NarrativeRepository::project_revision(&connection, project_id).unwrap()
+    };
+    execute_command_impl(
+        &state,
+        gate_policy_update_request(
+            project_id,
+            "ADOPT_DEFAULT",
+            json!({}),
+            expected_revision,
+            "adopt-r2",
+        ),
+    )
+    .expect("an existing r1 project can explicitly adopt r2");
+
+    let connection = state
+        .manager
+        .open(project_id, "RV-34 adopted r2", NOW)
+        .unwrap();
+    let (current_ref, current_payload) = current_gate_policy(&connection, project_id);
+    assert_eq!(current_payload["policyId"], "gate-policy-default.r2");
+    assert_eq!(current_payload["previousPolicyRef"]["artifactId"], old_ref.artifact_id);
+    assert_eq!(
+        NarrativeRepository::artifact_payload_by_ref(&connection, project_id, &old_ref)
+            .unwrap()
+            .unwrap()["policyId"],
+        "gate-policy-default.r1"
+    );
+    assert_eq!(current_ref.version, old_ref.version + 1);
 }
 
 #[test]
@@ -475,7 +556,7 @@ fn b08_rv08_legacy_b11_policy_blocks_long_form_until_explicit_default_adoption()
         .unwrap();
     let (current_ref, current_payload) = current_gate_policy(&connection, project_id);
     assert_eq!(current_ref.version, 3);
-    assert_eq!(current_payload["policyId"], "gate-policy-default.r1");
+    assert_eq!(current_payload["policyId"], "gate-policy-default.r2");
     assert_eq!(
         NarrativeRepository::artifact_payload_by_ref(&connection, project_id, &legacy_ref)
             .unwrap()

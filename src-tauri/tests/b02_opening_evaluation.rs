@@ -435,6 +435,48 @@ fn revision(state: &KernelState, project_id: &str) -> i64 {
         .expect("revision")
 }
 
+fn install_opening_fixture_gate_rules(state: &KernelState, project_id: &str) {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let has_policy = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        project_id,
+        "GatePolicy",
+    )
+    .unwrap()
+    .is_some();
+    drop(connection);
+    if !has_policy {
+        command(
+            state,
+            project_id,
+            "b02:test-gate-policy-default",
+            "gate_policy_update",
+            json!({"action":"ADOPT_DEFAULT"}),
+        );
+    }
+    for (index, predicate) in [
+        "found_evidence",
+        "protected_oath",
+        "appears_in_opening",
+        "opening_event",
+        "distrusts",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        command(
+            state,
+            project_id,
+            &format!("b02:test-gate-rule:{index}"),
+            "gate_policy_update",
+            json!({
+                "action":"UPSERT_RULE",
+                "rule":{"predicate":predicate,"cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}
+            }),
+        );
+    }
+}
+
 fn command(
     state: &KernelState,
     project_id: &str,
@@ -539,6 +581,7 @@ fn create_opening_project(state: &KernelState) -> String {
         .as_str()
         .expect("project id")
         .to_owned();
+    install_opening_fixture_gate_rules(state, &project_id);
     command(
         state,
         &project_id,
