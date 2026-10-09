@@ -224,7 +224,7 @@ fn b08_rv08_new_project_commits_version_one_of_the_checksummed_default_policy() 
     );
     assert_eq!(
         payload["canonSemantics"]["rules"].as_array().unwrap().len(),
-        11
+        17
     );
     let policy =
         ai_novel_production_system_core::canon_semantics::CanonSemanticPolicy::from_gate_policy(
