@@ -64,6 +64,61 @@ impl ProductionModelGateway for CapturingAuditPolicyGateway {
 
 struct GoodQualityGateway;
 
+#[derive(Clone, Default)]
+struct S40RepairGateway {
+    capabilities: Arc<Mutex<Vec<String>>>,
+    repair_inputs: Arc<Mutex<Vec<Value>>>,
+    audit_inputs: Arc<Mutex<Vec<Value>>>,
+}
+
+impl ProductionModelGateway for S40RepairGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        self.capabilities
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(capability.to_string());
+        match capability {
+            "PLAN_STRATEGY" => RecordingGateway.invoke(capability, input),
+            "RENDER_CHAPTER" => Ok(ProductionModelResponse::deterministic(json!({
+                "body":"林舟被迫等待。门后传来脚步声。"
+            }))),
+            "REPAIR_CANDIDATE" => {
+                self.repair_inputs
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .push(input.clone());
+                let body = input
+                    .pointer("/candidate/body")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "repair candidate body missing".to_string())?;
+                Ok(ProductionModelResponse::deterministic(json!({
+                    "start":0,
+                    "end":body.chars().count(),
+                    "replacement":"林舟决定推开石门。“我必须找到出口。”她望向门后传来的脚步声。"
+                })))
+            }
+            "AUDIT_EXTRACT" => {
+                self.audit_inputs
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .push(input.clone());
+                Ok(ProductionModelResponse::deterministic(json!({
+                    "qualityFindings":[],
+                    "canonCandidates":[],
+                    "knowledgeCandidates":[],
+                    "continuityCandidates":[],
+                    "taskProgressCandidates":[],
+                    "revealedReservationRefs":[],
+                    "evidenceRanges":[],
+                    "auditCompleteness":"COMPLETE_NO_CHANGE",
+                    "unresolvedHard":false
+                })))
+            }
+            other => Err(format!("unexpected capability: {other}")),
+        }
+    }
+}
+
 struct CompleteNoChangeGateway;
 
 struct TruncatedAuditGateway;
@@ -4174,6 +4229,172 @@ fn b10_production_repair_limit_marks_advisory_and_keeps_rendered_body() {
         "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b10-limit' AND capability='RENDER_CHAPTER'",
         [], |row| row.get(0)
     ).unwrap(), 1);
+}
+
+#[test]
+fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_new_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b5b-s40-repair";
+    let gateway = S40RepairGateway::default();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(gateway.clone()),
+    );
+    let connection = state.manager.create(project_id, "B5-B S40 repair", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b5b:s40-repair",
+            "idempotencyKey":"key:b5b:s40-repair","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":2}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert_eq!(
+        gateway.capabilities.lock().unwrap().as_slice(),
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "REPAIR_CANDIDATE", "AUDIT_EXTRACT"]
+    );
+    assert_eq!(gateway.repair_inputs.lock().unwrap().len(), 1);
+    assert_eq!(
+        gateway.repair_inputs.lock().unwrap()[0]["candidate"]["body"],
+        "林舟被迫等待。门后传来脚步声。"
+    );
+    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
+    let repaired_body = "林舟决定推开石门。“我必须找到出口。”她望向门后传来的脚步声。";
+    assert_eq!(gateway.audit_inputs.lock().unwrap()[0]["body"], repaired_body);
+
+    let connection = state.manager.open(project_id, "B5-B S40 repair", NOW).unwrap();
+    let candidates = {
+        let mut statement = connection
+            .prepare("SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
+            .unwrap();
+        statement
+            .query_map([project_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(candidates.len(), 2, "the source and repaired candidates remain traceable");
+    let original = candidates
+        .iter()
+        .find(|candidate| candidate["candidatePatch"].is_null())
+        .unwrap();
+    let repaired = candidates
+        .iter()
+        .find(|candidate| !candidate["candidatePatch"].is_null())
+        .unwrap();
+    assert_eq!(original["body"], "林舟被迫等待。门后传来脚步声。");
+    assert_eq!(repaired["body"], repaired_body);
+    assert_eq!(repaired["candidatePatch"]["kind"], "CandidatePatch");
+    assert_eq!(repaired["candidatePatch"]["status"], "CANDIDATE");
+    assert_eq!(repaired["candidatePatch"]["repairRun"], 1);
+
+    let quality_payload: Value = serde_json::from_str(
+        &connection
+            .query_row::<String, _, _>(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='NarrativeQualityReport'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(quality_payload["repair"]["status"], "REPAIRED");
+    assert_eq!(quality_payload["repair"]["run"], 1);
+    assert_eq!(
+        quality_payload["repair"]["candidateBefore"]["artifactId"],
+        original["artifactId"]
+    );
+    assert_eq!(
+        quality_payload["repair"]["candidateAfter"]["artifactId"],
+        repaired["artifactId"]
+    );
+    assert!(quality_payload["recheckedDimensions"]
+        .as_array()
+        .is_some_and(|dimensions| dimensions.iter().any(|dimension| dimension == "agency")));
+
+    let audit_payload: Value = serde_json::from_str(
+        &connection
+            .query_row::<String, _, _>(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ReviewReport'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(audit_payload["candidateRef"]["artifactId"], repaired["artifactId"]);
+    assert_eq!(gateway.audit_inputs.lock().unwrap()[0]["candidateRef"]["artifactId"], repaired["artifactId"]);
+    let final_payload: Value = serde_json::from_str(
+        &connection
+            .query_row::<String, _, _>(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(final_payload["candidateRef"]["artifactId"], repaired["artifactId"]);
+
+    let repair_run: (String, Option<String>, String) = connection
+        .query_row(
+            "SELECT model_run_id,budget_id,status FROM model_runs WHERE project_id=?1 AND capability='REPAIR_CANDIDATE'",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(repair_run.2, "COMPLETED");
+    assert!(repair_run.1.is_some(), "repair ModelRun must carry the B5-A budget binding");
+    assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
+
+    let receipt_payload: Value = serde_json::from_str(
+        &connection
+            .query_row::<String, _, _>(
+                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(receipt_payload["modelRunRefs"]
+        .as_array()
+        .is_some_and(|runs| runs.iter().any(|run| run == &repair_run.0)));
+    let certificate_evidence: String = connection
+        .query_row(
+            "SELECT evidence_refs_json FROM gate_certificates WHERE project_id=?1 ORDER BY passed_at DESC LIMIT 1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let evidence: Value = serde_json::from_str(&certificate_evidence).unwrap();
+    let audit_artifact_id: String = connection
+        .query_row(
+            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='ReviewReport'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let quality_artifact_id: String = connection
+        .query_row(
+            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='NarrativeQualityReport'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(evidence.as_array().is_some_and(|refs| {
+        refs.iter()
+            .any(|reference| reference["artifactId"] == audit_artifact_id)
+            && refs
+                .iter()
+                .any(|reference| reference["artifactId"] == quality_artifact_id)
+    }));
 }
 
 #[test]
