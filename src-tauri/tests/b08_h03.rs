@@ -99,7 +99,7 @@ impl ProductionModelGateway for S40RepairGateway {
                 Ok(ProductionModelResponse::deterministic(json!({
                     "start":body[..start].chars().count(),
                     "end":body[..end].chars().count(),
-                    "replacement":"决定推开石门。“我必须找到出口。"
+                    "replacement":"决定推开石门。“我必须找到出口。”"
                 })))
             }
             "AUDIT_EXTRACT" => {
