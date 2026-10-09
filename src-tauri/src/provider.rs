@@ -659,6 +659,21 @@ mod tests {
     }
 
     #[test]
+    fn audit_prompt_prefers_registered_predicates_and_reports_unknown_names() {
+        let request = ProviderRequest {
+            capability: "AUDIT_EXTRACT".into(),
+            model_id: "test-model".into(),
+            prompt: "{}".into(),
+            timeout_ms: 1000,
+        };
+        let payload =
+            OpenAiCompatibleProvider::request_payload("https://provider.invalid", &request);
+        let system_prompt = payload["messages"][0]["content"].as_str().unwrap();
+        assert!(system_prompt.contains("Prefer reusing an exactly matching registered predicate"));
+        assert!(system_prompt.contains("report the exact predicate faithfully"));
+    }
+
+    #[test]
     fn planner_prompt_forbids_unknown_top_level_fields() {
         let prompt = OpenAiCompatibleProvider::structured_prompt("PLAN_STRATEGY");
         assert!(prompt.contains("No other top-level keys are allowed"));
