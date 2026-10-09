@@ -634,6 +634,38 @@ fn commit_three_opening_chapters(state: &KernelState, project_id: &str) {
     let _ = commit_three_opening_chapters_with_outputs(state, project_id);
 }
 
+fn b6_signing_preflight_snapshot(state: &KernelState, project_id: &str) -> Value {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let count = |sql: &str| {
+        connection
+            .query_row(sql, [project_id], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    json!({
+        "revision":revision(state, project_id),
+        "artifacts":count("SELECT COUNT(*) FROM artifacts WHERE project_id=?1"),
+        "heads":count("SELECT COUNT(*) FROM canonical_heads WHERE project_id=?1"),
+        "jobs":count("SELECT COUNT(*) FROM jobs WHERE project_id=?1"),
+        "signingRuns":count("SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='OPENING_SIGNING_EVALUATION'"),
+        "signingReceipts":count("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='SimulatedSigningReceipt'")
+    })
+}
+
+fn assert_b6_signing_preflight_error(
+    state: &KernelState,
+    project_id: &str,
+    command_id: &str,
+    expected_error: &str,
+) {
+    let before = b6_signing_preflight_snapshot(state, project_id);
+    let result = execute_command_impl(
+        state,
+        raw_command_request(state, project_id, command_id, "opening_evaluate", json!({})),
+    );
+    assert_eq!(result.unwrap_err(), expected_error);
+    assert_eq!(b6_signing_preflight_snapshot(state, project_id), before);
+}
+
 fn current_b02_book_plan_payload(state: &KernelState, project_id: &str) -> Value {
     let connection = state.manager.open(project_id, "", NOW).unwrap();
     let raw: String = connection
@@ -2780,6 +2812,118 @@ fn b02_opening_evaluation_persists_not_verified_without_committed_canon() {
         "BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE"
     );
     println!("B02_SIGNING_RESULT missing_committed_canon=NOT_VERIFIED zero_model_runs=PASS receipt_committed=PASS plan_blocked=PASS status=PASS");
+}
+
+#[test]
+fn b6_rv32_opening_chapter_still_planned_rejects_r1_signing_without_writes() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET status='PLANNED' WHERE project_id=?1 AND chapter_no=2",
+            [&project_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_b6_signing_preflight_error(
+        &state,
+        &project_id,
+        "b6:signing:opening-planned",
+        "B02_OPENING_THREE_CHAPTERS_REQUIRED",
+    );
+}
+
+#[test]
+fn b6_rv32_missing_final_rejects_r1_signing_without_writes() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET final_artifact_id=NULL,final_version=NULL WHERE project_id=?1 AND chapter_no=2",
+            [&project_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_b6_signing_preflight_error(
+        &state,
+        &project_id,
+        "b6:signing:final-missing",
+        "B02_OPENING_FINAL_SOURCE_UNAVAILABLE",
+    );
+}
+
+#[test]
+fn b6_rv32_candidate_final_rejects_r1_signing_without_writes() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let chapter_id: String = connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=2",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let artifact_id = format!("candidate:final:b6:{project_id}:2");
+    let payload =
+        json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":"候选正文"});
+    let payload_hash = sha256_canonical(&payload).unwrap();
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    connection
+        .execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES (?1,?2,'FinalChapter','CHAPTER',?3,1,'m0a.artifact.v1','CANDIDATE',?4,'{}',?5)",
+            libsql_rusqlite::params![artifact_id, project_id, scope, payload_hash, NOW],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET final_artifact_id=?3,final_version=1 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id, artifact_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_b6_signing_preflight_error(
+        &state,
+        &project_id,
+        "b6:signing:final-candidate",
+        "B02_OPENING_FINAL_SOURCE_UNAVAILABLE",
+    );
+}
+
+#[test]
+fn b6_rv32_opening_chapter_out_of_range_rejects_r1_signing_without_writes() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET chapter_no=4 WHERE project_id=?1 AND chapter_no=3",
+            [&project_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_b6_signing_preflight_error(
+        &state,
+        &project_id,
+        "b6:signing:chapter-out-of-range",
+        "B02_OPENING_THREE_CHAPTERS_REQUIRED",
+    );
 }
 
 #[test]

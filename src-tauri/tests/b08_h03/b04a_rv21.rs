@@ -28,8 +28,8 @@ fn b08_task_satisfied_requires_satisfied_dependencies_and_completion_predicate()
     .unwrap_err();
     assert_eq!(error, "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED");
     let connection = state.manager.open(project_id, "B08 task", NOW).unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
 }

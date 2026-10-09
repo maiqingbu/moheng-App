@@ -1706,6 +1706,16 @@ fn load_current_binding(
     Ok((binding, digest))
 }
 
+/// Rebuilds the current signing input binding for receipt verification and
+/// deterministic fixture construction. This read-only helper does not mutate
+/// project state or authorize a signing result.
+pub fn current_signing_binding_for_project(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<(Value, String), String> {
+    load_current_binding(connection, project_id)
+}
+
 /// Returns true only when the latest evaluated PASS is explicitly confirmed
 /// for a passing mainstream platform and every bound source is still current.
 pub fn signing_receipt_is_current_and_confirmed_in_project(

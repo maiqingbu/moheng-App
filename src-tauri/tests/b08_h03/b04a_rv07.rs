@@ -75,10 +75,10 @@ fn b08_unbound_knowledge_candidate_makes_the_audit_incomplete() {
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
     assert_eq!(connection.query_row::<i64, _, _>(
         "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1 AND knowledge_id='knowledge:actual:flashback'",
         [project_id], |row| row.get(0)
@@ -109,10 +109,10 @@ fn b08_unknown_knowledge_time_or_visibility_blocks_when_hard_scope_is_affected()
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
 }
 #[test]
 fn b08_knowledge_cannot_reference_an_event_from_a_later_narrative_chapter() {
@@ -161,8 +161,8 @@ fn b08_knowledge_cannot_reference_an_event_from_a_later_narrative_chapter() {
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
 }

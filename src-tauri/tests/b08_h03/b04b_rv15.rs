@@ -22,6 +22,7 @@ struct CommitAtGateBoundaryGateway {
 
 type GateBoundaryRun = (
     tempfile::TempDir,
+    String,
     Result<Value, String>,
     Arc<Mutex<Vec<String>>>,
     KernelState,
@@ -170,6 +171,7 @@ fn run_production_at_gate_boundary(mutation: MutationKind) -> GateBoundaryRun {
     let request = production_request("p-b08-rv15-boundary", &chapter_id, &volume_id);
     (
         temp,
+        chapter_id,
         execute_command_impl(&state, request),
         capabilities,
         state,
@@ -178,7 +180,7 @@ fn run_production_at_gate_boundary(mutation: MutationKind) -> GateBoundaryRun {
 
 #[test]
 fn b08_rv15_unrelated_revision_change_rebases_bundle_without_repeating_model_runs() {
-    let (_temp, result, capabilities, state) =
+    let (_temp, chapter_id, result, capabilities, state) =
         run_production_at_gate_boundary(MutationKind::UnrelatedProjectRename);
     let result = result.expect("an unrelated revision change should not block the chapter");
     assert_eq!(result["finalStatus"], "committed");
@@ -204,8 +206,8 @@ fn b08_rv15_unrelated_revision_change_rebases_bundle_without_repeating_model_run
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08-rv15-boundary' AND artifact_type='FinalChapter'",
-                [],
+                "SELECT COUNT(*) FROM chapters c JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version WHERE c.project_id='p-b08-rv15-boundary' AND c.chapter_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED'",
+                [&chapter_id],
                 |row| row.get(0),
             )
             .unwrap(),
@@ -215,7 +217,7 @@ fn b08_rv15_unrelated_revision_change_rebases_bundle_without_repeating_model_run
 
 #[test]
 fn b08_rv15_relevant_revision_change_is_plan_stale_without_final_write_or_model_retry() {
-    let (_temp, result, capabilities, state) =
+    let (_temp, chapter_id, result, capabilities, state) =
         run_production_at_gate_boundary(MutationKind::RelevantBookPlanRevision);
     assert!(
         matches!(result.as_ref(), Err(error) if error.starts_with("PLAN_STALE")),
@@ -242,8 +244,8 @@ fn b08_rv15_relevant_revision_change_is_plan_stale_without_final_write_or_model_
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08-rv15-boundary' AND artifact_type='FinalChapter'",
-                [],
+                "SELECT COUNT(*) FROM chapters c JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version WHERE c.project_id='p-b08-rv15-boundary' AND c.chapter_id=?1 AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED'",
+                [&chapter_id],
                 |row| row.get(0),
             )
             .unwrap(),

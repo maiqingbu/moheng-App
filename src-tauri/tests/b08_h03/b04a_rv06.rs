@@ -416,10 +416,10 @@ fn b08_defer_without_bridge_blocks_before_final_commit() {
         .manager
         .open(project_id, "B08 lifecycle", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
     assert_eq!(connection.query_row::<String, _, _>(
         "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:existing'",
         [project_id], |row| row.get(0)
