@@ -52,6 +52,37 @@ function volume(overrides: Record<string, unknown> = {}) {
 afterEach(() => { mounted.splice(0).forEach(app => app.unmount()); document.body.innerHTML = '' })
 
 describe('R2 文档修订对应的前端行为', () => {
+  it('Given 后端提供项目成本摘要 When 打开创作中心 Then 显示本章与本月上限及余量', async () => {
+    production({
+      costSummary: {
+        currentVolume: 0,
+        projectTotal: 0.82,
+        budgetRemaining: 4.3,
+        chapterUsed: 0.12,
+        chapterBudget: 2,
+        chapterRemaining: 1.88,
+        monthUsed: 0.7,
+        monthlyBudget: 5,
+        monthRemaining: 4.3,
+      },
+    })
+    const page = await render(ProductionCenter)
+
+    expect(page.querySelector('[data-cost-summary]')).toBeTruthy()
+    expect(page.textContent).toContain('¥2.00')
+    expect(page.textContent).toContain('¥1.88')
+    expect(page.textContent).toContain('¥5.00')
+    expect(page.textContent).toContain('¥4.30')
+  })
+
+  it('Given 旧生产投影没有成本摘要 When 打开创作中心 Then 隐藏摘要卡且不阻断其他内容', async () => {
+    production()
+    const page = await render(ProductionCenter)
+
+    expect(page.querySelector('[data-cost-summary]')).toBeNull()
+    expect(page.textContent).toContain('正式章节')
+  })
+
   it('Given 项目助手的正式修复已提交但复核不完整 When 展示 Then 指向原回执重核，不宣称执行失败', async () => {
     const plan = {
       action: 'EXECUTABLE',
