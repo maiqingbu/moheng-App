@@ -461,3 +461,31 @@ pub fn opportunity_value(
         "externalTextClassification":"DATA_ONLY"
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{read_bounded_body, MAX_SOURCE_BYTES};
+    use std::io::Cursor;
+
+    #[test]
+    fn response_body_limit_accepts_boundary_and_rejects_declared_or_streamed_overflow() {
+        let boundary = vec![b'a'; MAX_SOURCE_BYTES];
+        assert_eq!(
+            read_bounded_body(Cursor::new(boundary.clone()), Some(MAX_SOURCE_BYTES as u64))
+                .unwrap()
+                .len(),
+            MAX_SOURCE_BYTES
+        );
+
+        let overflow = vec![b'a'; MAX_SOURCE_BYTES + 1];
+        assert_eq!(
+            read_bounded_body(Cursor::new(overflow.clone()), None).unwrap_err(),
+            "MARKET_SOURCE_HTTP_UNAVAILABLE"
+        );
+        assert_eq!(
+            read_bounded_body(Cursor::new(overflow), Some((MAX_SOURCE_BYTES + 1) as u64))
+                .unwrap_err(),
+            "MARKET_SOURCE_HTTP_UNAVAILABLE"
+        );
+    }
+}
