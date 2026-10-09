@@ -86,6 +86,17 @@ pub trait ProductionModelGateway: Send + Sync {
         None
     }
 
+    /// Deterministic gateways can model a concurrent writer in the small
+    /// window after the runtime snapshot is read and before CommitService
+    /// verifies its expected revision. Configured providers keep this no-op.
+    fn before_commit_attempt(
+        &self,
+        _connection: &libsql_rusqlite::Connection,
+        _attempt: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Resolve the provider once at the beginning of a production attempt.
     /// The returned profile is the non-secret snapshot used for every new
     /// ModelRun in that attempt.  Test/deterministic gateways retain their
@@ -1146,6 +1157,7 @@ fn commit_chapter_after_revision_recheck(
     plan: &Value,
     bundle: &mut CommitBundle,
     now: &str,
+    gateway: &dyn ProductionModelGateway,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     const MAX_REVISION_RETRIES: usize = 3;
 
@@ -1164,7 +1176,13 @@ fn commit_chapter_after_revision_recheck(
             plan_ref,
             plan,
         )?;
+        if attempt > 0 {
+            revalidate_chapter_gate_on_current_snapshot(
+                connection, project_id, chapter_id, plan, bundle, now,
+            )?;
+        }
         bundle.expected_project_revision = Some(revision);
+        gateway.before_commit_attempt(connection, attempt)?;
         match CommitService::commit_b08_chapter_with_deferred_b09_projection(
             connection, bundle, volume_id, now,
         ) {
@@ -1179,6 +1197,78 @@ fn commit_chapter_after_revision_recheck(
         }
     }
     Err("REVISION_CONFLICT".into())
+}
+
+fn revalidate_chapter_gate_on_current_snapshot(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    chapter_id: &str,
+    plan: &Value,
+    bundle: &mut CommitBundle,
+    now: &str,
+) -> Result<(), String> {
+    let artifacts = &bundle.artifacts;
+    let audit_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_type == ArtifactType::ReviewReport)
+        .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+    let candidate = artifacts
+        .iter()
+        .find(|artifact| artifact.artifact_type == ArtifactType::ChapterCandidate)
+        .ok_or_else(|| "B08_CANDIDATE_NOT_FOUND".to_string())?;
+    let certificate = bundle
+        .gate_certificates
+        .as_ref()
+        .and_then(|certificates| certificates.first())
+        .ok_or_else(|| "B08_GATE_CERTIFICATE_REQUIRED".to_string())?;
+    let candidate_ref: ArtifactRef = audit_artifact
+        .payload
+        .get("candidateRef")
+        .cloned()
+        .ok_or_else(|| "B08_AUDIT_CANDIDATE_BINDING_MISMATCH".to_string())
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|_| "B08_AUDIT_CANDIDATE_BINDING_MISMATCH".to_string())
+        })?;
+    validate_audit_candidate_binding(&audit_artifact.payload, &candidate_ref)?;
+
+    let audit_payload = audit_artifact
+        .payload
+        .get("audit")
+        .cloned()
+        .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+    let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
+        .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
+    validate_audit_completeness(&audit_payload, &extraction)?;
+    let body = candidate
+        .payload
+        .get("body")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "B08_CANDIDATE_BODY_REQUIRED".to_string())?;
+    let gate_policy = load_artifact_payload(connection, project_id, &certificate.gate_policy_ref)?;
+    validate_actual_extraction(
+        connection,
+        project_id,
+        chapter_id,
+        body,
+        plan,
+        &gate_policy,
+        &mut extraction,
+    )?;
+
+    let certificate = make_certificate(
+        project_id,
+        certificate.gate_policy_ref.clone(),
+        certificate.subject_ref.clone(),
+        certificate.evidence_refs.clone(),
+        now,
+    )?;
+    let certificates = bundle
+        .gate_certificates
+        .as_mut()
+        .ok_or_else(|| "B08_GATE_CERTIFICATE_REQUIRED".to_string())?;
+    certificates[0] = certificate;
+    Ok(())
 }
 
 fn make_certificate(
@@ -2582,6 +2672,7 @@ fn run_chapter_production_inner(
         &plan_payload,
         &mut bundle,
         &now,
+        gateway,
     ) {
         Ok(receipt) => receipt,
         Err(error) if error.starts_with("PLAN_STALE") => {

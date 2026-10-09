@@ -238,6 +238,62 @@ struct MutatingGateway {
     database: PathBuf,
 }
 
+struct PostGateCanonConflictGateway {
+    database: PathBuf,
+    injected: std::sync::atomic::AtomicBool,
+}
+
+impl ProductionModelGateway for PostGateCanonConflictGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["canonCandidates"] = json!([{
+                "factId":"fact:late-conflict:candidate",
+                "subjectId":"entity:late-conflict",
+                "predicate":"location",
+                "objectJson":{"place":"stone-door"},
+                "authorityLevel":"C",
+                "storyTime":"2020-06-01T00:00:00Z",
+                "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+            }]);
+        }
+        Ok(response)
+    }
+
+    fn before_commit_attempt(
+        &self,
+        _connection: &Connection,
+        attempt: usize,
+    ) -> Result<(), String> {
+        if attempt == 0
+            && self
+                .injected
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            let connection =
+                ai_novel_production_system_core::project_db::connection::open_connection(
+                    &self.database,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute(
+                    "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,created_at,updated_at) VALUES ('fact:late-conflict:committed','p-b08-post-gate-conflict','entity:late-conflict','location','{\"place\":\"other-city\"}','A','2020-01-01T00:00:00Z','2021-01-01T00:00:00Z',?1,?1)",
+                    [NOW],
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute(
+                    "UPDATE project_meta SET revision=revision+1 WHERE project_id='p-b08-post-gate-conflict'",
+                    [],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 struct CommitFaultGateway;
 
 impl ProductionModelGateway for CommitFaultGateway {
@@ -3456,6 +3512,84 @@ fn b08_revalidates_relevant_state_after_render_and_blocks_stale_final_commit() {
     let connection = state.manager.open("p-b08-stale", "B08 stale", NOW).unwrap();
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08-stale' AND artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), 0);
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08-stale' AND fact_id='fact:actual:door-open'", [], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let database = paths
+        .project_dir("p-b08-post-gate-conflict")
+        .unwrap()
+        .join("project.db");
+    let state = KernelState::with_production_gateway(
+        paths,
+        Arc::new(PostGateCanonConflictGateway {
+            database,
+            injected: std::sync::atomic::AtomicBool::new(false),
+        }),
+    );
+    let connection = state
+        .manager
+        .create("p-b08-post-gate-conflict", "B08 post-Gate conflict", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, "p-b08-post-gate-conflict");
+    connection
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:late-conflict','p-b08-post-gate-conflict','未选中实体','CHARACTER',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:b08:post-gate-conflict",
+            "idempotencyKey":"key:b08:post-gate-conflict","projectId":"p-b08-post-gate-conflict",
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED");
+
+    let connection = state
+        .manager
+        .open("p-b08-post-gate-conflict", "B08 post-Gate conflict", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b08-post-gate-conflict'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        3,
+        "post-Gate retry must not make additional model calls"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b08-post-gate-conflict' AND artifact_type='FinalChapter'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id='p-b08-post-gate-conflict' AND fact_id='fact:late-conflict:committed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1,
+        "concurrent Canon commit remains authoritative"
+    );
 }
 
 #[test]
