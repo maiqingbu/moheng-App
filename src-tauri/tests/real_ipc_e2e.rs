@@ -18,11 +18,13 @@ use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
+use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::repositories::runtime::{
     MemorySecretStore, OsKeychainSecretStore, SecretStore,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
+use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -1592,6 +1594,314 @@ fn r2_insert_artifact(
     digest
 }
 
+fn r2_seed_current_r1_signing_fixture(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    long_form_volume_id: &str,
+) {
+    let book_id: String = connection
+        .query_row(
+            "SELECT book_id FROM volumes WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, long_form_volume_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET volume_no=2 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, long_form_volume_id],
+        )
+        .unwrap();
+    let book_plan_ref =
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
+            .unwrap()
+            .unwrap();
+    let opening_ref = NarrativeRepository::canonical_project_head_ref(
+        connection,
+        project_id,
+        "OpeningContract",
+    )
+    .unwrap()
+    .or_else(|| {
+        let story_ref = NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "StoryConstitution",
+        )
+        .unwrap()
+        .unwrap();
+        let main_ref = NarrativeRepository::canonical_project_head_ref(
+            connection,
+            project_id,
+            "MainContract",
+        )
+        .unwrap()
+        .unwrap();
+        let payload = json!({
+            "payloadSchema":"opening-contract.r1",
+            "storyConstitutionRef":{"artifactId":story_ref.artifact_id,"version":story_ref.version,"payloadHash":story_ref.payload_hash},
+            "mainContractRef":{"artifactId":main_ref.artifact_id,"version":main_ref.version,"payloadHash":main_ref.payload_hash},
+            "bookPlanRef":{"artifactId":book_plan_ref.artifact_id,"version":book_plan_ref.version,"payloadHash":book_plan_ref.payload_hash},
+            "openingReady":true,
+            "firstChapterGoal":"验证石门线索",
+            "firstThreeChapterPromise":"逐步核对已提交事实",
+            "forbiddenReveals":[]
+        });
+        r2_insert_artifact(
+            connection,
+            project_id,
+            &format!("opening-contract:r2-signing:{project_id}"),
+            "OpeningContract",
+            "PROJECT",
+            "{\"level\":\"PROJECT\"}",
+            &payload,
+        );
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "OpeningContract")
+            .unwrap()
+    })
+    .unwrap();
+
+    let existing_opening_one: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT c.chapter_id,a.artifact_id,p.payload_json FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id AND v.volume_no=1 JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE c.project_id=?1 AND c.chapter_no=1 AND c.status='COMMITTED' LIMIT 1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .unwrap();
+    let opening_volume_id = format!("volume:r2:{project_id}:golden-three");
+    connection
+        .execute(
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'Golden Three','CLOSED',?4,3,3000,?5,?5)",
+            libsql_rusqlite::params![opening_volume_id, project_id, book_id, if existing_opening_one.is_some() { 2 } else { 1 }, R2_PROVIDER_NOW],
+        )
+        .unwrap();
+    let signing_entity_id = format!("entity:r2-signing:{project_id}");
+    connection
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,?2,'签约 fixture 主角','CHARACTER',?3,?3)",
+            libsql_rusqlite::params![signing_entity_id, project_id, R2_PROVIDER_NOW],
+        )
+        .unwrap();
+
+    let mut final_refs = Vec::new();
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
+        let (chapter_id, final_id, body) = if chapter_no == 1 {
+            if let Some((chapter_id, final_id, payload_json)) = &existing_opening_one {
+                let payload: Value = serde_json::from_str(payload_json).unwrap();
+                (
+                    chapter_id.clone(),
+                    final_id.clone(),
+                    payload["body"].as_str().unwrap_or_default().to_string(),
+                )
+            } else {
+                let chapter_id = format!("chapter:r2:{project_id}:opening:1");
+                let final_id = format!("final:r2:{project_id}:opening:1");
+                let body = "林舟确认石门旁的第一条线索。".to_string();
+                r2_insert_golden_chapter(
+                    connection,
+                    project_id,
+                    &opening_volume_id,
+                    1,
+                    &chapter_id,
+                    &final_id,
+                    &body,
+                );
+                (chapter_id, final_id, body)
+            }
+        } else {
+            let chapter_id = format!("chapter:r2:{project_id}:opening:{chapter_no}");
+            let final_id = format!("final:r2:{project_id}:opening:{chapter_no}");
+            let body = format!("林舟确认石门旁的第 {chapter_no} 条线索。");
+            r2_insert_golden_chapter(
+                connection,
+                project_id,
+                &opening_volume_id,
+                chapter_no,
+                &chapter_id,
+                &final_id,
+                &body,
+            );
+            (chapter_id, final_id, body)
+        };
+        let fact_id = format!("fact:r2-signing:{project_id}:{chapter_no}");
+        let evidence_id = format!("evidence:r2-signing:{project_id}:{chapter_no}");
+        let range_end = body.chars().count() as i64;
+        connection
+            .execute(
+                "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,source_chapter_id,evidence_range_json,authority_level,created_at,updated_at) VALUES (?1,?2,?3,'remembered',?4,?5,1,?6,?7,'A',?8,?8)",
+                libsql_rusqlite::params![fact_id, project_id, signing_entity_id, json!({"openingChapter":chapter_no}).to_string(), final_id, chapter_id, json!({"start":0,"end":range_end}).to_string(), R2_PROVIDER_NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,?2,?3,?4,?5,1,'DIRECT_QUOTE',?6,0,?7,?8)",
+                libsql_rusqlite::params![evidence_id, project_id, fact_id, chapter_id, final_id, body, range_end, R2_PROVIDER_NOW],
+            )
+            .unwrap();
+        let chapter_scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+        let final_ref = NarrativeRepository::canonical_head_ref(
+            connection,
+            project_id,
+            "FinalChapter",
+            &chapter_scope,
+        )
+        .unwrap()
+        .unwrap();
+        final_refs.push(json!({"artifactId":final_ref.artifact_id,"version":final_ref.version,"payloadHash":final_ref.payload_hash}));
+    }
+
+    let snapshot =
+        NarrativeRepository::opening_evaluation_snapshot(connection, project_id).unwrap();
+    assert_eq!(snapshot.chapters.len(), 3);
+    let (binding, source_digest) =
+        ai_novel_production_system_core::signing::current_signing_binding_for_project(
+            connection, project_id,
+        )
+        .unwrap();
+    let story_ref = NarrativeRepository::canonical_project_head_ref(
+        connection,
+        project_id,
+        "StoryConstitution",
+    )
+    .unwrap()
+    .unwrap();
+    let main_ref =
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "MainContract")
+            .unwrap()
+            .unwrap();
+    let source_refs = json!({
+        "storyConstitutionRef":{"artifactId":story_ref.artifact_id,"version":story_ref.version,"payloadHash":story_ref.payload_hash},
+        "mainContractRef":{"artifactId":main_ref.artifact_id,"version":main_ref.version,"payloadHash":main_ref.payload_hash},
+        "openingContractRef":{"artifactId":opening_ref.artifact_id,"version":opening_ref.version,"payloadHash":opening_ref.payload_hash},
+        "bookPlanSeedRef":{"artifactId":book_plan_ref.artifact_id,"version":book_plan_ref.version,"payloadHash":book_plan_ref.payload_hash}
+    });
+    let mut receipt = json!({
+        "payloadSchema":"simulated-signing-receipt.r1",
+        "status":"PASS",
+        "evaluationRuleVersion":"signing-eval.r1",
+        "ruleSetVersion":"signing-eval.r1",
+        "ruleSetDigest":binding["ruleSetDigest"],
+        "platformProfiles":binding["platformProfiles"],
+        "binding":binding,
+        "sourceDigest":source_digest,
+        "openingChapterRefs":snapshot.chapters.iter().map(|chapter| chapter.chapter_id.clone()).collect::<Vec<_>>(),
+        "openingCanonRefs":snapshot.opening_canon_refs,
+        "signingEvidenceRefs":snapshot.signing_evidence_refs,
+        "chapterEvidence":snapshot.chapters.iter().map(|chapter| json!({"chapterId":chapter.chapter_id,"chapterNo":chapter.chapter_no,"finalChapterRef":chapter.final_ref})).collect::<Vec<_>>(),
+        "sourceRefs":source_refs,
+        "coreStatus":"PASS",
+        "platformMatrix":[{"platformId":"FANQIE","mainstream":true,"status":"PASS"}],
+        "confirmation":{"confirmed":true,"confirmedBy":"R2 local fixture","confirmedAt":R2_PROVIDER_NOW,"platformId":"FANQIE"},
+        "receiptHash":""
+    });
+    receipt["receiptHash"] = json!(sha256_canonical(&receipt).unwrap());
+    let receipt_id = format!("signing-receipt:r2:{project_id}");
+    let receipt_hash = r2_insert_artifact(
+        connection,
+        project_id,
+        &receipt_id,
+        "SimulatedSigningReceipt",
+        "PROJECT",
+        "{\"level\":\"PROJECT\"}",
+        &receipt,
+    );
+    for reference in [
+        source_refs["storyConstitutionRef"].clone(),
+        source_refs["mainContractRef"].clone(),
+        source_refs["openingContractRef"].clone(),
+        source_refs["bookPlanSeedRef"].clone(),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,?3,?4)",
+                libsql_rusqlite::params![receipt_id, reference["artifactId"].as_str().unwrap(), reference["version"].as_i64().unwrap(), reference["payloadHash"].as_str().unwrap()],
+            )
+            .unwrap();
+    }
+    for final_ref in &final_refs {
+        connection
+            .execute(
+                "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,?3,?4)",
+                libsql_rusqlite::params![receipt_id, final_ref["artifactId"].as_str().unwrap(), final_ref["version"].as_i64().unwrap(), final_ref["payloadHash"].as_str().unwrap()],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,?2,?3,1,?4)",
+            libsql_rusqlite::params![book_plan_ref.artifact_id, book_plan_ref.version, receipt_id, receipt_hash],
+        )
+        .unwrap();
+    let receipt_ref = NarrativeRepository::canonical_project_head_ref(
+        connection,
+        project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_receipt_is_current_and_confirmed_in_project(
+            connection,
+            project_id,
+            &receipt_ref,
+        )
+        .unwrap()
+    );
+}
+
+fn r2_insert_golden_chapter(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    volume_id: &str,
+    chapter_no: i64,
+    chapter_id: &str,
+    final_id: &str,
+    body: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',?6,?7,?7)",
+            libsql_rusqlite::params![chapter_id, project_id, volume_id, chapter_no, format!("Golden Three {chapter_no}"), body.chars().count() as i64, R2_PROVIDER_NOW],
+        )
+        .unwrap();
+    let audit_id = format!("audit:r2:{project_id}:opening:{chapter_no}");
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+    let audit_hash = r2_insert_artifact(
+        connection,
+        project_id,
+        &audit_id,
+        "AuditReport",
+        "CHAPTER",
+        &scope,
+        &json!({"payloadSchema":"audit-report.r1","unresolvedHard":false}),
+    );
+    let final_hash = r2_insert_artifact(
+        connection,
+        project_id,
+        final_id,
+        "FinalChapter",
+        "CHAPTER",
+        &scope,
+        &json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":body,"auditRef":{"artifactId":audit_id,"version":1,"payloadHash":audit_hash}}),
+    );
+    connection
+        .execute(
+            "UPDATE chapters SET final_artifact_id=?3,final_version=1 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id, final_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,1,?3)",
+            libsql_rusqlite::params![final_id, audit_id, audit_hash],
+        )
+        .unwrap();
+    let _ = final_hash;
+}
+
 fn r2_seed_async_provider_project(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -1694,6 +2004,7 @@ fn r2_seed_async_provider_project(
             &gate_policy,
         );
     }
+    r2_seed_current_r1_signing_fixture(connection, project_id, &volume_id);
     (chapter_id, volume_id, book_plan_hash)
 }
 
@@ -1860,6 +2171,7 @@ fn r2_seed_planning_project(
         "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,?2,?3,1,'APPROVED',3,?4)",
         libsql_rusqlite::params![project_id,volume_id,plan_id,R2_PROVIDER_NOW],
     ).unwrap();
+    r2_seed_current_r1_signing_fixture(connection, project_id, &volume_id);
     (volume_id, chapter_id)
 }
 
