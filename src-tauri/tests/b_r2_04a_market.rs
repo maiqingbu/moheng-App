@@ -3,7 +3,8 @@ use ai_novel_production_system_core::commands::{
     query_story_directions_impl, query_story_setup_impl, KernelState,
 };
 use ai_novel_production_system_core::market_source::{
-    parse_fanqie_writer_zone, FanqieWriterZoneAdapter, MarketSourceAdapter, MarketSourceSnapshot,
+    current_epoch_ms, parse_fanqie_writer_zone, FanqieWriterZoneAdapter, MarketSourceAdapter,
+    MarketSourceSnapshot,
 };
 use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
@@ -54,6 +55,10 @@ fn available_source(observed_at_epoch_ms: i64) -> MarketSourceSnapshot {
         ],
         "errorCode":null
     })).unwrap()
+}
+
+fn market_observed_days_ago(days: i64) -> i64 {
+    current_epoch_ms() - days * 24 * 60 * 60 * 1000
 }
 
 fn unavailable_source() -> MarketSourceSnapshot {
@@ -224,7 +229,7 @@ fn market_selection_signature(
 
 #[test]
 fn market_refresh_commits_snapshot_evidence_opportunities_and_policy_then_survives_reopen() {
-    let (state, temp) = state_with_source(available_source(1791014400000));
+    let (state, temp) = state_with_source(available_source(market_observed_days_ago(1)));
     state.manager.create(PROJECT_ID, "市场链测试", NOW).unwrap();
     let committed = execute_command_impl(
         &state,
@@ -302,7 +307,7 @@ fn market_refresh_commits_snapshot_evidence_opportunities_and_policy_then_surviv
 fn user_selected_public_opportunity_is_refetched_persisted_and_reloaded_without_story_selection() {
     let temp = tempdir().unwrap();
     let root = temp.path().to_path_buf();
-    let source = available_source(1791014400000);
+    let source = available_source(market_observed_days_ago(1));
     let state = KernelState::new(AppPaths::new(root.clone()))
         .with_market_source_adapter(Arc::new(FixedMarketSource(source)));
     let preview = query_market_opportunities_impl(&state).unwrap();
@@ -346,7 +351,7 @@ fn user_selected_public_opportunity_is_refetched_persisted_and_reloaded_without_
 
 #[test]
 fn market_query_exposes_only_current_project_and_market_selection_never_changes_story_truth() {
-    let (state, _temp) = state_with_source(available_source(1791014400000));
+    let (state, _temp) = state_with_source(available_source(market_observed_days_ago(1)));
     state.manager.create(PROJECT_ID, "市场A", NOW).unwrap();
     let other_project = "p-b-r2-04a-market-other";
     state.manager.create(other_project, "市场B", NOW).unwrap();
@@ -437,7 +442,7 @@ fn unavailable_source_is_persisted_as_typed_failure_instead_of_old_policy_as_cur
 
 #[test]
 fn old_market_and_platform_policy_snapshots_are_marked_stale_not_current() {
-    let (state, _temp) = state_with_source(available_source(1_000));
+    let (state, _temp) = state_with_source(available_source(market_observed_days_ago(31)));
     state.manager.create(PROJECT_ID, "过期快照", NOW).unwrap();
     execute_command_impl(
         &state,
@@ -456,9 +461,7 @@ fn old_market_and_platform_policy_snapshots_are_marked_stale_not_current() {
 
 #[test]
 fn expired_market_opportunity_is_rejected_by_formal_owner_without_mutation() {
-    let current = ai_novel_production_system_core::market_source::current_epoch_ms();
-    let eight_days = 8_i64 * 24 * 60 * 60 * 1000;
-    let (state, _temp) = state_with_source(available_source(current - eight_days));
+    let (state, _temp) = state_with_source(available_source(market_observed_days_ago(8)));
     state
         .manager
         .create(PROJECT_ID, "过期市场来源拒绝选择", NOW)
