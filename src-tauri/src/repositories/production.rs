@@ -323,7 +323,7 @@ impl ProductionRepository {
         let task = job
             .as_ref()
             .map(|(id, _, chapter, status, _)| {
-                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"status":if status=="FAILED" {"failed"} else if status=="COMPLETED" {"done"} else if matches!(status.as_str(), "RUNNING" | "WAITING_MODEL") {"active"} else {"waiting"},"progress":if status=="COMPLETED" {json!(100)} else {Value::Null}})
+                json!({"id":id,"title":"Chapter Production","description":format!("{} · {}", chapter.as_deref().unwrap_or(""), status),"status":if status=="FAILED" {"failed"} else if status=="COMPLETED" {"done"} else if matches!(status.as_str(), "RUNNING" | "WAITING_MODEL") {"active"} else {"waiting"},"progress":if status=="COMPLETED" {json!(1.0)} else {Value::Null}})
             })
             .into_iter()
             .collect::<Vec<_>>();
