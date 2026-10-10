@@ -13,6 +13,7 @@ const acceptance = read('scripts/run-p01-acceptance.mjs')
 const settings = read('src/ui/pages/SettingsPage.vue')
 const contracts = read('src/application/contracts.ts')
 const libraryStore = read('src/ui/stores/projectLibraryStore.ts')
+const frontendPort = read('src/infrastructure/tauri/frontendPort.ts')
 
 test('P01 production composition binds configured provider gateway', () => {
   assert.match(commands, /ConfiguredProductionGateway::for_desktop/)
@@ -56,6 +57,28 @@ test('registered async execute_command runs synchronous owners on the blocking p
   assert.match(executeCommandHandler, /EXECUTE_COMMAND_WORKER_FAILED/)
   assert.match(executeCommandHandler, /MARKET_COMMAND_WORKER_FAILED/)
   assert.doesNotMatch(executeCommandHandler, /\n\s*execute_command_impl\(&state, request\)\s*\n\}/)
+})
+
+test('settings status checks keychain presence without reading secret data', () => {
+  const status = commands.match(/fn apply_provider_status\([\s\S]*?\n\}/)?.[0] ?? ''
+  const keychainPresence = runtime.match(/fn generic_password_exists\([\s\S]*?\n\}/)?.[0] ?? ''
+
+  assert.match(status, /\.contains\(/)
+  assert.doesNotMatch(status, /\.get\(/)
+  assert.match(keychainPresence, /load_attributes\(true\)/)
+  assert.match(keychainPresence, /load_data\(false\)/)
+  assert.match(keychainPresence, /\.search\(\)/)
+})
+
+test('settings queries use the blocking worker and provider test exposes keychain wait status', () => {
+  const globalSettings = commands.match(/pub async fn query_global_settings\([\s\S]*?\n\}/)?.[0] ?? ''
+  const projectSettings = commands.match(/pub async fn query_project_settings\([\s\S]*?\n\}/)?.[0] ?? ''
+  const providerTest = frontendPort.match(/testProvider\(settings:[\s\S]*?\n  }/)?.[0] ?? ''
+
+  assert.match(globalSettings, /spawn_blocking/)
+  assert.match(projectSettings, /spawn_blocking/)
+  assert.match(providerTest, /正在等待系统钥匙串授权/)
+  assert.match(settings, /CommandFeedback :state="testState"/)
 })
 
 test('P01 formal provider evidence is source-bound to raw, unknown, and budget paths', () => {
