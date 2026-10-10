@@ -3120,13 +3120,23 @@ fn run_chapter_production_inner(
                 }
                 _ => return Err("B08_THREAD_DISPOSITION_INVALID".into()),
             };
+            let mut obligation_payload = json!({
+                "sourceArtifactId":final_id,
+                "sourceVersion":1,
+                "resumeCondition":obligation.resume_condition,
+                "promotionDecision":promotion_decision,
+                "deltaMode":"EXISTING_AUTHORITY_UPDATE"
+            });
+            if let Some(source_event_id) = &item.source_event_id {
+                obligation_payload["sourceEventId"] = json!(source_event_id);
+            }
             obligation_delta.push(json!({
                 "obligationId":authority_id,"scope":obligation.scope,"obligationType":obligation.obligation_type,
                 "authorityLevel":obligation.authority_level,"lifecycle":lifecycle,"description":obligation.description,
                 "mustResolveBeforeChapter":obligation.must_resolve_before_chapter,
                 "prerequisites":obligation.prerequisites,
                 "decisionRef":obligation.decision_ref,
-                "payloadJson":{"sourceArtifactId":final_id,"sourceVersion":1,"resumeCondition":obligation.resume_condition,"promotionDecision":promotion_decision,"deltaMode":"EXISTING_AUTHORITY_UPDATE"}
+                "payloadJson":obligation_payload
             }));
             effective_continuity_refs.insert(item.thread_ref.clone());
             if let Some(evidence) = &item.evidence {
@@ -3258,6 +3268,19 @@ fn run_chapter_production_inner(
             "sourceRef":item.thread_ref,
             "payloadJson":{"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionSignals":item.promotion_signals,"evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote})),"fulfillmentObject":item.fulfillment_object,"resumeCondition":resume_condition}
         }));
+        let mut obligation_payload = json!({
+            "sourceAuthority":"B08_ACTUAL_NARRATIVE",
+            "sourceArtifactId":final_id,
+            "sourceVersion":1,
+            "resumeCondition":resume_condition,
+            "fulfillmentObject":item.fulfillment_object,
+            "ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,
+            "promotionDecision":promotion_decision,
+            "deltaMode":"NEW_CONTINUITY"
+        });
+        if let Some(source_event_id) = &item.source_event_id {
+            obligation_payload["sourceEventId"] = json!(source_event_id);
+        }
         obligation_delta.push(json!({
             "obligationId":authority_id,
             "scope":"CHAPTER",
@@ -3268,7 +3291,7 @@ fn run_chapter_production_inner(
             "mustResolveBeforeChapter":Value::Null,
             "prerequisites":[],
             "decisionRef":promotion_decision_ref,
-            "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"resumeCondition":resume_condition,"fulfillmentObject":item.fulfillment_object,"ruleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"promotionDecision":promotion_decision,"deltaMode":"NEW_CONTINUITY"}
+            "payloadJson":obligation_payload
         }));
         if let Some(evidence) = &item.evidence {
             new_responsibility_evidence.push(json!({
@@ -3764,6 +3787,8 @@ struct ContinuityCandidate {
     thread_ref: String,
     disposition: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     evidence: Option<EvidenceSpan>,
     #[serde(default)]
     promotion_signals: PromotionSignal,
@@ -4236,6 +4261,22 @@ fn validate_actual_extraction(
             exact_quote(body, evidence)?;
         } else if planned {
             return Err("B08_AUDIT_INCOMPLETE".into());
+        }
+        if let Some(source_event_id) = candidate.source_event_id.as_deref() {
+            let event_in_audit = audit.canon_candidates.iter().any(|item| {
+                item.event_type.is_some() && source_event_id == format!("event:{}", item.fact_id)
+            });
+            let event_already_committed =
+                crate::repositories::narrative::NarrativeRepository::canon_event_exists(
+                    connection,
+                    project_id,
+                    Some(source_event_id),
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+            if !event_in_audit && !event_already_committed {
+                return Err("B08_THREAD_SOURCE_EVENT_INVALID".into());
+            }
         }
         if !matches!(
             candidate.disposition.as_str(),

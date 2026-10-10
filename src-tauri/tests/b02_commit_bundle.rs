@@ -1247,3 +1247,114 @@ fn b02_receipt_draft_rejects_wrong_hash_and_payload_mutation() {
         1
     );
 }
+
+#[test]
+fn fx1_obligation_delta_persists_source_event_id_and_preserves_it_on_update() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+
+    let mut initial = full_bundle();
+    initial.obligation_delta.as_mut().unwrap()[0]
+        .payload_json
+        .as_mut()
+        .unwrap()
+        .insert(
+            "sourceEventId".into(),
+            Value::String("event:fact:p1:born:1".into()),
+        );
+    CommitService::commit(&connection, &initial, NOW).unwrap();
+
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id='obl:p1:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("event:fact:p1:born:1"));
+
+    let mut update = full_bundle();
+    update.commit_id = "commit:b02:source-event-update".into();
+    update.command_id = "b02-source-event-update".into();
+    update.idempotency_key = "b02-source-event-update-key".into();
+    update.expected_project_revision = Some(1);
+    update.artifacts.clear();
+    update.head_updates = None;
+    update.canon_delta = None;
+    update.foreshadow_delta = None;
+    update.knowledge_delta = None;
+    update.state_delta = None;
+    update.dependency_edges = None;
+    update.job_updates = None;
+    update.decision_updates = None;
+    update.reader_desire_delta = None;
+    update.gate_certificates = None;
+    update.receipt_draft = None;
+    update.obligation_delta.as_mut().unwrap()[0]
+        .payload_json
+        .as_mut()
+        .unwrap()
+        .remove("sourceEventId");
+
+    CommitService::commit(&connection, &update, NOW).unwrap();
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id='obl:p1:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("event:fact:p1:born:1"));
+}
+
+#[test]
+fn fx1_obligation_delta_rejects_unknown_source_event_and_rolls_back() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    seed_prerequisites(&connection);
+    let before_artifacts = connection
+        .query_row::<i64, _, _>("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+        .unwrap();
+
+    let mut bundle = full_bundle();
+    bundle.obligation_delta.as_mut().unwrap()[0]
+        .payload_json
+        .as_mut()
+        .unwrap()
+        .insert(
+            "sourceEventId".into(),
+            Value::String("event:missing".into()),
+        );
+    let error = CommitService::commit(&connection, &bundle, NOW).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("OBLIGATION_SOURCE_EVENT_NOT_FOUND"));
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT revision FROM project_meta", [], |row| row.get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap(),
+        before_artifacts
+    );
+    for table in [
+        "canon_events",
+        "canon_facts",
+        "narrative_obligations",
+        "commit_receipts",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "unexpected rows in {table}");
+    }
+}

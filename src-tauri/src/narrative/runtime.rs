@@ -270,7 +270,7 @@ pub fn build_continuity_threads(
         let mut evidence_refs = obligation.evidence_refs.clone();
         for item in evidence.iter().filter(|item| {
             item.fact_id.as_deref() == Some(obligation.obligation_id.as_str())
-                || item.event_id.as_deref() == obligation.source_event_id.as_deref()
+                || (item.event_id.is_some() && item.event_id == obligation.source_event_id)
         }) {
             let reference = evidence_ref(item);
             if !evidence_refs.contains(&reference) {
@@ -1371,5 +1371,93 @@ mod b2_context_tests {
         );
         assert_eq!(reservations[0]["mayForeshadow"], true);
         assert_eq!(reservations[0]["mayReveal"], false);
+    }
+
+    fn fx1_obligation(source_event_id: Option<&str>) -> ObligationRecord {
+        ObligationRecord {
+            obligation_id: "obligation:promise".into(),
+            obligation_type: "PROMISE".into(),
+            authority_level: "B".into(),
+            lifecycle: "APPROVED".into(),
+            description: "兑现承诺".into(),
+            fulfillment_object: None,
+            source_event_id: source_event_id.map(ToOwned::to_owned),
+            resume_condition: json!({"kind":"AFTER_CHAPTER","value":0}),
+            participant_entities: Vec::new(),
+            evidence_refs: Vec::new(),
+        }
+    }
+
+    fn fx1_evidence(
+        evidence_id: &str,
+        fact_id: Option<&str>,
+        event_id: Option<&str>,
+        quote: &str,
+    ) -> EvidenceRecord {
+        EvidenceRecord {
+            evidence_id: evidence_id.into(),
+            fact_id: fact_id.map(ToOwned::to_owned),
+            relation_id: None,
+            event_id: event_id.map(ToOwned::to_owned),
+            final_chapter_id: "chapter:one".into(),
+            source_artifact_id: "final:one".into(),
+            version: 1,
+            evidence_type: "ACTUAL_NARRATIVE".into(),
+            quote: Some(quote.into()),
+            range_start: Some(0),
+            range_end: Some(quote.chars().count() as i64),
+        }
+    }
+
+    #[test]
+    fn fx1_evidence_without_event_is_not_attached_to_unrelated_obligation() {
+        let threads = build_continuity_threads(
+            &[fx1_obligation(None)],
+            &[],
+            &[],
+            &[fx1_evidence(
+                "evidence:unrelated",
+                Some("fact:unrelated"),
+                None,
+                "无关事实",
+            )],
+            &ResumeContext::default(),
+        )
+        .unwrap();
+
+        assert!(threads[0].evidence_refs.is_empty());
+    }
+
+    #[test]
+    fn fx1_evidence_matches_only_same_source_event() {
+        let threads = build_continuity_threads(
+            &[fx1_obligation(Some("event:promise"))],
+            &[],
+            &[],
+            &[
+                fx1_evidence("evidence:matching", None, Some("event:promise"), "承诺原文"),
+                fx1_evidence(
+                    "evidence:other-event",
+                    None,
+                    Some("event:other"),
+                    "其他事件",
+                ),
+                fx1_evidence(
+                    "evidence:matching-fact",
+                    Some("obligation:promise"),
+                    Some("event:other"),
+                    "责任事实原文",
+                ),
+            ],
+            &ResumeContext::default(),
+        )
+        .unwrap();
+
+        let quotes = threads[0]
+            .evidence_refs
+            .iter()
+            .filter_map(|reference| reference.quote.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(quotes, vec!["承诺原文", "责任事实原文"]);
     }
 }
