@@ -10,6 +10,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,4 +54,6 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test tauri_ipc_smoke
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test real_ipc_e2e
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test project_lifecycle
+      - run: df -h /
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+      - run: df -h /
