@@ -46,6 +46,16 @@ impl KernelState {
         )
     }
 
+    #[cfg(feature = "scale-bench")]
+    pub fn for_scale_bench(paths: AppPaths) -> Self {
+        let package_root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../creative-skills/v1.2.0");
+        Self::with_skill_bundle_loader(
+            paths,
+            crate::creative_skills::SkillBundleLoader::from_application_package_root(package_root),
+        )
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn with_production_gateway(
         paths: AppPaths,

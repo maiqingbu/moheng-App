@@ -9,6 +9,7 @@ default = []
 custom-protocol = ["tauri/custom-protocol"]
 e2e-test = []
 e2e-webdriver = ["dep:tauri-plugin-wdio-webdriver"]
+scale-bench = []
 
 [lib]
 name = "ai_novel_production_system_core"

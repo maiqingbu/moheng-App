@@ -94,7 +94,10 @@ fn seed(connection: &Connection) {
 #[test]
 fn b14_r2_runs_formal_completion_queries_at_ten_million_scale_without_page_drift() {
     let temp = tempfile::tempdir().unwrap();
+    #[cfg(debug_assertions)]
     let state = KernelState::new(AppPaths::new(temp.path()));
+    #[cfg(not(debug_assertions))]
+    let state = KernelState::for_scale_bench(AppPaths::new(temp.path()));
     let connection = state
         .manager
         .create(PROJECT_ID, "B14 R2 scale", NOW)
