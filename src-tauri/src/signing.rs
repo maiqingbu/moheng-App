@@ -1786,6 +1786,8 @@ pub fn signing_evaluation_is_current_in_project(
     {
         return Ok(false);
     }
+    // RV-32 / FR-BP-002: a PASS is current only for the exact opening
+    // chapter identities and FinalChapter versions that the receipt evaluated.
     if !NarrativeRepository::receipt_bound_opening_finals_are_current(
         connection, project_id, &payload,
     )
