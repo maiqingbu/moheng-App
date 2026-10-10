@@ -318,11 +318,14 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         let connection = state.manager.open(&project_id, "", NOW).unwrap();
         let mut statement = connection
             .prepare(
-                "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3 ORDER BY chapter_no",
+                "SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no BETWEEN 1 AND ?2 ORDER BY c.chapter_no",
             )
             .unwrap();
         let chapter_ids = statement
-            .query_map([&project_id], |row| row.get::<_, String>(0))
+            .query_map(
+                libsql_rusqlite::params![&project_id, ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT],
+                |row| row.get::<_, String>(0),
+            )
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();

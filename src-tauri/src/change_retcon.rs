@@ -393,11 +393,8 @@ fn signing_impact_for_fact(
     let Some(chapter_id) = fact.get("sourceChapterId").and_then(Value::as_str) else {
         return Ok(false);
     };
-    let chapter_number = crate::repositories::narrative::NarrativeRepository::chapter_number(
-        connection, project_id, chapter_id,
-    )
-    .map_err(|error| format!("B12_DB:{error}"))?;
-    Ok(chapter_number.is_some_and(|number| (1..=3).contains(&number)))
+    crate::repositories::project_entry::is_opening_chapter(connection, project_id, chapter_id)
+        .map_err(|error| format!("B12_DB:{error}"))
 }
 
 fn resolve_typed_target(

@@ -54,6 +54,13 @@ pub struct OpeningProgress {
     pub next_prepared: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct OpeningChapter {
+    pub chapter_id: String,
+    pub chapter_no: i64,
+    pub status: String,
+}
+
 fn page_request(cursor: Option<&str>, limit: i64) -> (i64, i64) {
     let offset = cursor
         .and_then(|value| value.parse::<i64>().ok())
@@ -275,39 +282,27 @@ pub fn opening_progress(
     connection: &Connection,
     project_id: &str,
 ) -> Result<OpeningProgress, ProjectEntryRepositoryError> {
-    let completed: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND ?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status='COMMITTED'",
-        libsql_rusqlite::params![project_id, OPENING_CHAPTER_COUNT],
-        |row| row.get(0),
-    )?;
-    let current_chapter: Option<i64> = connection
-        .query_row(
-            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND ?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status!='COMMITTED' ORDER BY chapter_no LIMIT 1",
-            libsql_rusqlite::params![project_id, OPENING_CHAPTER_COUNT],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let previous_committed = if let Some(chapter_no) = current_chapter {
-        if chapter_no > 1 {
-            connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_no=?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status='COMMITTED')",
-                libsql_rusqlite::params![project_id, chapter_no - 1],
-                |row| row.get(0),
-            )?
-        } else {
-            false
-        }
-    } else {
-        completed >= OPENING_CHAPTER_COUNT
-    };
-    let next_prepared = match current_chapter {
-        Some(chapter_no) if chapter_no < OPENING_CHAPTER_COUNT => connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_no=?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status!='REJECTED')",
-            libsql_rusqlite::params![project_id, chapter_no + 1],
-            |row| row.get(0),
-        )?,
-        _ => false,
-    };
+    let chapters = opening_chapters(connection, project_id)?;
+    let completed = chapters
+        .iter()
+        .filter(|chapter| chapter.status == "COMMITTED")
+        .count() as i64;
+    let current = chapters
+        .iter()
+        .find(|chapter| chapter.status != "COMMITTED");
+    let current_chapter = current.map(|chapter| chapter.chapter_no);
+    let previous_committed = current.map_or(completed >= OPENING_CHAPTER_COUNT, |chapter| {
+        chapter.chapter_no > 1
+            && chapters.iter().any(|previous| {
+                previous.chapter_no == chapter.chapter_no - 1 && previous.status == "COMMITTED"
+            })
+    });
+    let next_prepared = current.is_some_and(|chapter| {
+        chapter.chapter_no < OPENING_CHAPTER_COUNT
+            && chapters
+                .iter()
+                .any(|next| next.chapter_no == chapter.chapter_no + 1 && next.status != "REJECTED")
+    });
     Ok(OpeningProgress {
         completed,
         total: OPENING_CHAPTER_COUNT,
@@ -321,14 +316,10 @@ pub fn next_opening_chapter_id(
     connection: &Connection,
     project_id: &str,
 ) -> Result<Option<String>, ProjectEntryRepositoryError> {
-    connection
-        .query_row(
-            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND ?2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1) AND status!='COMMITTED' ORDER BY chapter_no LIMIT 1",
-            libsql_rusqlite::params![project_id, OPENING_CHAPTER_COUNT],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+    Ok(opening_chapters(connection, project_id)?
+        .into_iter()
+        .find(|chapter| chapter.status != "COMMITTED")
+        .map(|chapter| chapter.chapter_id))
 }
 
 pub fn is_opening_chapter(
@@ -336,13 +327,34 @@ pub fn is_opening_chapter(
     project_id: &str,
     chapter_id: &str,
 ) -> Result<bool, ProjectEntryRepositoryError> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_id=?2 AND chapter_no BETWEEN 1 AND ?3 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1))",
-            libsql_rusqlite::params![project_id, chapter_id, OPENING_CHAPTER_COUNT],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
+    Ok(opening_chapters(connection, project_id)?
+        .iter()
+        .any(|chapter| chapter.chapter_id == chapter_id))
+}
+
+/// Returns the chapters inside the authoritative opening boundary: Volume 1,
+/// chapter numbers 1 through `OPENING_CHAPTER_COUNT`.
+pub fn opening_chapters(
+    connection: &Connection,
+    project_id: &str,
+) -> Result<Vec<OpeningChapter>, ProjectEntryRepositoryError> {
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_id,c.chapter_no,c.status FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no BETWEEN 1 AND ?2 ORDER BY c.chapter_no,c.chapter_id",
+    )?;
+    let rows = statement
+        .query_map(
+            libsql_rusqlite::params![project_id, OPENING_CHAPTER_COUNT],
+            |row| {
+                Ok(OpeningChapter {
+                    chapter_id: row.get(0)?,
+                    chapter_no: row.get(1)?,
+                    status: row.get(2)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into);
+    rows
 }
 
 pub fn opening_topology(

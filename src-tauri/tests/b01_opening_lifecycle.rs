@@ -6,6 +6,7 @@ use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -251,8 +252,8 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
     let connection = state.manager.open(&project_id, "", NOW).expect("open db");
     let chapter_count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3",
-            [&project_id],
+            "SELECT COUNT(*) FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no BETWEEN 1 AND ?2",
+            libsql_rusqlite::params![&project_id, OPENING_CHAPTER_COUNT],
             |row| row.get(0),
         )
         .expect("chapter count");
@@ -262,8 +263,8 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
     );
     let budget_count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id IN (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no BETWEEN 1 AND 3)",
-            [&project_id],
+            "SELECT COUNT(*) FROM chapter_production_budgets b WHERE b.project_id=?1 AND b.chapter_id IN (SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no BETWEEN 1 AND ?2)",
+            libsql_rusqlite::params![&project_id, OPENING_CHAPTER_COUNT],
             |row| row.get(0),
         )
         .expect("budget count");
@@ -281,7 +282,7 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
     let connection = state.manager.open(&project_id, "", NOW).expect("order db");
     let chapter_two_id: String = connection
         .query_row(
-            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=2",
+            "SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=2",
             [&project_id],
             |row| row.get(0),
         )
@@ -316,7 +317,7 @@ fn b01_real_opening_lifecycle_creates_and_commits_three_chapters_without_volume_
     );
 
     let mut final_refs = Vec::new();
-    for expected_chapter in 1..=3 {
+    for expected_chapter in 1..=OPENING_CHAPTER_COUNT {
         let center = query_production_center_impl(
             &state,
             json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),

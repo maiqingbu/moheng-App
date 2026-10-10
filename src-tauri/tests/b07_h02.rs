@@ -95,7 +95,9 @@ fn seed_b07_current_r1_signing(
         "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,?2,'Opening protagonist','CHARACTER',?3,?3)",
         libsql_rusqlite::params![signing_entity_id, project_id, "2026-08-30T00:00:00Z"],
     ).unwrap();
-    for chapter_no in 1..=3_i64 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         let chapter_id = format!("chapter:b07:{project_id}:opening:{chapter_no}");
         connection.execute(
             "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',0,?6,?6)",
@@ -324,7 +326,9 @@ fn b07_volume_intent_and_route_query_use_commit_bundle_authority() {
         .manager
         .create("p1", "B07", "2026-08-30T00:00:00Z")
         .unwrap();
-    for index in 1..=3 {
+    for index in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,'p1',?2,'CHARACTER',?3,?3)", libsql_rusqlite::params![format!("entity:book:{index}"), format!("Entity {index}"), "2026-08-30T00:00:00Z"]).unwrap();
         connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,'p1',?2,'opening','{}','A',?3,?3)", libsql_rusqlite::params![format!("fact:{index}"), format!("entity:book:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
     }
@@ -466,7 +470,9 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         .unwrap();
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:p2','p2',1,'Book','ACTIVE',?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:p2','p2','book:p2',1,'Volume','PLANNING',1,3,3000,?1,?1)", ["2026-08-30T00:00:00Z"]).unwrap();
-    for index in 1..=3 {
+    for index in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         connection.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,'p2',?2,'CHARACTER',?3,?3)", libsql_rusqlite::params![format!("entity:p2:{index}"), format!("Entity {index}"), "2026-08-30T00:00:00Z"]).unwrap();
         connection.execute("INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES (?1,'p2',?2,'opening','{}','A',?3,?3)", libsql_rusqlite::params![format!("fact:p2:{index}"), format!("entity:p2:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
         connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p2','volume:p2',?2,?3,'NORMAL','PLANNED',0,?4,?4)", libsql_rusqlite::params![format!("chapter:p2:{index}"), index, format!("Chapter {index}"), "2026-08-30T00:00:00Z"]).unwrap();
@@ -476,7 +482,9 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
     let signing_hash = sha256_canonical(&signing_payload).unwrap();
     connection.execute("INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:p2:signing','p2','SimulatedSigningReceipt','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3)", libsql_rusqlite::params!["{\"level\":\"PROJECT\"}", signing_hash, "2026-08-30T00:00:00Z"]).unwrap();
     connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:p2:signing',1,?1,?2)", libsql_rusqlite::params![signing_payload.to_string(), signing_hash]).unwrap();
-    for index in 1..=3 {
+    for index in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,'p2',?2,?3,'artifact:p2:signing',1,'OPENING','opening evidence',1,10,?4)", libsql_rusqlite::params![format!("evidence:p2:{index}"), format!("fact:p2:{index}"), format!("chapter:p2:{index}"), "2026-08-30T00:00:00Z"]).unwrap();
     }
     for index in 50..=52 {
@@ -523,7 +531,7 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
         .unwrap();
-    connection.execute("UPDATE chapters SET status='COMMITTED' WHERE project_id='p2' AND chapter_no IN (1,2,3)", []).unwrap();
+    connection.execute("UPDATE chapters SET status='COMMITTED' WHERE project_id='p2' AND chapter_no IN (1,2,3) AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id='p2' AND volume_no=1)", []).unwrap();
     drop(connection);
     let no_final_artifact = execute_command_impl(
         &state,
@@ -534,7 +542,9 @@ fn b07_legacy_signing_head_cannot_approve_bookplan() {
         .manager
         .open("p2", "", "2026-08-30T00:00:00Z")
         .unwrap();
-    for index in 1..=3 {
+    for index in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         let artifact_id = format!("artifact:p2:final:{index}");
         let payload =
             json!({"chapterId":format!("chapter:p2:{index}"),"body":format!("opening {index}")});

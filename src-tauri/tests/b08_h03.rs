@@ -1066,7 +1066,9 @@ fn seed_b08_long_form_opening_fixture(
         )
         .unwrap();
 
-    for chapter_no in 1..=3_i64 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         let chapter_id = format!("chapter:b08:{project_id}:opening:{chapter_no}");
         let final_artifact_id = format!("final:b08:{project_id}:opening:{chapter_no}");
         let audit_artifact_id = format!("audit:b08:{project_id}:opening:{chapter_no}");

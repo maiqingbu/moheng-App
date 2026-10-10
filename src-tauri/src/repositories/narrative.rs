@@ -354,6 +354,95 @@ impl NarrativeRepository {
         Ok((refs, truncated))
     }
 
+    pub fn committed_final_chapter_head(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT h.artifact_id,h.version,h.payload_hash FROM chapters c JOIN canonical_heads h ON h.project_id=c.project_id AND h.artifact_type='FinalChapter' AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=c.chapter_id JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version AND a.payload_hash=h.payload_hash AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE c.project_id=?1 AND c.chapter_id=?2 AND c.status='COMMITTED' AND c.final_artifact_id=h.artifact_id AND c.final_version=h.version",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| {
+                    Ok(ArtifactRef {
+                        artifact_id: row.get(0)?,
+                        version: row.get(1)?,
+                        payload_hash: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn receipt_bound_opening_finals_are_current(
+        connection: &Connection,
+        project_id: &str,
+        payload: &Value,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        let opening = crate::repositories::project_entry::opening_chapters(connection, project_id)
+            .map_err(|error| NarrativeRepositoryError::Invariant(error.to_string()))?;
+        let opening_count = crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize;
+        if opening.len() != opening_count
+            || opening.iter().enumerate().any(|(index, chapter)| {
+                chapter.status != "COMMITTED" || chapter.chapter_no != index as i64 + 1
+            })
+        {
+            return Ok(false);
+        }
+        let Some(bound_chapter_ids) = payload
+            .get("openingChapterRefs")
+            .and_then(Value::as_array)
+            .and_then(|refs| refs.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        else {
+            return Ok(false);
+        };
+        if bound_chapter_ids.len() != opening.len()
+            || bound_chapter_ids
+                .iter()
+                .zip(&opening)
+                .any(|(bound_id, chapter)| *bound_id != chapter.chapter_id)
+        {
+            return Ok(false);
+        }
+        let Some(chapter_evidence) = payload.get("chapterEvidence").and_then(Value::as_array)
+        else {
+            return Ok(false);
+        };
+        if chapter_evidence.len() != opening.len() {
+            return Ok(false);
+        }
+        for chapter in &opening {
+            let Some(bound) = chapter_evidence.iter().find(|item| {
+                item.get("chapterId").and_then(Value::as_str) == Some(chapter.chapter_id.as_str())
+            }) else {
+                return Ok(false);
+            };
+            if bound.get("chapterNo").and_then(Value::as_i64) != Some(chapter.chapter_no) {
+                return Ok(false);
+            }
+            let Some(bound_final_ref) = bound
+                .get("finalChapterRef")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<ArtifactRef>(value).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(current_final_ref) =
+                Self::committed_final_chapter_head(connection, project_id, &chapter.chapter_id)?
+            else {
+                return Ok(false);
+            };
+            if bound_final_ref.artifact_id != current_final_ref.artifact_id
+                || bound_final_ref.version != current_final_ref.version
+                || bound_final_ref.payload_hash != current_final_ref.payload_hash
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn recent_committed_chapters(
         connection: &Connection,
         project_id: &str,
@@ -1873,43 +1962,27 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
-    /// Reads only the committed golden-three boundary and its materialized
-    /// evidence.  The query deliberately excludes candidates and chapters
-    /// outside numbers 1..=3 so an evaluation can never be satisfied by a
-    /// later fixture or by planned text.
+    /// Reads only committed chapters inside the project-entry opening boundary
+    /// (Volume 1, chapter numbers 1..=OPENING_CHAPTER_COUNT) and their current
+    /// FinalChapter heads.
     pub fn opening_evaluation_snapshot(
         connection: &Connection,
         project_id: &str,
     ) -> Result<OpeningEvaluationSnapshot, NarrativeRepositoryError> {
-        let mut chapters_statement = connection.prepare(
-            "SELECT c.chapter_id,c.chapter_no,c.final_artifact_id,c.final_version,a.payload_hash FROM chapters c LEFT JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE c.project_id=?1 AND c.chapter_no BETWEEN 1 AND 3 AND c.status='COMMITTED' ORDER BY c.chapter_no,c.chapter_id",
-        )?;
         let mut chapters = Vec::new();
         let mut opening_canon_refs = BTreeSet::new();
         let mut signing_evidence_refs = Vec::new();
-        for row in chapters_statement.query_map([project_id], |row| {
-            let chapter_id: String = row.get(0)?;
-            let chapter_no: i64 = row.get(1)?;
-            let final_artifact_id: Option<String> = row.get(2)?;
-            let final_version: Option<i64> = row.get(3)?;
-            let payload_hash: Option<String> = row.get(4)?;
-            Ok((
-                chapter_id,
-                chapter_no,
-                final_artifact_id,
-                final_version,
-                payload_hash,
-            ))
-        })? {
-            let (chapter_id, chapter_no, final_artifact_id, final_version, payload_hash) = row?;
-            let final_ref = match (final_artifact_id, final_version, payload_hash) {
-                (Some(artifact_id), Some(version), Some(payload_hash)) => Some(ArtifactRef {
-                    artifact_id,
-                    version,
-                    payload_hash,
-                }),
-                _ => None,
-            };
+        let opening_chapters =
+            crate::repositories::project_entry::opening_chapters(connection, project_id)
+                .map_err(|error| NarrativeRepositoryError::Invariant(error.to_string()))?;
+        for chapter in opening_chapters
+            .into_iter()
+            .filter(|chapter| chapter.status == "COMMITTED")
+        {
+            let chapter_id = chapter.chapter_id;
+            let chapter_no = chapter.chapter_no;
+            let final_ref =
+                Self::committed_final_chapter_head(connection, project_id, &chapter_id)?;
             let mut evidence_statement = connection.prepare(
                 "SELECT evidence_id,fact_id,relation_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end FROM canon_evidence WHERE project_id=?1 AND final_chapter_id=?2 ORDER BY evidence_id LIMIT 100",
             )?;
@@ -2491,32 +2564,20 @@ impl NarrativeRepository {
             .and_then(Value::as_array)
             .map(|refs| refs.iter().filter_map(Value::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
-        let mut opening_numbers = opening_chapter_refs
+        let opening = crate::repositories::project_entry::opening_chapters(connection, project_id)
+            .map_err(|error| NarrativeRepositoryError::Invariant(error.to_string()))?;
+        let committed_opening = opening
             .iter()
-            .filter_map(|chapter_id| {
-                connection
-                    .query_row(
-                        "SELECT c.chapter_no FROM chapters c JOIN artifacts a ON a.project_id=c.project_id AND a.artifact_id=c.final_artifact_id AND a.version=c.final_version AND a.artifact_type='FinalChapter' AND a.artifact_status='COMMITTED' WHERE c.project_id=?1 AND c.chapter_id=?2 AND c.status='COMMITTED' AND c.final_artifact_id IS NOT NULL AND c.final_version IS NOT NULL",
-                        libsql_rusqlite::params![project_id, chapter_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()
-            })
+            .filter(|chapter| chapter.status == "COMMITTED")
             .collect::<Vec<_>>();
-        opening_numbers.sort_unstable();
-        let opening_chapters = opening_chapter_refs.len() == 3
-            && opening_numbers == [1, 2, 3]
-            && opening_chapter_refs.iter().all(|chapter_id| {
-                connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM chapters WHERE project_id=?1 AND chapter_id=?2)",
-                        libsql_rusqlite::params![project_id, chapter_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false)
-            });
+        let opening_chapters = committed_opening.len()
+            == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
+            && opening_chapter_refs.len() == committed_opening.len()
+            && opening_chapter_refs
+                .iter()
+                .zip(&committed_opening)
+                .all(|(chapter_ref, chapter)| chapter_ref == &chapter.chapter_id)
+            && Self::receipt_bound_opening_finals_are_current(connection, project_id, &payload)?;
         let opening_chapter_json = serde_json::to_string(&opening_chapter_refs)?;
         let receipt_canon_refs = payload
             .get("openingCanonRefs")

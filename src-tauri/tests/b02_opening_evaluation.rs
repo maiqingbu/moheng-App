@@ -15,6 +15,7 @@ use ai_novel_production_system_core::production::{
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+use ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT;
 use ai_novel_production_system_core::signing::execute_opening_evaluation_with_observer;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -753,7 +754,7 @@ fn commit_three_opening_chapters_with_outputs(
     project_id: &str,
 ) -> Vec<(String, Value)> {
     let mut productions = Vec::with_capacity(3);
-    for chapter_no in 1..=3 {
+    for chapter_no in 1..=OPENING_CHAPTER_COUNT {
         let center = query_production_center_impl(
             state,
             json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
@@ -781,6 +782,97 @@ fn commit_three_opening_chapters_with_outputs(
         productions.push((chapter_id, production));
     }
     productions
+}
+
+fn b6_commit_fixture_final_chapter(
+    state: &KernelState,
+    project_id: &str,
+    volume_id: &str,
+    chapter_no: i64,
+    chapter_id: &str,
+    final_id: &str,
+    body: &str,
+) {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','PLANNED',0,?6,?6)",
+            libsql_rusqlite::params![chapter_id, project_id, volume_id, chapter_no, format!("测试第 {chapter_no} 章"), NOW],
+        )
+        .unwrap();
+    let gate_policy_ref =
+        NarrativeRepository::canonical_project_head_ref(&connection, project_id, "GatePolicy")
+            .unwrap()
+            .unwrap();
+    drop(connection);
+
+    let payload = json!({
+        "payloadSchema":"final-chapter.r1",
+        "chapterId":chapter_id,
+        "body":body,
+        "wordCount":body.chars().count(),
+        "validatedEvidence":[]
+    });
+    let payload_hash = sha256_canonical(&payload).unwrap();
+    let final_ref = ArtifactRef {
+        artifact_id: final_id.to_owned(),
+        version: 1,
+        payload_hash: payload_hash.clone(),
+    };
+    let evidence_refs: Vec<ArtifactRef> = Vec::new();
+    let source_digest = sha256_canonical(&json!({
+        "gatePolicyRef":gate_policy_ref,
+        "subjectRef":final_ref,
+        "evidenceRefs":evidence_refs
+    }))
+    .unwrap();
+    let mut certificate = json!({
+        "certificateId":format!("cert:b6:volume-two:{}", chapter_id.replace(':', "-")),
+        "projectId":project_id,
+        "gatePolicyRef":gate_policy_ref,
+        "subjectRef":final_ref,
+        "evidenceRefs":evidence_refs,
+        "sourceDigest":source_digest,
+        "passedAt":NOW,
+        "certificateDigest":""
+    });
+    certificate["certificateDigest"] = json!(sha256_canonical(&certificate).unwrap());
+    let command_id = format!("b6:commit:volume-two:{chapter_no}");
+    let scope = json!({"level":"CHAPTER","chapterId":chapter_id});
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":format!("{command_id}:key"),
+        "expectedProjectRevision":revision(state, project_id),
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[{
+            "artifactId":final_id,
+            "projectId":project_id,
+            "artifactType":"FinalChapter",
+            "scope":scope,
+            "version":1,
+            "schemaVersion":"m0a.artifact.v1",
+            "artifactStatus":"CANDIDATE",
+            "payload":payload,
+            "payloadHash":payload_hash,
+            "dependencyRefs":[],
+            "provenance":{"createdBy":"B6::VolumeFixture","commandId":command_id},
+            "createdAt":NOW
+        }],
+        "headUpdates":[{
+            "artifactType":"FinalChapter",
+            "scope":scope,
+            "artifactId":final_id,
+            "version":1,
+            "payloadHash":payload_hash
+        }],
+        "gateCertificates":[certificate]
+    }))
+    .unwrap();
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
 }
 
 #[derive(Clone, Copy)]
@@ -1211,7 +1303,7 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let volume_id: String = connection
         .query_row(
-            "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_no=1",
+            "SELECT c.volume_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=1",
             [&project_id],
             |row| row.get(0),
         )
@@ -2415,6 +2507,460 @@ fn b02_real_opening_evaluation_and_book_plan_approval_are_authoritative() {
 }
 
 #[test]
+fn b6_rv32_second_volume_chapters_one_through_three_do_not_stale_signing() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b6:volume-two:signing-evaluation",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    command(
+        &state,
+        &project_id,
+        "b6:volume-two:signing-confirm",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    command(
+        &state,
+        &project_id,
+        "b6:volume-two:book-plan-approve",
+        "book_plan_revise",
+        json!({}),
+    );
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let book_id: String = connection
+        .query_row(
+            "SELECT book_id FROM volumes WHERE project_id=?1 AND volume_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let volume_two_id =
+        ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
+            ai_novel_production_system_core::stable_id::StableIdKind::Volume,
+            "b6:volume-two",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,2,'第二卷','PRODUCING',1,4,4000,?4,?4)",
+            libsql_rusqlite::params![volume_two_id, project_id, book_id, NOW],
+        )
+        .unwrap();
+    drop(connection);
+    for chapter_no in 1..=OPENING_CHAPTER_COUNT {
+        let chapter_id =
+            ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
+                ai_novel_production_system_core::stable_id::StableIdKind::Chapter,
+                &format!("b6:volume-two:chapter:{chapter_no}"),
+            )
+            .unwrap();
+        let final_id =
+            ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
+                ai_novel_production_system_core::stable_id::StableIdKind::Artifact,
+                &format!("b6:volume-two:final:{chapter_no}"),
+            )
+            .unwrap();
+        let body = format!("第二卷第 {chapter_no} 章：林舟继续核对已经确认的线索。");
+        b6_commit_fixture_final_chapter(
+            &state,
+            &project_id,
+            &volume_two_id,
+            chapter_no,
+            &chapter_id,
+            &final_id,
+            &body,
+        );
+    }
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let receipt_ref = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt_ref,
+        )
+        .unwrap()
+    );
+    ai_novel_production_system_core::signing::require_current_signing_for_long_form_if_present(
+        &connection,
+        &project_id,
+    )
+    .unwrap();
+    drop(connection);
+
+    let next_volume_id: String = state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            connection
+                .query_row(
+                    "SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .map_err(ai_novel_production_system_core::project_db::ManagerError::from)
+        })
+        .unwrap();
+    command(
+        &state,
+        &project_id,
+        "b6:next-volume-intent",
+        "planning_create_volume_intent",
+        json!({"volumeId":next_volume_id}),
+    );
+    command(
+        &state,
+        &project_id,
+        "b6:next-volume-route",
+        "planning_create_volume_plan",
+        json!({"volumeId":next_volume_id}),
+    );
+    let prepared = command(
+        &state,
+        &project_id,
+        "b6:next-chapter-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":next_volume_id}),
+    );
+    let next_chapter_id = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let intent = NarrativeRepository::artifact_payload(
+        &state.manager.open(&project_id, "", NOW).unwrap(),
+        &project_id,
+        "VolumeIntent",
+        &next_volume_id,
+    )
+    .unwrap()
+    .unwrap();
+    let route = NarrativeRepository::volume_plan_route(
+        &state.manager.open(&project_id, "", NOW).unwrap(),
+        &project_id,
+        &next_volume_id,
+    )
+    .unwrap()
+    .unwrap();
+    let route_payload = NarrativeRepository::artifact_payload_by_ref(
+        &state.manager.open(&project_id, "", NOW).unwrap(),
+        &project_id,
+        &route,
+    )
+    .unwrap()
+    .unwrap();
+    let scope_selection = json!({
+        "taskRefs":route_payload["tasks"].as_array().unwrap()
+            .iter()
+            .filter(|task| task["class"] == "REQUIRED")
+            .filter_map(|task| task["taskId"].as_str())
+            .take(1)
+            .collect::<Vec<_>>(),
+        "responsibilityRefs":intent["crossVolumeResponsibilityRefs"],
+        "reservationRefs":intent["futureReservationRefs"],
+        "entityRefs":["entity:b02:linzhou","entity:b02:guqing"]
+    });
+    let planned = command(
+        &state,
+        &project_id,
+        "b6:next-chapter-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":next_chapter_id,"chapterGoalHint":"按当前签约与第二卷现实规划下一章。","scopeSelection":scope_selection}),
+    );
+    assert_eq!(planned["finalStatus"], "committed");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let current_plan = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=?2)",
+            libsql_rusqlite::params![project_id, next_chapter_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap();
+    assert!(current_plan);
+    let current_signing = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &current_signing,
+        )
+        .unwrap()
+    );
+    drop(connection);
+}
+
+#[test]
+fn b6_rv32_change_to_opening_chapter_two_final_makes_signing_stale() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    let opening_outputs = commit_three_opening_chapters_with_outputs(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b6:change:signing-evaluation",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    command(
+        &state,
+        &project_id,
+        "b6:change:signing-confirm",
+        "signing_confirm",
+        json!({"platformId":"FANQIE"}),
+    );
+    let approval = command(
+        &state,
+        &project_id,
+        "b6:change:book-plan-approve",
+        "book_plan_revise",
+        json!({}),
+    );
+    assert_eq!(approval["result"]["planningMaturity"], "APPROVED");
+    let chapter_two_volume_id: String = state
+        .manager
+        .with_read_connection(&project_id, NOW, |connection| {
+            connection
+                .query_row(
+                    "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                    libsql_rusqlite::params![project_id, opening_outputs[1].0],
+                    |row| row.get(0),
+                )
+                .map_err(ai_novel_production_system_core::project_db::ManagerError::from)
+        })
+        .unwrap();
+    command(
+        &state,
+        &project_id,
+        "b6:change:volume-intent",
+        "planning_create_volume_intent",
+        json!({"volumeId":chapter_two_volume_id}),
+    );
+    command(
+        &state,
+        &project_id,
+        "b6:change:volume-route",
+        "planning_create_volume_plan",
+        json!({"volumeId":chapter_two_volume_id}),
+    );
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let chapter_id = &opening_outputs[1].0;
+    let plan_ref = connection
+        .query_row(
+            "SELECT h.artifact_id,h.version,h.payload_hash FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? }),
+        )
+        .unwrap();
+    drop(connection);
+
+    let change_id = "change:b6:chapter-two-final";
+    command(
+        &state,
+        &project_id,
+        "b6:change:create",
+        "change_request_create",
+        json!({
+            "changeRequestId":change_id,
+            "changeType":"CHANGE",
+            "scope":"PROJECT",
+            "summary":"经批准修订开篇第 2 章",
+            "sourceRefs":[plan_ref.artifact_id],
+            "requestedChange":{
+                "targetAuthority":{"artifactType":"ChapterPlan","artifactId":plan_ref.artifact_id},
+                "patch":{"chapterGoal":"经批准的 Change 要求重新核对第二章结论。"}
+            }
+        }),
+    );
+    let preflight = command(
+        &state,
+        &project_id,
+        "b6:change:preflight",
+        "impact_preflight",
+        json!({"changeRequestId":change_id}),
+    );
+    let digest = preflight["result"]["impactDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for index in 0..8 {
+        let page = command(
+            &state,
+            &project_id,
+            &format!("b6:change:expand:{index}"),
+            "impact_expand",
+            json!({"changeRequestId":change_id,"pageSize":100,"continueGlobal":true}),
+        );
+        if page["result"]["hasMore"] == false {
+            break;
+        }
+    }
+    command(
+        &state,
+        &project_id,
+        "b6:change:decision",
+        "change_request_decide",
+        json!({"changeRequestId":change_id,"decision":"APPROVE","impactDigest":digest,"scopeAcknowledged":true,"riskAcknowledged":true}),
+    );
+    let change_applied = command(
+        &state,
+        &project_id,
+        "b6:change:apply",
+        "change_request_apply",
+        json!({"changeRequestId":change_id,"impactDigest":digest}),
+    );
+
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let change_ref = change_applied["receipt"]["committedArtifactRefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reference| reference["artifactId"] == change_id)
+        .cloned()
+        .map(serde_json::from_value::<ArtifactRef>)
+        .unwrap()
+        .unwrap();
+    let change_payload =
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &change_ref)
+            .unwrap()
+            .unwrap();
+    let decision_id = change_payload["decisionId"].as_str().unwrap().to_owned();
+    let updated_plan_ref = connection
+        .query_row(
+            "SELECT h.artifact_id,h.version,h.payload_hash FROM canonical_heads h WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND json_extract(h.scope_key,'$.chapterId')=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? }),
+        )
+        .unwrap();
+    let current_final_ref =
+        NarrativeRepository::committed_final_chapter_head(&connection, &project_id, chapter_id)
+            .unwrap()
+            .unwrap();
+    let mut changed_final_payload =
+        NarrativeRepository::artifact_payload_by_ref(&connection, &project_id, &current_final_ref)
+            .unwrap()
+            .unwrap();
+    let changed_body = format!(
+        "{}\n经批准的 Change 修订。",
+        changed_final_payload["body"].as_str().unwrap()
+    );
+    changed_final_payload["body"] = json!(changed_body);
+    changed_final_payload["bodyDigest"] =
+        json!(sha256_canonical(&changed_final_payload["body"]).unwrap());
+    changed_final_payload["wordCount"] = json!(changed_body.chars().count());
+    changed_final_payload["chapterPlanRef"] = serde_json::to_value(&updated_plan_ref).unwrap();
+    changed_final_payload["validatedEvidence"] = json!([]);
+    changed_final_payload["validatedObligationEvidence"] = json!([]);
+    let final_hash = sha256_canonical(&changed_final_payload).unwrap();
+    let final_ref = ArtifactRef {
+        artifact_id: current_final_ref.artifact_id.clone(),
+        version: current_final_ref.version + 1,
+        payload_hash: final_hash.clone(),
+    };
+    let gate_policy_ref =
+        NarrativeRepository::canonical_project_head_ref(&connection, &project_id, "GatePolicy")
+            .unwrap()
+            .unwrap();
+    let evidence_refs_json: String = connection
+        .query_row(
+            "SELECT evidence_refs_json FROM gate_certificates WHERE project_id=?1 AND subject_artifact_id=?2 AND subject_version=?3 ORDER BY certificate_id LIMIT 1",
+            libsql_rusqlite::params![project_id, current_final_ref.artifact_id, current_final_ref.version],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let evidence_refs: Vec<ArtifactRef> = serde_json::from_str(&evidence_refs_json).unwrap();
+    drop(connection);
+
+    let source_digest = sha256_canonical(&json!({
+        "gatePolicyRef":gate_policy_ref,
+        "subjectRef":final_ref,
+        "evidenceRefs":evidence_refs
+    }))
+    .unwrap();
+    let mut certificate = json!({
+        "certificateId":format!("cert:b6:change:{}", chapter_id.replace(':', "-")),
+        "projectId":project_id,
+        "gatePolicyRef":gate_policy_ref,
+        "subjectRef":final_ref,
+        "evidenceRefs":evidence_refs,
+        "sourceDigest":source_digest,
+        "passedAt":NOW,
+        "certificateDigest":""
+    });
+    certificate["certificateDigest"] = json!(sha256_canonical(&certificate).unwrap());
+    let command_id = "b6:change:final-commit";
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":"commit:b6:change:final",
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":"b6:change:final:key",
+        "expectedProjectRevision":revision(&state,&project_id),
+        "contractVersion":"m0a.v1",
+        "createdAt":NOW,
+        "artifacts":[{
+            "artifactId":final_ref.artifact_id,
+            "projectId":project_id,
+            "artifactType":"FinalChapter",
+            "scope":{"level":"CHAPTER","chapterId":chapter_id},
+            "version":final_ref.version,
+            "schemaVersion":"m0a.artifact.v1",
+            "artifactStatus":"CANDIDATE",
+            "payload":changed_final_payload,
+            "payloadHash":final_hash,
+            "dependencyRefs":[updated_plan_ref,change_ref],
+            "provenance":{"createdBy":"B6::TestChangeMaterialization","commandId":command_id,"decisionRefs":[decision_id]},
+            "createdAt":NOW
+        }],
+        "headUpdates":[{
+            "artifactType":"FinalChapter",
+            "scope":{"level":"CHAPTER","chapterId":chapter_id},
+            "artifactId":final_ref.artifact_id,
+            "version":final_ref.version,
+            "payloadHash":final_ref.payload_hash
+        }],
+        "gateCertificates":[certificate]
+    }))
+    .unwrap();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    CommitService::commit(&connection, &bundle, NOW).unwrap();
+    let receipt_ref = NarrativeRepository::canonical_project_head_ref(
+        &connection,
+        &project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        !ai_novel_production_system_core::signing::signing_evaluation_is_current_in_project(
+            &connection,
+            &project_id,
+            &receipt_ref,
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn b02_legacy_rule_head_is_stale_then_r1_reapproval_preserves_history() {
     let (state, _temp) = state(true);
     let project_id = create_opening_project(&state);
@@ -2822,7 +3368,7 @@ fn b6_rv32_opening_chapter_still_planned_rejects_r1_signing_without_writes() {
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     connection
         .execute(
-            "UPDATE chapters SET status='PLANNED' WHERE project_id=?1 AND chapter_no=2",
+            "UPDATE chapters SET status='PLANNED' WHERE project_id=?1 AND chapter_no=2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1)",
             [&project_id],
         )
         .unwrap();
@@ -2844,7 +3390,7 @@ fn b6_rv32_missing_final_rejects_r1_signing_without_writes() {
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     connection
         .execute(
-            "UPDATE chapters SET final_artifact_id=NULL,final_version=NULL WHERE project_id=?1 AND chapter_no=2",
+            "UPDATE chapters SET final_artifact_id=NULL,final_version=NULL WHERE project_id=?1 AND chapter_no=2 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1)",
             [&project_id],
         )
         .unwrap();
@@ -2866,7 +3412,7 @@ fn b6_rv32_candidate_final_rejects_r1_signing_without_writes() {
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let chapter_id: String = connection
         .query_row(
-            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=2",
+            "SELECT c.chapter_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=2",
             [&project_id],
             |row| row.get(0),
         )
@@ -2912,7 +3458,7 @@ fn b6_rv32_opening_chapter_out_of_range_rejects_r1_signing_without_writes() {
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     connection
         .execute(
-            "UPDATE chapters SET chapter_no=4 WHERE project_id=?1 AND chapter_no=3",
+            "UPDATE chapters SET chapter_no=4 WHERE project_id=?1 AND chapter_no=3 AND volume_id IN (SELECT volume_id FROM volumes WHERE project_id=?1 AND volume_no=1)",
             [&project_id],
         )
         .unwrap();

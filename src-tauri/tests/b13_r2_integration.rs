@@ -95,7 +95,9 @@ fn insert_formal_route_with_task_status(
             libsql_rusqlite::params![volume_id, project_id, book_id, NOW],
         )
         .unwrap();
-    for chapter_no in 1..=3_i64 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         connection.execute(
             "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',1000,?6,?6)",
             libsql_rusqlite::params![format!("chapter:b13:r2:{chapter_no}"),project_id,volume_id,chapter_no,format!("R2 已提交章节 {chapter_no}"),NOW],

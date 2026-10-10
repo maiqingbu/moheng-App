@@ -329,7 +329,9 @@ fn seed_r1_signing_fixture(connection: &Connection, project_id: &str, long_form_
         )
         .unwrap();
 
-    for chapter_no in 1..=3_i64 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         let chapter_id = if chapter_no == 1 {
             first_chapter_id.clone()
         } else {

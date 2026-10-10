@@ -401,7 +401,9 @@ fn create_approved_book_plan(state: &KernelState) -> (String, Value) {
         json!({}),
     );
 
-    for chapter_no in 1..=3 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         let center = query_production_center_impl(
             state,
             json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
@@ -649,7 +651,11 @@ fn opening_item<'a>(book: &'a Value, field: &str, key: &str, prefix: &str) -> &'
 fn rv30_opening_contract_descriptions_reference_canon_without_copying_it() {
     let (state, _temp, _gateway) = state();
     let (_project_id, book) = create_approved_book_plan(&state);
-    let quote_strings = (1..=3).map(BehaviorGateway::quote).collect::<Vec<_>>();
+    let quote_strings = (1
+        ..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+            as usize)
+        .map(BehaviorGateway::quote)
+        .collect::<Vec<_>>();
     let opening_items = [
         opening_item(&book, "mustAchieve", "id", "goal:opening-reality:"),
         opening_item(&book, "mustNotBreak", "id", "rule:opening-reality:"),
@@ -778,7 +784,10 @@ fn rv30_long_form_plan_input_keeps_canon_once_and_omits_evidence_quotes() {
         assert!(!serialized.contains("distrusts"));
     }
     let serialized_hard_input = hard_input.to_string();
-    for chapter_no in 1..=3 {
+    for chapter_no in 1
+        ..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+            as usize
+    {
         assert!(
             !serialized_hard_input.contains(&BehaviorGateway::quote(chapter_no)),
             "HARD Plan input contains raw evidence quote from opening chapter {chapter_no}"

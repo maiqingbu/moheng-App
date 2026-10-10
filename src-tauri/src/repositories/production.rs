@@ -709,18 +709,23 @@ impl ProductionRepository {
         } else {
             false
         };
-        let next_chapter_projection = next_chapter.map(|(id, number, title, volume_id)| {
-            let execution_mode = if !next_chapter_has_volume_plan
-                && number <= crate::repositories::project_entry::OPENING_CHAPTER_COUNT
-            {
+        let next_chapter_projection = if let Some((id, number, title, volume_id)) = next_chapter {
+            let is_opening =
+                crate::repositories::project_entry::is_opening_chapter(connection, project_id, &id)
+                    .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+            let execution_mode = if !next_chapter_has_volume_plan && is_opening {
                 "OPENING_BOOTSTRAP"
             } else if plan_projection.is_some() {
                 "LONG_FORM"
             } else {
                 "OPENING_BOOTSTRAP"
             };
-            json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode})
-        });
+            Some(
+                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode}),
+            )
+        } else {
+            None
+        };
         let job_status = job.as_ref().map(|(_, _, _, status, _)| status.clone());
         let job_error = job
             .as_ref()

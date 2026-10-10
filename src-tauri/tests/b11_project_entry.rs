@@ -1609,7 +1609,7 @@ fn b11_opening_plan_accepts_a_valid_disposition_when_a_thread_exists() {
     let (chapter_id, plan_payload, story_artifact_id, story_version): (String, String, String, i64) =
         connection
             .query_row(
-                "SELECT c.chapter_id,plan_payload.payload_json,story_head.artifact_id,story_head.version FROM chapters c JOIN canonical_heads plan_head ON plan_head.project_id=c.project_id AND plan_head.artifact_type='ChapterPlan' AND plan_head.scope_level='CHAPTER' AND json_extract(plan_head.scope_key,'$.chapterId')=c.chapter_id JOIN artifact_payloads plan_payload ON plan_payload.artifact_id=plan_head.artifact_id AND plan_payload.version=plan_head.version JOIN canonical_heads story_head ON story_head.project_id=c.project_id AND story_head.artifact_type='StoryConstitution' WHERE c.project_id=?1 AND c.chapter_no=1",
+                "SELECT c.chapter_id,plan_payload.payload_json,story_head.artifact_id,story_head.version FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id AND v.volume_no=1 JOIN canonical_heads plan_head ON plan_head.project_id=c.project_id AND plan_head.artifact_type='ChapterPlan' AND plan_head.scope_level='CHAPTER' AND json_extract(plan_head.scope_key,'$.chapterId')=c.chapter_id JOIN artifact_payloads plan_payload ON plan_payload.artifact_id=plan_head.artifact_id AND plan_payload.version=plan_head.version JOIN canonical_heads story_head ON story_head.project_id=c.project_id AND story_head.artifact_type='StoryConstitution' WHERE c.project_id=?1 AND c.chapter_no=1",
                 [&project_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )

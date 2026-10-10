@@ -7268,7 +7268,10 @@ fn execute_planning_command_with_observer(
             )
             .map_err(|error| error.to_string())
         })?;
-        if canon_refs.len() < 3 || !canon_reachable || !receipt_passes {
+        if canon_refs.len() < crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
+            || !canon_reachable
+            || !receipt_passes
+        {
             return Err("BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE".into());
         }
         for reference in &evidence_refs {

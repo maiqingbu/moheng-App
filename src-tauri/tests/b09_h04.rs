@@ -83,7 +83,9 @@ fn fixture() -> Fixture {
     let volume_id = "vol:7d1adf18f35c5c29bd0500e6".to_string();
     connection.execute("INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:b09:1','p-b09',1,'Book','ACTIVE',?1,?1)", [NOW]).unwrap();
     connection.execute("INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,'p-b09','book:b09:1',1,'第一卷','PLANNING',1,3,3000,?2,?2)", libsql_rusqlite::params![volume_id,NOW]).unwrap();
-    for chapter_no in 1..=3 {
+    for chapter_no in
+        1..=ai_novel_production_system_core::repositories::project_entry::OPENING_CHAPTER_COUNT
+    {
         connection.execute("INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,'p-b09',?2,?3,?4,'NORMAL',?5,1000,?6,?6)", libsql_rusqlite::params![format!("chapter:b09:{chapter_no}"),volume_id,chapter_no,format!("第{chapter_no}章"),if chapter_no == 1 {"COMMITTED"} else {"PLANNED"},NOW]).unwrap();
     }
     let intent = json!({"payloadSchema":"volume-intent.r1","volumeFunction":"第一卷主线推进","entryConditions":[],"mustAchieve":[{"id":"goal:b09:main","description":"完成卷内主任务"}],"mustNotBreak":[],"requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:b09:required"}],"futureReservationRefs":["reservation:b09:v4"],"crossVolumeResponsibilityRefs":["thread:b09:promise"],"targetChapterRange":{"min":1,"preferred":3,"max":3},"targetWordRange":{"preferred":3000}});

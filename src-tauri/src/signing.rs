@@ -659,7 +659,8 @@ fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
 }
 
 fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) -> Vec<Value> {
-    let complete_chapters = chapters.len() == 3
+    let complete_chapters = chapters.len()
+        == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         && chapters
             .iter()
             .enumerate()
@@ -980,7 +981,7 @@ fn opening_canon_complete(
     snapshot: &OpeningEvaluationSnapshot,
     actual_state: &OpeningActualState,
 ) -> bool {
-    snapshot.chapters.len() == 3
+    snapshot.chapters.len() == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         && snapshot
             .chapters
             .iter()
@@ -1058,7 +1059,8 @@ fn current_binding(
     let opening_ready = opening_contract_complete(&opening_contract);
     let seed_ready = story_seed_complete(&story_constitution);
     let opening_canon_ready = opening_canon_complete(snapshot, actual_state);
-    let chapters_ready = chapters.len() == 3
+    let chapters_ready = chapters.len()
+        == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         && chapters.iter().enumerate().all(|(index, chapter)| {
             chapter.chapter_no == index as i64 + 1 && chapter.audit_unresolved_hard.is_some()
         });
@@ -1364,7 +1366,7 @@ pub fn execute_opening_evaluation_with_observer(
     no_prior_unknown_model_run(&handle, &project_id)?;
     let snapshot = NarrativeRepository::opening_evaluation_snapshot(&handle, &project_id)
         .map_err(|error| error.to_string())?;
-    if snapshot.chapters.len() != 3
+    if snapshot.chapters.len() != crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         || snapshot
             .chapters
             .iter()
@@ -1696,7 +1698,8 @@ fn load_current_binding(
 ) -> Result<(Value, String), String> {
     let snapshot = NarrativeRepository::opening_evaluation_snapshot(connection, project_id)
         .map_err(|error| error.to_string())?;
-    if snapshot.chapters.len() != 3 {
+    if snapshot.chapters.len() != crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
+    {
         return Err("B02_OPENING_THREE_CHAPTERS_REQUIRED".into());
     }
     let sources = source_refs(connection, project_id)?;
@@ -1780,6 +1783,13 @@ pub fn signing_evaluation_is_current_in_project(
         return Ok(false);
     }
     if payload.get("evaluationRuleVersion").and_then(Value::as_str) != Some(SIGNING_RULESET_VERSION)
+    {
+        return Ok(false);
+    }
+    if !NarrativeRepository::receipt_bound_opening_finals_are_current(
+        connection, project_id, &payload,
+    )
+    .map_err(|error| error.to_string())?
     {
         return Ok(false);
     }
@@ -2089,7 +2099,7 @@ mod tests {
 
     #[test]
     fn first_layer_failure_blocks_model_evaluation() {
-        let chapters = (1..=3)
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, "短正文"))
             .collect::<Vec<_>>();
         let corpus = OriginalityCorpus {
@@ -2129,7 +2139,7 @@ mod tests {
     #[test]
     fn critical_e311_failure_fails_the_common_core() {
         let body = "林舟找到证据并决定继续调查。".repeat(2);
-        let chapters = (1..=3)
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, &body))
             .collect::<Vec<_>>();
         let mut items = vec![
@@ -2150,7 +2160,7 @@ mod tests {
     #[test]
     fn prohibited_content_failure_fails_the_common_core() {
         let body = "林舟找到证据并决定继续调查。".repeat(2);
-        let chapters = (1..=3)
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, &body))
             .collect::<Vec<_>>();
         let mut items = vec![
@@ -2171,7 +2181,7 @@ mod tests {
     #[test]
     fn core_pass_without_a_passing_mainstream_platform_is_not_a_signing_pass() {
         let body = "林舟找到证据并决定继续调查。".repeat(2);
-        let chapters = (1..=3)
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, &body))
             .collect::<Vec<_>>();
         let mut items = vec![
