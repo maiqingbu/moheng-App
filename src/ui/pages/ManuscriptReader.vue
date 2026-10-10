@@ -5,6 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { productErrorMessage, sanitizeProductText } from '../presentation/productLanguage'
+import { formatProgressPercent } from '../presentation/progress'
 import { buildReaderRevisionCommands } from '../flows/readerRevision'
 import type { ExportCapabilityProjection, ExportProgressProjection, ExportReceiptProjection } from '../../application/contracts'
 
@@ -29,10 +30,10 @@ const revisionImpactState = computed(() => store.commandState('reader-revision-i
 const volumes = computed(() => store.readerVolumes?.items ?? [])
 const chapters = computed(() => volumeId.value ? store.chapterLists[volumeId.value]?.items ?? [] : [])
 const versionReason = (value: unknown) => sanitizeProductText(value, '这次版本调整已记录。')
-const exportPercent = computed(() => {
+const exportProgressRatio = computed(() => {
   const progress = exportProgress.value
   if (!progress || progress.totalCharacters <= 0) return 0
-  return Math.min(100, Math.floor(progress.completedCharacters / progress.totalCharacters * 100))
+  return Math.min(1, Math.max(0, progress.completedCharacters / progress.totalCharacters))
 })
 const exportUnavailableMessage = computed(() => {
   if (!exportCapability.value) return '正在核验正式导出能力…'
@@ -278,8 +279,8 @@ onUnmounted(() => {
             {{ exportUnavailableMessage }}
           </p>
           <div v-if="exportProgress" class="export-progress" aria-live="polite">
-            <span>{{ exportProgress.status === 'FINALIZING' ? '正在完成文件并写入回执' : `正在导出第 ${exportProgress.currentChapterNumber ?? '—'} 章` }}（{{ exportPercent }}%）</span>
-            <progress :value="exportPercent" max="100" aria-label="正式成品导出进度" />
+            <span>{{ exportProgress.status === 'FINALIZING' ? '正在完成文件并写入回执' : `正在导出第 ${exportProgress.currentChapterNumber ?? '—'} 章` }}（{{ formatProgressPercent(exportProgressRatio) }}）</span>
+            <progress :value="exportProgressRatio" max="1" aria-label="正式成品导出进度" />
           </div>
           <p v-if="exportError" class="banner warning" role="alert">{{ exportError }}</p>
           <div v-if="exportReceipt?.status === 'COMPLETED'" class="banner success" aria-live="polite">

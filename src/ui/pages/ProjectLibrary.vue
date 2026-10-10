@@ -8,6 +8,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import { blockReasonLabels, phaseLabel, runStateLabel, signingLabels } from '../presentation/projectLabels'
 import { productErrorMessage, productTimeLabel } from '../presentation/productLanguage'
+import { formatProgressPercent } from '../presentation/progress'
 import type { ProjectLibraryItem } from '../../application/contracts'
 
 const router = useRouter()
@@ -155,7 +156,7 @@ async function deleteProject() {
                 <div class="project-card-title-row"><h3>{{ displayTitle(item) }}</h3><span class="badge" :class="statusClass(item)">{{ item.pendingDecisions ? `待决定 ${item.pendingDecisions}` : runStateLabel(item.runState) }}</span></div>
                 <p>{{ item.subtitle }}</p>
                 <div class="project-tags"><span>{{ item.platform }}</span><span>{{ item.genre }}</span><span>{{ item.mode==='AUTO'?'全自动':'导演模式' }}</span></div>
-                <div class="project-progress-row"><div class="progress"><span :style="{width:`${item.progress}%`}" /></div><b>{{ item.progress }}%</b></div>
+                <div class="project-progress-row"><div class="progress"><span :style="{width:formatProgressPercent(item.progress)}" /></div><b>{{ formatProgressPercent(item.progress) }}</b></div>
                 <div class="project-stats"><span><b>{{ item.committedChapters }}</b> 正式章节</span><span><b>{{ item.totalWords.toLocaleString() }}</b> 字</span><span><b>¥{{ item.totalCost.toFixed(2) }}</b></span><span>{{ phaseLabel(item.phase) }}</span></div>
                 <div v-if="!item.operational" class="project-next warning-text">暂时无法打开：{{ readErrorLabel(item.readError) }}</div><div v-else-if="item.blockReason" class="project-next warning-text">当前原因：{{ blockLabel(item.blockReason) }}</div>
                 <div v-else class="project-next">开篇评估：{{ signingLabels[item.signingStatus] }} · 最近打开 {{ productTimeLabel(item.lastOpenedAt) }}</div>

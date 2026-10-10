@@ -153,6 +153,7 @@ export interface ProjectSnapshot {
   runState: RunState
   blockReason: BlockReason
   signingStatus: SigningStatus
+  /** Completion ratio in [0, 1]. */
   progress: number
   totalCost: number
   totalElapsed: string
@@ -175,6 +176,7 @@ interface ProjectLibraryItemBase {
   blockReason: BlockReason
   signingStatus: SigningStatus
   lifecycle: ProjectLifecycle
+  /** Completion ratio in [0, 1]. */
   progress: number
   totalCost: number
   totalWords: number
@@ -364,6 +366,7 @@ export interface ProductionTask {
   title: string
   description: string
   status: 'done' | 'active' | 'waiting' | 'blocked' | 'failed'
+  /** Completion ratio in [0, 1]. */
   progress?: number
   cost?: number
   elapsed?: string
@@ -630,6 +633,7 @@ export interface ProductionCenterProjection {
     label: string
     detail: string
     chapterNumber?: number
+    /** Completion ratio in [0, 1]. */
     progress?: number
   }
   costSummary: {
@@ -798,7 +802,13 @@ export interface ProjectOverviewProjection {
   pendingDecisionCount: number
   recentChapters: ChapterListItem[]
   recentArtifacts: ArtifactSummary[]
-  currentVolume?: { id: string; number: number; title: string; progress: number }
+  currentVolume?: {
+    id: string
+    number: number
+    title: string
+    /** Completion ratio in [0, 1]. */
+    progress: number
+  }
   healthSummary: { level: 'not_evaluated' | 'insufficient_data' | 'source_unavailable' | 'healthy' | 'attention' | 'risk'; label: string; note: string }
 }
 
@@ -813,6 +823,7 @@ export interface VolumeSummary {
   plannedChapters: number
   wordCount: number
   targetWords: number
+  /** Completion ratio in [0, 1]. */
   progress: number
   goal: string
   health: 'healthy' | 'attention' | 'risk'

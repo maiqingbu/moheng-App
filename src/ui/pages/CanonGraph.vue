@@ -4,30 +4,48 @@ import PageHeader from '../components/PageHeader.vue'
 import BaseDrawer from '../components/BaseDrawer.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import { layoutCanonGraphNodes } from '../presentation/canonGraphLayout'
 import { statusLabel } from '../presentation/productLanguage'
 
 const store=useProjectStore()
 const tab=ref<'relations'|'timeline'|'foreshadow'|'knowledge'>('relations')
-const selectedCharacter=ref<string|null>('shen')
+const selectedCharacter=ref<string|null>(null)
 const revisionOpen=ref(false)
 const revisionText=ref('')
 const revisionKey='canon-revision'
 const canon=computed(()=>store.canon)
+const characters=computed(()=>canon.value?.characters.items ?? [])
+const nodePositions=computed(()=>layoutCanonGraphNodes(characters.value.map(character=>character.id)))
 onMounted(()=>void store.loadCanon())
-const selected=computed(()=>canon.value?.characters.items.find(c=>c.id===selectedCharacter.value) ?? null)
+const selected=computed(()=>characters.value.find(c=>c.id===selectedCharacter.value) ?? characters.value[0] ?? null)
+const graphRelations=computed(()=>{
+  const positions=nodePositions.value
+  return (canon.value?.relations.items ?? []).flatMap((relation,index)=>{
+    const from=positions.get(relation.from)
+    const to=positions.get(relation.to)
+    if(!from||!to) return []
+    return [{
+      ...relation,
+      key:`${relation.from}-${relation.to}-${index}`,
+      x1:from.x*10,
+      y1:from.y*5.6,
+      x2:to.x*10,
+      y2:to.y*5.6,
+    }]
+  })
+})
 const relatedList=computed(()=>{
   const sel=selected.value
   if(!sel||!canon.value) return []
-  const chars=canon.value.characters.items
+  const characterIds=new Set(characters.value.map(character=>character.id))
   return canon.value.relations.items
-    .filter(r=>r.from===sel.id||r.to===sel.id)
+    .filter(r=>(r.from===sel.id||r.to===sel.id)&&characterIds.has(r.from)&&characterIds.has(r.to))
     .map(r=>{
       const otherId=r.from===sel.id?r.to:r.from
-      const other=chars.find(c=>c.id===otherId)
-      return { key:`${r.from}-${r.to}`, name:other?.name ?? '未知', label:r.label }
+      const other=characters.value.find(c=>c.id===otherId)!
+      return { key:`${r.from}-${r.to}`, name:other.name, label:r.label }
     })
 })
-const nodePositions:Record<string,{x:number,y:number}>={shen:{x:44,y:50},xuan:{x:23,y:24},liu:{x:20,y:72},mask:{x:76,y:30}}
 const revisionState=computed(()=>store.commandState(revisionKey))
 const toneLabel={knows:'已知',believes:'相信/误解',conceals:'刻意隐瞒',unknown:'未知'} as Record<string,string>
 async function submitRevision(){ await store.runCommand(revisionKey,{type:'change_request_create',projectId:store.project?.id,payload:{kind:'canon_revision',request:revisionText.value}}); revisionOpen.value=false }
@@ -46,20 +64,21 @@ async function submitRevision(){ await store.runCommand(revisionKey,{type:'chang
       <button class="btn small" :class="tab==='knowledge'?'primary':''" @click="tab='knowledge'">角色知识差</button>
     </div>
 
-    <section v-if="tab==='relations'" class="production-layout">
-      <div class="graph-stage">
-        <svg viewBox="0 0 1000 560" preserveAspectRatio="none">
-          <line x1="440" y1="280" x2="230" y2="135" stroke="var(--line-strong)" stroke-width="1.5" />
-          <line x1="440" y1="280" x2="200" y2="404" stroke="var(--line-strong)" stroke-width="1.5" />
-          <line x1="230" y1="135" x2="760" y2="168" stroke="var(--red)" stroke-width="1.5" stroke-dasharray="6 6" />
-        </svg>
-        <button v-for="c in canon.characters.items" :key="c.id" class="graph-node" :class="{primary:c.id==='shen',candidate:c.status==='候选影响'}" :style="{left:`${nodePositions[c.id]?.x ?? 50}%`,top:`${nodePositions[c.id]?.y ?? 50}%`}" @click="selectedCharacter=c.id">
-          <strong>{{ c.name }}</strong><span>{{ c.role }} · {{ statusLabel(c.status) }}</span>
-        </button>
+    <section v-if="tab==='relations'" class="section">
+      <div v-if="characters.length" class="production-layout">
+        <div class="graph-stage">
+          <svg viewBox="0 0 1000 560" preserveAspectRatio="none">
+            <line v-for="relation in graphRelations" :key="relation.key" :x1="relation.x1" :y1="relation.y1" :x2="relation.x2" :y2="relation.y2" :stroke="relation.tone==='negative'?'var(--red)':'var(--line-strong)'" stroke-width="1.5" :stroke-dasharray="relation.tone==='negative'?'6 6':undefined" />
+          </svg>
+          <button v-for="c in characters" :key="c.id" class="graph-node" :class="{primary:c.role==='主角',candidate:c.status==='候选影响'}" :style="{left:`${nodePositions.get(c.id)?.x}%`,top:`${nodePositions.get(c.id)?.y}%`}" @click="selectedCharacter=c.id">
+            <strong>{{ c.name }}</strong><span>{{ c.role }} · {{ statusLabel(c.status) }}</span>
+          </button>
+        </div>
+        <aside class="card pad">
+          <template v-if="selected"><div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="selected.status==='正式'?'success':'warning'">{{ statusLabel(selected.status) }}</span><span class="muted" style="font-size:10px">{{ selected.location }}</span></div><h2 style="margin:10px 0 4px;font-family:var(--font-serif)">{{ selected.name }}</h2><p class="muted">{{ selected.note }}</p><div class="divider" /><h3 style="font-size:13px">当前关系</h3><div style="display:grid;gap:8px"><div v-for="r in relatedList" :key="r.key" class="card pad" style="padding:10px"><strong style="font-size:12px">{{ r.name }}</strong><div class="muted" style="font-size:11px">{{ r.label }}</div></div></div></template>
+        </aside>
       </div>
-      <aside class="card pad">
-        <template v-if="selected"><div style="display:flex;justify-content:space-between;gap:8px"><span class="badge" :class="selected.status==='正式'?'success':'warning'">{{ statusLabel(selected.status) }}</span><span class="muted" style="font-size:10px">{{ selected.location }}</span></div><h2 style="margin:10px 0 4px;font-family:var(--font-serif)">{{ selected.name }}</h2><p class="muted">{{ selected.note }}</p><div class="divider" /><h3 style="font-size:13px">当前关系</h3><div style="display:grid;gap:8px"><div v-for="r in relatedList" :key="r.key" class="card pad" style="padding:10px"><strong style="font-size:12px">{{ r.name }}</strong><div class="muted" style="font-size:11px">{{ r.label }}</div></div></div></template>
-      </aside>
+      <div v-else class="empty card"><strong>暂无正式人物</strong></div>
     </section>
 
     <section v-if="tab==='timeline'" class="card pad">

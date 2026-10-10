@@ -47,6 +47,7 @@ describe('FX-3 CanonGraph data-driven rendering', () => {
     const rendered = mountGraph()
     await nextTick()
 
+    expect(rendered.container.querySelector('aside h2')?.textContent).toBe('甲')
     expect(rendered.container.querySelectorAll('.graph-node')).toHaveLength(5)
     expect(rendered.container.querySelectorAll('.graph-stage svg line')).toHaveLength(2)
     expect([...rendered.container.querySelectorAll('.graph-node')].map(node => node.textContent).join(' ')).not.toContain('shen')
@@ -54,6 +55,12 @@ describe('FX-3 CanonGraph data-driven rendering', () => {
     const positions = [...rendered.container.querySelectorAll<HTMLElement>('.graph-node')]
       .map(node => `${node.style.left},${node.style.top}`)
     expect(new Set(positions).size).toBe(5)
+    const [fromNode, toNode] = [...rendered.container.querySelectorAll<HTMLElement>('.graph-node')]
+    const firstRelation = rendered.container.querySelector('.graph-stage svg line')!
+    expect(Number(firstRelation.getAttribute('x1'))).toBeCloseTo(Number.parseFloat(fromNode.style.left) * 10)
+    expect(Number(firstRelation.getAttribute('y1'))).toBeCloseTo(Number.parseFloat(fromNode.style.top) * 5.6)
+    expect(Number(firstRelation.getAttribute('x2'))).toBeCloseTo(Number.parseFloat(toNode.style.left) * 10)
+    expect(Number(firstRelation.getAttribute('y2'))).toBeCloseTo(Number.parseFloat(toNode.style.top) * 5.6)
     expect(rendered.container.querySelectorAll('.graph-node.primary')).toHaveLength(1)
     rendered.app.unmount()
   })
@@ -75,6 +82,6 @@ describe('FX-3 CanonGraph data-driven rendering', () => {
     const second = layoutCanonGraphNodes(ids)
 
     expect(first).toEqual(second)
-    expect(new Set(Object.values(first).map(point => `${point.x},${point.y}`)).size).toBe(ids.length)
+    expect(new Set([...first.values()].map(point => `${point.x},${point.y}`)).size).toBe(ids.length)
   })
 })
