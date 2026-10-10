@@ -9,8 +9,10 @@ use ai_novel_production_system_core::provider::{
     ProviderResponse, ProviderUsage, ScriptedProvider,
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
+#[cfg(target_os = "macos")]
+use ai_novel_production_system_core::runtime::SecretStore;
 use ai_novel_production_system_core::runtime::{
-    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError, SecretStore,
+    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
@@ -351,7 +353,6 @@ impl SecretProcessObservation {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn runtime_secret_canary() -> String {
     let mut random = [0_u8; 24];
     std::fs::File::open("/dev/urandom")

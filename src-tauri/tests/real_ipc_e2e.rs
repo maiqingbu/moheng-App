@@ -10,6 +10,7 @@
 //! deterministically on CI and locally.
 
 use ai_novel_production_system_core::commands::{self, KernelState};
+#[cfg(target_os = "macos")]
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::market_source::{
     FanqieWriterZoneAdapter, MarketSourceAdapter,
@@ -18,12 +19,14 @@ use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
+#[cfg(target_os = "macos")]
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 #[cfg(target_os = "macos")]
 use ai_novel_production_system_core::repositories::runtime::MemorySecretStore;
 use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
+#[cfg(target_os = "macos")]
 use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 #[cfg(target_os = "macos")]
