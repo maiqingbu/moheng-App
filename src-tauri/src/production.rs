@@ -3407,13 +3407,19 @@ fn run_chapter_production_inner(
             });
         }
     }
+    let volume_id = crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+        connection,
+        &project_id,
+        &chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    let post_commit_capacity =
+        crate::planning::volume_capacity_context(connection, &project_id, &volume_id)?
+            .remaining_after_current_chapter;
     let reconciliation = classify_plan_reality(&ReconciliationFacts {
         task_reality,
-        remaining_chapter_capacity: crate::planning::remaining_chapter_capacity(
-            connection,
-            &project_id,
-            &chapter_id,
-        )?,
+        remaining_chapter_capacity: post_commit_capacity,
         canon_gate_passed: true,
         responsibility_reality,
     });

@@ -172,6 +172,19 @@ struct TruncatedAuditGateway;
 
 impl ProductionModelGateway for RecordingGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let horizon_preview_capacity = input
+            .get("horizonPreviewCapacity")
+            .and_then(Value::as_i64)
+            .unwrap_or(3)
+            .clamp(0, 3) as usize;
+        let horizon_preview = [
+            json!({"slotNo":1,"objective":"推进当前行动","tentative":true}),
+            json!({"slotNo":2,"objective":"观察行动后果","tentative":true}),
+            json!({"slotNo":3,"objective":"准备下一冲突","tentative":true}),
+        ]
+        .into_iter()
+        .take(horizon_preview_capacity)
+        .collect::<Vec<_>>();
         let active_task_progress = input
             .pointer("/chapterPlan/activeTaskRefs")
             .and_then(Value::as_array)
@@ -204,11 +217,7 @@ impl ProductionModelGateway for RecordingGateway {
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
                 "sceneExecution":[],
-                "horizonPreview":[
-                    {"slotNo":1,"objective":"推进当前行动","tentative":true},
-                    {"slotNo":2,"objective":"观察行动后果","tentative":true},
-                    {"slotNo":3,"objective":"准备下一冲突","tentative":true}
-                ]
+                "horizonPreview":horizon_preview
             }),
             "RENDER_CHAPTER" => json!({"body":"林舟推开石门，实际只推进了任务，没有完成它。"}),
             "REPAIR_CANDIDATE" => json!({
@@ -1318,8 +1327,8 @@ fn seed_b08_goal_contracts(
     connection: &Connection,
     project_id: &str,
     include_book_plan: bool,
-    include_volume_plan: bool,
     book_plan_maturity: &str,
+    volume_max_chapters: Option<i64>,
 ) {
     let project_scope = json!({"level":"PROJECT"}).to_string();
     let story_id = format!("story-constitution:{project_id}");
@@ -1428,9 +1437,9 @@ fn seed_b08_goal_contracts(
             "semanticDigest":"0".repeat(64)
         }),
     );
-    if !include_volume_plan {
+    let Some(volume_max_chapters) = volume_max_chapters else {
         return;
-    }
+    };
     insert_b08_contract_artifact(
         connection,
         project_id,
@@ -1454,7 +1463,7 @@ fn seed_b08_goal_contracts(
             }],
             "routeInvariants":["task-order"],
             "requiredExitConditions":[{"kind":"TASK_SATISFIED","value":"task:actual"}],
-            "capacityBudget":{"minChapters":1,"preferredChapters":4,"maxChapters":4}
+            "capacityBudget":{"minChapters":1,"preferredChapters":volume_max_chapters.clamp(1, 4),"maxChapters":volume_max_chapters}
         }),
     );
 }
@@ -1492,8 +1501,8 @@ fn seed_chapter_and_gate_without_volume_plan(connection: &Connection, project_id
         default_b08_gate_policy(),
         policy_id,
         true,
-        false,
         "APPROVED",
+        None,
     );
     seed_b08_long_form_signing_fixture(connection, project_id, &chapter_id);
     chapter_id
@@ -1511,8 +1520,8 @@ fn seed_chapter_and_gate_opening_without_volume_plan(
         default_b08_gate_policy(),
         policy_id,
         true,
-        false,
         "SEED",
+        None,
     );
     extend_seeded_chapter_volume(connection, project_id);
     chapter_id
@@ -1530,12 +1539,20 @@ fn seed_chapter_and_gate_without_planning_contracts(
         default_b08_gate_policy(),
         policy_id,
         false,
-        false,
         "SEED",
+        None,
     )
 }
 
 fn seed_chapter_and_gate_long_form(connection: &Connection, project_id: &str) -> String {
+    seed_chapter_and_gate_long_form_with_capacity(connection, project_id, 4)
+}
+
+fn seed_chapter_and_gate_long_form_with_capacity(
+    connection: &Connection,
+    project_id: &str,
+    volume_max_chapters: i64,
+) -> String {
     let policy_id =
         StableIdentityFactory::from_command(StableIdKind::Artifact, "b08-policy").unwrap();
     let chapter_id = seed_chapter_and_gate_with_policy_and_artifact_id_inner(
@@ -1544,8 +1561,8 @@ fn seed_chapter_and_gate_long_form(connection: &Connection, project_id: &str) ->
         default_b08_gate_policy(),
         policy_id,
         true,
-        true,
         "APPROVED",
+        Some(volume_max_chapters),
     );
     extend_seeded_chapter_volume(connection, project_id);
     seed_b08_long_form_signing_fixture(connection, project_id, &chapter_id);
@@ -1565,8 +1582,8 @@ fn seed_chapter_and_gate_with_policy(
         policy_payload,
         policy_id,
         true,
-        true,
         "SEED",
+        Some(4),
     );
     extend_seeded_chapter_volume(connection, project_id);
     chapter_id
@@ -1584,8 +1601,8 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id(
         policy_payload,
         policy_id,
         true,
-        true,
         "SEED",
+        Some(4),
     );
     extend_seeded_chapter_volume(connection, project_id);
     chapter_id
@@ -1608,8 +1625,8 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
     policy_payload: Value,
     policy_id: String,
     include_book_plan: bool,
-    include_volume_plan: bool,
     book_plan_maturity: &str,
+    volume_max_chapters: Option<i64>,
 ) -> String {
     let book_id = StableIdentityFactory::from_command(StableIdKind::Book, "b08-book").unwrap();
     let volume_id =
@@ -1634,8 +1651,8 @@ fn seed_chapter_and_gate_with_policy_and_artifact_id_inner(
         connection,
         project_id,
         include_book_plan,
-        include_volume_plan,
         book_plan_maturity,
+        volume_max_chapters,
     );
     chapter_id
 }
@@ -6190,7 +6207,11 @@ fn b08_reconciliation_five_values_are_emitted_by_real_production_receipts() {
             .manager
             .create(&project_id, "B08 reconciliation", NOW)
             .unwrap();
-        let chapter_id = seed_chapter_and_gate_long_form(&connection, &project_id);
+        let chapter_id = seed_chapter_and_gate_long_form_with_capacity(
+            &connection,
+            &project_id,
+            if suffix == "route" { 1 } else { 4 },
+        );
         let volume_id =
             StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
         connection
@@ -7500,9 +7521,7 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
         "chapterGoal":"由 B07 owner 重新编译","activeTaskRefs":["task:actual"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
         "sceneExecution":[],"horizonPreview":[
-            {"slotNo":1,"objective":"继续当前行动","tentative":true},
-            {"slotNo":2,"objective":"检查行动后果","tentative":true},
-            {"slotNo":3,"objective":"准备下一冲突","tentative":true}
+            {"slotNo":1,"objective":"继续当前行动","tentative":true}
         ]
     });
     let plan_id = "repair-plan:h03:recompile";

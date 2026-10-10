@@ -1067,7 +1067,7 @@ export interface FrontendPort {
   queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<import('../generated/contracts').VolumeProgressProjection>
   queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection>
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection>
-  queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection>
+  queryPlanRoute(request: Omit<NarrativeRuntimeQueryRequest, 'currentChapter'> & { volumeId: string }): Promise<PlanningRouteProjection>
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection>
   queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>
   queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection>

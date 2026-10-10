@@ -1281,16 +1281,39 @@ fn context_plan_reservation_refs(request: &Value) -> Result<Vec<String>, String>
     }
 }
 
-fn request_resume_context(request: &Value) -> ResumeContext {
-    let mut context = ResumeContext {
-        current_chapter: request
-            .get("currentChapter")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        current_volume: request
-            .get("currentVolumeId")
+fn request_resume_context(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    request: &Value,
+) -> Result<ResumeContext, String> {
+    let chapter_id = request.get("chapterId").and_then(Value::as_str);
+    let volume_id = if let Some(chapter_id) = chapter_id {
+        crate::repositories::narrative::NarrativeRepository::chapter_volume_id(
+            connection, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        request
+            .get("volumeId")
+            .or_else(|| request.get("currentVolumeId"))
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
+            .map(ToOwned::to_owned)
+    };
+    let current_chapter = if let Some(chapter_id) = chapter_id {
+        crate::repositories::narrative::NarrativeRepository::chapter_number(
+            connection, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0)
+    } else if let Some(volume_id) = volume_id.as_deref() {
+        crate::planning::volume_capacity_context(connection, project_id, volume_id)?
+            .current_chapter_no
+    } else {
+        0
+    };
+    let mut context = ResumeContext {
+        current_chapter,
+        current_volume: volume_id,
         ..ResumeContext::default()
     };
     context
@@ -1317,7 +1340,7 @@ fn request_resume_context(request: &Value) -> ResumeContext {
             }
         }
     }
-    context
+    Ok(context)
 }
 
 fn context_scope(request: &Value, project_id: &str) -> String {
@@ -1531,7 +1554,7 @@ fn continuity_from_request(
         &foreshadows,
         &mysteries,
         &evidence,
-        &request_resume_context(request),
+        &request_resume_context(connection, project_id, request)?,
     )
 }
 
@@ -3258,6 +3281,19 @@ pub fn volume_progress_from_authority(
     revision: i64,
 ) -> Result<Value, String> {
     let volume_id = required_string(request, "volumeId")?;
+    let capacity = crate::planning::volume_capacity_context(connection, project_id, volume_id)?;
+    volume_progress_from_authority_with_capacity(
+        connection, project_id, revision, volume_id, &capacity,
+    )
+}
+
+fn volume_progress_from_authority_with_capacity(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    revision: i64,
+    volume_id: &str,
+    capacity: &crate::planning::VolumeCapacityContext,
+) -> Result<Value, String> {
     let route = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
         connection, project_id, volume_id,
     )
@@ -3281,15 +3317,6 @@ pub fn volume_progress_from_authority(
     )
     .map_err(|e| e.to_string())?
     .unwrap_or_else(|| json!({}));
-    let current_chapter = request
-        .get("currentChapter")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let target_chapters = plan
-        .get("capacityBudget")
-        .and_then(|budget| budget.get("maxChapters"))
-        .and_then(Value::as_i64)
-        .unwrap_or(current_chapter);
     let task_ids = plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -3303,8 +3330,7 @@ pub fn volume_progress_from_authority(
     .map_err(|e| e.to_string())?;
     let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
         volume_id: volume_id.into(),
-        target_chapters,
-        current_chapter,
+        remaining_chapter_capacity: capacity.remaining_chapter_capacity,
         tasks: tasks.clone(),
         generated_revision: revision,
     }))
@@ -3335,8 +3361,7 @@ pub fn volume_progress_from_authority(
         .cloned()
         .unwrap_or_default();
     result["planningPressure"] = crate::planning::compile_planning_pressure(
-        current_chapter,
-        target_chapters,
+        capacity,
         &plan,
         &intent,
         &task_reality_values,
@@ -3395,7 +3420,10 @@ pub fn plan_route_from_authority(
     )
     .map_err(|e| e.to_string())?;
     crate::planning::validate_volume_route(&route)?;
-    let progress = volume_progress_from_authority(connection, request, project_id, revision)?;
+    let capacity = crate::planning::volume_capacity_context(connection, project_id, volume_id)?;
+    let progress = volume_progress_from_authority_with_capacity(
+        connection, project_id, revision, volume_id, &capacity,
+    )?;
     let intent_payload = crate::repositories::narrative::NarrativeRepository::artifact_payload(
         connection,
         project_id,
@@ -3428,35 +3456,29 @@ pub fn plan_route_from_authority(
             .and_then(Value::as_str)
             .is_none_or(|id| intent_refs.is_empty() || intent_refs.contains(id))
     });
-    let continuity_threads = continuity_from_request_bounded(connection, request, project_id)
-        .map_err(|e| e.to_string())?
-        .0
-        .into_iter()
-        .filter(|thread| matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED"))
-        .map(|thread| serde_json::to_value(thread).map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let current_chapter_plan = request
-        .get("currentChapter")
-        .and_then(Value::as_i64)
-        .filter(|chapter| *chapter > 0)
-        .and_then(|chapter_no| {
-            crate::repositories::narrative::NarrativeRepository::chapter_id_for_number(
-                connection, project_id, volume_id, chapter_no,
-            )
-            .ok()
-            .flatten()
-        })
-        .map(|chapter_id| {
-            crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
-                connection,
-                project_id,
-                "ChapterPlan",
-                &chapter_id,
-            )
-        })
-        .transpose()
-        .map_err(|e| e.to_string())?
-        .flatten();
+    let mut continuity_request = request.clone();
+    if let Some(object) = continuity_request.as_object_mut() {
+        object.remove("currentChapter");
+    }
+    let continuity_threads =
+        continuity_from_request_bounded(connection, &continuity_request, project_id)
+            .map_err(|e| e.to_string())?
+            .0
+            .into_iter()
+            .filter(|thread| matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED"))
+            .map(|thread| serde_json::to_value(thread).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+    let current_chapter_plan = if let Some(chapter_id) = capacity.current_chapter_id.as_deref() {
+        crate::repositories::narrative::NarrativeRepository::canonical_head_ref(
+            connection,
+            project_id,
+            "ChapterPlan",
+            chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
     let horizon_preview = current_chapter_plan
         .as_ref()
         .and_then(|reference| {
