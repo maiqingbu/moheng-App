@@ -1919,6 +1919,34 @@ fn run_chapter_production_inner(
         return Err("B08_EXECUTION_MODE_MISMATCH".into());
     }
     if execution_mode == "LONG_FORM" {
+        let book_plan_ref =
+            crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+                connection,
+                &project_id,
+                "BookPlan",
+            )
+            .map_err(|error| error.to_string())?;
+        let approved_book_plan = if let Some(reference) = book_plan_ref {
+            crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+                connection,
+                &project_id,
+                &reference,
+            )
+            .map_err(|error| error.to_string())?
+            .and_then(|payload| {
+                (payload.get("planningMaturity").and_then(Value::as_str) == Some("APPROVED"))
+                    .then_some(())
+            })
+            .is_some()
+        } else {
+            false
+        };
+        if approved_book_plan {
+            crate::signing::require_current_signing_for_long_form_if_present(
+                connection,
+                &project_id,
+            )?;
+        }
         crate::gate_policy::require_long_form_policy_supported(connection, &project_id)?;
     }
     if execution_mode == "LONG_FORM"

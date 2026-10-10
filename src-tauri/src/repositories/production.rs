@@ -588,7 +588,7 @@ impl ProductionRepository {
                 "receiptHash":payload.and_then(|value| value.get("receiptHash")).cloned().unwrap_or_else(|| json!(reference.payload_hash))
             })
         });
-        let signing = json!({
+        let mut signing = json!({
             "status":signing_status,
             "verdict":if legacy_revise {json!("历史签约评估未通过（旧版 REVISE）。")} else {signing_payload.as_ref().and_then(|payload| payload.get("verdict")).cloned().unwrap_or_else(|| json!("等待三章正式提交后开始开篇评估。"))},
             "summary":signing_payload.as_ref().and_then(|payload| payload.get("summary")).cloned().unwrap_or_else(|| json!({})),
@@ -634,6 +634,10 @@ impl ProductionRepository {
                 }
             })
             .unwrap_or("PENDING");
+        if book_plan_status == "APPROVED" && signing_ref.is_none() {
+            signing["verdict"] = json!("需要先完成签约评估。");
+            signing["evaluation"]["summary"] = json!("长篇规划与生产前需要先完成签约评估。");
+        }
         let signing_is_current_and_confirmed = signing_ref
             .as_ref()
             .zip(signing_payload.as_ref())

@@ -3864,7 +3864,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
             "PROJECT",
             "{\"level\":\"PROJECT\"}",
             book_plan,
-            book_plan_hash,
+            book_plan_hash.clone(),
         ),
         (
             volume_intent_id,
@@ -3887,6 +3887,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
         connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
         connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p-b08-long',?1,?2,?3,?4,1,?5)", libsql_rusqlite::params![artifact_type,scope_level,scope_key,artifact_id,hash]).unwrap();
     }
+    seed_b08_long_form_signing_fixture(&connection, "p-b08-long", &chapter_id);
     let volume_head_before = (volume_plan_id.to_string(), 1_i64, volume_plan_hash.clone());
     drop(connection);
     let context = query_context_manifest_impl(
@@ -5181,6 +5182,7 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
     let volume_id =
         StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
     seed_future_reservation_authority(&connection, project_id);
+    seed_b08_long_form_signing_fixture(&connection, project_id, &chapter_id);
     drop(connection);
     let intent_hard_context = query_context_manifest_impl(
         &state,
@@ -5286,12 +5288,15 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
             .unwrap(),
         revision_at_audit.lock().unwrap().unwrap()
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:seed'",
                 [project_id],
                 |row| row.get(0)
             )

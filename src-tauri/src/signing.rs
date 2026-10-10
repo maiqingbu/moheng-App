@@ -1807,8 +1807,7 @@ pub fn require_current_signing_for_long_form_if_present(
     )
     .map_err(|error| error.to_string())?
     else {
-        // RV-32 owns the no-receipt behavior; keep its current no-op in this batch.
-        return Ok(());
+        return Err("SIGNING_EVALUATION_REQUIRED".into());
     };
     let Some(payload) =
         NarrativeRepository::artifact_payload_by_ref(connection, project_id, &receipt_ref)
