@@ -6,6 +6,7 @@ default-run = "ai-novel-production-system"
 
 [features]
 default = []
+custom-protocol = ["tauri/custom-protocol"]
 e2e-test = []
 
 [lib]

@@ -7,6 +7,11 @@ use tauri::path::BaseDirectory;
 use tauri::Manager;
 
 fn main() {
+    #[cfg(test)]
+    let context = tauri::generate_context!("tauri.conf.json", test = true);
+    #[cfg(not(test))]
+    let context = tauri::generate_context!("tauri.conf.json");
+
     tauri::Builder::default()
         .setup(|app| {
             let resource_diagnostic =
@@ -50,6 +55,6 @@ fn main() {
             Ok(())
         })
         .invoke_handler(ai_novel_production_system_core::commands::handler())
-        .run(tauri::generate_context!("tauri.conf.json", test = true))
+        .run(context)
         .expect("error while running tauri application");
 }
