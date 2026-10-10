@@ -1628,7 +1628,7 @@ fn validate_chapter_plan_change_semantics(
         chapter_id,
         &route_task_ids,
         &triggered_threads,
-        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+        horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
         connection,
@@ -1972,7 +1972,6 @@ pub struct VolumeCapacityContext {
     pub committed_in_volume: i64,
     pub max_chapters: i64,
     pub remaining_chapter_capacity: i64,
-    pub remaining_after_current_chapter: i64,
     pub current_chapter_no: i64,
     pub current_chapter_id: Option<String>,
 }
@@ -2031,13 +2030,10 @@ pub fn volume_capacity_context(
         .unwrap_or(metadata.chapter_end + 1),
     };
     let remaining_chapter_capacity = (max_chapters - committed_in_volume).max(0);
-    let remaining_after_current_chapter =
-        remaining_chapter_capacity.saturating_sub(i64::from(current_chapter_id.is_some()));
     Ok(VolumeCapacityContext {
         committed_in_volume,
         max_chapters,
         remaining_chapter_capacity,
-        remaining_after_current_chapter,
         current_chapter_no,
         current_chapter_id,
     })
@@ -2454,7 +2450,10 @@ pub fn validate_chapter_plan_horizon(
     Ok(())
 }
 
-pub fn remaining_chapter_capacity(
+/// Return the capacity available to preview chapters after this chapter.
+/// An unsubmitted chapter reserves one slot from the volume capacity; a
+/// committed chapter is already included in the committed chapter count.
+pub fn horizon_capacity_after_chapter(
     connection: &Connection,
     project_id: &str,
     chapter_id: &str,
@@ -2464,7 +2463,17 @@ pub fn remaining_chapter_capacity(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    Ok(volume_capacity_context(connection, project_id, &volume_id)?.remaining_chapter_capacity)
+    let capacity = volume_capacity_context(connection, project_id, &volume_id)?;
+    let status = crate::repositories::narrative::NarrativeRepository::chapter_status(
+        connection, project_id, chapter_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
+    if status == "COMMITTED" {
+        Ok(capacity.remaining_chapter_capacity)
+    } else {
+        Ok(capacity.remaining_chapter_capacity.saturating_sub(1))
+    }
 }
 
 pub fn resolve_chapter_execution_mode(
@@ -2731,7 +2740,7 @@ pub fn recompile_chapter_plan_owner(
         chapter_id,
         &route_task_ids,
         &triggered_threads,
-        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+        horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     if let Some(route) = route_payload.as_ref() {
         let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
@@ -2927,7 +2936,7 @@ pub fn commit_opening_chapter_plan_owner(
         json!({"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}),
     ]
     .into_iter()
-    .take(remaining_chapter_capacity(connection, project_id, chapter_id)?.clamp(0, 8) as usize)
+    .take(horizon_capacity_after_chapter(connection, project_id, chapter_id)?.clamp(0, 8) as usize)
     .collect::<Vec<_>>();
     let plan = json!({
         "payloadSchema":"chapter-plan.r1",
@@ -3298,7 +3307,6 @@ mod tests {
             committed_in_volume: 1,
             max_chapters: 10,
             remaining_chapter_capacity: 9,
-            remaining_after_current_chapter: 8,
             current_chapter_no: 2,
             current_chapter_id: Some("chapter:2".into()),
         };

@@ -3,6 +3,7 @@ use ai_novel_production_system_core::commands::{
 };
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use ai_novel_production_system_core::volume_lifecycle::VolumeLifecycleOwner;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
@@ -31,7 +32,7 @@ fn insert_artifact(
     connection
         .execute(
             "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED',?6,'{}',?7,?7)",
-            libsql_rusqlite::params![artifact_id, project_id, artifact_type, if artifact_type == "ChapterPlan" || artifact_type == "FinalChapter" { "CHAPTER" } else if artifact_type == "BookPlan" || artifact_type == "MainContract" || artifact_type == "StoryConstitution" { "PROJECT" } else { "VOLUME" }, scope_key, payload_hash, NOW],
+            libsql_rusqlite::params![artifact_id, project_id, artifact_type, if artifact_type == "ChapterPlan" || artifact_type == "FinalChapter" { "CHAPTER" } else if artifact_type == "BookPlan" || artifact_type == "MainContract" || artifact_type == "StoryConstitution" || artifact_type == "OpeningContract" { "PROJECT" } else { "VOLUME" }, scope_key, payload_hash, NOW],
         )
         .unwrap();
     connection
@@ -43,7 +44,7 @@ fn insert_artifact(
     connection
         .execute(
             "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
-            libsql_rusqlite::params![project_id, artifact_type, if artifact_type == "ChapterPlan" || artifact_type == "FinalChapter" { "CHAPTER" } else if artifact_type == "BookPlan" || artifact_type == "MainContract" || artifact_type == "StoryConstitution" { "PROJECT" } else { "VOLUME" }, scope_key, artifact_id, payload_hash],
+            libsql_rusqlite::params![project_id, artifact_type, if artifact_type == "ChapterPlan" || artifact_type == "FinalChapter" { "CHAPTER" } else if artifact_type == "BookPlan" || artifact_type == "MainContract" || artifact_type == "StoryConstitution" || artifact_type == "OpeningContract" { "PROJECT" } else { "VOLUME" }, scope_key, artifact_id, payload_hash],
         )
         .unwrap();
     payload_hash
@@ -309,4 +310,212 @@ fn fx2_overdue_uses_global_chapter_numbers() {
         fixture.current_chapter_id,
         format!("chapter:{}:13", fixture.project_id)
     );
+}
+
+fn horizon_plan_preview(count: usize) -> Value {
+    let slots = (1..=count)
+        .map(|slot_no| json!({"slotNo":slot_no,"objective":"暂定章节推进","tentative":true}))
+        .collect::<Vec<_>>();
+    json!({"horizonPreview":slots})
+}
+
+#[test]
+fn fx2_horizon_capacity_excludes_current_chapter() {
+    let second_volume = fx2_capacity_fixture("p-fx2-horizon-two", 7, false);
+    let connection = second_volume
+        .state
+        .manager
+        .open(&second_volume.project_id, "FX-2 horizon", NOW)
+        .unwrap();
+    let two_slot_capacity =
+        ai_novel_production_system_core::planning::horizon_capacity_after_chapter(
+            &connection,
+            &second_volume.project_id,
+            &second_volume.current_chapter_id,
+        )
+        .unwrap();
+    assert_eq!(two_slot_capacity, 2);
+    assert_eq!(
+        ai_novel_production_system_core::planning::horizon_capacity_after_chapter(
+            &connection,
+            &second_volume.project_id,
+            &format!("chapter:{}:17", second_volume.project_id),
+        )
+        .unwrap(),
+        3
+    );
+    assert!(
+        ai_novel_production_system_core::planning::validate_chapter_plan_horizon(
+            &horizon_plan_preview(2),
+            two_slot_capacity,
+        )
+        .is_ok()
+    );
+    assert!(
+        ai_novel_production_system_core::planning::validate_chapter_plan_horizon(
+            &horizon_plan_preview(3),
+            two_slot_capacity,
+        )
+        .is_err()
+    );
+    drop(connection);
+
+    let last_chapter = fx2_capacity_fixture("p-fx2-horizon-last", 9, false);
+    let connection = last_chapter
+        .state
+        .manager
+        .open(&last_chapter.project_id, "FX-2 horizon", NOW)
+        .unwrap();
+    let last_chapter_capacity =
+        ai_novel_production_system_core::planning::horizon_capacity_after_chapter(
+            &connection,
+            &last_chapter.project_id,
+            &last_chapter.current_chapter_id,
+        )
+        .unwrap();
+    assert_eq!(
+        last_chapter.current_chapter_id,
+        format!("chapter:{}:20", last_chapter.project_id)
+    );
+    assert_eq!(last_chapter_capacity, 0);
+    assert!(
+        ai_novel_production_system_core::planning::validate_chapter_plan_horizon(
+            &horizon_plan_preview(1),
+            last_chapter_capacity,
+        )
+        .is_err()
+    );
+    drop(connection);
+
+    let opening_temp = tempfile::tempdir().unwrap();
+    let opening_state = KernelState::new(AppPaths::new(opening_temp.path()));
+    let opening_project_id = "p-fx2-opening-horizon";
+    let opening_connection = opening_state
+        .manager
+        .create(opening_project_id, "FX-2 opening horizon", NOW)
+        .unwrap();
+    let book_id =
+        StableIdentityFactory::from_command(StableIdKind::Book, "fx2-opening-book").unwrap();
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "fx2-opening-volume").unwrap();
+    let chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "fx2-opening-chapter").unwrap();
+    opening_connection
+        .execute(
+            "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'FX-2 opening','ACTIVE',?3,?3)",
+            libsql_rusqlite::params![book_id, opening_project_id, NOW],
+        )
+        .unwrap();
+    opening_connection
+        .execute(
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'开篇卷','PLANNING',1,1,1000,?4,?4)",
+            libsql_rusqlite::params![volume_id, opening_project_id, book_id, NOW],
+        )
+        .unwrap();
+    opening_connection
+        .execute(
+            "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,1,'第一章','NORMAL','PLANNED',0,?4,?4)",
+            libsql_rusqlite::params![chapter_id, opening_project_id, volume_id, NOW],
+        )
+        .unwrap();
+    let project_scope = json!({"level":"PROJECT"}).to_string();
+    let opening_book_plan = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"SEED",
+        "storyPromise":"以证据揭开真实代价",
+        "protagonistMacroDirection":"主动查明档案异常",
+        "endingBoundary":"不得抹除既有事实",
+        "mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],
+        "majorMysteryGoals":[],"futureReservations":[],"volumeIntentSeeds":[],
+        "openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}
+    });
+    insert_artifact(
+        &opening_connection,
+        opening_project_id,
+        "book-plan:fx2:opening",
+        "BookPlan",
+        &project_scope,
+        &opening_book_plan,
+    );
+    insert_artifact(
+        &opening_connection,
+        opening_project_id,
+        "story-constitution:fx2:opening",
+        "StoryConstitution",
+        &project_scope,
+        &json!({"storyCore":{
+            "protagonist":"记忆调查员","desire":"找回真实经历",
+            "mechanism":"档案校验留下可追踪痕迹","conflict":"档案权与个人记忆冲突",
+            "readerPromise":"每次调查揭开真实代价","worldRules":[],"forbiddenReveals":[]
+        }}),
+    );
+    insert_artifact(
+        &opening_connection,
+        opening_project_id,
+        "main-contract:fx2:opening",
+        "MainContract",
+        &project_scope,
+        &json!({"hardRules":["不得改变已经确认的事实"]}),
+    );
+    insert_artifact(
+        &opening_connection,
+        opening_project_id,
+        "opening-contract:fx2:opening",
+        "OpeningContract",
+        &project_scope,
+        &json!({
+            "firstChapterGoal":"发现档案异常",
+            "firstThreeChapterPromise":"逐步揭开记忆被篡改的代价",
+            "forbiddenReveals":[]
+        }),
+    );
+    let project_revision = opening_state
+        .manager
+        .project_revision(opening_project_id)
+        .unwrap();
+    let authority = json!({
+        "projectId":opening_project_id,"volumeId":volume_id,"chapterId":chapter_id,
+        "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[]
+    });
+    let (context_receipt, context_ref) =
+        ai_novel_production_system_core::narrative::commit_context_manifest_owner(
+            &opening_connection,
+            opening_project_id,
+            &authority,
+            project_revision,
+            "cmd:fx2:opening-context",
+            "key:fx2:opening-context",
+            "OPENING_BOOTSTRAP",
+            NOW,
+        )
+        .unwrap();
+    ai_novel_production_system_core::planning::commit_opening_chapter_plan_owner(
+        &opening_connection,
+        opening_project_id,
+        &chapter_id,
+        &context_ref,
+        &authority,
+        context_receipt.after_revision,
+        "cmd:fx2:opening-plan",
+        "key:fx2:opening-plan",
+        NOW,
+    )
+    .unwrap();
+    let opening_plan = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::b07_chapter_plan_payload(
+        &opening_connection,
+        opening_project_id,
+        &chapter_id,
+    )
+    .unwrap()
+    .unwrap();
+    let opening_horizon_capacity =
+        ai_novel_production_system_core::planning::horizon_capacity_after_chapter(
+            &opening_connection,
+            opening_project_id,
+            &chapter_id,
+        )
+        .unwrap();
+    let opening_horizon_count = opening_plan["horizonPreview"].as_array().unwrap().len();
+    assert_eq!(opening_horizon_capacity, 0);
+    assert!(opening_horizon_count <= opening_horizon_capacity as usize);
 }

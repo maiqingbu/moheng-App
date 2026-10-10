@@ -7520,9 +7520,7 @@ fn h03_recompile_uses_b07_owner_and_b06_stale_requery() {
         "contextManifestRef":{"artifactId":context_id,"version":1,"payloadHash":context_hash},
         "chapterGoal":"由 B07 owner 重新编译","activeTaskRefs":["task:actual"],"entityRefs":["entity:actual:linzhou"],"continuityActions":[],
         "requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],
-        "sceneExecution":[],"horizonPreview":[
-            {"slotNo":1,"objective":"继续当前行动","tentative":true}
-        ]
+        "sceneExecution":[],"horizonPreview":[]
     });
     let plan_id = "repair-plan:h03:recompile";
     let auth_id = "repair-auth:h03:recompile";
