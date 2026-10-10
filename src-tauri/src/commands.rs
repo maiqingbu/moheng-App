@@ -9134,10 +9134,17 @@ pub async fn create_export(state: State<'_, KernelState>, request: Value) -> Res
 }
 
 #[tauri::command]
-pub fn query_export_receipt(
+pub async fn query_export_receipt(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_export_receipt_impl(&state, request))
+        .await
+        .map_err(|_| "EXPORT_RECEIPT_WORKER_FAILED".to_string())?
+}
+
+fn query_export_receipt_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let request_id = required_string(&request, "requestId")?;
     let project_dir = state
@@ -9154,10 +9161,17 @@ pub fn query_export_receipt(
 }
 
 #[tauri::command]
-pub fn query_latest_export_receipt(
+pub async fn query_latest_export_receipt(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_latest_export_receipt_impl(&state, request))
+        .await
+        .map_err(|_| "EXPORT_RECEIPT_QUERY_WORKER_FAILED".to_string())?
+}
+
+fn query_latest_export_receipt_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let project_dir = state
         .paths
@@ -9303,19 +9317,25 @@ pub fn query_endgame_mapping_options(
 }
 
 #[tauri::command]
-pub fn query_endgame_advice(
+pub async fn query_endgame_advice(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
-    query_endgame_advice_impl(&state, request)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_endgame_advice_impl(&state, request))
+        .await
+        .map_err(|_| "B14_ENDGAME_ADVICE_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
-pub fn query_completion_quality(
+pub async fn query_completion_quality(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
-    query_completion_quality_impl(&state, request)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_completion_quality_impl(&state, request))
+        .await
+        .map_err(|_| "B14_COMPLETION_QUALITY_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9349,7 +9369,25 @@ fn provider_config(settings: &Value) -> Result<crate::provider::ProviderConfig, 
 }
 
 #[tauri::command]
-pub fn query_global_settings(state: State<'_, KernelState>) -> Result<Value, String> {
+pub async fn query_global_settings(state: State<'_, KernelState>) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_global_settings_impl(&state))
+        .await
+        .map_err(|error| format!("P01_GLOBAL_SETTINGS_QUERY_WORKER_FAILED:{error}"))?
+}
+
+fn query_global_settings_impl(state: &KernelState) -> Result<Value, String> {
+    let secret_store = crate::repositories::runtime::OsKeychainSecretStore::new(
+        "com.moheng.ai-novel-production",
+        "provider-api-key",
+    );
+    query_global_settings_with_secret_store(state, &secret_store)
+}
+
+fn query_global_settings_with_secret_store(
+    state: &KernelState,
+    secret_store: &dyn SecretStore,
+) -> Result<Value, String> {
     let mut settings =
         crate::repositories::provider::ProviderSettingsRepository::read_global(&state.paths)
             .map_err(|error| error.to_string())?;
@@ -9359,14 +9397,33 @@ pub fn query_global_settings(state: State<'_, KernelState>) -> Result<Value, Str
             "1970-01-01T00:00:00Z",
         )?)
         .map_err(|error| error.to_string())?;
-    apply_provider_status(&mut settings);
+    apply_provider_status(&mut settings, secret_store);
     Ok(settings)
 }
 
 #[tauri::command]
-pub fn query_project_settings(
+pub async fn query_project_settings(
     state: State<'_, KernelState>,
     request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_project_settings_impl(&state, request))
+        .await
+        .map_err(|error| format!("P01_PROJECT_SETTINGS_QUERY_WORKER_FAILED:{error}"))?
+}
+
+fn query_project_settings_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let secret_store = crate::repositories::runtime::OsKeychainSecretStore::new(
+        "com.moheng.ai-novel-production",
+        "provider-api-key",
+    );
+    query_project_settings_with_secret_store(state, request, &secret_store)
+}
+
+fn query_project_settings_with_secret_store(
+    state: &KernelState,
+    request: Value,
+    secret_store: &dyn SecretStore,
 ) -> Result<Value, String> {
     let request = request.get("request").cloned().unwrap_or(request);
     let project_id = required_string(&request, "projectId")?;
@@ -9379,21 +9436,16 @@ pub fn query_project_settings(
         project_id,
     )
     .map_err(|error| error.to_string())?;
-    apply_provider_status(&mut settings);
+    apply_provider_status(&mut settings, secret_store);
     Ok(settings)
 }
 
-fn apply_provider_status(settings: &mut Value) {
+fn apply_provider_status(settings: &mut Value, secret_store: &dyn SecretStore) {
     let provider_id = settings
         .get("providerId")
         .and_then(Value::as_str)
         .unwrap_or("openai-compatible");
-    let has_secret = crate::repositories::runtime::OsKeychainSecretStore::new(
-        "com.moheng.ai-novel-production",
-        "provider-api-key",
-    )
-    .get(provider_id)
-    .is_ok();
+    let has_secret = secret_store.contains(provider_id);
     settings["secretStatus"] = json!(if has_secret {
         "AVAILABLE"
     } else {
@@ -9698,5 +9750,108 @@ mod rv17_provider_test_response_tests {
             validate_test_provider_response(r#"{"ok":true,"unexpected":true}"#).unwrap_err(),
             "P01_MALFORMED_RESPONSE"
         );
+    }
+}
+
+#[cfg(test)]
+mod c1_settings_secret_tests {
+    use super::{
+        apply_provider_status, query_global_settings_with_secret_store, KernelState, SecretStore,
+    };
+    use crate::project_db::paths::AppPaths;
+    use crate::repositories::runtime::RuntimeError;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    struct CountingSecretStore {
+        get_calls: AtomicUsize,
+        contains_calls: AtomicUsize,
+    }
+
+    impl SecretStore for CountingSecretStore {
+        fn get(&self, _provider: &str) -> Result<String, RuntimeError> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            Err(RuntimeError::SecretUnavailable)
+        }
+
+        fn contains(&self, _provider: &str) -> bool {
+            self.contains_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    struct ThirtySecondBlockingSecretStore {
+        entered: AtomicBool,
+    }
+
+    impl SecretStore for ThirtySecondBlockingSecretStore {
+        fn get(&self, _provider: &str) -> Result<String, RuntimeError> {
+            panic!("settings status must not read secret data")
+        }
+
+        fn contains(&self, _provider: &str) -> bool {
+            self.entered.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_secs(30));
+            true
+        }
+    }
+
+    #[test]
+    fn settings_status_uses_presence_check_without_reading_secret_data() {
+        let store = CountingSecretStore {
+            get_calls: AtomicUsize::new(0),
+            contains_calls: AtomicUsize::new(0),
+        };
+        let mut settings = json!({
+            "providerId":"openai-compatible",
+            "enabled":true,
+            "endpoint":"https://provider.invalid"
+        });
+
+        apply_provider_status(&mut settings, &store);
+
+        assert_eq!(settings["secretStatus"], "AVAILABLE");
+        assert_eq!(settings["capabilityStatus"], "AVAILABLE");
+        assert_eq!(store.contains_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.get_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn settings_query_waiting_on_keychain_keeps_async_work_responsive() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = KernelState::new(AppPaths::new(temp.path()));
+        let secret_store = Arc::new(ThirtySecondBlockingSecretStore {
+            entered: AtomicBool::new(false),
+        });
+
+        tauri::async_runtime::block_on(async {
+            let started = Instant::now();
+            let worker_state = state.clone();
+            let worker_secret_store = secret_store.clone();
+            let query = tauri::async_runtime::spawn_blocking(move || {
+                query_global_settings_with_secret_store(&worker_state, worker_secret_store.as_ref())
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !secret_store.entered.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < deadline,
+                    "secret-store fixture did not start"
+                );
+                std::thread::yield_now();
+            }
+
+            let responsive = tauri::async_runtime::spawn(async { "other UI work" })
+                .await
+                .unwrap();
+            assert_eq!(responsive, "other UI work");
+            assert!(started.elapsed() < Duration::from_secs(1));
+
+            let settings = query.await.unwrap().unwrap();
+            assert!(started.elapsed() >= Duration::from_secs(30));
+            assert_eq!(settings["secretStatus"], "AVAILABLE");
+        });
     }
 }

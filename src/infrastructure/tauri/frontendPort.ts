@@ -89,7 +89,7 @@ export class TauriFrontendPort implements FrontendPort {
   supportSession(request: { projectId: string; question: string; mode?: 'INSPECT' | 'DIAGNOSE'; scope?: string } & NarrativeRuntimeQueryRequest): Promise<SupportSessionProjection> { return invokeQuery(this.ipc, 'support_session', { request }) }
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection> { return invokeQuery(this.ipc, 'support_checkpoint_resume', { request }) }
   testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {
-    onStatus?.('submitting', '正在测试 Provider')
+    onStatus?.('submitting', settings.apiKey ? '正在测试 Provider…' : '正在等待系统钥匙串授权')
     return invokeQuery<CommandReceipt>(this.ipc, 'test_provider', { settings }).then(receipt => {
       onStatus?.(receipt.finalStatus, receipt.message)
       return receipt

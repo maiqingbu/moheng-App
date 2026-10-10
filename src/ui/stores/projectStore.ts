@@ -826,7 +826,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function testProvider(key:string, nextSettings:ProviderSettingsInput) {
-    commandStates.value[key]={status:'submitting',message:'正在提交诊断…'}
+    commandStates.value[key]={status:'submitting',message:nextSettings.apiKey?'正在测试 Provider…':'正在等待系统钥匙串授权'}
     try {
       const receipt=await frontendPort.testProvider(nextSettings,(status,message)=>{commandStates.value[key]={...commandStates.value[key],status,message}})
       commandStates.value[key]={status:receipt.finalStatus,message:receipt.message,commandId:receipt.commandId}

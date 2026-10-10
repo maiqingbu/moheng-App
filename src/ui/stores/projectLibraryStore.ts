@@ -73,7 +73,10 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
   }
 
   async function testProvider(key: string, settings: ProviderSettingsInput) {
-    commandStates.value[key] = { status: 'submitting', message: '正在提交诊断…' }
+    commandStates.value[key] = {
+      status: 'submitting',
+      message: settings.apiKey ? '正在测试 Provider…' : '正在等待系统钥匙串授权',
+    }
     try {
       const receipt = await frontendPort.testProvider(settings, (status, message) => {
         commandStates.value[key] = { ...commandStates.value[key], status, message }

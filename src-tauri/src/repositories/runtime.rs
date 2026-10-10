@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
+use security_framework::item::{ItemClass, ItemSearchOptions};
+#[cfg(target_os = "macos")]
 use security_framework::passwords::{
     delete_generic_password, generic_password, set_generic_password, PasswordOptions,
 };
@@ -2368,6 +2370,7 @@ fn finish_parse(
 
 pub trait SecretStore: Send + Sync {
     fn get(&self, provider: &str) -> Result<String, RuntimeError>;
+    fn contains(&self, provider: &str) -> bool;
 }
 
 pub struct SecretBackedTransport<T, S> {
@@ -2470,6 +2473,13 @@ impl SecretStore for MemorySecretStore {
             .cloned()
             .ok_or(RuntimeError::SecretUnavailable)
     }
+
+    fn contains(&self, provider: &str) -> bool {
+        self.values
+            .lock()
+            .map(|values| values.contains_key(provider))
+            .unwrap_or(false)
+    }
 }
 
 pub struct OsKeychainSecretStore {
@@ -2507,10 +2517,34 @@ impl OsKeychainSecretStore {
             .map_err(|_| RuntimeError::SecretUnavailable)
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn contains(&self, provider: &str) -> bool {
+        let account = format!("{}:{}", self.account, provider);
+        generic_password_exists(&self.service, &account)
+    }
+
     #[cfg(not(target_os = "macos"))]
     pub fn delete(&self, _provider: &str) -> Result<(), RuntimeError> {
         Err(RuntimeError::SecretUnavailable)
     }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn contains(&self, _provider: &str) -> bool {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn generic_password_exists(service: &str, account: &str) -> bool {
+    let mut options = ItemSearchOptions::new();
+    options
+        .class(ItemClass::generic_password())
+        .service(service)
+        .account(account)
+        .limit(1)
+        .load_attributes(true)
+        .load_data(false);
+    options.search().is_ok_and(|items| !items.is_empty())
 }
 
 #[cfg(target_os = "macos")]
@@ -2526,6 +2560,10 @@ impl SecretStore for OsKeychainSecretStore {
             .map(|secret| secret.trim_end().to_string())
             .map_err(|_| RuntimeError::SecretUnavailable)
     }
+
+    fn contains(&self, provider: &str) -> bool {
+        Self::contains(self, provider)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2533,5 +2571,9 @@ impl SecretStore for OsKeychainSecretStore {
     fn get(&self, _provider: &str) -> Result<String, RuntimeError> {
         let _ = (&self.service, &self.account);
         Err(RuntimeError::SecretUnavailable)
+    }
+
+    fn contains(&self, _provider: &str) -> bool {
+        false
     }
 }

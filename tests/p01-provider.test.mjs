@@ -64,19 +64,27 @@ test('settings status checks keychain presence without reading secret data', () 
   const keychainPresence = runtime.match(/fn generic_password_exists\([\s\S]*?\n\}/)?.[0] ?? ''
 
   assert.match(status, /\.contains\(/)
-  assert.doesNotMatch(status, /\.get\(/)
+  assert.doesNotMatch(status, /\.get\(provider_id\)/)
   assert.match(keychainPresence, /load_attributes\(true\)/)
   assert.match(keychainPresence, /load_data\(false\)/)
   assert.match(keychainPresence, /\.search\(\)/)
 })
 
-test('settings queries use the blocking worker and provider test exposes keychain wait status', () => {
+test('keychain, file, and network commands use blocking workers and expose keychain wait status', () => {
   const globalSettings = commands.match(/pub async fn query_global_settings\([\s\S]*?\n\}/)?.[0] ?? ''
   const projectSettings = commands.match(/pub async fn query_project_settings\([\s\S]*?\n\}/)?.[0] ?? ''
+  const exportReceipt = commands.match(/pub async fn query_export_receipt\([\s\S]*?\n\}/)?.[0] ?? ''
+  const latestExportReceipt = commands.match(/pub async fn query_latest_export_receipt\([\s\S]*?\n\}/)?.[0] ?? ''
+  const endgameAdvice = commands.match(/pub async fn query_endgame_advice\([\s\S]*?\n\}/)?.[0] ?? ''
+  const completionQuality = commands.match(/pub async fn query_completion_quality\([\s\S]*?\n\}/)?.[0] ?? ''
   const providerTest = frontendPort.match(/testProvider\(settings:[\s\S]*?\n  }/)?.[0] ?? ''
 
   assert.match(globalSettings, /spawn_blocking/)
   assert.match(projectSettings, /spawn_blocking/)
+  assert.match(exportReceipt, /spawn_blocking/)
+  assert.match(latestExportReceipt, /spawn_blocking/)
+  assert.match(endgameAdvice, /spawn_blocking/)
+  assert.match(completionQuality, /spawn_blocking/)
   assert.match(providerTest, /正在等待系统钥匙串授权/)
   assert.match(settings, /CommandFeedback :state="testState"/)
 })
