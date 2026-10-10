@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[path = "b02_opening_evaluation_rv32_fixture.rs"]
+#[path = "fixtures/b02_opening_evaluation_rv32_fixture.rs"]
 mod b6_rv32_fixture;
 
 const NOW: &str = "2026-09-13T12:00:00Z";
