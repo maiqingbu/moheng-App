@@ -12,7 +12,15 @@ fn main() {
     #[cfg(not(test))]
     let context = tauri::generate_context!("tauri.conf.json");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(feature = "e2e-webdriver")]
+    let builder = {
+        eprintln!("E2E WebDriver 已启用");
+        builder.plugin(tauri_plugin_wdio_webdriver::init())
+    };
+
+    builder
         .setup(|app| {
             let resource_diagnostic =
                 std::env::args_os().any(|argument| argument == "--diagnose-skill-resources");

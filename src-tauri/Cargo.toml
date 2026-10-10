@@ -8,6 +8,7 @@ default-run = "ai-novel-production-system"
 default = []
 custom-protocol = ["tauri/custom-protocol"]
 e2e-test = []
+e2e-webdriver = ["dep:tauri-plugin-wdio-webdriver"]
 
 [lib]
 name = "ai_novel_production_system_core"
@@ -32,6 +33,7 @@ serde_json = "1"
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10"
 tauri = { version = "2", features = [] }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 thiserror = "2"
 uuid = { version = "1.25.0", features = ["v4", "v5"] }
 
