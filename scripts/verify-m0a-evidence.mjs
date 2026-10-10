@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { hasKernelStateManageCall } from './m0a-kernel-state-check.mjs'
 
 const root = process.cwd()
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
@@ -54,7 +55,7 @@ for (const marker of ['idempotencyKey', 'commit_project_command', 'REVISION_CONF
 }
 
 const main = read('src-tauri/src/main.rs')
-if (!main.includes('manage(KernelState::new')) errors.push('Tauri host does not initialize KernelState')
+if (!hasKernelStateManageCall(main)) errors.push('Tauri host does not initialize KernelState')
 if (!main.includes('commands::handler()')) errors.push('Tauri host does not register the command handler')
 
 const migration = read('src-tauri/migrations/0002_project_authority.sql')
