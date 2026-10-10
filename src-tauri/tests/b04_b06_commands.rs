@@ -275,6 +275,244 @@ fn seed_authority_with_options(
     (volume_id, chapter_two_id)
 }
 
+fn seed_authority_with_r1_signing(connection: &Connection, project_id: &str) -> (String, String) {
+    let result = seed_authority(connection, project_id);
+    seed_r1_signing_fixture(connection, project_id, &result.0);
+    result
+}
+
+fn seed_authority_for_direction_with_r1_signing(
+    connection: &Connection,
+    project_id: &str,
+    direction: &str,
+) -> (String, String) {
+    let result = seed_authority_for_direction(connection, project_id, direction);
+    seed_r1_signing_fixture(connection, project_id, &result.0);
+    result
+}
+
+fn seed_authority_with_large_world_rule_and_r1_signing(
+    connection: &Connection,
+    project_id: &str,
+    rule_characters: usize,
+) -> (String, String) {
+    let result = seed_authority_with_large_world_rule(connection, project_id, rule_characters);
+    seed_r1_signing_fixture(connection, project_id, &result.0);
+    result
+}
+
+fn seed_r1_signing_fixture(connection: &Connection, project_id: &str, long_form_volume_id: &str) {
+    let first_chapter_id: String = connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND volume_id=?2 AND chapter_no=1",
+            libsql_rusqlite::params![project_id, long_form_volume_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=7 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, long_form_volume_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET chapter_no=4 WHERE project_id=?1 AND volume_id=?2 AND chapter_no=2",
+            libsql_rusqlite::params![project_id, long_form_volume_id],
+        )
+        .unwrap();
+    let signing_entity_id = format!("entity:b04:signing:{project_id}");
+    connection
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,?2,'签约 fixture 主角','CHARACTER',?3,?3)",
+            libsql_rusqlite::params![signing_entity_id, project_id, NOW],
+        )
+        .unwrap();
+
+    for chapter_no in 1..=3_i64 {
+        let chapter_id = if chapter_no == 1 {
+            first_chapter_id.clone()
+        } else {
+            let chapter_id = format!("chapter:b04:{project_id}:opening:{chapter_no}");
+            connection
+                .execute(
+                    "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'NORMAL','COMMITTED',0,?6,?6)",
+                    libsql_rusqlite::params![chapter_id, project_id, long_form_volume_id, chapter_no, format!("开篇第 {chapter_no} 章"), NOW],
+                )
+                .unwrap();
+            chapter_id
+        };
+        let audit_id = format!("audit:b04:{project_id}:opening:{chapter_no}");
+        let final_id = format!("final:b04:{project_id}:opening:{chapter_no}");
+        let evidence_id = format!("evidence:b04:{project_id}:opening:{chapter_no}");
+        let fact_id = format!("fact:b04:{project_id}:opening:{chapter_no}");
+        let scope = json!({"level":"CHAPTER","chapterId":chapter_id}).to_string();
+        let audit_ref = json!({
+            "artifactId":audit_id,
+            "version":1,
+            "payloadHash":insert_artifact(
+                connection,
+                project_id,
+                &audit_id,
+                "AuditReport",
+                "CHAPTER",
+                &scope,
+                &json!({"payloadSchema":"audit-report.r1","unresolvedHard":false}),
+            )
+        });
+        let body = format!("开篇事实{chapter_no}：主角确认一条已发生的线索。");
+        let final_payload = json!({
+            "payloadSchema":"final-chapter.r1",
+            "chapterId":chapter_id,
+            "body":body,
+            "auditRef":audit_ref
+        });
+        let final_hash = insert_artifact(
+            connection,
+            project_id,
+            &final_id,
+            "FinalChapter",
+            "CHAPTER",
+            &scope,
+            &final_payload,
+        );
+        connection
+            .execute(
+                "UPDATE chapters SET final_artifact_id=?3,final_version=1,word_count=?4 WHERE project_id=?1 AND chapter_id=?2",
+                libsql_rusqlite::params![project_id, chapter_id, final_id, body.chars().count() as i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,1,?3)",
+                libsql_rusqlite::params![final_id, audit_id, audit_ref["payloadHash"].as_str().unwrap()],
+            )
+            .unwrap();
+        let range_end = body.chars().count() as i64;
+        connection
+            .execute(
+                "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,source_artifact_id,source_version,source_chapter_id,evidence_range_json,authority_level,created_at,updated_at) VALUES (?1,?2,?3,'remembered',?4,?5,1,?6,?7,'A',?8,?8)",
+                libsql_rusqlite::params![fact_id, project_id, signing_entity_id, json!({"clue":format!("opening-{chapter_no}")}).to_string(), final_id, chapter_id, json!({"start":0,"end":range_end}).to_string(), NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES (?1,?2,?3,?4,?5,1,'DIRECT_QUOTE',?6,0,?7,?8)",
+                libsql_rusqlite::params![evidence_id, project_id, fact_id, chapter_id, final_id, body, range_end, NOW],
+            )
+            .unwrap();
+        assert!(!final_hash.is_empty());
+    }
+
+    let snapshot =
+        NarrativeRepository::opening_evaluation_snapshot(connection, project_id).unwrap();
+    assert_eq!(snapshot.chapters.len(), 3);
+    let (binding, source_digest) =
+        ai_novel_production_system_core::signing::current_signing_binding_for_project(
+            connection, project_id,
+        )
+        .unwrap();
+    let mut source_refs = serde_json::Map::new();
+    for (field, artifact_type) in [
+        ("storyConstitutionRef", "StoryConstitution"),
+        ("mainContractRef", "MainContract"),
+        ("openingContractRef", "OpeningContract"),
+        ("bookPlanSeedRef", "BookPlan"),
+    ] {
+        let reference =
+            NarrativeRepository::canonical_project_head_ref(connection, project_id, artifact_type)
+                .unwrap()
+                .unwrap();
+        source_refs.insert(
+            field.to_string(),
+            json!({"artifactId":reference.artifact_id,"version":reference.version,"payloadHash":reference.payload_hash}),
+        );
+    }
+    let mut receipt_payload = json!({
+        "payloadSchema":"simulated-signing-receipt.r1",
+        "status":"PASS",
+        "reasonCode":null,
+        "verdict":"测试 fixture 中的 r1 签约结果已确认。",
+        "evaluatedAt":NOW,
+        "evaluationRuleVersion":"signing-eval.r1",
+        "ruleSetVersion":"signing-eval.r1",
+        "ruleSetDigest":binding["ruleSetDigest"],
+        "platformProfiles":binding["platformProfiles"],
+        "binding":binding,
+        "sourceDigest":source_digest,
+        "openingChapterRefs":snapshot.chapters.iter().map(|chapter| chapter.chapter_id.clone()).collect::<Vec<_>>(),
+        "openingCanonRefs":snapshot.opening_canon_refs,
+        "signingEvidenceRefs":snapshot.signing_evidence_refs,
+        "chapterEvidence":snapshot.chapters.iter().map(|chapter| json!({"chapterId":chapter.chapter_id,"chapterNo":chapter.chapter_no,"finalChapterRef":chapter.final_ref})).collect::<Vec<_>>(),
+        "sourceRefs":serde_json::Value::Object(source_refs.clone()),
+        "modelRunId":null,
+        "skillId":"S35",
+        "coreStatus":"PASS",
+        "itemResults":[],
+        "platformMatrix":[
+            {"platformId":"FANQIE","mainstream":true,"status":"PASS"},
+            {"platformId":"QIDIAN","mainstream":true,"status":"PASS"},
+            {"platformId":"QIMAO","mainstream":true,"status":"PASS"},
+            {"platformId":"ZONGHENG","mainstream":true,"status":"PASS"}
+        ],
+        "confirmation":{"confirmed":true,"confirmedBy":"B04 fixture","confirmedAt":NOW,"platformId":"FANQIE"},
+        "evaluation":{"status":"COMPLETED","phase":"COMPLETED","steps":[],"summary":"测试 fixture 中的签约结果已完成。"},
+        "summary":{"chapters":3,"canonRefs":snapshot.opening_canon_refs.len(),"evidenceRefs":snapshot.signing_evidence_refs.len()},
+        "readiness":{"ready":true,"openingContractComplete":true,"storySeedComplete":true,"openingCanonCommitted":true,"chaptersComplete":true},
+        "receiptHash":""
+    });
+    receipt_payload["receiptHash"] = json!(sha256_canonical(&receipt_payload).unwrap());
+    let receipt_id = format!("signing-receipt:{project_id}");
+    let receipt_hash = insert_artifact(
+        connection,
+        project_id,
+        &receipt_id,
+        "SimulatedSigningReceipt",
+        "PROJECT",
+        "{\"level\":\"PROJECT\"}",
+        &receipt_payload,
+    );
+    for reference in source_refs.values() {
+        connection
+            .execute(
+                "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,?3,?4)",
+                libsql_rusqlite::params![receipt_id, reference["artifactId"].as_str().unwrap(), reference["version"].as_i64().unwrap(), reference["payloadHash"].as_str().unwrap()],
+            )
+            .unwrap();
+    }
+    for chapter in &snapshot.chapters {
+        let final_ref = chapter.final_ref.as_ref().unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,1,?2,?3,?4)",
+                libsql_rusqlite::params![receipt_id, final_ref.artifact_id, final_ref.version, final_ref.payload_hash],
+            )
+            .unwrap();
+    }
+    let book_ref = &source_refs["bookPlanSeedRef"];
+    connection
+        .execute(
+            "INSERT INTO artifact_dependencies(source_artifact_id,source_version,target_artifact_id,target_version,target_payload_hash) VALUES (?1,?2,?3,1,?4)",
+            libsql_rusqlite::params![book_ref["artifactId"].as_str().unwrap(), book_ref["version"].as_i64().unwrap(), receipt_id, receipt_hash],
+        )
+        .unwrap();
+    let receipt_ref = NarrativeRepository::canonical_project_head_ref(
+        connection,
+        project_id,
+        "SimulatedSigningReceipt",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        ai_novel_production_system_core::signing::signing_receipt_is_current_and_confirmed_in_project(
+            connection,
+            project_id,
+            &receipt_ref,
+        )
+        .unwrap()
+    );
+}
+
 #[test]
 fn b04_b06_prepare_command_is_revision_checked_and_idempotent() {
     let temp = tempfile::tempdir().unwrap();
@@ -299,7 +537,8 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
     let connection = manager
         .create("p-b04-b06-plan", "B04/B06 plan", NOW)
         .unwrap();
-    let (volume_id, prior_chapter_id) = seed_authority(&connection, "p-b04-b06-plan");
+    let (volume_id, prior_chapter_id) =
+        seed_authority_with_r1_signing(&connection, "p-b04-b06-plan");
     connection
         .execute(
             "UPDATE chapters SET status='COMMITTED' WHERE project_id=?1 AND chapter_id=?2",
@@ -308,7 +547,7 @@ fn b04_b06_compile_command_uses_one_model_after_bounded_context_and_commits_plan
         .unwrap();
     connection
         .execute(
-            "UPDATE volumes SET chapter_end=6 WHERE project_id=?1 AND volume_id=?2",
+            "UPDATE volumes SET chapter_end=8 WHERE project_id=?1 AND volume_id=?2",
             libsql_rusqlite::params!["p-b04-b06-plan", volume_id],
         )
         .unwrap();
@@ -377,18 +616,18 @@ fn b2_plan_input_contains_direction_specific_goal_fields_with_source_refs() {
         .create("p-b2-direction-b", "B2 direction B", NOW)
         .unwrap();
     let (volume_a, chapter_a) =
-        seed_authority_for_direction(&project_a, "p-b2-direction-a", "方向甲");
+        seed_authority_for_direction_with_r1_signing(&project_a, "p-b2-direction-a", "方向甲");
     let (volume_b, chapter_b) =
-        seed_authority_for_direction(&project_b, "p-b2-direction-b", "方向乙");
+        seed_authority_for_direction_with_r1_signing(&project_b, "p-b2-direction-b", "方向乙");
     project_a
         .execute(
-            "UPDATE volumes SET chapter_end=5 WHERE project_id='p-b2-direction-a' AND volume_id=?1",
+            "UPDATE volumes SET chapter_end=7 WHERE project_id='p-b2-direction-a' AND volume_id=?1",
             [&volume_a],
         )
         .unwrap();
     project_b
         .execute(
-            "UPDATE volumes SET chapter_end=5 WHERE project_id='p-b2-direction-b' AND volume_id=?1",
+            "UPDATE volumes SET chapter_end=7 WHERE project_id='p-b2-direction-b' AND volume_id=?1",
             [&volume_b],
         )
         .unwrap();
@@ -868,7 +1107,8 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
     let connection = manager
         .create(project_id, "Context completeness", NOW)
         .unwrap();
-    let (volume_id, _) = seed_authority_with_large_world_rule(&connection, project_id, 5000);
+    let (volume_id, _) =
+        seed_authority_with_large_world_rule_and_r1_signing(&connection, project_id, 5000);
     drop(connection);
 
     let gateway = Arc::new(PlanningGateway {
@@ -927,7 +1167,7 @@ fn b_r2_01_long_form_route_task_total_over_bound_blocks_before_state_reads_and_m
     let connection = manager
         .create(project_id, "Long-form Task bound", NOW)
         .unwrap();
-    let (volume_id, _) = seed_authority(&connection, project_id);
+    let (volume_id, _) = seed_authority_with_r1_signing(&connection, project_id);
     let route_json: String = connection
         .query_row(
             "SELECT payload_json FROM artifact_payloads WHERE artifact_id='authority:route' AND version=1",
@@ -1050,17 +1290,18 @@ fn b_r2_01_long_form_historical_evidence_quote_is_soft_and_remains_retrievable()
             libsql_rusqlite::params![project_id, prior_chapter_id],
         )
         .unwrap();
-    connection
-        .execute(
-            "UPDATE volumes SET chapter_end=6 WHERE project_id=?1 AND volume_id=?2",
-            libsql_rusqlite::params![project_id, volume_id],
-        )
-        .unwrap();
     let quote = "证据内容".repeat(3_000);
     connection.execute(
         "INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:budget:oversized',?1,'fact:b04:reality','chapter:b04:1','authority:book',1,'FINAL_CHAPTER',?2,0,?3,?4)",
         libsql_rusqlite::params![project_id, quote, quote.chars().count() as i64, NOW],
     ).unwrap();
+    seed_r1_signing_fixture(&connection, project_id, &volume_id);
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=8 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
     drop(connection);
 
     let gateway = Arc::new(PlanningGateway {
