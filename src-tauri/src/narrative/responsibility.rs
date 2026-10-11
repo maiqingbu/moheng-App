@@ -168,6 +168,8 @@ pub fn execute_adjustment(
         })
     {
         let supplied = payload.get("evidence").and_then(Value::as_object);
+        let has_start = supplied.is_some_and(|evidence| evidence.contains_key("start"));
+        let has_end = supplied.is_some_and(|evidence| evidence.contains_key("end"));
         let (start, end, quote) = match supplied {
             Some(evidence) => (
                 evidence
@@ -193,9 +195,12 @@ pub fn execute_adjustment(
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".to_string())?;
-        let (start, end) = match (start, end) {
-            (Some(start), Some(end)) => (start, end),
-            (None, None) => unique_quote_span(&body, quote)
+        let (start, end) = match (has_start, has_end) {
+            (true, true) => match (start, end) {
+                (Some(start), Some(end)) => (start, end),
+                _ => return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into()),
+            },
+            (false, false) => unique_quote_span(&body, quote)
                 .ok_or_else(|| "EVIDENCE_QUOTE_NOT_UNIQUE".to_string())?,
             _ => return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into()),
         };
