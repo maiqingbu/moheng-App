@@ -989,6 +989,24 @@ impl ProductionModelGateway for QuoteOnlyResponsibilityGateway {
             response.output["body"] = json!(self.body);
         }
         if capability == "AUDIT_EXTRACT" {
+            let start = self
+                .body
+                .find("林舟推开石门")
+                .map(|byte_start| self.body[..byte_start].chars().count())
+                .unwrap_or(0);
+            let end = start + "林舟推开石门".chars().count();
+            response.output["canonCandidates"][0]["evidence"]["start"] = json!(start);
+            response.output["canonCandidates"][0]["evidence"]["end"] = json!(end);
+            if let Some(candidate) = response.output["taskProgressCandidates"]
+                .as_array_mut()
+                .and_then(|candidates| candidates.first_mut())
+            {
+                candidate["evidence"]["start"] = json!(start);
+                candidate["evidence"]["end"] = json!(end);
+            }
+            response.output["evidenceRanges"] = json!([{
+                "start":start,"end":end,"quote":"林舟推开石门"
+            }]);
             response.output["continuityCandidates"] = json!([{
                 "threadRef":"thread:mystery:fx6-quote",
                 "disposition":"ADVANCE",
@@ -6762,15 +6780,17 @@ fn fx5_reconciliation_considers_tasks_beyond_first_chunk() {
 
 #[test]
 fn fx6_quote_only_evidence_located_by_backend() {
-    for (suffix, body, quote, should_commit) in [
-        ("unique", "林舟推开石门，走向窗边。", "林舟推开石门", true),
+    for (suffix, body, quote, should_commit, invalid_range) in [
+        ("unique", "顾清看见，林舟推开石门，走向窗边。", "林舟推开石门", true, false),
         (
             "duplicate",
             "林舟推开石门，林舟推开石门。",
             "林舟推开石门",
             false,
+            false,
         ),
-        ("missing", "林舟推开石门，走向窗边。", "顾清走进房间", false),
+        ("missing", "林舟推开石门，走向窗边。", "顾清走进房间", false, false),
+        ("invalid-range", "林舟推开石门，走向窗边。", "林舟推开石门", false, true),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-fx6-quote-{suffix}");
@@ -6819,7 +6839,7 @@ fn fx6_quote_only_evidence_located_by_backend() {
                 "authorityLevel":"B",
                 "fulfillmentObject":"entity:actual:linzhou",
                 "resumeCondition":{"kind":"ENTITY_PRESENT","value":"entity:actual:linzhou"},
-                "evidence":{"quote":quote}
+                "evidence":if invalid_range { json!({"start":"0","end":"6","quote":quote}) } else { json!({"quote":quote}) }
             }
         });
         let result = execute_command_impl(&state, request);
@@ -6840,11 +6860,14 @@ fn fx6_quote_only_evidence_located_by_backend() {
                 )
                 .unwrap();
             let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
-            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeStart"], 0);
-            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeEnd"], 6);
+            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeStart"], 5);
+            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeEnd"], 11);
             assert_eq!(snapshot["sourceEvidenceRefs"][0]["quote"], quote);
         } else {
-            assert_eq!(result.unwrap_err(), "EVIDENCE_QUOTE_NOT_UNIQUE");
+            assert_eq!(
+                result.unwrap_err(),
+                if invalid_range { "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED" } else { "EVIDENCE_QUOTE_NOT_UNIQUE" },
+            );
             assert_eq!(
                 connection
                     .query_row::<i64, _, _>(
