@@ -168,6 +168,8 @@ pub fn execute_adjustment(
         })
     {
         let supplied = payload.get("evidence").and_then(Value::as_object);
+        let has_start = supplied.is_some_and(|evidence| evidence.contains_key("start"));
+        let has_end = supplied.is_some_and(|evidence| evidence.contains_key("end"));
         let (start, end, quote) = match supplied {
             Some(evidence) => (
                 evidence
@@ -182,7 +184,7 @@ pub fn execute_adjustment(
             ),
             None => (None, None, None),
         };
-        let (Some(start), Some(end), Some(quote)) = (start, end, quote) else {
+        let Some(quote) = quote else {
             return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into());
         };
         let body = NarrativeRepository::final_chapter_body_for_ref(
@@ -193,6 +195,15 @@ pub fn execute_adjustment(
         )
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".to_string())?;
+        let (start, end) = match (has_start, has_end) {
+            (true, true) => match (start, end) {
+                (Some(start), Some(end)) => (start, end),
+                _ => return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into()),
+            },
+            (false, false) => unique_quote_span(&body, quote)
+                .ok_or_else(|| "EVIDENCE_QUOTE_NOT_UNIQUE".to_string())?,
+            _ => return Err("B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED".into()),
+        };
         crate::production::exact_quote_span(&body, start, end, quote)
             .map_err(|_| "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_INVALID".to_string())?;
         source_evidence_refs.push(crate::generated::types::EvidenceRef {
@@ -320,4 +331,30 @@ pub fn execute_adjustment(
         "replayed":false,
         "receipt":receipt
     }))
+}
+
+fn unique_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
+    if quote.is_empty() {
+        return None;
+    }
+
+    let mut cursor = 0;
+    let mut match_start = None;
+    while cursor <= body.len() {
+        let Some(relative_start) = body.get(cursor..)?.find(quote) else {
+            break;
+        };
+        let byte_start = cursor + relative_start;
+        if match_start.is_some() {
+            return None;
+        }
+        match_start = Some(byte_start);
+        let next_char_len = body.get(byte_start..)?.chars().next()?.len_utf8();
+        cursor = byte_start + next_char_len;
+    }
+
+    let byte_start = match_start?;
+    let start = body.get(..byte_start)?.chars().count();
+    let end = start + quote.chars().count();
+    Some((start, end))
 }

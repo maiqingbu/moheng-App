@@ -6,10 +6,13 @@ import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
 import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import ResumeConditionFields from '../components/ResumeConditionFields.vue'
 import { useProjectStore } from '../stores/projectStore'
 import type { ProductionCenterProjection, RunState } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
+import { buildResponsibilityEvidence, createResumeConditionDraft, serializeResumeCondition, type ResumeConditionDraft } from '../flows/resumeCondition'
+import { resumeConditionLabel } from '../presentation/continuity'
 
 const store = useProjectStore()
 const route = useRoute()
@@ -45,7 +48,9 @@ const gatePolicyUpdateInFlight = ref(false)
 const gatePolicyRuleDraft = ref('{"predicate":"alive","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}')
 const gatePolicyDraftError = ref('')
 const fulfillmentObjectDraft = reactive<Record<string, string>>({})
-const resumeConditionDraft = reactive<Record<string, string>>({})
+const resumeConditionDraft = reactive<Record<string, ResumeConditionDraft>>({})
+const advancedResumeConditionDraft = reactive<Record<string, string>>({})
+const responsibilityFormError = ref('')
 const evidenceStartDraft = reactive<Record<string, number | undefined>>({})
 const evidenceEndDraft = reactive<Record<string, number | undefined>>({})
 const evidenceQuoteDraft = reactive<Record<string, string>>({})
@@ -159,20 +164,14 @@ function focusOpeningEvaluationProgress() {
   document.querySelector<HTMLElement>('[data-opening-evaluation-progress]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
-function resumeConditionLabel(condition: Record<string, unknown> | null | undefined) {
-  if (!condition) return '未提供明确兑现条件'
-  const kind = String(condition.kind ?? '')
-  const value = condition.value
-  if (kind === 'ENTITY_PRESENT') return `当人物或实体出现（${String(value ?? '未知')}）`
-  if (kind === 'NEXT_MEETING' && value && typeof value === 'object') {
-    const meeting = value as Record<string, unknown>
-    return `当 ${String(meeting.entityA ?? '人物 A')} 与 ${String(meeting.entityB ?? '人物 B')} 再次相遇`
-  }
-  if (kind === 'KNOWLEDGE_ACQUIRED') return `当相关知识获得（${String(value ?? '未知')}）`
-  if (kind === 'TASK_SATISFIED') return `当任务完成（${String(value ?? '未知')}）`
-  if (kind === 'AFTER_CHAPTER') return `第 ${String(value ?? '未知')} 章之后`
-  if (kind === 'IN_VOLUME') return `进入卷（${String(value ?? '未知')}）`
-  return kind ? `${kind} · ${JSON.stringify(value)}` : '未提供明确兑现条件'
+type ResponsibilityItem = NonNullable<ProductionCenterProjection['newResponsibilities']>[number]
+
+function resumeConditionForm(item: ResponsibilityItem): ResumeConditionDraft {
+  return resumeConditionDraft[item.threadRef] ?? createResumeConditionDraft(item.resumeCondition)
+}
+
+function updateResumeConditionForm(item: ResponsibilityItem, value: ResumeConditionDraft) {
+  resumeConditionDraft[item.threadRef] = value
 }
 
 async function adjustResponsibility(
@@ -181,35 +180,45 @@ async function adjustResponsibility(
   authorityLevel?: 'A' | 'B',
 ) {
   if (responsibilityAdjustmentInFlight.value) return
+  responsibilityFormError.value = ''
   const key = `thread-responsibility-${item.threadRef}`
-  responsibilityAdjustmentInFlight.value = item.threadRef
-  lastCommand.value = key
   const payload: Record<string, unknown> = { threadRef: item.threadRef, action }
   if (action === 'UPGRADE') {
+    let resumeCondition: Record<string, unknown> | null = null
+    const rawAdvancedCondition = store.advancedMode ? advancedResumeConditionDraft[item.threadRef]?.trim() : ''
+    if (rawAdvancedCondition) {
+      try {
+        const parsed: unknown = JSON.parse(rawAdvancedCondition)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid condition')
+        resumeCondition = parsed as Record<string, unknown>
+      } catch {
+        responsibilityFormError.value = '高级兑现条件 JSON 格式不正确。'
+        return
+      }
+    } else {
+      resumeCondition = serializeResumeCondition(resumeConditionDraft[item.threadRef] ?? createResumeConditionDraft(item.resumeCondition))
+    }
+    if (!resumeCondition) {
+      responsibilityFormError.value = '请补全兑现条件所需的信息。'
+      return
+    }
+    payload.resumeCondition = resumeCondition
     const fulfillmentObject = fulfillmentObjectDraft[item.threadRef]?.trim() || item.fulfillmentObject
     if (fulfillmentObject) payload.fulfillmentObject = fulfillmentObject
-    const conditionText = resumeConditionDraft[item.threadRef]?.trim()
-    if (conditionText) {
-      try {
-        payload.resumeCondition = JSON.parse(conditionText)
-      } catch {
-        payload.resumeCondition = conditionText
-      }
-    } else if (item.resumeCondition) {
-      payload.resumeCondition = item.resumeCondition
-    }
     if (item.evidence) {
       payload.evidence = item.evidence
-    } else if (evidenceQuoteDraft[item.threadRef]?.trim()
-      && evidenceStartDraft[item.threadRef] !== undefined
-      && evidenceEndDraft[item.threadRef] !== undefined) {
-      payload.evidence = {
-        start: evidenceStartDraft[item.threadRef],
-        end: evidenceEndDraft[item.threadRef],
-        quote: evidenceQuoteDraft[item.threadRef],
-      }
+    } else {
+      const evidence = buildResponsibilityEvidence(
+        evidenceQuoteDraft[item.threadRef] ?? '',
+        evidenceStartDraft[item.threadRef],
+        evidenceEndDraft[item.threadRef],
+        store.advancedMode,
+      )
+      if (evidence) payload.evidence = evidence
     }
   }
+  responsibilityAdjustmentInFlight.value = item.threadRef
+  lastCommand.value = key
   try {
     await store.runCommand(key, {
       type: 'thread_responsibility_adjust',
@@ -650,15 +659,22 @@ function costText(value: number | null | undefined) {
               <label style="display:grid;gap:4px">升级时的兑现对象
                 <input v-model="fulfillmentObjectDraft[item.threadRef]" :placeholder="item.fulfillmentObject ?? '人物、事件或物件引用'" />
               </label>
-              <label style="display:grid;gap:4px">升级时的 typed resume condition（JSON）
-                <textarea v-model="resumeConditionDraft[item.threadRef]" :placeholder="item.resumeCondition ? JSON.stringify(item.resumeCondition) : '{&quot;kind&quot;:&quot;ENTITY_PRESENT&quot;,&quot;value&quot;:&quot;entity:...&quot;}'" rows="2" />
+              <label style="display:grid;gap:4px">升级时的兑现条件
+                <ResumeConditionFields :model-value="resumeConditionForm(item)" @update:model-value="updateResumeConditionForm(item, $event)" />
+              </label>
+              <label v-if="store.advancedMode" style="display:grid;gap:4px">原始兑现条件 JSON
+                <textarea v-model="advancedResumeConditionDraft[item.threadRef]" :placeholder="JSON.stringify(item.resumeCondition ?? {})" rows="2" />
               </label>
               <div v-if="!item.evidence" class="responsibility-evidence-fields">
-                <small class="muted">升级前请从来源正文填写精确引用和零起点字符范围。</small>
-                <input v-model.number="evidenceStartDraft[item.threadRef]" type="number" min="0" placeholder="证据起点" />
-                <input v-model.number="evidenceEndDraft[item.threadRef]" type="number" min="0" placeholder="证据终点" />
-                <input v-model="evidenceQuoteDraft[item.threadRef]" placeholder="逐字证据" />
+                <small class="muted">普通模式只需粘贴原文引文，系统会在该责任的来源正文中定位唯一位置。</small>
+                <input v-model="evidenceQuoteDraft[item.threadRef]" placeholder="逐字证据引文" />
+                <template v-if="store.advancedMode">
+                  <small class="muted">高级模式可手动指定零起点字符范围。</small>
+                  <input v-model.number="evidenceStartDraft[item.threadRef]" type="number" min="0" placeholder="证据起点（字符）" />
+                  <input v-model.number="evidenceEndDraft[item.threadRef]" type="number" min="0" placeholder="证据终点（字符）" />
+                </template>
               </div>
+              <p v-if="responsibilityFormError" class="banner warning" role="alert">{{ responsibilityFormError }}</p>
             </div>
             <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'UPGRADE', 'B')">升级为 B 级</button>
             <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'UPGRADE', 'A')">升级为 A 级</button>

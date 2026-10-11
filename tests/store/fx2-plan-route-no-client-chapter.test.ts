@@ -8,7 +8,7 @@ const harness = vi.hoisted(() => ({
   port: null as any,
 }))
 
-vi.mock('vue-router', () => ({ useRoute: () => harness.route }))
+vi.mock('vue-router', () => ({ useRoute: () => harness.route, useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('../../src/app/providers/runtimePort', () => ({ getFrontendPort: () => harness.port }))
 
 describe('FX-2 planning route requests', () => {
@@ -80,6 +80,7 @@ describe('FX-2 planning route requests', () => {
         requests.push(request)
         return routeProjection
       }),
+      queryContinuity: vi.fn(async () => ({ projectId: 'project:fx2', projectRevision: 9, threads: [], truncated: false })),
       executeCommand: vi.fn(async (request: Record<string, unknown>) => ({
         commandId: request.commandId,
         projectId: request.projectId,
@@ -109,6 +110,10 @@ describe('FX-2 planning route requests', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     await nextTick()
     expect(requests).toHaveLength(1)
+    expect(harness.port.queryContinuity).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'project:fx2',
+      volumeId: 'volume:fx2:2',
+    }))
     expect(requests[0]).not.toHaveProperty('currentChapter')
     const firstRoute = JSON.parse(JSON.stringify(store.planningRoute))
 

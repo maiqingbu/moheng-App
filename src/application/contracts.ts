@@ -64,7 +64,34 @@ export interface NarrativeRuntimeQueryRequest extends ProjectQueryRequest {
 }
 
 export interface NarrativeStateProjection { projectId: string; projectRevision: number; view: Record<string, unknown> }
-export interface ContinuityProjection { projectId: string; projectRevision: number; threads: import('../generated/contracts').ContinuityThreadProjection[] }
+export interface ContinuityEvidenceProjection {
+  artifactId: string
+  version: number
+  rangeStart?: number | null
+  rangeEnd?: number | null
+  quote?: string | null
+}
+export interface ContinuitySourceProjection { kind: string; ref: string }
+export interface ContinuityThreadViewProjection {
+  threadId: string
+  threadClass: string
+  description: string
+  fulfillmentObject: string | null
+  logicalStatus: string
+  sourceEventRef: string | null
+  evidenceRefs: ContinuityEvidenceProjection[]
+  participantEntities: string[]
+  resumeCondition: Record<string, unknown>
+  authorityLevel: 'A' | 'B' | 'C'
+  currentDisposition: string
+  sourceRefs: ContinuitySourceProjection[]
+}
+export interface ContinuityProjection {
+  projectId: string
+  projectRevision: number
+  threads: ContinuityThreadViewProjection[]
+  truncated: boolean
+}
 export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
 /** Optional backend projection for the 2026-09-19 PRD. Absence is not PASS. */
 export interface NarrativeValidationProjection {
