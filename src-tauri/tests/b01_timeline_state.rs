@@ -113,5 +113,5 @@ fn b01_timeline_state_machine_keeps_idle_and_completed_truthful() {
     assert!(timeline_statuses(&completed)
         .iter()
         .all(|status| status != "active"));
-    assert_eq!(completed["tasks"][0]["progress"], 100);
+    assert_eq!(completed["tasks"][0]["progress"], 1.0);
 }

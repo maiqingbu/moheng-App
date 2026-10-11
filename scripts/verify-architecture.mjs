@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import crypto from 'node:crypto'
+import { findDemoCharacterIdLeaks } from './architecture-rules.mjs'
 
 const root = path.resolve('src')
 const files = []
@@ -137,6 +138,11 @@ for (const command of [
 
 const uiFiles = files.filter(file => file.includes(`${path.sep}ui${path.sep}`))
 const ui = uiFiles.map(file => sourceByPath.get(file)).join('\n')
+const demoCharacterIdLeaks = findDemoCharacterIdLeaks(uiFiles.map(file => ({
+  path: path.relative(projectRoot, file).split(path.sep).join('/'),
+  source: sourceByPath.get(file),
+})))
+for (const leak of demoCharacterIdLeaks) errors.push(`FX-3 UI references demo fixture character id ${leak.id}: ${leak.path}`)
 if (ui.includes('queryProjectBundle')) errors.push('UI 仍在查询整项目 Bundle')
 if (/store\.bundle|projectStore\.bundle/.test(ui)) errors.push('Pinia/UI 仍持有整项目 Bundle')
 

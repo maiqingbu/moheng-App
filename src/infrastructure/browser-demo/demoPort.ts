@@ -152,7 +152,7 @@ function newProjectBundle(request: BrowserDemoCommandRequest, id: string): Proje
     runState: 'IDLE',
     blockReason: null,
     signingStatus: 'NOT_STARTED',
-    progress: 10,
+    progress: 0.1,
     totalCost: 0.24,
     totalElapsed: '1 分钟',
     committedChapters: 0,
@@ -191,9 +191,9 @@ function deriveVolumes(record: DemoProjectRecord): VolumeSummary[] {
   const p = record.bundle.project
   if (p.id === 'proj-river-archive') {
     return [
-      { id:'vol-1', number:1, title:'水灯照骨', status:'CLOSED', chapterStart:1, chapterEnd:30, committedChapters:30, plannedChapters:30, wordCount:106800, targetWords:105000, progress:100, goal:'建立沿江十二镇与第一批旧案规则。', health:'healthy', updatedAt:'2026-07-05 21:10' },
-      { id:'vol-2', number:2, title:'十二镇回声', status:'CLOSED', chapterStart:31, chapterEnd:60, committedChapters:30, plannedChapters:30, wordCount:112420, targetWords:110000, progress:100, goal:'让分散旧案汇聚为同一条历史因果链。', health:'healthy', updatedAt:'2026-07-29 18:40' },
-      { id:'vol-3', number:3, title:'河灯归岸', status:'CLOSED', chapterStart:61, chapterEnd:86, committedChapters:26, plannedChapters:26, wordCount:96840, targetWords:95000, progress:100, goal:'回收核心谜团并完成群像终局。', health:'healthy', updatedAt:p.updatedAt }
+      { id:'vol-1', number:1, title:'水灯照骨', status:'CLOSED', chapterStart:1, chapterEnd:30, committedChapters:30, plannedChapters:30, wordCount:106800, targetWords:105000, progress:1, goal:'建立沿江十二镇与第一批旧案规则。', health:'healthy', updatedAt:'2026-07-05 21:10' },
+      { id:'vol-2', number:2, title:'十二镇回声', status:'CLOSED', chapterStart:31, chapterEnd:60, committedChapters:30, plannedChapters:30, wordCount:112420, targetWords:110000, progress:1, goal:'让分散旧案汇聚为同一条历史因果链。', health:'healthy', updatedAt:'2026-07-29 18:40' },
+      { id:'vol-3', number:3, title:'河灯归岸', status:'CLOSED', chapterStart:61, chapterEnd:86, committedChapters:26, plannedChapters:26, wordCount:96840, targetWords:95000, progress:1, goal:'回收核心谜团并完成群像终局。', health:'healthy', updatedAt:p.updatedAt }
     ]
   }
   const status: VolumeSummary['status'] = p.signingStatus !== 'PASS' && p.phase !== 'COMPLETED'
@@ -207,7 +207,7 @@ function deriveVolumes(record: DemoProjectRecord): VolumeSummary[] {
     id:'vol-1', number:1, title:'真名旧案', status, chapterStart:1, chapterEnd:planned,
     committedChapters: committed, plannedChapters: planned,
     wordCount: record.bundle.chapters.filter(ch => ch.status === 'official').reduce((sum, ch) => sum + ch.wordCount, 0),
-    targetWords: 125000, progress: planned ? Math.round(committed / planned * 100) : 0,
+    targetWords: 125000, progress: planned ? committed / planned : 0,
     goal:'确认玉符与寒江剑派旧案的联系，击穿第一层身份骗局。',
     health: record.bundle.decisions.some(d => d.priority === 'blocking' && d.status === 'pending') ? 'attention' : 'healthy',
     updatedAt:p.updatedAt
@@ -510,8 +510,8 @@ export class BrowserDemoPort implements FrontendPort {
       volume,
       planVersion:'VolumePlan v1', contractVersion:'VolumeContract v1', stateLedgerVersion:'PlanningStateLedger v1',
       arcs:[
-        { id:'arc-1', title:'入局', chapterRange:`${volume.chapterStart}–${Math.min(volume.chapterStart + 7, volume.chapterEnd)} 章`, status: volume.progress > 22 ? 'done' : 'active', goal:'建立本卷主要问题与人物站位。' },
-        { id:'arc-2', title:'真假证据', chapterRange:`${Math.min(volume.chapterStart + 8, volume.chapterEnd)}–${Math.min(volume.chapterStart + 22, volume.chapterEnd)} 章`, status: volume.progress > 55 ? 'active' : 'waiting', goal:'让局部线索互相冲突并产生一次中段回报。' },
+        { id:'arc-1', title:'入局', chapterRange:`${volume.chapterStart}–${Math.min(volume.chapterStart + 7, volume.chapterEnd)} 章`, status: volume.progress > 0.22 ? 'done' : 'active', goal:'建立本卷主要问题与人物站位。' },
+        { id:'arc-2', title:'真假证据', chapterRange:`${Math.min(volume.chapterStart + 8, volume.chapterEnd)}–${Math.min(volume.chapterStart + 22, volume.chapterEnd)} 章`, status: volume.progress > 0.55 ? 'active' : 'waiting', goal:'让局部线索互相冲突并产生一次中段回报。' },
         { id:'arc-3', title:'卷终回收', chapterRange:`${Math.min(volume.chapterStart + 23, volume.chapterEnd)}–${volume.chapterEnd} 章`, status: volume.status === 'CLOSED' ? 'done' : 'waiting', goal:'完成本卷主问题，并形成下一卷可消费的退出状态。' }
       ],
       chapters: page(chapters, request, 30),
@@ -771,10 +771,10 @@ export class BrowserDemoPort implements FrontendPort {
           case 'production_resume': bundle.project.runState='ACTIVE'; bundle.project.blockReason=null; message='制作已恢复。'; break
           case 'production_cancel': bundle.project.runState='FAILED'; bundle.project.blockReason=null; message='本次生产已取消；正式提交内容保持不变。'; break
           case 'pitch_regenerate': bundle.project.phase='PITCHING'; bundle.project.runState='IDLE'; bundle.project.blockReason=null; message='三份故事方向已根据新约束重新生成。'; break
-          case 'pitch_select': bundle.project.phase='STORY_BLUEPRINT'; bundle.project.runState='ACTIVE'; bundle.project.blockReason=null; bundle.project.progress=Math.max(bundle.project.progress,16); message='故事方向已确认，系统将继续建立书级战略。'; break
-          case 'story_setup_save': bundle.project.phase='OPENING_CONTRACT'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,28); message='故事核心已保存，等待你批准开篇准备。'; break
-          case 'opening_ready': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,36); message='开篇准备已完成，已生成第一章的最小规划。'; break
-          case 'opening_start_creating': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='ACTIVE'; bundle.project.progress=Math.max(bundle.project.progress,40); message='已进入正式创作中心。'; break
+          case 'pitch_select': bundle.project.phase='STORY_BLUEPRINT'; bundle.project.runState='ACTIVE'; bundle.project.blockReason=null; bundle.project.progress=Math.max(bundle.project.progress,0.16); message='故事方向已确认，系统将继续建立书级战略。'; break
+          case 'story_setup_save': bundle.project.phase='OPENING_CONTRACT'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,0.28); message='故事核心已保存，等待你批准开篇准备。'; break
+          case 'opening_ready': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='IDLE'; bundle.project.progress=Math.max(bundle.project.progress,0.36); message='开篇准备已完成，已生成第一章的最小规划。'; break
+          case 'opening_start_creating': bundle.project.phase='OPENING_PRODUCTION'; bundle.project.runState='ACTIVE'; bundle.project.progress=Math.max(bundle.project.progress,0.4); message='已进入正式创作中心。'; break
           case 'book_plan_create': bundle.project.phase='BOOK_PLANNING'; message='BookPlan 与 MainContract 规划任务已创建。'; break
           case 'book_plan_revise': bundle.project.phase='BOOK_PLANNING'; message='书级战略修订已进入影响分析。'; break
           case 'volume_plan_build':
@@ -789,7 +789,7 @@ export class BrowserDemoPort implements FrontendPort {
           case 'volume_close': message='卷关闭检查已提交；只有 Volume Gate 通过后才会生成 VolumeExitState。'; break
           case 'decision_submit': {
             const id=String(request.payload?.decisionId ?? ''); const target=bundle.decisions.find(item=>item.id===id); if(target) target.status='resolved'
-            if(id==='dec-opening'){bundle.project.runState='ACTIVE';bundle.project.blockReason=null;bundle.tasks=bundle.tasks.map(task=>task.id==='task-review'?{...task,status:'done' as const,progress:100}:task.id==='task-repair'?{...task,status:'active' as const,progress:24}:task)}
+            if(id==='dec-opening'){bundle.project.runState='ACTIVE';bundle.project.blockReason=null;bundle.tasks=bundle.tasks.map(task=>task.id==='task-review'?{...task,status:'done' as const,progress:1}:task.id==='task-repair'?{...task,status:'active' as const,progress:0.24}:task)}
             message='你的选择已记录，系统将按新的正式约束继续。'; break
           }
           case 'revision_request':

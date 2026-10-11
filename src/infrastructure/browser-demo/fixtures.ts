@@ -14,7 +14,7 @@ export const demoBundle: ProjectBundle = {
     runState: 'WAITING_DECISION',
     blockReason: 'DECISION_REQUIRED',
     signingStatus: 'NOT_STARTED',
-    progress: 63,
+    progress: 0.63,
     totalCost: 12.46,
     totalElapsed: '28 分钟',
     committedChapters: 2,
@@ -90,7 +90,7 @@ export const demoBundle: ProjectBundle = {
     { id: 'task-draft', title: '第三章 · 正文生成', description: '制作稿已生成，等待后续审核。', status: 'done', cost: 0.18, elapsed: '2 分 16 秒' },
     { id: 'task-rule', title: '规则与合同检查', description: '字数、禁区、开篇义务与硬约束均通过。', status: 'done', cost: 0.02, elapsed: '18 秒' },
     { id: 'task-cont', title: '人物与设定连续性', description: '发现 1 处角色动机表达偏弱，已进入剧情审核。', status: 'done', cost: 0.06, elapsed: '58 秒' },
-    { id: 'task-review', title: '剧情与文学审核', description: '建议增强雨夜来客与主角的正面冲突。', status: 'active', progress: 78, cost: 0.13, elapsed: '进行中' },
+    { id: 'task-review', title: '剧情与文学审核', description: '建议增强雨夜来客与主角的正面冲突。', status: 'active', progress: 0.78, cost: 0.13, elapsed: '进行中' },
     { id: 'task-repair', title: '定向修复', description: '等待你确认推荐修复方向。', status: 'waiting' },
     { id: 'task-rerun', title: '完整复检', description: '修复完成后重新执行全部审核。', status: 'waiting' },
     { id: 'task-commit', title: '正式收入作品', description: '全部质量门通过后原子提交正文与图谱增量。', status: 'waiting' }
@@ -204,7 +204,7 @@ const pausedBundle = cloneDemo({
   runState: 'PAUSED',
   blockReason: 'USER_PAUSE',
   signingStatus: 'NOT_STARTED',
-  progress: 22,
+  progress: 0.22,
   totalCost: 4.18,
   totalElapsed: '11 分钟',
   committedChapters: 0,
@@ -216,7 +216,7 @@ const pausedBundle = cloneDemo({
 pausedBundle.decisions = []
 pausedBundle.chapters = []
 pausedBundle.versions = []
-pausedBundle.tasks = pausedBundle.tasks.map((task, index) => ({ ...task, status: index === 0 ? 'active' : 'waiting', progress: index === 0 ? 36 : undefined }))
+pausedBundle.tasks = pausedBundle.tasks.map((task, index) => ({ ...task, status: index === 0 ? 'active' : 'waiting', progress: index === 0 ? 0.36 : undefined }))
 pausedBundle.timeline = pausedBundle.timeline.map((item, index) => ({ ...item, status: index === 0 ? 'done' : index === 1 ? 'active' : 'locked' }))
 pausedBundle.signing = { ...pausedBundle.signing, status: 'NOT_STARTED', score: 0, verdict: '尚未进入开篇生产。' }
 pausedBundle.canon = { characters: [], relations: [], timeline: [], foreshadows: [], knowledge: [] }
@@ -232,7 +232,7 @@ const completedBundle = cloneDemo({
   runState: 'COMPLETED',
   blockReason: null,
   signingStatus: 'PASS',
-  progress: 100,
+  progress: 1,
   totalCost: 286.74,
   totalElapsed: '19 小时 42 分',
   committedChapters: 86,
@@ -268,7 +268,7 @@ const archivedBundle = cloneDemo({
   runState: 'IDLE',
   blockReason: null,
   signingStatus: 'NOT_STARTED',
-  progress: 9,
+  progress: 0.09,
   totalCost: 1.26,
   totalElapsed: '4 分钟',
   committedChapters: 0,
