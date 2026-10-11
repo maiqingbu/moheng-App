@@ -178,8 +178,28 @@ fn apply_obligation(
         .filter(|condition| !condition.is_null())
         .map(serde_json::to_string)
         .transpose()?;
+    let source_event_id = payload
+        .and_then(|payload| payload.get("sourceEventId"))
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|event_id| !event_id.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| invalid("OBLIGATION_SOURCE_EVENT_ID_INVALID"))
+        })
+        .transpose()?;
+    if let Some(event_id) = &source_event_id {
+        let exists = row_exists(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM canon_events WHERE project_id = ?1 AND event_id = ?2)",
+            libsql_rusqlite::params![project_id, event_id],
+        )?;
+        if !exists {
+            return Err(invalid("OBLIGATION_SOURCE_EVENT_NOT_FOUND"));
+        }
+    }
     let existed = row_exists(connection, "SELECT EXISTS(SELECT 1 FROM narrative_obligations WHERE project_id = ?1 AND obligation_id = ?2)", libsql_rusqlite::params![project_id, delta.obligation_id])?;
-    connection.execute("INSERT INTO narrative_obligations(obligation_id, project_id, scope, obligation_type, authority_level, source_artifact_id, source_version, description, must_resolve_before_chapter, prerequisites_json, lifecycle, decision_ref, resume_condition_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, COALESCE(?13,'{}'), ?14, ?14) ON CONFLICT(obligation_id) DO UPDATE SET scope=excluded.scope, obligation_type=excluded.obligation_type, authority_level=excluded.authority_level, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, description=excluded.description, must_resolve_before_chapter=excluded.must_resolve_before_chapter, prerequisites_json=excluded.prerequisites_json, lifecycle=excluded.lifecycle, decision_ref=excluded.decision_ref, resume_condition_json=COALESCE(?13,narrative_obligations.resume_condition_json), updated_at=excluded.updated_at", libsql_rusqlite::params![delta.obligation_id, project_id, delta.scope.clone().unwrap_or_else(|| "CHAPTER".into()), delta.obligation_type, delta.authority_level.clone().unwrap_or_else(|| "C".into()), artifact_id, version, delta.description.clone().unwrap_or_else(|| delta.obligation_id.clone()), delta.must_resolve_before_chapter, serde_json::to_string(&delta.prerequisites.clone().unwrap_or_default())?, delta.lifecycle.clone().unwrap_or_else(|| "PROPOSED".into()), delta.decision_ref, resume_condition, now])?;
+    connection.execute("INSERT INTO narrative_obligations(obligation_id, project_id, scope, obligation_type, authority_level, source_artifact_id, source_version, description, must_resolve_before_chapter, prerequisites_json, lifecycle, decision_ref, source_event_id, resume_condition_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, COALESCE(?14,'{}'), ?15, ?15) ON CONFLICT(obligation_id) DO UPDATE SET scope=excluded.scope, obligation_type=excluded.obligation_type, authority_level=excluded.authority_level, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, description=excluded.description, must_resolve_before_chapter=excluded.must_resolve_before_chapter, prerequisites_json=excluded.prerequisites_json, lifecycle=excluded.lifecycle, decision_ref=excluded.decision_ref, source_event_id=COALESCE(?13,narrative_obligations.source_event_id), resume_condition_json=COALESCE(?14,narrative_obligations.resume_condition_json), updated_at=excluded.updated_at", libsql_rusqlite::params![delta.obligation_id, project_id, delta.scope.clone().unwrap_or_else(|| "CHAPTER".into()), delta.obligation_type, delta.authority_level.clone().unwrap_or_else(|| "C".into()), artifact_id, version, delta.description.clone().unwrap_or_else(|| delta.obligation_id.clone()), delta.must_resolve_before_chapter, serde_json::to_string(&delta.prerequisites.clone().unwrap_or_default())?, delta.lifecycle.clone().unwrap_or_else(|| "PROPOSED".into()), delta.decision_ref, source_event_id, resume_condition, now])?;
     Ok(i64::from(!existed))
 }
 

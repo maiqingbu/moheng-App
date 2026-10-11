@@ -478,6 +478,10 @@ impl ProductionModelGateway for CommitFaultGateway {
 
 struct PromiseGateway;
 
+struct PromiseSourceEventGateway {
+    source_event_id: &'static str,
+}
+
 impl ProductionModelGateway for PromiseGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let mut response = RecordingGateway.invoke(capability, input)?;
@@ -491,6 +495,65 @@ impl ProductionModelGateway for PromiseGateway {
                 "threadRef":"thread:promise:old","disposition":"ADVANCE",
                 "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
             }]);
+        }
+        Ok(response)
+    }
+}
+
+impl ProductionModelGateway for PromiseSourceEventGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "RENDER_CHAPTER" {
+            response.output["body"] = json!("林舟推开石门，林舟推开木箱。");
+        }
+        if capability == "AUDIT_EXTRACT" {
+            response.output["canonCandidates"] = json!([
+                {
+                    "factId":"fact:actual:door-open",
+                    "subjectId":"entity:actual:linzhou",
+                    "predicate":"opened",
+                    "objectJson":{"target":"stone-door"},
+                    "authorityLevel":"C",
+                    "eventType":"ACTION",
+                    "storyTime":"2026-01-01T00:00:00Z",
+                    "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+                },
+                {
+                    "factId":"fact:actual:box-open",
+                    "subjectId":"entity:actual:linzhou",
+                    "predicate":"opened",
+                    "objectJson":{"target":"wooden-box"},
+                    "authorityLevel":"C",
+                    "evidence":{"start":7,"end":13,"quote":"林舟推开木箱"}
+                }
+            ]);
+            response.output["continuityCandidates"] = json!([{
+                "threadRef":"thread:promise:source-event",
+                "disposition":"ADVANCE",
+                "sourceEventId":self.source_event_id,
+                "description":"林舟承诺继续追查石门后的秘密。",
+                "fulfillmentObject":"secret:behind-stone-door",
+                "resumeCondition":{"kind":"AFTER_CHAPTER","value":2},
+                "promotionSignals":{
+                    "explicitPromise":true,
+                    "unresolvedMajorConflict":false,
+                    "majorRelationshipTransition":false,
+                    "mysteryOrRevealResponsibility":false,
+                    "foreshadowRecoveryResponsibility":false,
+                    "keyFutureUseObjectOrInformation":false,
+                    "goalContractResponsibility":false,
+                    "hardAuthorityResponsibility":false,
+                    "futureReservationResponsibility":false,
+                    "ambientDescription":false,
+                    "completedTrivialEvent":false,
+                    "nonContinuingSceneDetail":false
+                },
+                "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+            }]);
+            response.output["evidenceRanges"] = json!([
+                {"start":0,"end":6,"quote":"林舟推开石门"},
+                {"start":7,"end":13,"quote":"林舟推开木箱"}
+            ]);
         }
         Ok(response)
     }
@@ -5052,6 +5115,157 @@ fn b08_cross_volume_promise_keeps_old_evidence_and_adds_actual_evidence() {
         2
     );
     assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM obligation_evidence WHERE evidence_id='obligation-evidence:old'", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-source-event";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(PromiseSourceEventGateway {
+            source_event_id: "event:fact:actual:door-open",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B08 source event", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start",
+            "commandId":"cmd:b08:source-event",
+            "idempotencyKey":"key:b08:source-event",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+
+    let connection = state
+        .manager
+        .open(project_id, "B08 source event", NOW)
+        .unwrap();
+    let source_event_id: String = connection
+        .query_row(
+            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id='promise:source-event'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(source_event_id, "event:fact:actual:door-open");
+
+    let continuity = ai_novel_production_system_core::commands::query_continuity_impl(
+        &state,
+        json!({"projectId":project_id}),
+    )
+    .unwrap();
+    let thread = continuity["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["threadId"] == "thread:promise:source-event")
+        .unwrap();
+    assert_eq!(thread["sourceEventRef"], format!("event:{source_event_id}"));
+    let evidence_refs = thread["evidenceRefs"].as_array().unwrap();
+    assert_eq!(evidence_refs.len(), 1);
+    assert_eq!(evidence_refs[0]["quote"], "林舟推开石门");
+    assert_eq!(evidence_refs[0]["rangeStart"], 0);
+    assert_eq!(evidence_refs[0]["rangeEnd"], 6);
+}
+
+#[test]
+fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b08-source-event-invalid";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(PromiseSourceEventGateway {
+            source_event_id: "event:missing",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B08 invalid source event", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let canon_events_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let canon_facts_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let obligations_before: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start",
+            "commandId":"cmd:b08:source-event-invalid",
+            "idempotencyKey":"key:b08:source-event-invalid",
+            "projectId":project_id,
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B08_THREAD_SOURCE_EVENT_INVALID");
+
+    let connection = state
+        .manager
+        .open(project_id, "B08 invalid source event", NOW)
+        .unwrap();
+    let canon_events_after: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let canon_facts_after: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let obligations_after: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM narrative_obligations WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(canon_events_after, canon_events_before);
+    assert_eq!(canon_facts_after, canon_facts_before);
+    assert_eq!(obligations_after, obligations_before);
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
 }
 
 #[test]

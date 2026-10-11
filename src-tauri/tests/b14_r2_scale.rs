@@ -85,9 +85,11 @@ fn seed(connection: &Connection) {
         connection.execute("INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id,payload.to_string(),hash]).unwrap();
         connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'FinalChapter','CHAPTER',?2,?3,1,?4)", libsql_rusqlite::params![PROJECT_ID,scope,artifact_id,hash]).unwrap();
     }
+    connection.execute("INSERT INTO canon_events(event_id,project_id,chapter_id,event_type,event_ordinal,payload_json,created_at) VALUES ('event:b14:r2:scale',?1,'chapter:b14:r2:0001','PROMISE_MADE',1,'{}',?2)", libsql_rusqlite::params![PROJECT_ID,NOW]).unwrap();
+    connection.execute("UPDATE narrative_obligations SET source_event_id='event:b14:r2:scale' WHERE project_id=?1 AND obligation_id='obligation:b14:r2:001'", [PROJECT_ID]).unwrap();
     connection.execute("INSERT INTO foreshadows(foreshadow_id,project_id,intent,status,source_authority,created_at,updated_at) VALUES ('foreshadow:b14:r2:scale',?1,'规模伏笔','PLANTED','B06',?2,?2)", libsql_rusqlite::params![PROJECT_ID,NOW]).unwrap();
     connection.execute("INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES ('mystery:b14:r2:scale',?1,'规模谜团','OPEN',?2,?2)", libsql_rusqlite::params![PROJECT_ID,NOW]).unwrap();
-    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES ('evidence:b14:r2:scale',?1,'fact:b14:r2:scale',?2,?3,1,'CANON','规模证据',?4)", libsql_rusqlite::params![PROJECT_ID,"chapter:b14:r2:0001","final:b14:r2:0001",NOW]).unwrap();
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,event_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,created_at) VALUES ('evidence:b14:r2:scale',?1,'fact:b14:r2:scale','event:b14:r2:scale',?2,?3,1,'CANON','规模证据',?4)", libsql_rusqlite::params![PROJECT_ID,"chapter:b14:r2:0001","final:b14:r2:0001",NOW]).unwrap();
     connection.execute_batch("COMMIT").unwrap();
 }
 
