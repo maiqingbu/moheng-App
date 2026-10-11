@@ -576,6 +576,10 @@ struct AuditVariantGateway {
     variant: &'static str,
 }
 
+struct QuoteOnlyResponsibilityGateway {
+    body: &'static str,
+}
+
 struct W13AuditGateway {
     variant: &'static str,
     database: PathBuf,
@@ -973,6 +977,23 @@ impl ProductionModelGateway for AuditVariantGateway {
             response.output["reservationRefs"] = json!(["reservation:future:1"]);
             response.output["sceneExecution"] =
                 json!([{ "action":"FORESHADOW", "reservationRef":"reservation:future:1" }]);
+        }
+        Ok(response)
+    }
+}
+
+impl ProductionModelGateway for QuoteOnlyResponsibilityGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "RENDER_CHAPTER" {
+            response.output["body"] = json!(self.body);
+        }
+        if capability == "AUDIT_EXTRACT" {
+            response.output["continuityCandidates"] = json!([{
+                "threadRef":"thread:mystery:fx6-quote",
+                "disposition":"ADVANCE",
+                "promotionSignals":{"mysteryOrRevealResponsibility":true}
+            }]);
         }
         Ok(response)
     }
@@ -6737,6 +6758,116 @@ fn fx5_reconciliation_considers_tasks_beyond_first_chunk() {
         .unwrap();
     let receipt_payload: Value = serde_json::from_str(&receipt_payload).unwrap();
     assert_eq!(receipt_payload["reconciliation"], "REPLAN_VOLUME_ROUTE");
+}
+
+#[test]
+fn fx6_quote_only_evidence_located_by_backend() {
+    for (suffix, body, quote, should_commit) in [
+        ("unique", "林舟推开石门，走向窗边。", "林舟推开石门", true),
+        (
+            "duplicate",
+            "林舟推开石门，林舟推开石门。",
+            "林舟推开石门",
+            false,
+        ),
+        ("missing", "林舟推开石门，走向窗边。", "顾清走进房间", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let project_id = format!("p-fx6-quote-{suffix}");
+        let state = KernelState::with_production_gateway(
+            AppPaths::new(temp.path()),
+            Arc::new(QuoteOnlyResponsibilityGateway { body }),
+        );
+        let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, &project_id);
+        let produced = execute_command_impl(
+            &state,
+            json!({
+                "type":"production_start",
+                "commandId":format!("cmd:fx6:quote:{suffix}:produce"),
+                "idempotencyKey":format!("key:fx6:quote:{suffix}:produce"),
+                "projectId":project_id,
+                "expectedRevision":0,
+                "requestedAt":NOW,
+                "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]}
+            }),
+        )
+        .unwrap_or_else(|error| panic!("quote fixture production failed ({suffix}): {error}"));
+        assert_eq!(produced["finalStatus"], "committed", "{produced}");
+        let connection = state
+            .manager
+            .open(&project_id, "FX-6 quote evidence", NOW)
+            .unwrap();
+        let revision = connection
+            .query_row::<i64, _, _>(
+                "SELECT revision FROM project_meta WHERE project_id=?1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        let request = json!({
+            "type":"thread_responsibility_adjust",
+            "commandId":format!("cmd:fx6:quote:{suffix}:upgrade"),
+            "idempotencyKey":format!("key:fx6:quote:{suffix}:upgrade"),
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{
+                "threadRef":"thread:mystery:fx6-quote",
+                "action":"UPGRADE",
+                "authorityLevel":"B",
+                "fulfillmentObject":"entity:actual:linzhou",
+                "resumeCondition":{"kind":"ENTITY_PRESENT","value":"entity:actual:linzhou"},
+                "evidence":{"quote":quote}
+            }
+        });
+        let result = execute_command_impl(&state, request);
+        let connection = state
+            .manager
+            .open(&project_id, "FX-6 quote evidence", NOW)
+            .unwrap();
+        if should_commit {
+            let result = result.unwrap_or_else(|error| {
+                panic!("unique quote should be located by backend: {error}")
+            });
+            assert_eq!(result["finalStatus"], "committed", "{result}");
+            let snapshot: String = connection
+                .query_row(
+                    "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='NarrativeObligationSet'",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeStart"], 0);
+            assert_eq!(snapshot["sourceEvidenceRefs"][0]["rangeEnd"], 6);
+            assert_eq!(snapshot["sourceEvidenceRefs"][0]["quote"], quote);
+        } else {
+            assert_eq!(result.unwrap_err(), "EVIDENCE_QUOTE_NOT_UNIQUE");
+            assert_eq!(
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT revision FROM project_meta WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                revision,
+                "an absent or ambiguous quote must not write a new revision"
+            );
+            assert_eq!(
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='NarrativeObligationSet'",
+                        [&project_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
 }
 
 #[test]
