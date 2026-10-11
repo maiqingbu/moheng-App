@@ -1628,7 +1628,7 @@ fn validate_chapter_plan_change_semantics(
         chapter_id,
         &route_task_ids,
         &triggered_threads,
-        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+        horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
         connection,
@@ -1967,16 +1967,88 @@ pub fn validate_reservation_actions_with_volume_numbers(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeCapacityContext {
+    pub committed_in_volume: i64,
+    pub max_chapters: i64,
+    pub remaining_chapter_capacity: i64,
+    pub current_chapter_no: i64,
+    pub current_chapter_id: Option<String>,
+}
+
+/// Resolve the volume-relative capacity and whole-book current chapter from
+/// committed authority. Every planning and lifecycle projection uses this
+/// result instead of deriving either value from request input.
+pub fn volume_capacity_context(
+    connection: &Connection,
+    project_id: &str,
+    volume_id: &str,
+) -> Result<VolumeCapacityContext, String> {
+    let metadata =
+        crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+            connection, project_id, volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
+    let committed_in_volume =
+        crate::repositories::volume_lifecycle::VolumeLifecycleRepository::committed_chapters(
+            connection, project_id, volume_id,
+        )
+        .map_err(|error| error.to_string())?;
+    let range_capacity = metadata.chapter_end - metadata.chapter_start + 1;
+    let route_ref = crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+        connection, project_id, volume_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let max_chapters = if let Some(route_ref) = route_ref {
+        crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            connection, project_id, &route_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?
+        .pointer("/capacityBudget/maxChapters")
+        .and_then(Value::as_i64)
+        .unwrap_or(range_capacity)
+    } else {
+        range_capacity
+    };
+    let current_chapter_id =
+        crate::repositories::narrative::NarrativeRepository::next_unsubmitted_chapter_id(
+            connection, project_id, volume_id,
+        )
+        .map_err(|error| error.to_string())?;
+    let current_chapter_no = match current_chapter_id.as_deref() {
+        Some(chapter_id) => crate::repositories::narrative::NarrativeRepository::chapter_number(
+            connection, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?,
+        None => crate::repositories::narrative::NarrativeRepository::next_chapter_number(
+            connection, project_id, volume_id,
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(metadata.chapter_end + 1),
+    };
+    let remaining_chapter_capacity = (max_chapters - committed_in_volume).max(0);
+    Ok(VolumeCapacityContext {
+        committed_in_volume,
+        max_chapters,
+        remaining_chapter_capacity,
+        current_chapter_no,
+        current_chapter_id,
+    })
+}
+
 pub fn planning_pressure(
-    current_chapter: i64,
-    max_chapters: i64,
+    remaining_chapter_capacity: i64,
+    current_chapter_no: i64,
     required_remaining: i64,
     blocked_required: i64,
     exit_gap: i64,
     overdue_threads: i64,
     reservations: i64,
 ) -> Value {
-    let remaining = (max_chapters - current_chapter).max(0);
+    let remaining = remaining_chapter_capacity.max(0);
     let score = required_remaining.saturating_mul(4)
         + blocked_required.saturating_mul(6)
         + exit_gap.saturating_mul(5)
@@ -1988,7 +2060,7 @@ pub fn planning_pressure(
         .saturating_add(blocked_required.saturating_mul(40))
         .saturating_add(exit_gap.saturating_mul(20));
     let climax_readiness = 100_i64.saturating_sub(readiness_gap.min(100));
-    let continuity_aging = overdue_threads.saturating_mul(current_chapter.max(1));
+    let continuity_aging = overdue_threads.saturating_mul(current_chapter_no.max(1));
     json!({
         "remainingChapterCapacity":remaining,
         "requiredTasksRemaining":required_remaining,
@@ -2006,8 +2078,8 @@ pub fn planning_pressure(
 /// sourced from the authoritative route/reality/continuity readers; no plan
 /// task status or shorthand `threadRef` is accepted as a substitute.
 pub struct PlanningPressureInput<'a> {
-    pub current_chapter: i64,
-    pub max_chapters: i64,
+    pub remaining_chapter_capacity: i64,
+    pub current_chapter_no: i64,
     pub route_tasks: &'a [Value],
     pub task_reality: &'a [Value],
     pub continuity_threads: &'a [Value],
@@ -2054,8 +2126,7 @@ pub fn future_reservation_authority(book_plan: &Value, intent: &Value) -> Vec<Va
 /// refs and intent refs are merged here, then resolved against the supplied
 /// authority projections, so VolumeProgress and VolumeLifecycle cannot drift.
 pub fn compile_planning_pressure(
-    current_chapter: i64,
-    max_chapters: i64,
+    capacity: &VolumeCapacityContext,
     route: &Value,
     intent: &Value,
     task_reality: &[Value],
@@ -2121,8 +2192,8 @@ pub fn compile_planning_pressure(
         .cloned()
         .collect::<Vec<_>>();
     planning_pressure_from_authority(PlanningPressureInput {
-        current_chapter,
-        max_chapters,
+        remaining_chapter_capacity: capacity.remaining_chapter_capacity,
+        current_chapter_no: capacity.current_chapter_no,
         route_tasks: &route_tasks,
         task_reality,
         continuity_threads: &continuity,
@@ -2140,7 +2211,7 @@ pub fn compile_planning_pressure(
 /// product projections call this function so CLIMAX readiness, thread age,
 /// deadlines, and task status all have explicit sources.
 pub fn planning_pressure_from_authority(input: PlanningPressureInput<'_>) -> Value {
-    let remaining_capacity = (input.max_chapters - input.current_chapter).max(0);
+    let remaining_capacity = input.remaining_chapter_capacity.max(0);
     let status_by_task = input
         .task_reality
         .iter()
@@ -2260,7 +2331,7 @@ pub fn planning_pressure_from_authority(input: PlanningPressureInput<'_>) -> Val
             .get("mustResolveBeforeChapter")
             .or_else(|| thread.get("deadline"))
             .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()));
-        if deadline.is_some_and(|value| value < input.current_chapter) {
+        if deadline.is_some_and(|value| value < input.current_chapter_no) {
             overdue_threads += 1;
         }
         if let Some(last_touched) = thread
@@ -2268,7 +2339,7 @@ pub fn planning_pressure_from_authority(input: PlanningPressureInput<'_>) -> Val
             .or_else(|| thread.get("lastTouchedChapterNo"))
             .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse().ok()))
         {
-            continuity_aging += (input.current_chapter - last_touched).max(0);
+            continuity_aging += (input.current_chapter_no - last_touched).max(0);
             aged_threads += 1;
         }
     }
@@ -2379,7 +2450,10 @@ pub fn validate_chapter_plan_horizon(
     Ok(())
 }
 
-pub fn remaining_chapter_capacity(
+/// Return the capacity available to preview chapters after this chapter.
+/// An unsubmitted chapter reserves one slot from the volume capacity; a
+/// committed chapter is already included in the committed chapter count.
+pub fn horizon_capacity_after_chapter(
     connection: &Connection,
     project_id: &str,
     chapter_id: &str,
@@ -2389,18 +2463,17 @@ pub fn remaining_chapter_capacity(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    let chapter_no = crate::repositories::narrative::NarrativeRepository::chapter_number(
+    let capacity = volume_capacity_context(connection, project_id, &volume_id)?;
+    let status = crate::repositories::narrative::NarrativeRepository::chapter_status(
         connection, project_id, chapter_id,
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    let metadata =
-        crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
-            connection, project_id, &volume_id,
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
-    Ok((metadata.chapter_end - chapter_no).max(0))
+    if status == "COMMITTED" {
+        Ok(capacity.remaining_chapter_capacity)
+    } else {
+        Ok(capacity.remaining_chapter_capacity.saturating_sub(1))
+    }
 }
 
 pub fn resolve_chapter_execution_mode(
@@ -2667,7 +2740,7 @@ pub fn recompile_chapter_plan_owner(
         chapter_id,
         &route_task_ids,
         &triggered_threads,
-        remaining_chapter_capacity(connection, project_id, chapter_id)?,
+        horizon_capacity_after_chapter(connection, project_id, chapter_id)?,
     )?;
     if let Some(route) = route_payload.as_ref() {
         let states = crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
@@ -2863,7 +2936,7 @@ pub fn commit_opening_chapter_plan_owner(
         json!({"slotNo":3,"objective":"把问题推向首卷主线","tentative":true}),
     ]
     .into_iter()
-    .take(remaining_chapter_capacity(connection, project_id, chapter_id)?.clamp(0, 8) as usize)
+    .take(horizon_capacity_after_chapter(connection, project_id, chapter_id)?.clamp(0, 8) as usize)
     .collect::<Vec<_>>();
     let plan = json!({
         "payloadSchema":"chapter-plan.r1",
@@ -3166,8 +3239,8 @@ mod tests {
 
     #[test]
     fn pressure_rises_for_required_blocked_and_exit_constraints() {
-        let calm = planning_pressure(10, 40, 1, 0, 0, 0, 0);
-        let pressured = planning_pressure(35, 40, 3, 1, 2, 1, 1);
+        let calm = planning_pressure(30, 10, 1, 0, 0, 0, 0);
+        let pressured = planning_pressure(5, 35, 3, 1, 2, 1, 1);
         assert!(
             pressured["priorityScore"].as_i64().unwrap() > calm["priorityScore"].as_i64().unwrap()
         );
@@ -3193,8 +3266,8 @@ mod tests {
             "lastTouchedChapterNo":1
         })];
         let pressure = planning_pressure_from_authority(PlanningPressureInput {
-            current_chapter: 4,
-            max_chapters: 8,
+            remaining_chapter_capacity: 4,
+            current_chapter_no: 4,
             route_tasks: &tasks,
             task_reality: &reality,
             continuity_threads: &threads,
@@ -3210,8 +3283,8 @@ mod tests {
     #[test]
     fn authority_pressure_without_climax_is_schema_neutral() {
         let pressure = planning_pressure_from_authority(PlanningPressureInput {
-            current_chapter: 1,
-            max_chapters: 10,
+            remaining_chapter_capacity: 9,
+            current_chapter_no: 1,
             route_tasks: &[],
             task_reality: &[],
             continuity_threads: &[],
@@ -3230,13 +3303,20 @@ mod tests {
         let object = vec![
             json!({"reservationId":"reservation:future","status":"DECLARED","mayReveal":false}),
         ];
+        let capacity = VolumeCapacityContext {
+            committed_in_volume: 1,
+            max_chapters: 10,
+            remaining_chapter_capacity: 9,
+            current_chapter_no: 2,
+            current_chapter_id: Some("chapter:2".into()),
+        };
         assert_eq!(
-            compile_planning_pressure(1, 10, &route, &intent, &[], &[], &ref_only)
+            compile_planning_pressure(&capacity, &route, &intent, &[], &[], &ref_only)
                 ["reservationPressure"],
             0
         );
         assert_eq!(
-            compile_planning_pressure(1, 10, &route, &intent, &[], &[], &object)
+            compile_planning_pressure(&capacity, &route, &intent, &[], &[], &object)
                 ["reservationPressure"],
             1
         );

@@ -600,8 +600,7 @@ fn b06_progress_context_digest_and_stale_evaluation_are_bounded_and_order_stable
     ];
     let progress = build_volume_progress(VolumeProgressInput {
         volume_id: "volume:2".into(),
-        target_chapters: 20,
-        current_chapter: 12,
+        remaining_chapter_capacity: 8,
         tasks: tasks.clone(),
         generated_revision: 4,
     });
@@ -1254,7 +1253,8 @@ fn b06_h01_real_command_path_uses_repository_and_persists_checkpoint() {
         json!({"projectId":"p1","scope":"VOLUME","volumeId":"volume:1","currentChapter":3}),
     )
     .unwrap();
-    assert_eq!(progress_projection["remainingChapterCapacity"], 7);
+    // The caller's currentChapter is compatibility-only; one committed chapter leaves 9 of 10.
+    assert_eq!(progress_projection["remainingChapterCapacity"], 9);
     assert_eq!(
         progress_projection["routePlanRef"]["artifactId"],
         "plan:volume"

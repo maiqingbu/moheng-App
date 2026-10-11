@@ -2216,7 +2216,7 @@ fn run_chapter_production_inner(
                 "authorityContext":authority_context.clone(),
                 "activeTaskRefs":compiler_input.active_task_refs,
                 "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
-                "horizonPreviewCapacity":crate::planning::remaining_chapter_capacity(connection, &project_id, &chapter_id)?,
+                "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(connection, &project_id, &chapter_id)?,
                 "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
             });
             let planning_result = execute_production_model_with_profile(
@@ -2258,7 +2258,11 @@ fn run_chapter_production_inner(
                     .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
                     .map(|thread| thread.thread_id.clone())
                     .collect::<Vec<_>>(),
-                crate::planning::remaining_chapter_capacity(connection, &project_id, &chapter_id)?,
+                crate::planning::horizon_capacity_after_chapter(
+                    connection,
+                    &project_id,
+                    &chapter_id,
+                )?,
             )?;
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
             let planning_receipt = crate::planning::recompile_chapter_plan_owner(
@@ -3407,13 +3411,11 @@ fn run_chapter_production_inner(
             });
         }
     }
+    let post_commit_capacity =
+        crate::planning::horizon_capacity_after_chapter(connection, &project_id, &chapter_id)?;
     let reconciliation = classify_plan_reality(&ReconciliationFacts {
         task_reality,
-        remaining_chapter_capacity: crate::planning::remaining_chapter_capacity(
-            connection,
-            &project_id,
-            &chapter_id,
-        )?,
+        remaining_chapter_capacity: post_commit_capacity,
         canon_gate_passed: true,
         responsibility_reality,
     });

@@ -1423,8 +1423,7 @@ fn insert_semantic_chapter_fixture_with_responsibilities(
         "sceneExecution":[],
         "horizonPreview":[
             {"slotNo":1,"objective":"推进路线","tentative":true},
-            {"slotNo":2,"objective":"制造阻力","tentative":true},
-            {"slotNo":3,"objective":"留下后果","tentative":true}
+            {"slotNo":2,"objective":"制造阻力","tentative":true}
         ]
     });
     if !responsibility_refs.is_empty() {

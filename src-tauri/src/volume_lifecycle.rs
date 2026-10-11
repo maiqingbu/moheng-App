@@ -1167,14 +1167,9 @@ fn build_planning_state(
             true
         })
         .count() as i64;
-    let committed_chapters =
-        VolumeLifecycleRepository::committed_chapters(connection, project_id, volume_id)
-            .map_err(|error| error.to_string())?;
-    let max_chapters = route
-        .pointer("/capacityBudget/maxChapters")
-        .and_then(Value::as_i64)
-        .unwrap_or((metadata.chapter_end - metadata.chapter_start + 1).max(1));
-    let remaining_chapter_capacity = (max_chapters - committed_chapters).max(0);
+    let capacity = planning::volume_capacity_context(connection, project_id, volume_id)?;
+    let committed_chapters = capacity.committed_in_volume;
+    let remaining_chapter_capacity = capacity.remaining_chapter_capacity;
     let future_reservation_refs = intent
         .get("futureReservationRefs")
         .and_then(Value::as_array)
@@ -1228,8 +1223,7 @@ fn build_planning_state(
         })
         .collect::<Vec<_>>();
     let planning_pressure = planning::compile_planning_pressure(
-        committed_chapters,
-        max_chapters,
+        &capacity,
         &route,
         &intent,
         &task_reality,

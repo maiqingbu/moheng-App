@@ -129,7 +129,7 @@ async function prepareNextChapter() {
   const chapter = refreshed?.chapters.items
     .filter(item => item.status !== 'official')
     .sort((left, right) => left.number - right.number)[0]
-  if (chapter) await store.loadPlanningRoute(volumeId.value, true, chapter.number)
+  if (chapter) await store.loadPlanningRoute(volumeId.value, true)
 }
 
 async function compileNextChapterPlan(adjustScope = false) {
@@ -150,7 +150,7 @@ async function compileNextChapterPlan(adjustScope = false) {
       ...(scopeSelection ? { scopeSelection } : {}),
     },
   })
-  await store.loadPlanningRoute(volumeId.value, true, chapter.number)
+  await store.loadPlanningRoute(volumeId.value, true)
 }
 
 async function loadWorkspace(force = false) {
@@ -163,10 +163,7 @@ async function loadWorkspace(force = false) {
       store.loadVolumeLifecycle(requestedVolumeId, true),
     ])
     if (!workspaceMounted || requestedVolumeId !== volumeId.value) return
-    const planned = initial?.chapters.items
-      .filter(item => item.status !== 'official')
-      .sort((left, right) => left.number - right.number)[0]
-    await store.loadPlanningRoute(requestedVolumeId, true, planned?.number)
+    await store.loadPlanningRoute(requestedVolumeId, true)
     if (!workspaceMounted || requestedVolumeId !== volumeId.value) return
     if (initial?.runtimeOperation?.active === true) workspaceRuntimePoller.start()
   } catch {

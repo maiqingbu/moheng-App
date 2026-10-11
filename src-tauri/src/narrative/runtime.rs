@@ -340,8 +340,7 @@ pub fn build_continuity_threads(
 #[serde(rename_all = "camelCase")]
 pub struct VolumeProgressInput {
     pub volume_id: String,
-    pub target_chapters: i64,
-    pub current_chapter: i64,
+    pub remaining_chapter_capacity: i64,
     pub tasks: Vec<TaskStateRecord>,
     pub generated_revision: i64,
 }
@@ -366,7 +365,7 @@ pub fn build_volume_progress(input: VolumeProgressInput) -> VolumeProgressProjec
         volume_id: input.volume_id,
         active_task_ids: active,
         blocked_task_ids: blocked,
-        remaining_chapter_capacity: (input.target_chapters - input.current_chapter).max(0),
+        remaining_chapter_capacity: input.remaining_chapter_capacity.max(0),
         planning_pressure: pressure,
         generated_revision: input.generated_revision,
     }

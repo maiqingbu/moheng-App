@@ -358,9 +358,9 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (volumeDetail.value?.volume.id === volumeId && !force) return volumeDetail.value
     return withWorkspace('volume-detail', () => frontendPort.queryVolumeDetail({ ...queryBase(`volume:${volumeId}`, 30), volumeId }), v => { volumeDetail.value=v })
   }
-  async function loadPlanningRoute(volumeId:string, force=false, currentChapter?: number) {
+  async function loadPlanningRoute(volumeId:string, force=false) {
     if (planningRoute.value?.volumeId === volumeId && !force) return planningRoute.value
-    return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId, ...(currentChapter == null ? {} : { currentChapter }) }), route => { planningRoute.value = route })
+    return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId }), route => { planningRoute.value = route })
   }
   async function loadVolumeLifecycle(volumeId:string, force=false) {
     if (volumeLifecycle.value?.volumeId === volumeId && !force) return volumeLifecycle.value

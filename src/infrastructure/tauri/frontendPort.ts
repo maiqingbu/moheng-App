@@ -79,7 +79,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<VolumeProgressProjection> { return invokeQuery(this.ipc, 'query_volume_progress', { request }) }
   queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection> { return invokeQuery(this.ipc, 'query_context_manifest', { request }) }
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection> { return invokeQuery(this.ipc, 'query_plan_stale', { request }) }
-  queryPlanRoute(request: NarrativeRuntimeQueryRequest & { volumeId: string; currentChapter?: number }): Promise<PlanningRouteProjection> { return invokeQuery(this.ipc, 'query_plan_route', { request }) }
+  queryPlanRoute(request: Omit<NarrativeRuntimeQueryRequest, 'currentChapter'> & { volumeId: string }): Promise<PlanningRouteProjection> { return invokeQuery(this.ipc, 'query_plan_route', { request }) }
   queryVolumeLifecycle(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeLifecycleProjection> { return invokeQuery(this.ipc, 'query_volume_lifecycle', { request }) }
   queryEndgameStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_endgame_status', { request }) }
   queryCompletionStatus(request: ProjectQueryRequest): Promise<CompletionStatusProjection> { return invokeQuery(this.ipc, 'query_completion_status', { request }) }

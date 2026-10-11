@@ -34,6 +34,19 @@ impl ProductionModelGateway for PlanningGateway {
         assert_eq!(capability, "PLAN_STRATEGY");
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inputs.lock().unwrap().push(input.clone());
+        let horizon_preview_capacity = input
+            .get("horizonPreviewCapacity")
+            .and_then(Value::as_i64)
+            .unwrap_or(3)
+            .clamp(0, 3) as usize;
+        let horizon_preview = [
+            json!({"slotNo":1,"objective":"核对新证据","tentative":true}),
+            json!({"slotNo":2,"objective":"观察后果","tentative":true}),
+            json!({"slotNo":3,"objective":"准备下一冲突","tentative":true}),
+        ]
+        .into_iter()
+        .take(horizon_preview_capacity)
+        .collect::<Vec<_>>();
         Ok(ProductionModelResponse::deterministic(json!({
             "payloadSchema":"chapter-plan.r1",
             "chapterId":input["chapterId"],
@@ -49,11 +62,7 @@ impl ProductionModelGateway for PlanningGateway {
             "reservationRefs":input["authorityContext"]["futureReservationRefs"],
             "entityRefs":input["authorityContext"]["state"]["bounds"]["entityIds"],
             "sceneExecution":[],
-            "horizonPreview":[
-                {"slotNo":1,"objective":"核对新证据","tentative":true},
-                {"slotNo":2,"objective":"观察后果","tentative":true},
-                {"slotNo":3,"objective":"准备下一冲突","tentative":true}
-            ]
+            "horizonPreview":horizon_preview
         })))
     }
 }
