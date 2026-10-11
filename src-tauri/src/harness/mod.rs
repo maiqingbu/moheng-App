@@ -547,7 +547,15 @@ pub fn diagnose_knowledge_event(
         .from_story_time
         .as_ref()
         .zip(establishing_event.and_then(|event| event.story_time.as_ref()))
-        .is_some_and(|(knowledge_time, event_time)| knowledge_time < event_time);
+        .is_some_and(|(knowledge_time, event_time)| {
+            match (
+                crate::canon_semantics::parse_world_time(knowledge_time),
+                crate::canon_semantics::parse_world_time(event_time),
+            ) {
+                (Ok(knowledge_time), Ok(event_time)) => knowledge_time < event_time,
+                _ => true,
+            }
+        });
     let missing_chain = establishing_event.is_none() || evidence.is_none();
     let conflicting_chain =
         !missing_chain && (!evidence_matches_event || !evidence_matches_fact || time_conflict);
