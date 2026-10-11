@@ -31,3 +31,35 @@ test('should inspect Rust command implementations and authoritative SQL boundari
   assert.match(architecture, /authoritative write/)
   assert.match(projectManager, /CommitService::commit_project_command/)
 })
+
+test('FX-CI-2 allows TempDir fixtures whose owner remains in scope', async () => {
+  const { findTempDirLeakViolations } = await import('../../scripts/architecture-rules.mjs')
+  assert.equal(typeof findTempDirLeakViolations, 'function')
+  assert.deepEqual(findTempDirLeakViolations([
+    {
+      path: 'src-tauri/tests/safe.rs',
+      source: 'let temp: TempDir = tempfile::tempdir().unwrap(); let state = KernelState::new(temp.path());',
+    },
+    {
+      path: 'src-tauri/src/runtime.rs',
+      source: 'fn open_project() { let state = KernelState::new(path); }',
+    },
+  ]), [])
+})
+
+test('FX-CI-2 rejects TempDir lifetimes escaped by each forbidden operation', async () => {
+  const { findTempDirLeakViolations } = await import('../../scripts/architecture-rules.mjs')
+  assert.equal(typeof findTempDirLeakViolations, 'function')
+  const operations = [
+    ['box-leak', ['Box', '::', 'leak', '(Box::new(temp))'].join('')],
+    ['mem-forget', ['std', '::', 'mem', '::', 'forget(temp)'].join('')],
+    ['path-conversion', ['temp', '.', 'into', '_path', '()'].join('')],
+    ['directory-keep', ['temp', '.', 'keep', '()'].join('')],
+  ]
+  for (const [operation, source] of operations) {
+    assert.deepEqual(findTempDirLeakViolations([{
+      path: 'src-tauri/tests/leaking.rs',
+      source: `let temp: TempDir = tempfile::tempdir().unwrap(); ${source};`,
+    }]), [{ path: 'src-tauri/tests/leaking.rs', operation }])
+  }
+})

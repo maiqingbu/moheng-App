@@ -316,7 +316,7 @@ fn b12_dependency_summary_bootstrap_formal_job_is_created_and_reusable() {
 #[test]
 fn b12_dependency_summary_bootstrap_concurrent_requests_share_one_job() {
     let temp = tempfile::tempdir().unwrap();
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
+    let root = temp.path().to_path_buf();
     let setup = KernelState::with_production_gateway(
         AppPaths::new(root.clone()),
         Arc::new(UnavailableProductionGateway),
@@ -1032,9 +1032,22 @@ fn b12_global_preflight_defers_frontier_materialization_until_expansion() {
         .unwrap();
 }
 
-fn test_state(project_id: &str) -> KernelState {
+struct TempKernelState {
+    _temp: tempfile::TempDir,
+    state: KernelState,
+}
+
+impl std::ops::Deref for TempKernelState {
+    type Target = KernelState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+fn test_state(project_id: &str) -> TempKernelState {
     let temp = tempfile::tempdir().expect("temporary project root");
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
+    let root = temp.path().to_path_buf();
     let state = KernelState::with_production_gateway(
         AppPaths::new(root),
         Arc::new(UnavailableProductionGateway),
@@ -1043,7 +1056,7 @@ fn test_state(project_id: &str) -> KernelState {
         .manager
         .create(project_id, "B12 修订测试作品", NOW)
         .expect("create project");
-    state
+    TempKernelState { _temp: temp, state }
 }
 
 fn command(
