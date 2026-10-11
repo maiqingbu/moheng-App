@@ -272,13 +272,13 @@ enum TimeRelation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct WorldTime {
+pub(crate) struct WorldTime {
     day_number: i64,
     second_of_day: u32,
     nanosecond: u32,
 }
 
-fn parse_world_time(value: &str) -> Result<WorldTime, ()> {
+pub(crate) fn parse_world_time(value: &str) -> Result<WorldTime, ()> {
     let bytes = value.as_bytes();
     if bytes.len() < 20
         || bytes.get(4) != Some(&b'-')
@@ -312,6 +312,28 @@ fn parse_world_time(value: &str) -> Result<WorldTime, ()> {
     if year == 0 || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
         return Err(());
     }
+
+    let (zone_start, offset_seconds) = if bytes.last() == Some(&b'Z') {
+        (bytes.len() - 1, 0_i64)
+    } else {
+        let start = bytes.len().checked_sub(6).ok_or(())?;
+        let sign = *bytes.get(start).ok_or(())?;
+        if !matches!(sign, b'+' | b'-') || bytes.get(start + 3) != Some(&b':') {
+            return Err(());
+        }
+        let offset_hour = number(start + 1, start + 3)?;
+        let offset_minute = number(start + 4, start + 6)?;
+        if offset_hour > 23 || offset_minute > 59 {
+            return Err(());
+        }
+        let magnitude = i64::from(offset_hour * 60 + offset_minute) * 60;
+        let offset_seconds = if sign == b'+' { magnitude } else { -magnitude };
+        (start, offset_seconds)
+    };
+    if zone_start < 19 {
+        return Err(());
+    }
+
     let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let month_lengths = [
         31,
@@ -332,10 +354,11 @@ fn parse_world_time(value: &str) -> Result<WorldTime, ()> {
         return Err(());
     }
 
-    let nanosecond = if bytes.len() == 20 && bytes[19] == b'Z' {
+    let fraction = bytes.get(19..zone_start).ok_or(())?;
+    let nanosecond = if fraction.is_empty() {
         0
-    } else if bytes.get(19) == Some(&b'.') && bytes.last() == Some(&b'Z') {
-        let fraction = bytes.get(20..bytes.len() - 1).ok_or(())?;
+    } else if fraction.first() == Some(&b'.') {
+        let fraction = &fraction[1..];
         if fraction.is_empty()
             || fraction.len() > 9
             || fraction.iter().any(|byte| !byte.is_ascii_digit())
@@ -360,9 +383,11 @@ fn parse_world_time(value: &str) -> Result<WorldTime, ()> {
         day_number += i64::from(month_lengths[(prior_month - 1) as usize]);
     }
     day_number += i64::from(day - 1);
+    let utc_seconds =
+        day_number * 86_400 + i64::from(hour * 3_600 + minute * 60 + second) - offset_seconds;
     Ok(WorldTime {
-        day_number,
-        second_of_day: hour * 3_600 + minute * 60 + second,
+        day_number: utc_seconds.div_euclid(86_400),
+        second_of_day: utc_seconds.rem_euclid(86_400) as u32,
         nanosecond,
     })
 }
@@ -646,5 +671,65 @@ mod tests {
             malformed_candidate,
             SemanticOutcome::Unresolved("B08_CANON_TIME_UNRESOLVED")
         );
+    }
+
+    #[test]
+    fn fx4_flashback_event_passes() {
+        let single = policy(json!({
+            "predicate":"location",
+            "cardinality":"SINGLE",
+            "scope":{"kind":"FIXED","value":"PROJECT"},
+            "timeBasis":"WORLD_TIME"
+        }));
+        let mut chapter_ten_event = record(
+            json!({"place":"A"}),
+            Some("2030-01-01T00:00:00Z"),
+            Some("2030-01-01T00:00:00Z"),
+        );
+        chapter_ten_event.valid_from_chapter_no = Some(10);
+        chapter_ten_event.valid_to_chapter_no = Some(10);
+        let earlier_chapter_twenty_event = json!({"place":"B"});
+
+        assert_eq!(
+            single.evaluate(
+                "location",
+                &chapter_ten_event,
+                CandidateSemanticInput {
+                    object_json: &earlier_chapter_twenty_event,
+                    story_time: Some("2020-01-01T00:00:00Z"),
+                    valid_from_chapter_no: Some(20),
+                    valid_to_chapter_no: Some(20),
+                }
+            ),
+            SemanticOutcome::NoConflict("NO_CONFLICT_DISJOINT_TIME")
+        );
+    }
+
+    #[test]
+    fn fx4_world_time_normalizes_numeric_timezone_offsets() {
+        assert_eq!(
+            parse_world_time("2030-01-01T08:00:00+08:00"),
+            parse_world_time("2030-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            parse_world_time("2029-12-31T19:00:00-05:00"),
+            parse_world_time("2030-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            parse_world_time("2030-01-01T08:00:00.125000+08:00"),
+            parse_world_time("2030-01-01T00:00:00.125Z")
+        );
+    }
+
+    #[test]
+    fn fx4_world_time_rejects_malformed_numeric_timezone_offsets() {
+        for invalid in [
+            "2030-01-01T08:00:00+8:00",
+            "2030-01-01T08:00:00+08:60",
+            "2030-01-01T08:00:00+24:00",
+            "2030-01-01T08:00:00",
+        ] {
+            assert_eq!(parse_world_time(invalid), Err(()), "{invalid}");
+        }
     }
 }

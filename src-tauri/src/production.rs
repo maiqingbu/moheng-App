@@ -4386,12 +4386,6 @@ fn validate_actual_extraction(
             .map_err(|error| error.to_string())?
         };
         let fact_timing = fact_timing.ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
-        if fact_timing
-            .source_chapter_no
-            .is_some_and(|source| source > current_chapter_no)
-        {
-            return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
-        }
         let acquired_time = candidate
             .acquired_story_time
             .as_deref()
@@ -4400,12 +4394,23 @@ fn validate_actual_extraction(
             .story_time
             .as_deref()
             .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
+        let (Some(acquired_time), Some(fact_time)) = (acquired_time, fact_time) else {
+            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        };
+        let acquired_time = crate::canon_semantics::parse_world_time(acquired_time)
+            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
+        let fact_time = crate::canon_semantics::parse_world_time(fact_time)
+            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
+        if fact_timing
+            .source_chapter_no
+            .is_some_and(|source| source > current_chapter_no)
+        {
+            return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
+        }
         if candidate
             .visibility_scope
             .as_deref()
             .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
-            || acquired_time.is_none()
-            || fact_time.is_none()
         {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
         }
@@ -4426,7 +4431,7 @@ fn validate_actual_extraction(
         if !valid_visibility_scope {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_VISIBILITY".into());
         }
-        if acquired_time.unwrap() < fact_time.unwrap() {
+        if acquired_time < fact_time {
             return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
         }
         bound_knowledge_candidates.push(candidate);

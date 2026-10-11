@@ -68,6 +68,55 @@ fn populated_state() -> CurrentNarrativeStateView {
     )
 }
 
+#[test]
+fn fx4_harness_knowledge_time_uses_parsed_instants_and_rejects_unparseable_values() {
+    let scope =
+        resolve_project_scope("p1", 1, "知识时间核对", "DIAGNOSE", "knowledge:event").unwrap();
+    let state = populated_state();
+    let mut knowledge = state.knowledge[0].clone();
+    knowledge.from_story_time = Some("1999-01-01T08:00:00+08:00".into());
+    let mut event = state.events[0].clone();
+    event.story_time = Some("1999-01-01T00:00:00Z".into());
+    let evidence = EvidenceRecord {
+        evidence_id: "evidence:identity".into(),
+        fact_id: Some("fact:a".into()),
+        relation_id: None,
+        event_id: Some(event.event_id.clone()),
+        final_chapter_id: "chapter:11".into(),
+        source_artifact_id: "artifact:evidence".into(),
+        version: 1,
+        evidence_type: "EVENT".into(),
+        quote: Some("identity".into()),
+        range_start: Some(1),
+        range_end: Some(2),
+    };
+
+    assert_eq!(
+        diagnose_knowledge_event(
+            &scope,
+            "equivalent offset timestamps",
+            &knowledge,
+            Some(&event),
+            Some(&evidence),
+        )
+        .support_status,
+        SupportStatus::SUPPORTED
+    );
+
+    knowledge.from_story_time = Some("later".into());
+    assert_eq!(
+        diagnose_knowledge_event(
+            &scope,
+            "unparseable knowledge time",
+            &knowledge,
+            Some(&event),
+            Some(&evidence),
+        )
+        .support_status,
+        SupportStatus::CONFLICTING
+    );
+}
+
 fn insert_context_artifact(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
