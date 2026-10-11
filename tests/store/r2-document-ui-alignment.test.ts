@@ -41,10 +41,12 @@ function production(overrides: Record<string, unknown> = {}) {
 function volume(overrides: Record<string, unknown> = {}) {
   harness.store = reactive({
     currentProjectId: 'p', advancedMode: false,
+    continuityProjection: null, continuityVolumeId: 'v',
     volumeDetail: { volume: { id: 'v', number: 1, title: '山城', goal: '找到线索', status: 'READY' }, chapters: { items: [] } },
     planningRoute: { volumeId: 'v', tasks: [{ taskId: 't', class: 'REQUIRED', objective: '找到钥匙' }], taskReality: [], planningPressure: {}, routeVersion: 1, truncated: false, horizonPreview: [], ...overrides },
     volumeLifecycle: null, commandState: () => ({ status: 'idle', message: '' }), runCommand: vi.fn(),
     loadVolumeDetail: vi.fn(async () => harness.store.volumeDetail),
+    loadContinuity: vi.fn(async () => null),
     loadPlanningRoute: vi.fn(async () => harness.store.planningRoute), loadVolumeLifecycle: vi.fn(async () => null),
   })
 }
