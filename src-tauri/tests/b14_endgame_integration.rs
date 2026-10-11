@@ -11,18 +11,15 @@ use ai_novel_production_system_core::repositories::endgame::EndgameRepository;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::Connection;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-06T00:00:00Z";
 
-fn test_state() -> (KernelState, PathBuf) {
+fn test_state() -> (KernelState, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().to_path_buf();
-    std::mem::forget(temp);
-    let state = KernelState::new(AppPaths::new(root.clone()));
+    let state = KernelState::new(AppPaths::new(temp.path()));
     drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
-    (state, root)
+    (state, temp)
 }
 
 struct EndgameSkillGateway {
@@ -78,19 +75,21 @@ impl ProductionModelGateway for EndgameSkillGateway {
     }
 }
 
-fn test_state_with_skill_gateway() -> (KernelState, PathBuf, Arc<Mutex<Vec<serde_json::Value>>>) {
+fn test_state_with_skill_gateway() -> (
+    KernelState,
+    tempfile::TempDir,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+) {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().to_path_buf();
-    std::mem::forget(temp);
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let state = KernelState::with_production_gateway(
-        AppPaths::new(root.clone()),
+        AppPaths::new(temp.path()),
         Arc::new(EndgameSkillGateway {
             inputs: inputs.clone(),
         }),
     );
     drop(state.manager.create("proj-b14", "B14", NOW).unwrap());
-    (state, root, inputs)
+    (state, temp, inputs)
 }
 
 fn insert_committed_artifact(
@@ -352,7 +351,7 @@ fn assert_r7_domains_unchanged(
 
 #[test]
 fn b14_contract_and_completion_use_atomic_commit_receipts() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
 
     let initial = query_completion_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
@@ -422,7 +421,7 @@ fn b14_contract_and_completion_use_atomic_commit_receipts() {
 
 #[test]
 fn b14_completion_rejects_second_command_after_book_exit_state() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -451,7 +450,7 @@ fn b14_completion_rejects_second_command_after_book_exit_state() {
 
 #[test]
 fn b14_relevant_change_requires_recheck_and_allows_new_digest_completion() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -503,7 +502,7 @@ fn b14_relevant_change_requires_recheck_and_allows_new_digest_completion() {
 
 #[test]
 fn b14_unrelated_revision_does_not_make_endgame_contract_stale() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -527,7 +526,7 @@ fn b14_unrelated_revision_does_not_make_endgame_contract_stale() {
 
 #[test]
 fn b14_task_truth_uses_volume_plan_class_and_current_task_progress() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     insert_committed_artifact(
@@ -569,7 +568,7 @@ fn b14_task_truth_uses_volume_plan_class_and_current_task_progress() {
 
 #[test]
 fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     insert_obligation(&handle, "obligation:b14:a", "A", "PROGRESSING");
@@ -587,7 +586,7 @@ fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
         .unwrap();
     assert_eq!(payoff["status"], "BLOCKED");
 
-    let (advisory_state, _root) = test_state();
+    let (advisory_state, _temp) = test_state();
     seed_ready_project(&advisory_state);
     let handle = advisory_state.manager.open("proj-b14", "", NOW).unwrap();
     insert_obligation(&handle, "obligation:b14:c", "C", "PROGRESSING");
@@ -606,7 +605,7 @@ fn b14_continuity_uses_formal_thread_projection_and_keeps_c_advisory() {
 
 #[test]
 fn b14_continuity_projection_includes_foreshadow_mystery_and_evidence_sources() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     let chapter_id = "chapter:b14:continuity";
@@ -639,7 +638,7 @@ fn b14_continuity_projection_includes_foreshadow_mystery_and_evidence_sources() 
 
 #[test]
 fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     insert_committed_artifact(
@@ -700,7 +699,7 @@ fn b14_r4_continuity_complete_reads_501_rows_and_exposes_hard_thread() {
 
 #[test]
 fn b14_mystery_mapping_requires_current_responsibility_disposition() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[{"id":"mystery:b14:closure","description":"身份谜团"}],"futureReservations":[]});
     seed_ready_project_with_plan(&state, plan);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
@@ -730,7 +729,7 @@ fn b14_mystery_mapping_requires_current_responsibility_disposition() {
 
 #[test]
 fn b14_no_mystery_source_is_insufficient_data_not_ready() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
 
     let result = query_endgame_status_impl(&state, json!({"projectId":"proj-b14"})).unwrap();
     let mystery = result["checks"]
@@ -750,7 +749,7 @@ fn b14_no_mystery_source_is_insufficient_data_not_ready() {
 
 #[test]
 fn b14_hard_responsibilities_are_instance_level_and_change_matchable() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project_with_plan(
         &state,
         json!({
@@ -789,7 +788,7 @@ fn b14_hard_responsibilities_are_instance_level_and_change_matchable() {
 
 #[test]
 fn b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     let plan = json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[{"reservationId":"reservation:b14:future","description":"未来承诺","authorityLevel":"A"}]});
     seed_ready_project_with_plan(&state, plan);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
@@ -816,7 +815,7 @@ fn b14_unrelated_final_chapter_cannot_fulfill_reservation_or_payoff() {
 
 #[test]
 fn b14_r4_mapping_candidates_are_relation_scoped_before_ui() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project_with_plan(
         &state,
         json!({
@@ -861,7 +860,7 @@ fn b14_r4_mapping_candidates_are_relation_scoped_before_ui() {
 
 #[test]
 fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -887,7 +886,7 @@ fn b14_hard_payoff_mapping_is_a_completion_blocker_until_fulfilled() {
 
 #[test]
 fn b14_hard_payoff_rejects_non_final_artifact_as_fulfillment_evidence() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -912,7 +911,7 @@ fn b14_hard_payoff_rejects_non_final_artifact_as_fulfillment_evidence() {
 
 #[test]
 fn b14_export_preflight_blocks_uncommitted_chapter_in_final_sequence() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     handle.execute(
@@ -933,7 +932,7 @@ fn b14_export_preflight_blocks_uncommitted_chapter_in_final_sequence() {
 
 #[test]
 fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
-    let (state, _root, inputs) = test_state_with_skill_gateway();
+    let (state, _temp, inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let before = state.manager.open("proj-b14", "", NOW).unwrap();
     let before_runs: i64 = before
@@ -1052,7 +1051,7 @@ fn b14_s44_s45_run_through_model_runtime_and_stay_soft_only() {
 
 #[test]
 fn rv10_b14_advice_obeys_project_monthly_budget_before_model_send() {
-    let (state, _root, inputs) = test_state_with_skill_gateway();
+    let (state, _temp, inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let revision = state.manager.project_revision("proj-b14").unwrap();
     execute_command_impl(
@@ -1084,7 +1083,7 @@ fn rv10_b14_advice_obeys_project_monthly_budget_before_model_send() {
 
 #[test]
 fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
-    let (state, _root, _inputs) = test_state_with_skill_gateway();
+    let (state, _temp, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     let volume_scope = r#"{"level":"VOLUME","volumeId":"volume:b14"}"#;
@@ -1142,7 +1141,7 @@ fn b14_r5_empty_runtime_checks_recheck_current_task_and_thread_scope() {
 
 #[test]
 fn b14_r5_continuity_101_and_501_are_real_hard_blockers() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     for index in 1..=100 {
@@ -1206,7 +1205,7 @@ fn b14_r5_continuity_101_and_501_are_real_hard_blockers() {
 
 #[test]
 fn b14_r5_no_authority_mutation_uses_non_empty_domain_fixtures() {
-    let (state, _root, _inputs) = test_state_with_skill_gateway();
+    let (state, _temp, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     handle.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r5','proj-b14','R5人物','PERSON',?1,?1)", [NOW]).unwrap();
@@ -1346,7 +1345,7 @@ fn b14_r5_explicit_runtime_refs_are_scoped_and_cross_project_refs_are_unsupporte
 #[test]
 fn b14_r6_paged_foreshadow_and_mystery_sources_create_real_hard_blockers() {
     let run_case = |source_class: &str, ordinal: usize| -> serde_json::Value {
-        let (state, _root) = test_state();
+        let (state, _temp) = test_state();
         seed_ready_project(&state);
         let handle = state.manager.open("proj-b14", "", NOW).unwrap();
         if source_class == "Foreshadow" {
@@ -1423,7 +1422,7 @@ fn b14_r6_paged_foreshadow_and_mystery_sources_create_real_hard_blockers() {
 
 #[test]
 fn b14_r6_continuity_domain_is_non_empty_and_unchanged_after_read_and_completion() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     const R6_CONTINUITY_DOMAIN_SEED: bool = true;
@@ -1471,7 +1470,7 @@ fn b14_r6_continuity_domain_is_non_empty_and_unchanged_after_read_and_completion
 
 #[test]
 fn b14_status_and_soft_queries_do_not_mutate_authority() {
-    let (state, _root, _inputs) = test_state_with_skill_gateway();
+    let (state, _temp, _inputs) = test_state_with_skill_gateway();
     seed_ready_project(&state);
     let count = |connection: &libsql_rusqlite::Connection, table: &str| -> i64 {
         connection
@@ -1541,7 +1540,7 @@ fn b14_status_and_soft_queries_do_not_mutate_authority() {
 
 #[test]
 fn b14_core_queries_and_completion_do_not_schedule_remote_models() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     execute_command_impl(
         &state,
@@ -1604,7 +1603,7 @@ fn b14_core_queries_and_completion_do_not_schedule_remote_models() {
 
 #[test]
 fn b14_domain_digests_use_independent_authoritative_sources() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let before = {
         let handle = state.manager.open("proj-b14", "", NOW).unwrap();
@@ -1633,7 +1632,7 @@ fn b14_domain_digests_use_independent_authoritative_sources() {
 #[test]
 fn b14_r7_paged_sources_enter_continuity_and_change_digest() {
     let run_case = |source_class: &str, ordinal: usize| -> serde_json::Value {
-        let (state, _root) = test_state();
+        let (state, _temp) = test_state();
         seed_ready_project(&state);
         let handle = state.manager.open("proj-b14", "", NOW).unwrap();
         let source_id = format!("{}:r7:{ordinal:03}", source_class.to_lowercase());
@@ -1761,7 +1760,7 @@ fn b14_r7_paged_sources_enter_continuity_and_change_digest() {
 
 #[test]
 fn b14_r7_hard_continuity_responsibility_blocks_completion_independently() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     insert_obligation(&handle, "obligation:r7:hard", "A", "PROGRESSING");
@@ -1807,7 +1806,7 @@ fn b14_r7_hard_continuity_responsibility_blocks_completion_independently() {
 
 #[test]
 fn b14_r7_one_fixture_keeps_all_11_domains_unchanged_across_queries_and_completion() {
-    let (state, _root) = test_state();
+    let (state, _temp) = test_state();
     seed_ready_project(&state);
     let handle = state.manager.open("proj-b14", "", NOW).unwrap();
     handle.execute("INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:r7','proj-b14','R7人物','PERSON',?1,?1)", [NOW]).unwrap();

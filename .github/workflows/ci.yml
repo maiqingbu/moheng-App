@@ -10,6 +10,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,6 +36,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: npm ci
       - run: npm run contracts:validate
       - run: npm run contracts:golden
@@ -51,4 +56,6 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test tauri_ipc_smoke
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test real_ipc_e2e
       - run: cargo test --manifest-path src-tauri/Cargo.toml --test project_lifecycle
+      - run: df -h /
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+      - run: df -h /

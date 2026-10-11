@@ -9793,9 +9793,10 @@ mod c1_settings_secret_tests {
     use crate::project_db::paths::AppPaths;
     use crate::repositories::runtime::RuntimeError;
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     struct CountingSecretStore {
         get_calls: AtomicUsize,
@@ -9814,18 +9815,19 @@ mod c1_settings_secret_tests {
         }
     }
 
-    struct ThirtySecondBlockingSecretStore {
-        entered: AtomicBool,
+    struct BlockingSecretStore {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
     }
 
-    impl SecretStore for ThirtySecondBlockingSecretStore {
+    impl SecretStore for BlockingSecretStore {
         fn get(&self, _provider: &str) -> Result<String, RuntimeError> {
             panic!("settings status must not read secret data")
         }
 
         fn contains(&self, _provider: &str) -> bool {
-            self.entered.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_secs(30));
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
             true
         }
     }
@@ -9854,35 +9856,31 @@ mod c1_settings_secret_tests {
     fn settings_query_waiting_on_keychain_keeps_async_work_responsive() {
         let temp = tempfile::tempdir().unwrap();
         let state = KernelState::new(AppPaths::new(temp.path()));
-        let secret_store = Arc::new(ThirtySecondBlockingSecretStore {
-            entered: AtomicBool::new(false),
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let secret_store = Arc::new(BlockingSecretStore {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
         });
 
         tauri::async_runtime::block_on(async {
-            let started = Instant::now();
             let worker_state = state.clone();
             let worker_secret_store = secret_store.clone();
             let query = tauri::async_runtime::spawn_blocking(move || {
                 query_global_settings_with_secret_store(&worker_state, worker_secret_store.as_ref())
             });
 
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !secret_store.entered.load(Ordering::SeqCst) {
-                assert!(
-                    Instant::now() < deadline,
-                    "secret-store fixture did not start"
-                );
-                std::thread::yield_now();
-            }
+            entered_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("secret-store fixture did not start");
 
             let responsive = tauri::async_runtime::spawn(async { "other UI work" })
                 .await
                 .unwrap();
             assert_eq!(responsive, "other UI work");
-            assert!(started.elapsed() < Duration::from_secs(1));
+            release_tx.send(()).unwrap();
 
             let settings = query.await.unwrap().unwrap();
-            assert!(started.elapsed() >= Duration::from_secs(30));
             assert_eq!(settings["secretStatus"], "AVAILABLE");
         });
     }

@@ -5,7 +5,7 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::narrative::{evaluate_plan_stale, PlanStaleStatus};
 use ai_novel_production_system_core::production::UnavailableProductionGateway;
-use ai_novel_production_system_core::project_db::paths::AppPaths;
+use ai_novel_production_system_core::project_db::{paths::AppPaths, ManagerError};
 use ai_novel_production_system_core::repair::{operation_digest_with_postconditions, RepairPlan};
 use ai_novel_production_system_core::repositories::change_retcon::rebuild_global_dependency_summary;
 use ai_novel_production_system_core::repositories::runtime::{
@@ -1069,16 +1069,30 @@ fn command(
 }
 
 fn wait_for_summary_ready(state: &KernelState, project_id: &str) -> Value {
+    let mut summary_completed = false;
     for _ in 0..10_000 {
         let status =
             query_dependency_summary_bootstrap_impl(state, json!({"projectId":project_id}))
                 .expect("query summary bootstrap status");
         if status["summary"]["summaryStatus"] == "READY" && status["job"]["status"] == "COMPLETED" {
-            return status;
+            summary_completed = true;
+            match state.manager.open(project_id, "", NOW) {
+                Ok(writer_probe) => {
+                    drop(writer_probe);
+                    return status;
+                }
+                Err(ManagerError::AlreadyOpen) => {}
+                Err(error) => panic!("failed to verify summary writer release: {error}"),
+            }
         }
         thread::yield_now();
     }
-    panic!("summary worker did not reach READY");
+    if summary_completed {
+        panic!(
+            "summary reached READY/COMPLETED but its writer remained open after 10,000 attempts"
+        );
+    }
+    panic!("summary worker did not reach READY/COMPLETED after 10,000 attempts");
 }
 
 fn insert_dependency(

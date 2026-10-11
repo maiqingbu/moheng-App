@@ -9,21 +9,28 @@ use ai_novel_production_system_core::provider::{
     ProviderResponse, ProviderUsage, ScriptedProvider,
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
+#[cfg(target_os = "macos")]
+use ai_novel_production_system_core::runtime::SecretStore;
 use ai_novel_production_system_core::runtime::{
-    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError, SecretStore,
+    DurableModelRunner, MemorySecretStore, ModelRunSpec, RuntimeError,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::json;
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(target_os = "macos")]
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn p01_provider_adapter_maps_usage_and_typed_errors() {
@@ -327,6 +334,7 @@ fn disconnect_after_provider_request() -> String {
     format!("http://{address}")
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct SecretProcessObservation {
     process_name_matches: usize,
@@ -335,6 +343,7 @@ struct SecretProcessObservation {
     environment_dump_canary_matches: usize,
 }
 
+#[cfg(target_os = "macos")]
 impl SecretProcessObservation {
     fn merge(&mut self, other: Self) {
         self.process_name_matches += other.process_name_matches;
@@ -417,11 +426,7 @@ fn process_arguments_and_environment(pid: u32) -> Option<(Vec<u8>, Vec<u8>)> {
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn process_arguments_and_environment(_pid: u32) -> Option<(Vec<u8>, Vec<u8>)> {
-    None
-}
-
+#[cfg(target_os = "macos")]
 fn observe_child_processes(
     parent_pid: u32,
     process_name: &str,
@@ -475,6 +480,7 @@ fn observe_child_processes(
     observed
 }
 
+#[cfg(target_os = "macos")]
 fn gated_local_provider_server() -> (String, Receiver<String>, Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

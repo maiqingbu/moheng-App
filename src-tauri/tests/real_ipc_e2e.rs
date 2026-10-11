@@ -10,6 +10,7 @@
 //! deterministically on CI and locally.
 
 use ai_novel_production_system_core::commands::{self, KernelState};
+#[cfg(target_os = "macos")]
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::market_source::{
     FanqieWriterZoneAdapter, MarketSourceAdapter,
@@ -18,26 +19,41 @@ use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::connection::open_connection;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
+#[cfg(target_os = "macos")]
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
-use ai_novel_production_system_core::repositories::runtime::{
-    MemorySecretStore, OsKeychainSecretStore, SecretStore,
-};
+#[cfg(target_os = "macos")]
+use ai_novel_production_system_core::repositories::runtime::MemorySecretStore;
+use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
+#[cfg(target_os = "macos")]
 use libsql_rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
 use std::io::{Read, Write};
+#[cfg(target_os = "macos")]
 use std::net::{TcpListener, TcpStream};
+#[cfg(target_os = "macos")]
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command as ProcessCommand;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc;
 use tauri::test::{mock_builder, mock_context, noop_assets};
 use tauri::webview::InvokeRequest;
@@ -1183,9 +1199,12 @@ fn real_ipc_integrity_query_runs_and_market_opportunities_is_available() {
         .is_some());
 }
 
+#[cfg(target_os = "macos")]
 const R2_PROVIDER_NOW: &str = "2026-10-04T00:00:00Z";
+#[cfg(target_os = "macos")]
 static R2_REGISTERED_PROVIDER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(target_os = "macos")]
 fn r2_runtime_canary() -> String {
     let mut random = [0_u8; 24];
     std::fs::File::open("/dev/urandom")
@@ -1194,6 +1213,7 @@ fn r2_runtime_canary() -> String {
     format!("MOHENG_SECRET_CANARY_{}", hex::encode(random))
 }
 
+#[cfg(target_os = "macos")]
 fn r2_read_http_request(stream: &mut TcpStream) -> Result<(String, Value), String> {
     stream
         .set_nonblocking(false)
@@ -1247,6 +1267,7 @@ fn r2_read_http_request(stream: &mut TcpStream) -> Result<(String, Value), Strin
     }
 }
 
+#[cfg(target_os = "macos")]
 fn r2_response_envelope(content: Value) -> Vec<u8> {
     let envelope = json!({
         "id":"r2-local-response",
@@ -1256,6 +1277,7 @@ fn r2_response_envelope(content: Value) -> Vec<u8> {
     envelope.to_string().into_bytes()
 }
 
+#[cfg(target_os = "macos")]
 fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
     let opening_bootstrap =
         input.get("executionMode").and_then(Value::as_str) == Some("OPENING_BOOTSTRAP");
@@ -1337,6 +1359,7 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct R2LocalProviderServer {
     endpoint: String,
     stop: Arc<AtomicBool>,
@@ -1348,6 +1371,7 @@ struct R2LocalProviderServer {
     worker: thread::JoinHandle<()>,
 }
 
+#[cfg(target_os = "macos")]
 fn r2_spawn_local_provider_server(
     canary: String,
     task_id: String,
@@ -1435,6 +1459,7 @@ fn r2_spawn_local_provider_server(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn r2_process_canary_matches(canary: &str) -> usize {
     let processes = ProcessCommand::new("/bin/ps")
         .args(["-eww", "-axo", "pid=,ppid=,command="])
@@ -1449,6 +1474,7 @@ fn r2_process_canary_matches(canary: &str) -> usize {
         .count()
 }
 
+#[cfg(target_os = "macos")]
 fn r2_bounded_invoke(
     webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
     command: &'static str,
@@ -1467,6 +1493,7 @@ fn r2_bounded_invoke(
         .unwrap_or_else(|_| Err("IPC_RESPONSE_TIMEOUT".into()))
 }
 
+#[cfg(target_os = "macos")]
 fn r2_safe_error_class(error: Option<&String>) -> &'static str {
     let Some(error) = error else {
         return "NONE";
@@ -1495,6 +1522,7 @@ fn r2_safe_error_class(error: Option<&String>) -> &'static str {
     "OTHER_HANDLER_ERROR"
 }
 
+#[cfg(target_os = "macos")]
 fn r2_safe_error_detail(error: Option<&String>, canary: &str) -> String {
     let redacted = error
         .map(|value| value.replace(canary, "[CANARY]"))
@@ -1517,6 +1545,7 @@ fn r2_safe_error_detail(error: Option<&String>, canary: &str) -> String {
         .join(" ")
 }
 
+#[cfg(target_os = "macos")]
 fn r2_scan_project_tree(root: &Path, canary: &str) -> (usize, usize, BTreeMap<String, usize>) {
     let mut scanned = 0;
     let mut matches = 0;
@@ -1569,6 +1598,7 @@ fn r2_scan_project_tree(root: &Path, canary: &str) -> (usize, usize, BTreeMap<St
     (scanned, matches, categories)
 }
 
+#[cfg(target_os = "macos")]
 fn r2_insert_artifact(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -1594,6 +1624,7 @@ fn r2_insert_artifact(
     digest
 }
 
+#[cfg(target_os = "macos")]
 fn r2_seed_current_r1_signing_fixture(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -1852,6 +1883,7 @@ fn r2_seed_current_r1_signing_fixture(
     );
 }
 
+#[cfg(target_os = "macos")]
 fn r2_insert_golden_chapter(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -1902,6 +1934,7 @@ fn r2_insert_golden_chapter(
     let _ = final_hash;
 }
 
+#[cfg(target_os = "macos")]
 fn r2_seed_async_provider_project(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -2008,6 +2041,7 @@ fn r2_seed_async_provider_project(
     (chapter_id, volume_id, book_plan_hash)
 }
 
+#[cfg(target_os = "macos")]
 fn r2_seed_planning_project(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
