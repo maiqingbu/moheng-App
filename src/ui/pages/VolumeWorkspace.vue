@@ -1,21 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import { useProjectStore } from '../stores/projectStore'
+import ContinuityPanel from '../components/ContinuityPanel.vue'
+import type { ContinuityThreadViewProjection, VolumeDetailProjection } from '../../application/contracts'
 import { sanitizeProductText, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 import VolumePlanningProgress from '../components/VolumePlanningProgress.vue'
 import { createVolumePlanningRuntimePoller } from '../runtime/volumePlanningRuntimeSync'
-import type { VolumeDetailProjection } from '../../application/contracts'
 
 const store = useProjectStore()
 const route = useRoute()
+const router = useRouter()
 const volumeId = computed(() => String(route.params.volumeId ?? ''))
 const detail = computed(() => store.volumeDetail?.volume.id === volumeId.value ? store.volumeDetail : null)
 const workspaceError = ref('')
 const planRoute = computed(() => store.planningRoute?.volumeId === volumeId.value ? store.planningRoute : null)
+const continuity = computed(() => store.continuityVolumeId === volumeId.value ? store.continuityProjection : null)
+const continuityError = ref('')
 const lifecycle = computed(() => store.volumeLifecycle?.volumeId === volumeId.value ? store.volumeLifecycle : null)
 const planningState = computed(() => lifecycle.value?.planningState ?? {})
 const tasks = computed(() => planRoute.value?.tasks ?? [])
@@ -155,8 +159,14 @@ async function compileNextChapterPlan(adjustScope = false) {
 
 async function loadWorkspace(force = false) {
   workspaceError.value = ''
+  continuityError.value = ''
   workspaceRuntimePoller.stop()
   const requestedVolumeId = volumeId.value
+  void store.loadContinuity(requestedVolumeId, true).then(() => {
+    if (workspaceMounted && requestedVolumeId === volumeId.value) continuityError.value = ''
+  }).catch(() => {
+    if (workspaceMounted && requestedVolumeId === volumeId.value) continuityError.value = '暂时无法读取已记录的剧情线，请重新读取。'
+  })
   try {
     const [initial] = await Promise.all([
       force ? store.loadVolumeDetail(requestedVolumeId, true) : store.loadVolumeDetail(requestedVolumeId),
@@ -169,6 +179,20 @@ async function loadWorkspace(force = false) {
   } catch {
     if (workspaceMounted && requestedVolumeId === volumeId.value) workspaceError.value = '卷工作区查询未完成，当前结果可能不完整，请重新读取。'
   }
+}
+
+function requestContinuityChange(thread: ContinuityThreadViewProjection) {
+  const projectId = store.currentProjectId
+  if (!projectId) return
+  void router.push({
+    name: 'history',
+    params: { id: projectId },
+    query: {
+      createChangeRequest: '1',
+      continuityThreadRef: thread.threadId,
+      continuityDescription: thread.description,
+    },
+  })
 }
 
 async function performAction(action: () => Promise<void>) {
@@ -190,6 +214,15 @@ onUnmounted(() => {
     <section class="card pad section"><span class="badge">PLAN</span><h2 class="card-title" style="margin-top:8px">本卷目标</h2><p class="card-subtitle">{{ detail.volume.goal }}</p></section>
     <CommandFeedback :state="state" @confirm="store.confirmCommandResult('volume-build')" />
     <div v-if="workspaceError || planRoute?.truncated" class="banner warning" role="alert">{{ workspaceError || '当前卷查询结果已截断，不能据此确认必需信息完整。' }}</div>
+
+    <p v-if="continuityError" class="banner warning section" role="alert">{{ continuityError }}</p>
+    <ContinuityPanel
+      v-else-if="continuity"
+      :threads="continuity.threads"
+      :truncated="continuity.truncated"
+      :advanced="store.advancedMode"
+      @request-change="requestContinuityChange"
+    />
 
     <VolumePlanningProgress :operation="runtimeOperation" />
 
@@ -247,7 +280,7 @@ onUnmounted(() => {
 
     <section v-if="planRoute" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">前后连贯与后续安排</h2><p class="card-subtitle">这些内容用于规划参考，不会改变正式作品事实或已经发生的进展。</p></div><span class="badge">PROJECTION · 系统推算</span></div>
-      <dl class="pitch-kv"><div><dt>未完成的剧情线</dt><dd>{{ planRoute.continuityThreads?.length ?? '未提供' }}</dd></div><div><dt>预留安排</dt><dd>{{ planRoute.futureReservations?.length ?? '未提供' }}</dd></div><div><dt>当前章节规划</dt><dd>{{ planRoute.currentChapterPlan ? '已生成' : '未生成' }}</dd></div><div><dt>后续预览</dt><dd>{{ planRoute.horizonPreview == null ? '尚未提供预览' : planRoute.horizonPreview.length ? `${planRoute.horizonPreview.length} 项暂定安排` : '暂无后续预览' }}</dd></div></dl>
+      <dl class="pitch-kv"><div><dt>预留安排</dt><dd>{{ planRoute.futureReservations?.length ?? '未提供' }}</dd></div><div><dt>当前章节规划</dt><dd>{{ planRoute.currentChapterPlan ? '已生成' : '未生成' }}</dd></div><div><dt>后续预览</dt><dd>{{ planRoute.horizonPreview == null ? '尚未提供预览' : planRoute.horizonPreview.length ? `${planRoute.horizonPreview.length} 项暂定安排` : '暂无后续预览' }}</dd></div></dl>
     </section>
 
     <section v-if="planRoute" class="card pad section" data-rolling-horizon>

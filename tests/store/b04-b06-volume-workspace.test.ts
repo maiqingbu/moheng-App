@@ -1,14 +1,15 @@
 /* @vitest-environment happy-dom */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, reactive } from 'vue'
+import { createApp, nextTick, reactive } from 'vue'
 import VolumeWorkspace from '../../src/ui/pages/VolumeWorkspace.vue'
 
 const harness = vi.hoisted(() => ({
   route: { params: { volumeId: 'volume-b04-b06' } },
   store: null as any,
+  routerPush: vi.fn(),
 }))
 
-vi.mock('vue-router', () => ({ useRoute: () => harness.route }))
+vi.mock('vue-router', () => ({ useRoute: () => harness.route, useRouter: () => ({ push: harness.routerPush }) }))
 vi.mock('../../src/ui/stores/projectStore', () => ({ useProjectStore: () => harness.store }))
 
 const detail = (chapterStatus: 'official' | 'producing' = 'official') => ({
@@ -44,12 +45,14 @@ function mountWorkspace(
 ) {
   const store = reactive({
     currentProjectId: 'project-b04-b06', volumeDetail: detail(chapterStatus), planningRoute: routeProjection(currentChapterPlan),
+    continuityProjection: null as any, continuityVolumeId: 'volume-b04-b06',
     volumeLifecycle: null, advancedMode: false, commandState: vi.fn((key: string) => key === 'chapter-plan-compile' && budgetFailure
       ? { status: 'failed', message: '本章硬性资料超出预算。', contextBudget: budgetFailure }
       : { status: 'idle', message: '' }),
     runCommand: vi.fn(async () => ({ finalStatus: 'committed', message: 'ok' })),
     loadVolumeDetail: vi.fn(async () => store.volumeDetail),
     loadPlanningRoute: vi.fn(async () => store.planningRoute), loadVolumeLifecycle: vi.fn(async () => null),
+    loadContinuity: vi.fn(async () => null),
   })
   harness.store = store
   const container = document.createElement('div')
@@ -61,6 +64,33 @@ function mountWorkspace(
 
 describe('B04-B06 chapter planning controls', () => {
   afterEach(() => { document.body.innerHTML = '' })
+
+  it('routes A/B continuity changes through the existing ChangeRequest flow', async () => {
+    harness.routerPush.mockClear()
+    const mounted = mountWorkspace('official')
+    mounted.store.continuityProjection = {
+      projectId: 'project-b04-b06', projectRevision: 4, truncated: false,
+      threads: [{
+        threadId: 'thread:promise:door', threadClass: 'OBLIGATION', description: '处理门后的承诺。',
+        fulfillmentObject: null, logicalStatus: 'OPEN', sourceEventRef: 'event:event:fact:door',
+        evidenceRefs: [], participantEntities: [], resumeCondition: { kind: 'IN_VOLUME', value: 'volume:2' },
+        authorityLevel: 'B', currentDisposition: 'HOLD', sourceRefs: [],
+      }],
+    }
+    await nextTick()
+    mounted.container.querySelector<HTMLButtonElement>('.continuity-projection button')!.click()
+    expect(harness.routerPush).toHaveBeenCalledWith({
+      name: 'history',
+      params: { id: 'project-b04-b06' },
+      query: {
+        createChangeRequest: '1',
+        continuityThreadRef: 'thread:promise:door',
+        continuityDescription: '处理门后的承诺。',
+      },
+    })
+    expect(mounted.store.runCommand).not.toHaveBeenCalled()
+    mounted.app.unmount()
+  })
 
   it('prepares the next chapter through the formal project command', async () => {
     const mounted = mountWorkspace('official')

@@ -85,6 +85,7 @@ const errorLabels: Record<string, string> = {
   BUDGET_EXCEEDED: '本次模型调用会超出剩余预算，未发送请求。',
   FUTURE_RESERVATION_VIOLATION: '本章提前使用了后续保留的剧情内容，需要调整当前计划或正文。',
   CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
+  EVIDENCE_QUOTE_NOT_UNIQUE: '没有在该责任的来源正文中找到唯一引文，请补充一段更长、更有辨识度的原文。',
   UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
   PLAN_STALE: '当前规划已与最新内容不一致，需要重新确认或更新。',
   AUTHORIZATION_STALE: '作品状态已经变化，请重新确认修复方案。',

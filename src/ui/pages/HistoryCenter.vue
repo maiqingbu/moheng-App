@@ -270,6 +270,11 @@ onMounted(() => {
   }
   const changeId = route.query.changeRequestId
   if (typeof changeId === 'string' && changeId.trim()) void restoreChange(changeId)
+  if (route.query.createChangeRequest === '1') {
+    modal.value = 'change'
+    const description = typeof route.query.continuityDescription === 'string' ? route.query.continuityDescription.trim() : ''
+    requestText.value = description ? `请评估是否需要调整这条剧情线：${description}` : '请评估是否需要调整这条剧情线。'
+  }
 })
 async function setKind(next: HistoryKind) {
   if (historyFilterLoading.value) return
@@ -286,6 +291,7 @@ async function create() {
   const projectId = store.currentProjectId
   if (!projectId || !requestText.value.trim()) return
   const type = modal.value === 'retcon' ? 'RETCON' : 'CHANGE'
+  const continuityThreadRef = typeof route.query.continuityThreadRef === 'string' ? route.query.continuityThreadRef : ''
   const changeId = `change:${projectId}:${Date.now()}`
   const evidence = type === 'RETCON' ? selectedEvidence() : undefined
   if (type === 'RETCON' && (!retconTargetRef.value || !retconReplacement.value.trim() || !evidence)) {
@@ -302,8 +308,8 @@ async function create() {
       summary: requestText.value.trim(),
       reason: requestText.value.trim(),
       targetFactId: type === 'RETCON' ? retconTargetRef.value.trim() : undefined,
-      targetRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : undefined,
-      sourceRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : undefined,
+      targetRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : continuityThreadRef ? [continuityThreadRef] : undefined,
+      sourceRefs: type === 'RETCON' ? [retconTargetRef.value.trim()] : continuityThreadRef ? [continuityThreadRef] : undefined,
       requestedChange: {
         description: requestText.value.trim(),
         ...(type === 'RETCON' ? {

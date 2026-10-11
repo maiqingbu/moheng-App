@@ -10,6 +10,7 @@ const harness = vi.hoisted(() => ({
 
 vi.mock('vue-router', () => ({
   useRoute: () => harness.route,
+  useRouter: () => ({ push: vi.fn() }),
 }))
 
 vi.mock('../../src/ui/stores/projectStore', () => ({
@@ -50,11 +51,14 @@ const mountWorkspace = (frames: Array<Record<string, unknown>>, options: { defer
     currentProjectId: 'project-r4',
     volumeDetail: null as any,
     planningRoute: null,
+    continuityProjection: null,
+    continuityVolumeId: 'volume-r4',
     volumeLifecycle: null,
     advancedMode: false,
     commandState: vi.fn(() => ({ status: 'idle', message: '' })),
     runCommand: vi.fn(),
     loadPlanningRoute: vi.fn(async () => null),
+    loadContinuity: vi.fn(async () => null),
     loadVolumeLifecycle: vi.fn(async () => null),
     loadVolumeDetail: vi.fn(async (_volumeId: string, force = false) => {
       if (!force && options.deferInitial) {

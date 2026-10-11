@@ -6781,7 +6781,13 @@ fn fx5_reconciliation_considers_tasks_beyond_first_chunk() {
 #[test]
 fn fx6_quote_only_evidence_located_by_backend() {
     for (suffix, body, quote, should_commit, invalid_range) in [
-        ("unique", "顾清看见，林舟推开石门，走向窗边。", "林舟推开石门", true, false),
+        (
+            "unique",
+            "顾清看见，林舟推开石门，走向窗边。",
+            "林舟推开石门",
+            true,
+            false,
+        ),
         (
             "duplicate",
             "林舟推开石门，林舟推开石门。",
@@ -6789,8 +6795,20 @@ fn fx6_quote_only_evidence_located_by_backend() {
             false,
             false,
         ),
-        ("missing", "林舟推开石门，走向窗边。", "顾清走进房间", false, false),
-        ("invalid-range", "林舟推开石门，走向窗边。", "林舟推开石门", false, true),
+        (
+            "missing",
+            "林舟推开石门，走向窗边。",
+            "顾清走进房间",
+            false,
+            false,
+        ),
+        (
+            "invalid-range",
+            "林舟推开石门，走向窗边。",
+            "林舟推开石门",
+            false,
+            true,
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-fx6-quote-{suffix}");
@@ -6866,7 +6884,11 @@ fn fx6_quote_only_evidence_located_by_backend() {
         } else {
             assert_eq!(
                 result.unwrap_err(),
-                if invalid_range { "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED" } else { "EVIDENCE_QUOTE_NOT_UNIQUE" },
+                if invalid_range {
+                    "B08_RESPONSIBILITY_UPGRADE_EVIDENCE_REQUIRED"
+                } else {
+                    "EVIDENCE_QUOTE_NOT_UNIQUE"
+                },
             );
             assert_eq!(
                 connection

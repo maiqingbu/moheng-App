@@ -10,6 +10,7 @@ import type {
   CommandReceipt,
   CommandRequest,
   CommandStatus,
+  ContinuityProjection,
   FrontendPort,
   DecisionItem,
   HistoryProjection,
@@ -97,6 +98,8 @@ export const useProjectStore = defineStore('project-projection', () => {
   const volumes = ref<PageResult<VolumeSummary> | null>(null)
   const volumeDetail = ref<VolumeDetailProjection | null>(null)
   const planningRoute = ref<PlanningRouteProjection | null>(null)
+  const continuityProjection = ref<ContinuityProjection | null>(null)
+  const continuityVolumeId = ref<string | null>(null)
   const volumeLifecycle = ref<VolumeLifecycleProjection | null>(null)
   const decisions = ref<PageResult<DecisionItem> | null>(null)
   const readerVolumes = ref<PageResult<VolumeSummary> | null>(null)
@@ -141,6 +144,8 @@ export const useProjectStore = defineStore('project-projection', () => {
     volumes.value = null
     volumeDetail.value = null
     planningRoute.value = null
+    continuityProjection.value = null
+    continuityVolumeId.value = null
     volumeLifecycle.value = null
     decisions.value = null
     readerVolumes.value = null
@@ -362,6 +367,16 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (planningRoute.value?.volumeId === volumeId && !force) return planningRoute.value
     return withWorkspace('planning-route', () => frontendPort.queryPlanRoute({ ...queryBase(`plan-route:${volumeId}`, 30), volumeId }), route => { planningRoute.value = route })
   }
+  async function loadContinuity(volumeId: string, force = false) {
+    if (continuityProjection.value && continuityVolumeId.value === volumeId && !force) return continuityProjection.value
+    return withWorkspace('continuity', () => frontendPort.queryContinuity({
+      ...queryBase(`continuity:${volumeId}`, 100),
+      volumeId,
+    }), value => {
+      continuityProjection.value = value
+      continuityVolumeId.value = volumeId
+    })
+  }
   async function loadVolumeLifecycle(volumeId:string, force=false) {
     if (volumeLifecycle.value?.volumeId === volumeId && !force) return volumeLifecycle.value
     return withWorkspace('volume-lifecycle', () => frontendPort.queryVolumeLifecycle({ ...queryBase(`volume-lifecycle:${volumeId}`, 30), volumeId }), value => { volumeLifecycle.value = value })
@@ -557,6 +572,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (volumes.value) jobs.push(loadVolumes(true))
     if (volumeDetail.value) jobs.push(loadVolumeDetail(volumeDetail.value.volume.id, true))
     if (planningRoute.value) jobs.push(loadPlanningRoute(planningRoute.value.volumeId, true))
+    if (continuityProjection.value && continuityVolumeId.value) jobs.push(loadContinuity(continuityVolumeId.value, true))
     if (volumeLifecycle.value) jobs.push(loadVolumeLifecycle(volumeLifecycle.value.volumeId, true))
     if (decisions.value) jobs.push(loadDecisions('all', true))
     if (readerVolumes.value) jobs.push(loadReaderVolumes(true))
@@ -843,11 +859,11 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, decisions,
+    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
-    loadVolumeDetail, loadPlanningRoute, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
+    loadVolumeDetail, loadPlanningRoute, loadContinuity, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
     loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
