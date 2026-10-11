@@ -39,6 +39,8 @@ const STAGES: &[&str] = &[
     "COMPLETED",
 ];
 
+const MAX_RECONCILIATION_ROUTE_TASKS: usize = crate::repositories::narrative::TASK_STATE_CHUNK_SIZE;
+
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
     pub output: Value,
@@ -3362,27 +3364,109 @@ fn run_chapter_production_inner(
         &now,
         vec![reference(&audit)],
     )?;
-    let task_reality = extraction
-        .task_progress_candidates
-        .iter()
-        .map(|item| {
-            let expected = plan_payload
-                .get("requiredStateOutcomes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|condition| {
-                    condition.get("value").and_then(Value::as_str) == Some(item.task_id.as_str())
+    let task_reality = if let Some(route_ref) =
+        crate::repositories::narrative::NarrativeRepository::volume_plan_route(
+            connection,
+            &project_id,
+            &volume_id,
+        )
+        .map_err(|error| error.to_string())?
+    {
+        let route = crate::repositories::narrative::NarrativeRepository::artifact_payload_by_ref(
+            connection,
+            &project_id,
+            &route_ref,
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "VOLUME_PLAN_PAYLOAD_NOT_FOUND".to_string())?;
+        let route_tasks = route
+            .get("tasks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "VOLUME_PLAN_TASKS_INVALID".to_string())?;
+        if route_tasks.len() > MAX_RECONCILIATION_ROUTE_TASKS {
+            return Err("B08_RECONCILIATION_TASK_LIMIT_EXCEEDED".into());
+        }
+        let route_task_ids = route_tasks
+            .iter()
+            .map(|task| {
+                task.get("taskId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| "VOLUME_PLAN_TASKS_INVALID".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let route_task_id_refs = route_task_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let current_task_states =
+            crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
+                connection,
+                &project_id,
+                &route_task_id_refs,
+            )
+            .map_err(|error| error.to_string())?;
+        let state_by_id = current_task_states
+            .into_iter()
+            .map(|state| {
+                let status = state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NOT_STARTED")
+                    .to_owned();
+                (state.state_id, status)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let audit_status_by_id = extraction
+            .task_progress_candidates
+            .iter()
+            .map(|candidate| (candidate.task_id.as_str(), candidate.status.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        route_tasks
+            .iter()
+            .zip(route_task_ids.iter())
+            .map(|(task, task_id)| {
+                let class = task
+                    .get("class")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "VOLUME_PLAN_TASKS_INVALID".to_string())?;
+                let estimated_min_cost = task
+                    .pointer("/estimatedChapterCost/min")
+                    .and_then(Value::as_i64)
+                    .or_else(|| {
+                        task.pointer("/estimatedChapterCost/preferred")
+                            .and_then(Value::as_i64)
+                    })
+                    .unwrap_or(1);
+                let status = audit_status_by_id
+                    .get(task_id.as_str())
+                    .copied()
+                    .or_else(|| state_by_id.get(task_id).map(String::as_str))
+                    .unwrap_or("NOT_STARTED")
+                    .to_owned();
+                let expected = plan_payload
+                    .get("requiredStateOutcomes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|condition| {
+                        condition.get("value").and_then(Value::as_str) == Some(task_id.as_str())
+                    })
+                    .and_then(|condition| condition.get("kind").and_then(Value::as_str))
+                    .map(ToOwned::to_owned);
+                Ok(ReconciliationTaskReality {
+                    task_id: task_id.clone(),
+                    class: class.to_owned(),
+                    status,
+                    estimated_min_cost,
+                    expected,
                 })
-                .and_then(|condition| condition.get("kind").and_then(Value::as_str))
-                .map(ToOwned::to_owned);
-            ReconciliationTaskReality {
-                task_id: item.task_id.clone(),
-                status: item.status.clone(),
-                expected,
-            }
-        })
-        .collect::<Vec<_>>();
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    } else {
+        Vec::new()
+    };
     let mut responsibility_reality = extraction
         .continuity_candidates
         .iter()
@@ -3673,7 +3757,9 @@ pub fn validate_candidate_evidence_range(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconciliationTaskReality {
     pub task_id: String,
+    pub class: String,
     pub status: String,
+    pub estimated_min_cost: i64,
     pub expected: Option<String>,
 }
 
@@ -3700,6 +3786,24 @@ pub fn classify_plan_reality(facts: &ReconciliationFacts) -> &'static str {
     {
         return "CHANGE_REQUEST";
     }
+    let unsatisfied_required_tasks = facts.task_reality.iter().filter(|task| {
+        matches!(task.class.as_str(), "REQUIRED" | "CLIMAX") && task.status != "SATISFIED"
+    });
+    let mut has_unsatisfied_required_task = false;
+    let mut unsatisfied_required_cost = 0_i64;
+    let mut has_invalidated_required_task = false;
+    for task in unsatisfied_required_tasks {
+        has_unsatisfied_required_task = true;
+        has_invalidated_required_task |= task.status == "INVALIDATED";
+        unsatisfied_required_cost =
+            unsatisfied_required_cost.saturating_add(task.estimated_min_cost);
+    }
+    if has_invalidated_required_task
+        || unsatisfied_required_cost > facts.remaining_chapter_capacity
+        || (facts.remaining_chapter_capacity <= 0 && has_unsatisfied_required_task)
+    {
+        return "REPLAN_VOLUME_ROUTE";
+    }
     if facts
         .responsibility_reality
         .iter()
@@ -3710,14 +3814,6 @@ pub fn classify_plan_reality(facts: &ReconciliationFacts) -> &'static str {
             .any(|task| task.status == "BLOCKED")
     {
         return "RECOMPILE_ROLLING_WINDOW";
-    }
-    if facts.remaining_chapter_capacity <= 0
-        && facts
-            .task_reality
-            .iter()
-            .any(|task| task.status != "SATISFIED")
-    {
-        return "REPLAN_VOLUME_ROUTE";
     }
     if facts.task_reality.iter().any(|task| {
         task.expected.as_deref().is_some_and(|expected| {
@@ -4661,6 +4757,141 @@ fn knowledge_authority_is_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fx5_classify_plan_reality_table() {
+        let task = |task_id: &str,
+                    class: &str,
+                    status: &str,
+                    estimated_min_cost: i64,
+                    expected: Option<&str>| ReconciliationTaskReality {
+            task_id: task_id.into(),
+            class: class.into(),
+            status: status.into(),
+            estimated_min_cost,
+            expected: expected.map(ToOwned::to_owned),
+        };
+        let facts =
+            |task_reality, remaining_chapter_capacity, canon_gate_passed| ReconciliationFacts {
+                task_reality,
+                remaining_chapter_capacity,
+                canon_gate_passed,
+                responsibility_reality: vec![],
+            };
+        let cases = [
+            (
+                "optional unfinished at zero capacity",
+                facts(
+                    vec![task("task:optional", "OPTIONAL", "ACTIVE", 5, None)],
+                    0,
+                    true,
+                ),
+                "NO_ACTION",
+            ),
+            (
+                "flexible unfinished at zero capacity",
+                facts(
+                    vec![task("task:flexible", "FLEXIBLE", "ACTIVE", 5, None)],
+                    0,
+                    true,
+                ),
+                "NO_ACTION",
+            ),
+            (
+                "reserved unfinished at zero capacity",
+                facts(
+                    vec![task("task:reserved", "RESERVED", "ACTIVE", 5, None)],
+                    0,
+                    true,
+                ),
+                "NO_ACTION",
+            ),
+            (
+                "required cost exceeds remaining capacity",
+                facts(
+                    vec![task("task:required", "REQUIRED", "ACTIVE", 5, None)],
+                    3,
+                    true,
+                ),
+                "REPLAN_VOLUME_ROUTE",
+            ),
+            (
+                "climax cost exceeds remaining capacity",
+                facts(
+                    vec![task("task:climax", "CLIMAX", "ACTIVE", 5, None)],
+                    3,
+                    true,
+                ),
+                "REPLAN_VOLUME_ROUTE",
+            ),
+            (
+                "required invalidated",
+                facts(
+                    vec![task("task:required", "REQUIRED", "INVALIDATED", 1, None)],
+                    3,
+                    true,
+                ),
+                "REPLAN_VOLUME_ROUTE",
+            ),
+            (
+                "required blocked and over capacity",
+                facts(
+                    vec![task("task:required", "REQUIRED", "BLOCKED", 5, None)],
+                    3,
+                    true,
+                ),
+                "REPLAN_VOLUME_ROUTE",
+            ),
+            (
+                "required blocked with enough capacity",
+                facts(
+                    vec![task("task:required", "REQUIRED", "BLOCKED", 1, None)],
+                    3,
+                    true,
+                ),
+                "RECOMPILE_ROLLING_WINDOW",
+            ),
+            (
+                "canon gate failed",
+                facts(vec![], 3, false),
+                "CHANGE_REQUEST",
+            ),
+            (
+                "actual differs from planned expected state",
+                facts(
+                    vec![task(
+                        "task:required",
+                        "REQUIRED",
+                        "ACTIVE",
+                        1,
+                        Some("TASK_SATISFIED"),
+                    )],
+                    3,
+                    true,
+                ),
+                "RECOMPILE_NEXT_CHAPTER",
+            ),
+            (
+                "all task expectations satisfied",
+                facts(
+                    vec![task(
+                        "task:required",
+                        "REQUIRED",
+                        "SATISFIED",
+                        1,
+                        Some("TASK_SATISFIED"),
+                    )],
+                    0,
+                    true,
+                ),
+                "NO_ACTION",
+            ),
+        ];
+
+        for (scenario, facts, expected) in cases {
+            assert_eq!(classify_plan_reality(&facts), expected, "{scenario}");
+        }
+    }
 
     fn synthetic_audit_policy_contract(artifact_id: String, policy_version: String) -> Value {
         json!({
