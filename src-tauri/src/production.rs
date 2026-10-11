@@ -39,8 +39,6 @@ const STAGES: &[&str] = &[
     "COMPLETED",
 ];
 
-const MAX_RECONCILIATION_ROUTE_TASKS: usize = crate::repositories::narrative::TASK_STATE_CHUNK_SIZE;
-
 #[derive(Debug, Clone)]
 pub struct ProductionModelResponse {
     pub output: Value,
@@ -3383,9 +3381,6 @@ fn run_chapter_production_inner(
             .get("tasks")
             .and_then(Value::as_array)
             .ok_or_else(|| "VOLUME_PLAN_TASKS_INVALID".to_string())?;
-        if route_tasks.len() > MAX_RECONCILIATION_ROUTE_TASKS {
-            return Err("B08_RECONCILIATION_TASK_LIMIT_EXCEEDED".into());
-        }
         let route_task_ids = route_tasks
             .iter()
             .map(|task| {

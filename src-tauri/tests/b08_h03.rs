@@ -6601,6 +6601,145 @@ fn fx5_optional_unfinished_tasks_do_not_replan_when_capacity_is_sufficient() {
 }
 
 #[test]
+fn fx5_reconciliation_considers_tasks_beyond_first_chunk() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx5-route-task-chunk";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "fx5-no-task-candidates",
+        }),
+    );
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+    let connection = state
+        .manager
+        .open(project_id, "FX-5 route task chunk", NOW)
+        .unwrap();
+    let mut tasks = (1..=149)
+        .map(|index| {
+            let task_id = if index == 1 {
+                "task:actual".to_string()
+            } else {
+                format!("task:fx5:optional:{index}")
+            };
+            json!({
+                "taskId":task_id,
+                "class":"OPTIONAL",
+                "objective":format!("可选任务 {index}"),
+                "dependsOnTaskIds":[],
+                "continuityThreadRefs":[],
+                "reservationRefs":[],
+                "completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":task_id,"evidenceType":"ACTUAL_NARRATIVE","requiresNewEvidence":true}},
+                "estimatedChapterCost":{"preferred":1}
+            })
+        })
+        .collect::<Vec<_>>();
+    let invalidated_task_id = "task:fx5:required:150";
+    tasks.push(json!({
+        "taskId":invalidated_task_id,
+        "class":"REQUIRED",
+        "objective":"位于第二个读取分块末尾的必需任务",
+        "dependsOnTaskIds":[],
+        "continuityThreadRefs":[],
+        "reservationRefs":[],
+        "completionPredicate":{"kind":"TASK_EVIDENCE_RECORDED","value":{"taskId":invalidated_task_id,"evidenceType":"ACTUAL_NARRATIVE","requiresNewEvidence":true}},
+        "estimatedChapterCost":{"preferred":1}
+    }));
+    assert_eq!(tasks.len(), 150);
+    fx5_replace_route_tasks(&connection, project_id, &volume_id, json!(tasks), 4);
+    connection
+        .execute(
+            "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES (?1,?2,'volume.task.progress',?3,?4,'{}',?5,?5)",
+            libsql_rusqlite::params![
+                invalidated_task_id,
+                project_id,
+                json!({"taskId":invalidated_task_id,"status":"INVALIDATED","evidenceRefs":[],"remainingConditions":[]}).to_string(),
+                chapter_id,
+                NOW
+            ],
+        )
+        .unwrap();
+    let capacity = ai_novel_production_system_core::planning::horizon_capacity_after_chapter(
+        &connection,
+        project_id,
+        &chapter_id,
+    )
+    .unwrap();
+    assert!(
+        capacity > 1,
+        "fixture must have enough capacity for one task"
+    );
+    drop(connection);
+
+    let connection = state
+        .manager
+        .open(project_id, "FX-5 route task chunk", NOW)
+        .unwrap();
+    let revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    let planning = execute_command_impl(
+        &state,
+        json!({
+            "type":"planning_compile_chapter_plan",
+            "commandId":"cmd:fx5:route-chunk:plan",
+            "idempotencyKey":"key:fx5:route-chunk:plan",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+        }),
+    )
+    .unwrap();
+    assert_eq!(planning["finalStatus"], "committed", "{planning}");
+
+    let connection = state
+        .manager
+        .open(project_id, "FX-5 route task chunk", NOW)
+        .unwrap();
+    let revision = connection
+        .query_row::<i64, _, _>(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start",
+            "commandId":"cmd:fx5:route-chunk:produce",
+            "idempotencyKey":"key:fx5:route-chunk:produce",
+            "projectId":project_id,
+            "expectedRevision":revision,
+            "requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[],"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+        }),
+    )
+    .unwrap_or_else(|error| panic!("150-task production_start failed: {error}"));
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let connection = state
+        .manager
+        .open(project_id, "FX-5 route task chunk", NOW)
+        .unwrap();
+    let receipt_payload: String = connection
+        .query_row(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let receipt_payload: Value = serde_json::from_str(&receipt_payload).unwrap();
+    assert_eq!(receipt_payload["reconciliation"], "REPLAN_VOLUME_ROUTE");
+}
+
+#[test]
 fn b08_reconciliation_no_action_prepares_only_an_empty_next_chapter_row() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-reconciliation-empty-next";
