@@ -11,6 +11,7 @@ use ai_novel_production_system_core::production::{
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::json;
+use std::ops::Deref;
 use std::sync::Arc;
 
 const NOW: &str = "2026-09-02T02:00:00Z";
@@ -78,15 +79,27 @@ impl ProductionModelGateway for FailingEntryGateway {
     }
 }
 
-fn state_with_gateway(gateway: Arc<dyn ProductionModelGateway>) -> KernelState {
-    let temp = tempfile::tempdir().unwrap();
-    // Keep the temporary directory alive for the duration of each test by
-    // leaking only this test-owned path; the project manager owns the files.
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
-    KernelState::with_production_gateway(AppPaths::new(root), gateway)
+struct TempKernelState {
+    _temp: tempfile::TempDir,
+    state: KernelState,
 }
 
-fn state() -> KernelState {
+impl Deref for TempKernelState {
+    type Target = KernelState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+fn state_with_gateway(gateway: Arc<dyn ProductionModelGateway>) -> TempKernelState {
+    let temp = tempfile::tempdir().unwrap();
+    let state =
+        KernelState::with_production_gateway(AppPaths::new(temp.path().to_path_buf()), gateway);
+    TempKernelState { _temp: temp, state }
+}
+
+fn state() -> TempKernelState {
     state_with_gateway(Arc::new(EntryFixtureGateway))
 }
 

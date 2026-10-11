@@ -3266,22 +3266,35 @@ mod postverify_contract_tests {
     use crate::production::UnavailableProductionGateway;
     use crate::project_db::paths::AppPaths;
     use serde_json::{json, Value};
+    use std::ops::Deref;
     use std::sync::Arc;
 
     const NOW: &str = "2026-09-24T00:00:00Z";
 
-    fn state(project_id: &str) -> KernelState {
+    struct TempKernelState {
+        _temp: tempfile::TempDir,
+        state: KernelState,
+    }
+
+    impl Deref for TempKernelState {
+        type Target = KernelState;
+
+        fn deref(&self) -> &Self::Target {
+            &self.state
+        }
+    }
+
+    fn state(project_id: &str) -> TempKernelState {
         let temp = tempfile::tempdir().unwrap();
-        let root = Box::leak(Box::new(temp)).path().to_path_buf();
         let state = KernelState::with_production_gateway(
-            AppPaths::new(root),
+            AppPaths::new(temp.path().to_path_buf()),
             Arc::new(UnavailableProductionGateway),
         );
         state
             .manager
             .create(project_id, "B12 postverify fault", NOW)
             .unwrap();
-        state
+        TempKernelState { _temp: temp, state }
     }
 
     fn command(

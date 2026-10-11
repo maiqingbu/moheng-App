@@ -19,6 +19,7 @@ use ai_novel_production_system_core::repositories::health::{
 use ai_novel_production_system_core::volume_lifecycle::VolumeLifecycleOwner;
 use libsql_rusqlite::OptionalExtension;
 use serde_json::json;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,10 +30,26 @@ const NOW: &str = "2026-09-04T02:00:00Z";
 const HEALTH_SCALE_ROUTE_COUNT: i64 = 100_000;
 const LEGACY_FORMAL_ROUTE_PAYLOAD_SCAN_SQL: &str = "SELECT p.payload_json FROM volumes v JOIN volume_plan_index i ON i.project_id=v.project_id AND i.volume_id=v.volume_id JOIN artifacts a ON a.project_id=i.project_id AND a.artifact_id=i.plan_artifact_id AND a.version=i.plan_version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE v.project_id=?1 ORDER BY v.volume_no,v.volume_id";
 
-fn state() -> KernelState {
+struct TempKernelState {
+    _temp: tempfile::TempDir,
+    state: KernelState,
+}
+
+impl Deref for TempKernelState {
+    type Target = KernelState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+fn state() -> TempKernelState {
     let temp = tempfile::tempdir().unwrap();
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
-    KernelState::with_production_gateway(AppPaths::new(root), Arc::new(EntryFixtureGateway))
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        Arc::new(EntryFixtureGateway),
+    );
+    TempKernelState { _temp: temp, state }
 }
 
 fn create_project(state: &KernelState, command_id: &str) -> String {
@@ -124,7 +141,7 @@ fn explain_with_params(
         .unwrap()
 }
 
-fn large_route_fixture(command_id: &str) -> (KernelState, String, ProjectHandle) {
+fn large_route_fixture(command_id: &str) -> (TempKernelState, String, ProjectHandle) {
     let state = state();
     let project_id = create_project(&state, command_id);
     let connection = state

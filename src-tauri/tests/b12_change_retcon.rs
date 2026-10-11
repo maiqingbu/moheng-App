@@ -8,23 +8,36 @@ use ai_novel_production_system_core::repair::{
 };
 use libsql_rusqlite::params;
 use serde_json::{json, Value};
+use std::ops::Deref;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 const NOW: &str = "2026-09-02T04:00:00Z";
 
-fn state(project_id: &str) -> KernelState {
+struct TempKernelState {
+    _temp: tempfile::TempDir,
+    state: KernelState,
+}
+
+impl Deref for TempKernelState {
+    type Target = KernelState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+fn state(project_id: &str) -> TempKernelState {
     let temp = tempfile::tempdir().unwrap();
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
     let state = KernelState::with_production_gateway(
-        AppPaths::new(root),
+        AppPaths::new(temp.path().to_path_buf()),
         Arc::new(UnavailableProductionGateway),
     );
     state
         .manager
         .create(project_id, "B12 测试作品", NOW)
         .unwrap();
-    state
+    TempKernelState { _temp: temp, state }
 }
 
 fn command(
@@ -769,7 +782,7 @@ fn b12_impact_source_digest_change_marks_the_saved_impact_stale_before_expansion
 #[test]
 fn b12_two_workers_competing_for_the_same_approved_change_have_one_canonical_winner() {
     let temp = tempfile::tempdir().unwrap();
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
+    let root = temp.path().to_path_buf();
     let first_state = KernelState::with_production_gateway(
         AppPaths::new(root.clone()),
         Arc::new(UnavailableProductionGateway),

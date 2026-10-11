@@ -51,10 +51,10 @@ test('FX-CI-2 rejects TempDir lifetimes escaped by each forbidden operation', as
   const { findTempDirLeakViolations } = await import('../../scripts/architecture-rules.mjs')
   assert.equal(typeof findTempDirLeakViolations, 'function')
   const operations = [
-    ['Box::leak', 'Box::leak(Box::new(temp))'],
-    ['mem::forget', 'std::mem::forget(temp)'],
-    ['into_path', 'temp.into_path()'],
-    ['keep', 'temp.keep()'],
+    ['box-leak', ['Box', '::', 'leak', '(Box::new(temp))'].join('')],
+    ['mem-forget', ['std', '::', 'mem', '::', 'forget(temp)'].join('')],
+    ['path-conversion', ['temp', '.', 'into', '_path', '()'].join('')],
+    ['directory-keep', ['temp', '.', 'keep', '()'].join('')],
   ]
   for (const [operation, source] of operations) {
     assert.deepEqual(findTempDirLeakViolations([{

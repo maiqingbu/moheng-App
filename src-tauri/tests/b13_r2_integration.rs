@@ -10,6 +10,7 @@ use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFac
 use ai_novel_production_system_core::volume_lifecycle::VolumeLifecycleOwner;
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
+use std::ops::Deref;
 use std::sync::Arc;
 
 mod support;
@@ -17,10 +18,26 @@ use support::EntryFixtureGateway;
 
 const NOW: &str = "2026-09-05T00:00:00Z";
 
-fn state() -> KernelState {
+struct TempKernelState {
+    _temp: tempfile::TempDir,
+    state: KernelState,
+}
+
+impl Deref for TempKernelState {
+    type Target = KernelState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+fn state() -> TempKernelState {
     let temp = tempfile::tempdir().unwrap();
-    let root = Box::leak(Box::new(temp)).path().to_path_buf();
-    KernelState::with_production_gateway(AppPaths::new(root), Arc::new(EntryFixtureGateway))
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        Arc::new(EntryFixtureGateway),
+    );
+    TempKernelState { _temp: temp, state }
 }
 
 fn create_project(state: &KernelState) -> String {

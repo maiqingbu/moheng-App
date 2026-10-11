@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import crypto from 'node:crypto'
-import { findDemoCharacterIdLeaks } from './architecture-rules.mjs'
+import { findDemoCharacterIdLeaks, findTempDirLeakViolations } from './architecture-rules.mjs'
 
 const root = path.resolve('src')
 const files = []
@@ -66,6 +66,23 @@ const walkRust = dir => {
   }
 }
 walkRust(rustRoot)
+const rustTestRoot = path.join(projectRoot, 'src-tauri/tests')
+const rustTestFiles = []
+const walkRustTests = dir => {
+  for (const name of fs.readdirSync(dir)) {
+    const file = path.join(dir, name)
+    if (fs.statSync(file).isDirectory()) walkRustTests(file)
+    else if (name.endsWith('.rs')) rustTestFiles.push(file)
+  }
+}
+walkRustTests(rustTestRoot)
+const tempDirLeakViolations = findTempDirLeakViolations([...rustFiles, ...rustTestFiles].map(file => ({
+  path: path.relative(projectRoot, file).split(path.sep).join('/'),
+  source: fs.readFileSync(file, 'utf8'),
+})))
+for (const violation of tempDirLeakViolations) {
+  errors.push(`FX-CI-2 TempDir 生命周期泄漏（${violation.operation}）: ${violation.path}`)
+}
 const sqlOwnerPrefixes = ['catalog/', 'commit/', 'project_db/', 'repositories/']
 for (const file of rustFiles) {
   const relative = path.relative(rustRoot, file).split(path.sep).join('/')
@@ -199,4 +216,5 @@ if (errors.length) {
   process.exit(1)
 }
 console.log(`B05_ARCHITECTURE_RESULT docs=PASS frozen_migrations=PASS no_second_authority=PASS forbidden_authority_tables=${forbiddenAuthorityTableCount} legacy_planner_count=${legacyPlannerCount} narrative_runtime_delta_count=${narrativeRuntimeDeltaCount} commit_bundle_v3_count=${commitBundleV3Count} status=PASS`)
+console.log(`FXCI2_TEMP_DIR_RESULT rust_source_and_test_files=${rustFiles.length + rustTestFiles.length} leaks=${tempDirLeakViolations.length} status=PASS`)
 console.log(`Architecture verification passed: ${files.length} source files scanned; scoped queries, frozen IA, command boundaries and demo isolation checks passed.`)
