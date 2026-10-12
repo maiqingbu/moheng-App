@@ -116,7 +116,7 @@ fn duplicate_refuses_active_writer_and_self_duplicate() {
     let _handle = manager.create("proj-a", "A", NOW).unwrap();
     assert!(matches!(
         manager.duplicate("proj-a", "proj-a-copy", NOW),
-        Err(ManagerError::AlreadyOpen)
+        Err(ManagerError::ProjectBusy)
     ));
     drop(_handle);
 }
@@ -160,7 +160,7 @@ fn delete_to_trash_refuses_active_writer_and_delete_does_not_remove_rows() {
     let handle = manager.create("proj-a", "A", NOW).unwrap();
     assert!(matches!(
         manager.delete_to_trash("proj-a", NOW),
-        Err(ManagerError::AlreadyOpen)
+        Err(ManagerError::ProjectBusy)
     ));
     drop(handle);
     // Deleting a fresh project then relocating does not remove authoritative rows.
