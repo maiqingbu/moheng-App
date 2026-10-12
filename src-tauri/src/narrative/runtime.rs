@@ -11,7 +11,7 @@ use crate::repositories::narrative::{
 use libsql_rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -241,6 +241,61 @@ fn evidence_ref(record: &EvidenceRecord) -> EvidenceRef {
     }
 }
 
+type EvidenceRefIdentity = (String, i64, Option<i64>, Option<i64>, Option<String>);
+
+fn evidence_ref_identity(reference: &EvidenceRef) -> EvidenceRefIdentity {
+    (
+        reference.artifact_id.clone(),
+        reference.version,
+        reference.range_start,
+        reference.range_end,
+        reference.quote.clone(),
+    )
+}
+
+fn append_indexed_evidence_refs(
+    first_indices: &[usize],
+    second_indices: &[usize],
+    evidence: &[EvidenceRecord],
+    evidence_refs: &mut Vec<EvidenceRef>,
+    seen: &mut HashSet<EvidenceRefIdentity>,
+) {
+    let (mut first, mut second) = (0, 0);
+    while first < first_indices.len() || second < second_indices.len() {
+        let index = match (
+            first_indices.get(first).copied(),
+            second_indices.get(second).copied(),
+        ) {
+            (Some(left), Some(right)) if left == right => {
+                first += 1;
+                second += 1;
+                left
+            }
+            (Some(left), Some(right)) if left < right => {
+                first += 1;
+                left
+            }
+            (Some(_), Some(right)) => {
+                second += 1;
+                right
+            }
+            (Some(left), None) => {
+                first += 1;
+                left
+            }
+            (None, Some(right)) => {
+                second += 1;
+                right
+            }
+            (None, None) => break,
+        };
+        let reference = evidence_ref(&evidence[index]);
+        if seen.insert(evidence_ref_identity(&reference)) {
+            evidence_refs.push(reference);
+        }
+    }
+}
+
 pub fn build_continuity_threads(
     obligations: &[ObligationRecord],
     foreshadows: &[ForeshadowRecord],
@@ -248,6 +303,19 @@ pub fn build_continuity_threads(
     evidence: &[EvidenceRecord],
     resume_context: &ResumeContext,
 ) -> Result<Vec<ContinuityThreadView>, String> {
+    let mut evidence_by_fact: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut evidence_by_event: HashMap<&str, Vec<usize>> = HashMap::new();
+    if !obligations.is_empty() {
+        for (index, item) in evidence.iter().enumerate() {
+            if let Some(fact_id) = item.fact_id.as_deref() {
+                evidence_by_fact.entry(fact_id).or_default().push(index);
+            }
+            if let Some(event_id) = item.event_id.as_deref() {
+                evidence_by_event.entry(event_id).or_default().push(index);
+            }
+        }
+    }
+
     let mut result = Vec::new();
     for obligation in obligations {
         let logical_status = match obligation.lifecycle.as_str() {
@@ -268,15 +336,27 @@ pub fn build_continuity_threads(
             }
         };
         let mut evidence_refs = obligation.evidence_refs.clone();
-        for item in evidence.iter().filter(|item| {
-            item.fact_id.as_deref() == Some(obligation.obligation_id.as_str())
-                || (item.event_id.is_some() && item.event_id == obligation.source_event_id)
-        }) {
-            let reference = evidence_ref(item);
-            if !evidence_refs.contains(&reference) {
-                evidence_refs.push(reference);
-            }
-        }
+        let mut seen = evidence_refs
+            .iter()
+            .map(evidence_ref_identity)
+            .collect::<HashSet<_>>();
+        let fact_indices = evidence_by_fact
+            .get(obligation.obligation_id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let event_indices = obligation
+            .source_event_id
+            .as_deref()
+            .and_then(|event_id| evidence_by_event.get(event_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        append_indexed_evidence_refs(
+            fact_indices,
+            event_indices,
+            evidence,
+            &mut evidence_refs,
+            &mut seen,
+        );
         result.push(ContinuityThreadView {
             thread_id: format!("thread:{}", obligation.obligation_id),
             thread_class: obligation.obligation_type.clone(),
@@ -1458,5 +1538,162 @@ mod b2_context_tests {
             .filter_map(|reference| reference.quote.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(quotes, vec!["承诺原文", "责任事实原文"]);
+    }
+
+    fn fx7_obligation(id: &str, source_event_id: Option<&str>) -> ObligationRecord {
+        let mut obligation = fx1_obligation(source_event_id);
+        obligation.obligation_id = id.into();
+        obligation
+    }
+
+    fn fx7_reference_evidence_refs(
+        obligation: &ObligationRecord,
+        evidence: &[EvidenceRecord],
+    ) -> Vec<EvidenceRef> {
+        let mut references = obligation.evidence_refs.clone();
+        for record in evidence.iter().filter(|record| {
+            record.fact_id.as_deref() == Some(obligation.obligation_id.as_str())
+                || (record.event_id.is_some() && record.event_id == obligation.source_event_id)
+        }) {
+            let reference = evidence_ref(record);
+            if !references.contains(&reference) {
+                references.push(reference);
+            }
+        }
+        references
+    }
+
+    fn fx7_reference_threads(
+        obligations: &[ObligationRecord],
+        evidence: &[EvidenceRecord],
+    ) -> Vec<ContinuityThreadView> {
+        let mut threads = obligations
+            .iter()
+            .map(|obligation| {
+                let logical_status = match obligation.lifecycle.as_str() {
+                    "RESOLVED" | "RECOVERED" => "RESOLVED",
+                    "ABANDONED" => "ABANDONED",
+                    "APPROVED" | "PLANTED" | "PROGRESSING" => {
+                        if evaluate_resume_condition(
+                            &obligation.resume_condition,
+                            &ResumeContext::default(),
+                        )
+                        .unwrap()
+                        {
+                            "OPEN"
+                        } else {
+                            "SUSPENDED"
+                        }
+                    }
+                    other => panic!("unexpected fixture lifecycle: {other}"),
+                };
+                ContinuityThreadView {
+                    thread_id: format!("thread:{}", obligation.obligation_id),
+                    thread_class: obligation.obligation_type.clone(),
+                    description: obligation.description.clone(),
+                    fulfillment_object: obligation.fulfillment_object.clone(),
+                    logical_status: logical_status.into(),
+                    source_event_ref: obligation
+                        .source_event_id
+                        .clone()
+                        .map(|id| format!("event:{id}")),
+                    evidence_refs: fx7_reference_evidence_refs(obligation, evidence),
+                    participant_entities: obligation.participant_entities.clone(),
+                    resume_condition: obligation.resume_condition.clone(),
+                    authority_level: obligation.authority_level.clone(),
+                    current_disposition: obligation.lifecycle.clone(),
+                    source_refs: vec![SourceRef {
+                        kind: "obligation".into(),
+                        ref_: obligation.obligation_id.clone(),
+                    }],
+                }
+            })
+            .collect::<Vec<_>>();
+        threads.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+        threads
+    }
+
+    #[test]
+    fn fx7_continuity_index_preserves_output_order_and_content() {
+        let evidence = vec![
+            fx1_evidence("event-first", None, Some("event:z"), "event-first"),
+            fx1_evidence(
+                "fact-and-event",
+                Some("obligation:z"),
+                Some("event:z"),
+                "fact-and-event",
+            ),
+            fx1_evidence("fact-a", Some("obligation:a"), None, "fact-a"),
+            fx1_evidence("other-event", None, Some("event:other"), "other-event"),
+            fx1_evidence("unscoped", None, None, "unscoped"),
+        ];
+        let mut z = fx7_obligation("obligation:z", Some("event:z"));
+        z.evidence_refs.push(evidence_ref(&evidence[1]));
+        let obligations = [z, fx7_obligation("obligation:a", None)];
+
+        let threads =
+            build_continuity_threads(&obligations, &[], &[], &evidence, &ResumeContext::default())
+                .unwrap();
+
+        assert_eq!(threads, fx7_reference_threads(&obligations, &evidence));
+    }
+
+    #[cfg(feature = "scale-bench")]
+    #[test]
+    fn fx7_continuity_build_is_linear() {
+        #[cfg(debug_assertions)]
+        use std::time::Duration;
+        use std::time::Instant;
+
+        const OBLIGATION_COUNT: usize = 5_000;
+        const EVIDENCE_PER_OBLIGATION: usize = 20;
+        let obligations = (0..OBLIGATION_COUNT)
+            .map(|index| {
+                let id = format!("obligation:fx7:{index:04}");
+                let event_id = format!("event:fx7:{index:04}");
+                fx7_obligation(&id, Some(&event_id))
+            })
+            .collect::<Vec<_>>();
+        let evidence = (0..OBLIGATION_COUNT * EVIDENCE_PER_OBLIGATION)
+            .map(|index| {
+                let obligation_index = index / EVIDENCE_PER_OBLIGATION;
+                let obligation_id = format!("obligation:fx7:{obligation_index:04}");
+                let event_id = format!("event:fx7:{obligation_index:04}");
+                EvidenceRecord {
+                    evidence_id: format!("evidence:fx7:{index:06}"),
+                    fact_id: Some(obligation_id),
+                    relation_id: None,
+                    event_id: Some(event_id),
+                    final_chapter_id: "chapter:fx7".into(),
+                    source_artifact_id: format!("final:fx7:{index:06}"),
+                    version: 1,
+                    evidence_type: "ACTUAL_NARRATIVE".into(),
+                    quote: Some(format!("quote:{index}")),
+                    range_start: Some(0),
+                    range_end: Some(1),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let threads =
+            build_continuity_threads(&obligations, &[], &[], &evidence, &ResumeContext::default())
+                .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(threads.len(), OBLIGATION_COUNT);
+        assert!(threads
+            .iter()
+            .all(|thread| thread.evidence_refs.len() == EVIDENCE_PER_OBLIGATION));
+        println!(
+            "FX7_CONTINUITY_BUILD obligations={OBLIGATION_COUNT} evidence={} elapsed_ms={:.3}",
+            evidence.len(),
+            elapsed.as_secs_f64() * 1000.0
+        );
+        #[cfg(debug_assertions)]
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "continuity build took {elapsed:?}"
+        );
     }
 }

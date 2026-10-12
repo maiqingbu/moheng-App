@@ -1,10 +1,16 @@
 use crate::endgame::CompletionInput;
 use crate::generated::types::ArtifactRef;
 use crate::hash::sha256_canonical;
+use crate::narrative::ContinuityThreadView;
 use crate::repositories::narrative::NarrativeRepository;
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+#[cfg(test)]
+thread_local! {
+    static FX7_ENDGAME_CONTINUITY_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndgameRepositoryError {
@@ -33,6 +39,15 @@ pub struct CompletionHistory {
 }
 
 impl EndgameRepository {
+    fn continuity_threads_complete(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<ContinuityThreadView>, EndgameRepositoryError> {
+        #[cfg(test)]
+        FX7_ENDGAME_CONTINUITY_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+        NarrativeRepository::continuity_threads_complete(connection, project_id).map_err(Into::into)
+    }
+
     pub fn instance_responsibilities(
         connection: &Connection,
         project_id: &str,
@@ -40,7 +55,7 @@ impl EndgameRepository {
         let mut result = Vec::new();
         let mut statement = connection.prepare("SELECT obligation_id,authority_level FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"kind":"OBLIGATION","responsibilityId":format!("obligation:{}",row.get::<_,String>(0)?),"sourceRefs":[format!("obligation:{}",row.get::<_,String>(0)?)],"authorityClass":row.get::<_,String>(1)?,"requiredDisposition":"RESOLVED_BEFORE_COMPLETION"})))? { result.push(row?); }
-        for thread in NarrativeRepository::continuity_threads_complete(connection, project_id)? {
+        for thread in Self::continuity_threads_complete(connection, project_id)? {
             if matches!(thread.authority_level.as_str(), "A" | "B")
                 && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
             {
@@ -355,6 +370,7 @@ impl EndgameRepository {
         connection: &Connection,
         project_id: &str,
         reference: &str,
+        continuity_threads: &HashMap<String, ContinuityThreadView>,
     ) -> Result<bool, EndgameRepositoryError> {
         let Some((kind, id)) = reference.split_once(':') else {
             return Ok(false);
@@ -362,7 +378,9 @@ impl EndgameRepository {
         match kind {
             "obligation" => Ok(connection.query_row("SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2", libsql_rusqlite::params![project_id,id], |row| row.get::<_,String>(0)).optional()?.is_some_and(|value| matches!(value.as_str(),"RESOLVED"|"ABANDONED"|"SUPERSEDED"))),
             "foreshadow" => Ok(connection.query_row("SELECT status FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2", libsql_rusqlite::params![project_id,id], |row| row.get::<_,String>(0)).optional()?.is_some_and(|value| matches!(value.as_str(),"RECOVERED"|"RESOLVED"|"ABANDONED"))),
-            "thread" => Ok(NarrativeRepository::continuity_threads_complete(connection, project_id)?.into_iter().find(|thread| thread.thread_id == reference).is_some_and(|thread| matches!(thread.logical_status.as_str(),"RESOLVED"|"ABANDONED"))),
+            "thread" => Ok(continuity_threads
+                .get(reference)
+                .is_some_and(|thread| matches!(thread.logical_status.as_str(), "RESOLVED" | "ABANDONED"))),
             "task" => Ok(NarrativeRepository::task_states_by_ids_complete(connection, project_id, &[id])?.into_iter().find(|state| state.state_id == id).and_then(|state| state.value.get("status").and_then(Value::as_str).map(|value| matches!(value,"SATISFIED"|"INVALIDATED"))).unwrap_or(false)),
             "reservation" => {
                 let current = Self::payload_for_head(connection, project_id, "BookPlan")?;
@@ -382,6 +400,7 @@ impl EndgameRepository {
         connection: &Connection,
         project_id: &str,
         refs: Option<&Value>,
+        continuity_threads: &HashMap<String, ContinuityThreadView>,
     ) -> Result<bool, EndgameRepositoryError> {
         let Some(refs) = refs.and_then(Value::as_array) else {
             return Ok(false);
@@ -390,7 +409,12 @@ impl EndgameRepository {
             return Ok(false);
         }
         for reference in refs.iter().filter_map(Value::as_str) {
-            if !Self::responsibility_satisfied(connection, project_id, reference)? {
+            if !Self::responsibility_satisfied(
+                connection,
+                project_id,
+                reference,
+                continuity_threads,
+            )? {
                 return Ok(false);
             }
         }
@@ -445,6 +469,7 @@ impl EndgameRepository {
         project_id: &str,
         book_plan: Option<&Value>,
         contract: Option<&Value>,
+        continuity_threads: &HashMap<String, ContinuityThreadView>,
     ) -> Result<(i64, i64, bool), EndgameRepositoryError> {
         let goals = book_plan
             .and_then(|value| value.get("majorMysteryGoals"))
@@ -483,6 +508,7 @@ impl EndgameRepository {
                 connection,
                 project_id,
                 mapping.and_then(|item| item.get("mappedResponsibilityRefs")),
+                continuity_threads,
             )? {
                 unresolved += 1;
             }
@@ -863,7 +889,7 @@ impl EndgameRepository {
         let mut knowledge = Vec::new();
         let mut statement = connection.prepare("SELECT knowledge_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id,until_chapter_id FROM canon_knowledge WHERE project_id=?1 ORDER BY knowledge_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"knowledgeId":row.get::<_,String>(0)?,"knowerId":row.get::<_,String>(1)?,"factId":row.get::<_,Option<String>>(2)?,"epistemicState":row.get::<_,String>(3)?,"visibilityScope":row.get::<_,Option<String>>(4)?,"fromChapterId":row.get::<_,Option<String>>(5)?,"untilChapterId":row.get::<_,Option<String>>(6)?})))? { knowledge.push(row?); }
-        let continuity = NarrativeRepository::continuity_threads_complete(connection, project_id)?
+        let continuity = Self::continuity_threads_complete(connection, project_id)?
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
@@ -923,17 +949,19 @@ impl EndgameRepository {
         )?;
         let unresolved_hard_payoffs =
             Self::hard_payoff_count(connection, project_id, endgame_contract.as_ref())?;
-        let continuity_threads =
-            NarrativeRepository::continuity_threads_complete(connection, project_id)?;
+        let continuity_threads = Self::continuity_threads_complete(connection, project_id)?
+            .into_iter()
+            .map(|thread| (thread.thread_id.clone(), thread))
+            .collect::<HashMap<_, _>>();
         let open_hard_continuity = continuity_threads
-            .iter()
+            .values()
             .filter(|thread| {
                 matches!(thread.authority_level.as_str(), "A" | "B")
                     && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
             })
             .count() as i64;
         let continuity_advisories = continuity_threads
-            .iter()
+            .values()
             .filter(|thread| {
                 thread.authority_level == "C"
                     && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
@@ -977,6 +1005,7 @@ impl EndgameRepository {
                 project_id,
                 book_plan.as_ref(),
                 endgame_contract.as_ref(),
+                &continuity_threads,
             )?;
         let unfulfilled_hard_reservations = Self::reservation_count(
             connection,
@@ -1023,5 +1052,100 @@ impl EndgameRepository {
             endgame_contract,
             relevant_state_digest: current_digest,
         })
+    }
+}
+
+#[cfg(test)]
+mod fx7_tests {
+    use super::*;
+    use crate::project_db::paths::AppPaths;
+    use crate::project_db::ProjectManager;
+
+    const NOW: &str = "2026-10-11T00:00:00Z";
+
+    #[test]
+    fn fx7_endgame_builds_threads_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let connection = manager
+            .create("project:fx7-endgame", "FX7 Endgame", NOW)
+            .unwrap();
+        let evidence_index_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_obligation_evidence_project_obligation_created')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(evidence_index_exists);
+        let project_scope = r#"{"level":"PROJECT"}"#;
+        let book_plan = json!({
+            "payloadSchema":"book-plan.r1",
+            "majorMysteryGoals":[{"id":"mystery:fx7"}],
+            "futureReservations":[]
+        });
+        let payload_hash = sha256_canonical(&book_plan).unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('artifact:fx7-book-plan','project:fx7-endgame','BookPlan','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED',?2,'{}',?3,?3)",
+                libsql_rusqlite::params![project_scope, payload_hash, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:fx7-book-plan',1,?1,?2)",
+                libsql_rusqlite::params![book_plan.to_string(), payload_hash],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('project:fx7-endgame','BookPlan','PROJECT',?1,'artifact:fx7-book-plan',1,?2)",
+                libsql_rusqlite::params![project_scope, payload_hash],
+            )
+            .unwrap();
+        let contract = json!({
+            "mysteryMappings":[{
+                "sourceMysteryId":"mystery:fx7",
+                "mappingConfirmation":"USER_CONFIRMED",
+                "mappedResponsibilityRefs":["thread:obligation:missing"]
+            }]
+        });
+
+        FX7_ENDGAME_CONTINUITY_BUILD_COUNT.with(|count| count.set(0));
+        let result = EndgameRepository::read_completion_input_with_contract(
+            &connection,
+            "project:fx7-endgame",
+            Some(&contract),
+        )
+        .unwrap();
+        let build_count = FX7_ENDGAME_CONTINUITY_BUILD_COUNT.with(std::cell::Cell::get);
+
+        assert_eq!(result.input.unresolved_mapped_mysteries, 1);
+        assert_eq!(build_count, 1);
+    }
+
+    #[test]
+    fn fx7_batch_evidence_query_uses_obligation_id_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let connection = manager
+            .create("project:fx7-evidence-index", "FX7 Evidence Index", NOW)
+            .unwrap();
+        let mut statement = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT e.obligation_id,e.artifact_id,e.version,p.payload_json FROM json_each('[]') requested CROSS JOIN obligation_evidence e INDEXED BY idx_obligation_evidence_project_obligation_created JOIN artifact_payloads p ON p.artifact_id=e.artifact_id AND p.version=e.version WHERE e.project_id='project:fx7-evidence-index' AND e.obligation_id=requested.value ORDER BY e.obligation_id,e.created_at,e.evidence_id",
+            )
+            .unwrap();
+        let plan = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        println!("FX7_BATCH_EVIDENCE_QUERY_PLAN={}", plan.join(" | "));
+        assert!(plan.iter().any(|detail| {
+            detail.contains("idx_obligation_evidence_project_obligation_created")
+                && detail.contains("obligation_id=?")
+        }));
     }
 }

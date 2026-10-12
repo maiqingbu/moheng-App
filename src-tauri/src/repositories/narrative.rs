@@ -3,7 +3,7 @@ use crate::narrative::{build_continuity_threads, ContinuityThreadView, ResumeCon
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const TASK_STATE_CHUNK_SIZE: usize = 100;
 pub const CONTINUITY_SOURCE_CHUNK_SIZE: i64 = 100;
@@ -519,9 +519,16 @@ impl NarrativeRepository {
         })? {
             obligations.push(row?);
         }
+        let obligation_ids = obligations
+            .iter()
+            .map(|obligation| obligation.obligation_id.clone())
+            .collect::<Vec<_>>();
+        let mut evidence_refs =
+            Self::obligation_evidence_refs_by_ids(connection, project_id, &obligation_ids)?;
         for obligation in &mut obligations {
-            obligation.evidence_refs =
-                Self::obligation_evidence_refs(connection, project_id, &obligation.obligation_id)?;
+            obligation.evidence_refs = evidence_refs
+                .remove(&obligation.obligation_id)
+                .unwrap_or_default();
         }
         let foreshadows = Self::active_foreshadows_complete(connection, project_id)?;
         let mysteries = Self::open_mysteries_complete(connection, project_id)?;
@@ -1427,9 +1434,16 @@ impl NarrativeRepository {
             },
         )?;
         let mut obligations = rows.collect::<Result<Vec<_>, _>>()?;
+        let obligation_ids = obligations
+            .iter()
+            .map(|obligation| obligation.obligation_id.clone())
+            .collect::<Vec<_>>();
+        let mut evidence_refs =
+            Self::obligation_evidence_refs_by_ids(connection, project_id, &obligation_ids)?;
         for obligation in &mut obligations {
-            obligation.evidence_refs =
-                Self::obligation_evidence_refs(connection, project_id, &obligation.obligation_id)?;
+            obligation.evidence_refs = evidence_refs
+                .remove(&obligation.obligation_id)
+                .unwrap_or_default();
         }
         Ok(obligations)
     }
@@ -2913,24 +2927,58 @@ impl NarrativeRepository {
         project_id: &str,
         obligation_id: &str,
     ) -> Result<Vec<crate::generated::types::EvidenceRef>, NarrativeRepositoryError> {
-        let mut statement = connection.prepare(
-            "SELECT e.artifact_id,e.version,p.payload_json FROM obligation_evidence e JOIN artifact_payloads p ON p.artifact_id=e.artifact_id AND p.version=e.version WHERE e.project_id=?1 AND e.obligation_id=?2 ORDER BY e.created_at,e.evidence_id",
+        let mut grouped = Self::obligation_evidence_refs_by_ids(
+            connection,
+            project_id,
+            &[obligation_id.to_owned()],
         )?;
-        let rows =
-            statement.query_map(libsql_rusqlite::params![project_id, obligation_id], |row| {
-                let artifact_id: String = row.get(0)?;
-                let version: i64 = row.get(1)?;
-                let raw_payload: String = row.get(2)?;
-                let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
-                let evidence = payload
-                    .get("validatedObligationEvidence")
-                    .and_then(Value::as_array)
-                    .and_then(|items| {
-                        items.iter().find(|item| {
-                            item.get("obligationId").and_then(Value::as_str) == Some(obligation_id)
-                        })
-                    });
-                Ok(crate::generated::types::EvidenceRef {
+        Ok(grouped.remove(obligation_id).unwrap_or_default())
+    }
+
+    fn obligation_evidence_refs_by_ids(
+        connection: &Connection,
+        project_id: &str,
+        obligation_ids: &[String],
+    ) -> Result<HashMap<String, Vec<crate::generated::types::EvidenceRef>>, NarrativeRepositoryError>
+    {
+        let mut grouped = obligation_ids
+            .iter()
+            .cloned()
+            .map(|id| (id, Vec::new()))
+            .collect::<HashMap<_, _>>();
+        if obligation_ids.is_empty() {
+            return Ok(grouped);
+        }
+
+        let ids_json = serde_json::to_string(obligation_ids)?;
+        let mut evidence_statement = connection.prepare(
+            "SELECT e.obligation_id,e.artifact_id,e.version,p.payload_json FROM json_each(?2) requested CROSS JOIN obligation_evidence e INDEXED BY idx_obligation_evidence_project_obligation_created JOIN artifact_payloads p ON p.artifact_id=e.artifact_id AND p.version=e.version WHERE e.project_id=?1 AND e.obligation_id=requested.value ORDER BY e.obligation_id,e.created_at,e.evidence_id",
+        )?;
+        let evidence_rows = evidence_statement.query_map(
+            libsql_rusqlite::params![project_id, ids_json],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        for row in evidence_rows {
+            let (obligation_id, artifact_id, version, raw_payload) = row?;
+            let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+            let evidence = payload
+                .get("validatedObligationEvidence")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("obligationId").and_then(Value::as_str)
+                            == Some(obligation_id.as_str())
+                    })
+                });
+            if let Some(references) = grouped.get_mut(&obligation_id) {
+                references.push(crate::generated::types::EvidenceRef {
                     artifact_id,
                     version,
                     range_start: evidence
@@ -2943,25 +2991,36 @@ impl NarrativeRepository {
                         .and_then(|item| item.get("quote"))
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
-                })
+                });
+            }
+        }
+        drop(evidence_statement);
+
+        let mut source_statement = connection.prepare(
+            "SELECT o.obligation_id,a.artifact_id,a.version,a.artifact_type,p.payload_json FROM json_each(?2) requested CROSS JOIN narrative_obligations o JOIN artifacts a ON a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE o.project_id=?1 AND o.obligation_id=requested.value ORDER BY o.obligation_id",
+        )?;
+        let source_rows =
+            source_statement.query_map(libsql_rusqlite::params![project_id, ids_json], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })?;
-        let mut evidence_refs = rows.collect::<Result<Vec<_>, _>>()?;
-        let source: Option<(String, i64, String, String)> = connection
-            .query_row(
-                "SELECT a.artifact_id,a.version,a.artifact_type,p.payload_json FROM narrative_obligations o JOIN artifacts a ON a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE o.project_id=?1 AND o.obligation_id=?2",
-                libsql_rusqlite::params![project_id, obligation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some((artifact_id, version, artifact_type, raw_payload)) = source {
+        for row in source_rows {
+            let (obligation_id, artifact_id, version, artifact_type, raw_payload) = row?;
             let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+            let references = grouped.entry(obligation_id.clone()).or_default();
             if artifact_type == "FinalChapter" {
                 if let Some(item) = payload
                     .get("newResponsibilityEvidence")
                     .and_then(Value::as_array)
                     .and_then(|items| {
                         items.iter().find(|item| {
-                            item.get("obligationId").and_then(Value::as_str) == Some(obligation_id)
+                            item.get("obligationId").and_then(Value::as_str)
+                                == Some(obligation_id.as_str())
                         })
                     })
                 {
@@ -2975,8 +3034,8 @@ impl NarrativeRepository {
                             .and_then(Value::as_str)
                             .map(ToOwned::to_owned),
                     };
-                    if !evidence_refs.contains(&reference) {
-                        evidence_refs.push(reference);
+                    if !references.contains(&reference) {
+                        references.push(reference);
                     }
                 }
             } else if artifact_type == "NarrativeObligationSet" {
@@ -2989,14 +3048,14 @@ impl NarrativeRepository {
                     if let Ok(reference) =
                         serde_json::from_value::<crate::generated::types::EvidenceRef>(value)
                     {
-                        if !evidence_refs.contains(&reference) {
-                            evidence_refs.push(reference);
+                        if !references.contains(&reference) {
+                            references.push(reference);
                         }
                     }
                 }
             }
         }
-        Ok(evidence_refs)
+        Ok(grouped)
     }
 
     /// Read timing data from the continuity authority for the planning
