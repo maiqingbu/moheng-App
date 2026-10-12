@@ -86,9 +86,9 @@ pub trait ProductionModelGateway: Send + Sync {
         None
     }
 
-    /// Deterministic gateways can model a concurrent writer in the small
-    /// window after the runtime snapshot is read and before CommitService
-    /// verifies its expected revision. Configured providers keep this no-op.
+    /// Deterministic gateways can model a concurrent writer after the gate
+    /// snapshot has been checked and immediately before CommitService runs.
+    /// Configured providers keep this no-op.
     fn before_commit_attempt(
         &self,
         _connection: &libsql_rusqlite::Connection,
@@ -96,6 +96,21 @@ pub trait ProductionModelGateway: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Deterministic gateways can model a write after audit and before the
+    /// first current-revision snapshot is read. Configured providers keep this
+    /// no-op.
+    fn before_commit_snapshot(
+        &self,
+        _connection: &libsql_rusqlite::Connection,
+        _attempt: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Test gateways may observe the bounded gate recheck attempt without
+    /// changing production behavior.
+    fn on_chapter_gate_revalidation(&self, _attempt: usize) {}
 
     /// Resolve the provider once at the beginning of a production attempt.
     /// The returned profile is the non-secret snapshot used for every new
@@ -1637,8 +1652,10 @@ fn commit_chapter_after_revision_recheck(
     gateway: &dyn ProductionModelGateway,
 ) -> Result<crate::generated::types::CommitReceipt, String> {
     const MAX_REVISION_RETRIES: usize = 3;
+    let original_expected_project_revision = bundle.expected_project_revision;
 
     for attempt in 0..=MAX_REVISION_RETRIES {
+        gateway.before_commit_snapshot(connection, attempt)?;
         let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
             connection, project_id,
         )
@@ -1653,7 +1670,8 @@ fn commit_chapter_after_revision_recheck(
             plan_ref,
             plan,
         )?;
-        if attempt > 0 {
+        if attempt > 0 || original_expected_project_revision != Some(revision) {
+            gateway.on_chapter_gate_revalidation(attempt);
             revalidate_chapter_gate_on_current_snapshot(
                 connection, project_id, chapter_id, plan, bundle, now,
             )?;

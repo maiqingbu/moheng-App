@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub const TASK_STATE_CHUNK_SIZE: usize = 100;
 pub const CONTINUITY_SOURCE_CHUNK_SIZE: i64 = 100;
 pub const TASK_STATES_BY_IDS_SQL: &str = "SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3";
-pub const ARTIFACT_PAYLOAD_BY_REF_SQL: &str = "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4";
+pub const ARTIFACT_PAYLOAD_BY_REF_SQL: &str = "SELECT a.artifact_type,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NarrativeRepositoryError {
@@ -18,8 +18,36 @@ pub enum NarrativeRepositoryError {
     Json(#[from] serde_json::Error),
     #[error("continuity projection: {0}")]
     ContinuityProjection(String),
+    #[error("LEGACY_UNTYPED")]
+    LegacyUntyped,
     #[error("narrative invariant: {0}")]
     Invariant(String),
+}
+
+fn formal_payload_schema(artifact_type: &str) -> Option<&'static str> {
+    match artifact_type {
+        "BookPlan" => Some("book-plan.r1"),
+        "VolumeIntent" => Some("volume-intent.r1"),
+        "VolumePlan" => Some("volume-plan.r1"),
+        "ChapterPlan" => Some("chapter-plan.r1"),
+        "ContextManifest" => Some("context-manifest.r1"),
+        "ChapterExitState" => Some("chapter-exit-state.r1"),
+        "VolumeExitState" => Some("volume-exit-state.r1"),
+        _ => None,
+    }
+}
+
+fn parse_formal_payload(
+    artifact_type: &str,
+    raw_payload: &str,
+) -> Result<Value, NarrativeRepositoryError> {
+    let payload = serde_json::from_str(raw_payload).unwrap_or(Value::Null);
+    if formal_payload_schema(artifact_type).is_some_and(|expected| {
+        payload.get("payloadSchema").and_then(Value::as_str) != Some(expected)
+    }) {
+        return Err(NarrativeRepositoryError::LegacyUntyped);
+    }
+    Ok(payload)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -476,7 +504,7 @@ impl NarrativeRepository {
         project_id: &str,
     ) -> Result<Vec<ContinuityThreadView>, NarrativeRepositoryError> {
         let current_chapter: i64 = connection.query_row(
-            "SELECT COALESCE(MAX(chapter_no), 0) FROM chapters WHERE project_id=?1",
+            "SELECT COALESCE(MAX(chapter_no), 0) FROM chapters WHERE project_id=?1 AND status='COMMITTED'",
             [project_id],
             |row| row.get(0),
         )?;
@@ -1822,7 +1850,16 @@ impl NarrativeRepository {
         } else {
             scope_key.to_string()
         };
-        connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 AND h.scope_key IN (?3, ?4) ORDER BY CASE WHEN h.scope_key=?3 THEN 0 ELSE 1 END LIMIT 1", libsql_rusqlite::params![project_id, artifact_type, canonical_scope, scope_key], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 AND h.scope_key IN (?3, ?4) ORDER BY CASE WHEN h.scope_key=?3 THEN 0 ELSE 1 END LIMIT 1",
+                libsql_rusqlite::params![project_id, artifact_type, canonical_scope, scope_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|raw| parse_formal_payload(artifact_type, &raw))
+            .transpose()
     }
 
     pub fn dependency_edges_for_entity(
@@ -2441,13 +2478,16 @@ impl NarrativeRepository {
         connection: &Connection,
         project_id: &str,
     ) -> Result<bool, NarrativeRepositoryError> {
-        connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan' AND json_extract(p.payload_json, '$.planningMaturity')='APPROVED')",
-                [project_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
+        let mut statement = connection.prepare(
+            "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='BookPlan' ORDER BY h.scope_key",
+        )?;
+        for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let payload = parse_formal_payload("BookPlan", &row?)?;
+            if payload.get("planningMaturity").and_then(Value::as_str) == Some("APPROVED") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn opening_canon_reference_exists(
@@ -2624,17 +2664,79 @@ impl NarrativeRepository {
         project_id: &str,
         artifact_type: &str,
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
-        connection.query_row("SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type=?2 ORDER BY h.scope_key LIMIT 1", libsql_rusqlite::params![project_id, artifact_type], |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) }).optional().map_err(Into::into)
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type=?2 ORDER BY h.scope_key LIMIT 1",
+                libsql_rusqlite::params![project_id, artifact_type],
+                |row| row.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|raw| parse_formal_payload(artifact_type, &raw))
+            .transpose()
     }
 
     pub fn latest_book_plan_seed_ref(
         connection: &Connection,
         project_id: &str,
     ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT a.artifact_id,a.version,a.payload_hash,a.artifact_type,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND a.artifact_status='COMMITTED' ORDER BY a.created_at DESC,a.version DESC,a.artifact_id DESC",
+        )?;
+        for row in statement.query_map([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })? {
+            let (artifact_id, version, payload_hash, artifact_type, raw_payload) = row?;
+            let payload = parse_formal_payload(&artifact_type, &raw_payload)?;
+            if payload.get("planningMaturity").and_then(Value::as_str) == Some("SEED") {
+                return Ok(Some(ArtifactRef {
+                    artifact_id,
+                    version,
+                    payload_hash,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn artifact_payload_by_ref(
+        connection: &Connection,
+        project_id: &str,
+        reference: &ArtifactRef,
+    ) -> Result<Option<Value>, NarrativeRepositoryError> {
+        let payload: Option<(String, String)> = connection
+            .query_row(
+                ARTIFACT_PAYLOAD_BY_REF_SQL,
+                libsql_rusqlite::params![
+                    project_id,
+                    reference.artifact_id,
+                    reference.version,
+                    reference.payload_hash
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        payload
+            .map(|(artifact_type, raw)| parse_formal_payload(&artifact_type, &raw))
+            .transpose()
+    }
+
+    pub fn artifact_ref_for_version(
+        connection: &Connection,
+        project_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<Option<ArtifactRef>, NarrativeRepositoryError> {
         connection
             .query_row(
-                "SELECT a.artifact_id,a.version,a.payload_hash FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND a.artifact_status='COMMITTED' AND json_extract(p.payload_json,'$.planningMaturity')='SEED' ORDER BY a.created_at DESC,a.version DESC,a.artifact_id DESC LIMIT 1",
-                [project_id],
+                "SELECT artifact_id,version,payload_hash FROM artifacts WHERE project_id=?1 AND artifact_id=?2 AND version=?3",
+                libsql_rusqlite::params![project_id, artifact_id, version],
                 |row| {
                     Ok(ArtifactRef {
                         artifact_id: row.get(0)?,
@@ -2647,24 +2749,16 @@ impl NarrativeRepository {
             .map_err(Into::into)
     }
 
-    pub fn artifact_payload_by_ref(
+    pub fn commit_receipt_idempotency_key_by_command(
         connection: &Connection,
         project_id: &str,
-        reference: &ArtifactRef,
-    ) -> Result<Option<Value>, NarrativeRepositoryError> {
+        command_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
         connection
             .query_row(
-                ARTIFACT_PAYLOAD_BY_REF_SQL,
-                libsql_rusqlite::params![
-                    project_id,
-                    reference.artifact_id,
-                    reference.version,
-                    reference.payload_hash
-                ],
-                |row| {
-                    let raw: String = row.get(0)?;
-                    Ok(serde_json::from_str(&raw).unwrap_or(Value::Null))
-                },
+                "SELECT idempotency_key FROM commit_receipts WHERE project_id=?1 AND command_id=?2 ORDER BY committed_at DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, command_id],
+                |row| row.get(0),
             )
             .optional()
             .map_err(Into::into)
@@ -2788,11 +2882,16 @@ impl NarrativeRepository {
         chapter_id: &str,
     ) -> Result<Option<Value>, NarrativeRepositoryError> {
         let scope = Self::chapter_scope_key(chapter_id)?;
-        connection.query_row(
-            "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2 AND json_extract(a.provenance_json,'$.createdBy')='B07::PlanningOwner'",
-            libsql_rusqlite::params![project_id, scope],
-            |row| { let raw: String = row.get(0)?; Ok(serde_json::from_str(&raw).unwrap_or(Value::Null)) },
-        ).optional().map_err(Into::into)
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifacts a ON a.project_id=h.project_id AND a.artifact_id=h.artifact_id AND a.version=h.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2 AND json_extract(a.provenance_json,'$.createdBy')='B07::PlanningOwner'",
+                libsql_rusqlite::params![project_id, scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|raw| parse_formal_payload("ChapterPlan", &raw))
+            .transpose()
     }
 
     pub fn obligation_authority(
@@ -2952,7 +3051,7 @@ impl NarrativeRepository {
 
         let ids_json = serde_json::to_string(obligation_ids)?;
         let mut evidence_statement = connection.prepare(
-            "SELECT e.obligation_id,e.artifact_id,e.version,p.payload_json FROM json_each(?2) requested CROSS JOIN obligation_evidence e INDEXED BY idx_obligation_evidence_project_obligation_created JOIN artifact_payloads p ON p.artifact_id=e.artifact_id AND p.version=e.version WHERE e.project_id=?1 AND e.obligation_id=requested.value ORDER BY e.obligation_id,e.created_at,e.evidence_id",
+            "SELECT e.obligation_id,e.artifact_id,e.version,a.artifact_type,p.payload_json FROM json_each(?2) requested CROSS JOIN obligation_evidence e INDEXED BY idx_obligation_evidence_project_obligation_created JOIN artifacts a ON a.project_id=e.project_id AND a.artifact_id=e.artifact_id AND a.version=e.version JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE e.project_id=?1 AND e.obligation_id=requested.value ORDER BY e.obligation_id,e.created_at,e.evidence_id",
         )?;
         let evidence_rows = evidence_statement.query_map(
             libsql_rusqlite::params![project_id, ids_json],
@@ -2962,12 +3061,13 @@ impl NarrativeRepository {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )?;
         for row in evidence_rows {
-            let (obligation_id, artifact_id, version, raw_payload) = row?;
-            let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+            let (obligation_id, artifact_id, version, artifact_type, raw_payload) = row?;
+            let payload = parse_formal_payload(&artifact_type, &raw_payload)?;
             let evidence = payload
                 .get("validatedObligationEvidence")
                 .and_then(Value::as_array)
@@ -3011,7 +3111,7 @@ impl NarrativeRepository {
             })?;
         for row in source_rows {
             let (obligation_id, artifact_id, version, artifact_type, raw_payload) = row?;
-            let payload: Value = serde_json::from_str(&raw_payload).unwrap_or(Value::Null);
+            let payload = parse_formal_payload(&artifact_type, &raw_payload)?;
             let references = grouped.entry(obligation_id.clone()).or_default();
             if artifact_type == "FinalChapter" {
                 if let Some(item) = payload
@@ -3100,6 +3200,153 @@ impl NarrativeRepository {
             libsql_rusqlite::params![project_id, foreshadow_id],
             |row| Ok(ForeshadowAuthorityRecord { intent: row.get(0)?, status: row.get(1)?, plant_chapter_id: row.get(2)?, recover_window_end_chapter: row.get(3)?, secret_payload_ref: row.get(4)? }),
         ).optional().map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod fx8_legacy_payload_tests {
+    use super::*;
+    use crate::hash::sha256_canonical;
+    use crate::project_db::paths::AppPaths;
+    use crate::project_db::ProjectManager;
+
+    const NOW: &str = "2026-10-12T00:00:00Z";
+
+    #[test]
+    fn fx8_untyped_narrative_payload_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let project_id = "project:fx8-untyped-plan";
+        let connection = manager
+            .create(project_id, "FX-8 untyped plan", NOW)
+            .unwrap();
+        let cases = [
+            (
+                "untyped",
+                json!({
+                    "routeVersion": 1,
+                    "tasks": [],
+                    "capacityBudget": {"minChapters": 1, "preferredChapters": 2, "maxChapters": 3}
+                }),
+            ),
+            (
+                "wrong-schema",
+                json!({
+                    "payloadSchema": "volume-plan.r0",
+                    "routeVersion": 1,
+                    "tasks": [],
+                    "capacityBudget": {"minChapters": 1, "preferredChapters": 2, "maxChapters": 3}
+                }),
+            ),
+        ];
+        let mut references = Vec::new();
+        for (suffix, payload) in cases {
+            let volume_id = format!("volume:fx8-{suffix}");
+            let artifact_id = format!("artifact:fx8-{suffix}-volume-plan");
+            let scope_key = NarrativeRepository::volume_scope_key(&volume_id).unwrap();
+            let payload_hash = sha256_canonical(&payload).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,'VolumePlan','VOLUME',?3,1,'m0a.artifact.v1','COMMITTED',?4,'{}',?5,?5)",
+                    libsql_rusqlite::params![artifact_id, project_id, scope_key, payload_hash, NOW],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+                    libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,'VolumePlan','VOLUME',?2,?3,1,?4)",
+                    libsql_rusqlite::params![project_id, scope_key, artifact_id, payload_hash],
+                )
+                .unwrap();
+            references.push((volume_id, artifact_id, payload_hash));
+        }
+
+        for (volume_id, artifact_id, payload_hash) in references {
+            let result = NarrativeRepository::artifact_payload(
+                &connection,
+                project_id,
+                "VolumePlan",
+                &volume_id,
+            );
+            assert!(
+                matches!(result.as_ref(), Err(error) if error.to_string() == "LEGACY_UNTYPED"),
+                "untyped or wrongly-versioned VolumePlan must fail closed; result={result:?}"
+            );
+
+            let latest =
+                NarrativeRepository::latest_artifact_payload(&connection, project_id, "VolumePlan");
+            assert!(matches!(latest.as_ref(), Err(error) if error.to_string() == "LEGACY_UNTYPED"));
+
+            let by_ref = NarrativeRepository::artifact_payload_by_ref(
+                &connection,
+                project_id,
+                &ArtifactRef {
+                    artifact_id,
+                    version: 1,
+                    payload_hash,
+                },
+            );
+            assert!(matches!(by_ref.as_ref(), Err(error) if error.to_string() == "LEGACY_UNTYPED"));
+        }
+    }
+
+    #[test]
+    fn fx8_after_chapter_ignores_planned_chapters() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let project_id = "project:fx8-after-chapter";
+        let connection = manager
+            .create(project_id, "FX-8 after chapter", NOW)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:fx8','project:fx8-after-chapter',1,'Book','ACTIVE',?1,?1)",
+                [NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES ('volume:fx8','project:fx8-after-chapter','book:fx8',1,'Volume','READY',1,10,1000,?1,?1)",
+                [NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES ('chapter:fx8:2','project:fx8-after-chapter','volume:fx8',2,'Committed','NORMAL','COMMITTED',100,?1,?1),('chapter:fx8:9','project:fx8-after-chapter','volume:fx8',9,'Planned','NORMAL','PLANNED',0,?1,?1)",
+                [NOW],
+            )
+            .unwrap();
+        let source_payload = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
+        let source_hash = sha256_canonical(&source_payload).unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at,committed_at) VALUES ('artifact:fx8-source','project:fx8-after-chapter','BookPlan','PROJECT','project:fx8-after-chapter',1,'m0a.artifact.v1','COMMITTED',?1,'{}',?2,?2)",
+                libsql_rusqlite::params![source_hash, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:fx8-source',1,?1,?2)",
+                libsql_rusqlite::params![source_payload.to_string(), source_hash],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,resume_condition_json,created_at,updated_at) VALUES ('obligation:fx8-after','project:fx8-after-chapter','BOOK','PROMISE','C','artifact:fx8-source',1,'Wait until chapter three','[]','APPROVED','{\"kind\":\"AFTER_CHAPTER\",\"value\":3}',?1,?1)",
+                [NOW],
+            )
+            .unwrap();
+
+        let threads =
+            NarrativeRepository::continuity_threads_complete(&connection, project_id).unwrap();
+
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].logical_status, "SUSPENDED");
     }
 }
 

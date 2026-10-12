@@ -3328,15 +3328,6 @@ fn volume_progress_from_authority_with_capacity(
         connection, project_id, &task_ids, 100,
     )
     .map_err(|e| e.to_string())?;
-    let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
-        volume_id: volume_id.into(),
-        remaining_chapter_capacity: capacity.remaining_chapter_capacity,
-        tasks: tasks.clone(),
-        generated_revision: revision,
-    }))
-    .map_err(|e| e.to_string())?;
-    result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
-    result["tasks"] = serde_json::to_value(&tasks).map_err(|e| e.to_string())?;
     let continuity_authority =
         crate::repositories::narrative::NarrativeRepository::continuity_pressure_records(
             connection, project_id,
@@ -3360,7 +3351,7 @@ fn volume_progress_from_authority_with_capacity(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    result["planningPressure"] = crate::planning::compile_planning_pressure(
+    let planning_pressure = crate::planning::compile_planning_pressure(
         capacity,
         &plan,
         &intent,
@@ -3368,6 +3359,17 @@ fn volume_progress_from_authority_with_capacity(
         &continuity_authority,
         &reservation_authority,
     );
+    let planning_pressure = serde_json::from_value(planning_pressure).map_err(|e| e.to_string())?;
+    let mut result = serde_json::to_value(build_volume_progress(VolumeProgressInput {
+        volume_id: volume_id.into(),
+        remaining_chapter_capacity: capacity.remaining_chapter_capacity,
+        tasks: tasks.clone(),
+        planning_pressure,
+        generated_revision: revision,
+    }))
+    .map_err(|e| e.to_string())?;
+    result["routePlanRef"] = serde_json::to_value(route).map_err(|e| e.to_string())?;
+    result["tasks"] = serde_json::to_value(&tasks).map_err(|e| e.to_string())?;
     result["truncated"] = json!(false);
     Ok(result)
 }
@@ -3681,6 +3683,8 @@ fn run_b14_runtime_rechecks(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
     requests: &[crate::creative_skills::RuntimeCheckRequest],
+    continuity_snapshot: &[crate::narrative::ContinuityThreadView],
+    completion_read: &crate::repositories::endgame::CompletionRead,
 ) -> Result<Value, String> {
     let mut results = Vec::new();
     for request in requests {
@@ -3709,15 +3713,13 @@ fn run_b14_runtime_rechecks(
         }
         let result = match request.kind.as_str() {
             "THREAD_STATE" => {
-                let threads = crate::repositories::narrative::NarrativeRepository::continuity_threads_complete(connection, project_id)
-                    .map_err(|error| error.to_string())?;
                 let resolved_scope = if request.refs.is_empty() {
                     "current_endgame_continuity"
                 } else {
                     "explicit_continuity_refs"
                 };
                 let selected = if request.refs.is_empty() {
-                    threads
+                    continuity_snapshot
                         .iter()
                         .filter(|thread| {
                             matches!(thread.authority_level.as_str(), "A" | "B")
@@ -3727,8 +3729,9 @@ fn run_b14_runtime_rechecks(
                 } else {
                     let mut selected = Vec::new();
                     for reference in &request.refs {
-                        let Some(thread) =
-                            threads.iter().find(|thread| thread.thread_id == *reference)
+                        let Some(thread) = continuity_snapshot
+                            .iter()
+                            .find(|thread| thread.thread_id == *reference)
                         else {
                             let result = json!({
                                 "requestType": request.kind,
@@ -3817,32 +3820,20 @@ fn run_b14_runtime_rechecks(
                 })
             }
             "RESERVATION" => {
-                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
-                    connection, project_id,
-                )
-                .map_err(|error| error.to_string())?;
-                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_reservations","status":if read.input.unfulfilled_hard_reservations > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":read.input.unfulfilled_hard_reservations,"summary":if read.input.unfulfilled_hard_reservations > 0 {"系统重新核对后，确认还有一项未来约束没有完成。"} else {"当前未来约束未发现需要处理的问题。"},"sourceRefs":["completion:reservations"],"unfulfilledHardReservations":read.input.unfulfilled_hard_reservations})
+                let input = &completion_read.input;
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_reservations","status":if input.unfulfilled_hard_reservations > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":input.unfulfilled_hard_reservations,"summary":if input.unfulfilled_hard_reservations > 0 {"系统重新核对后，确认还有一项未来约束没有完成。"} else {"当前未来约束未发现需要处理的问题。"},"sourceRefs":["completion:reservations"],"unfulfilledHardReservations":input.unfulfilled_hard_reservations})
             }
             "INTEGRITY" => {
-                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
-                    connection, project_id,
-                )
-                .map_err(|error| error.to_string())?;
-                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_integrity","status":if read.input.export_integrity_failures > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":read.input.export_integrity_failures,"summary":if read.input.export_integrity_failures > 0 {"系统重新核对后，确认成品完整性仍有问题。"} else {"当前成品完整性未发现需要处理的问题。"},"sourceRefs":["completion:integrity"],"exportIntegrityFailures":read.input.export_integrity_failures})
+                let input = &completion_read.input;
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_integrity","status":if input.export_integrity_failures > 0 {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":input.export_integrity_failures,"summary":if input.export_integrity_failures > 0 {"系统重新核对后，确认成品完整性仍有问题。"} else {"当前成品完整性未发现需要处理的问题。"},"sourceRefs":["completion:integrity"],"exportIntegrityFailures":input.export_integrity_failures})
             }
             "PLAN_STALE" => {
-                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
-                    connection, project_id,
-                )
-                .map_err(|error| error.to_string())?;
-                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_plan","status":if read.input.plan_stale {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":i64::from(read.input.plan_stale),"summary":if read.input.plan_stale {"系统重新核对后，确认当前规划需要重新确认。"} else {"当前规划未发现需要处理的问题。"},"sourceRefs":["completion:plan"],"planStale":read.input.plan_stale})
+                let input = &completion_read.input;
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_endgame_plan","status":if input.plan_stale {"ISSUE_FOUND"} else {"NO_ISSUE"},"findingCount":i64::from(input.plan_stale),"summary":if input.plan_stale {"系统重新核对后，确认当前规划需要重新确认。"} else {"当前规划未发现需要处理的问题。"},"sourceRefs":["completion:plan"],"planStale":input.plan_stale})
             }
             "EVIDENCE_GAP" => {
-                let read = crate::repositories::endgame::EndgameRepository::read_completion_input(
-                    connection, project_id,
-                )
-                .map_err(|error| error.to_string())?;
-                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_evidence","status":if read.input.source_available {"NO_ISSUE"} else {"ISSUE_FOUND"},"findingCount":i64::from(!read.input.source_available),"summary":if read.input.source_available {"当前正式依据可读取。"} else {"系统重新核对后，确认正式依据暂时不可读取。"},"sourceRefs":["completion:evidence"],"sourceAvailable":read.input.source_available})
+                let input = &completion_read.input;
+                json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_evidence","status":if input.source_available {"NO_ISSUE"} else {"ISSUE_FOUND"},"findingCount":i64::from(!input.source_available),"summary":if input.source_available {"当前正式依据可读取。"} else {"系统重新核对后，确认正式依据暂时不可读取。"},"sourceRefs":["completion:evidence"],"sourceAvailable":input.source_available})
             }
             "CANON_CONFLICT" | "KNOWLEDGE_BOUNDARY" => {
                 json!({"requestType":request.kind,"requestedRefs":request.refs,"resolvedScope":"current_completion_scope","status":"NO_ISSUE","findingCount":0,"summary":"已完成确定性核对。","sourceRefs":["completion:current-scope"]})
@@ -3872,9 +3863,18 @@ fn query_b14_skill_runtime(
         .manager
         .open(project_id, "", "2026-09-06T00:00:00Z")
         .map_err(|error| error.to_string())?;
-    let read =
-        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
-            .map_err(|error| error.to_string())?;
+    let continuity_snapshot =
+        crate::repositories::endgame::EndgameRepository::build_continuity_snapshot(
+            &handle, project_id,
+        )
+        .map_err(|error| error.to_string())?;
+    let read = crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract_and_threads(
+        &handle,
+        project_id,
+        None,
+        &continuity_snapshot,
+    )
+    .map_err(|error| error.to_string())?;
     let selection =
         state
             .skill_bundle_loader
@@ -3908,7 +3908,7 @@ fn query_b14_skill_runtime(
             .endgame_contract
             .as_ref()
             .and_then(|value| value.get("requestedEnding")),
-        "hardResponsibilities": crate::repositories::endgame::EndgameRepository::instance_responsibilities(&handle, project_id)
+        "hardResponsibilities": crate::repositories::endgame::EndgameRepository::instance_responsibilities_with_threads(&handle, project_id, &continuity_snapshot)
             .map_err(|error| error.to_string())?,
         "readerPromise": read
             .endgame_contract
@@ -4010,8 +4010,13 @@ fn query_b14_skill_runtime(
             .ok_or_else(|| "B14_SKILL_OUTPUT_MISSING".to_string())?,
     )?;
     let runtime_check_requests = output.runtime_check_requests.clone();
-    let runtime_check_results =
-        run_b14_runtime_rechecks(&handle, project_id, &runtime_check_requests)?;
+    let runtime_check_results = run_b14_runtime_rechecks(
+        &handle,
+        project_id,
+        &runtime_check_requests,
+        &continuity_snapshot,
+        &read,
+    )?;
     let output_digest =
         sha256_canonical(&serde_json::to_value(&output).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
@@ -4052,10 +4057,13 @@ fn b14_project_scope() -> Value {
 fn b14_hard_responsibilities(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
+    continuity_snapshot: &[crate::narrative::ContinuityThreadView],
 ) -> Result<Value, String> {
     let responsibilities =
-        crate::repositories::endgame::EndgameRepository::instance_responsibilities(
-            connection, project_id,
+        crate::repositories::endgame::EndgameRepository::instance_responsibilities_with_threads(
+            connection,
+            project_id,
+            continuity_snapshot,
         )
         .map_err(|error| error.to_string())?;
     Ok(responsibilities)
@@ -4115,9 +4123,18 @@ pub fn create_endgame_contract_impl(
     {
         return Ok(replayed);
     }
-    let read =
-        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
-            .map_err(|error| error.to_string())?;
+    let continuity_snapshot =
+        crate::repositories::endgame::EndgameRepository::build_continuity_snapshot(
+            &handle, project_id,
+        )
+        .map_err(|error| error.to_string())?;
+    let read = crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract_and_threads(
+        &handle,
+        project_id,
+        None,
+        &continuity_snapshot,
+    )
+    .map_err(|error| error.to_string())?;
     let revision = read.revision;
     if revision != expected_revision {
         return Err("REVISION_CONFLICT".into());
@@ -4165,20 +4182,20 @@ pub fn create_endgame_contract_impl(
             "confirmationSource": "USER_CONFIRMED",
             "confirmedAt": confirmed_at
         },
-        "hardResponsibilities": b14_hard_responsibilities(&handle, project_id)?,
+        "hardResponsibilities": b14_hard_responsibilities(&handle, project_id, &continuity_snapshot)?,
         "mysteryMappings": mystery_mappings,
         "reservationMappings": reservation_mappings,
         "hardPayoffMappings": hard_payoff_mappings,
         "relevantRefs": relevant_refs,
         "createdAt": requested_at
     });
-    let preview =
-        crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract(
-            &handle,
-            project_id,
-            Some(&contract_payload),
-        )
-        .map_err(|error| error.to_string())?;
+    let preview = crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract_and_threads(
+        &handle,
+        project_id,
+        Some(&contract_payload),
+        &continuity_snapshot,
+    )
+    .map_err(|error| error.to_string())?;
     let digest = preview.relevant_state_digest;
     contract_payload["compiledFromRelevantStateDigest"] = json!(digest);
     let artifact_id = format!("endgame-contract:{project_id}");
@@ -4238,9 +4255,18 @@ pub fn complete_book_impl(
     {
         return Ok(replayed);
     }
-    let read =
-        crate::repositories::endgame::EndgameRepository::read_completion_input(&handle, project_id)
-            .map_err(|error| error.to_string())?;
+    let continuity_snapshot =
+        crate::repositories::endgame::EndgameRepository::build_continuity_snapshot(
+            &handle, project_id,
+        )
+        .map_err(|error| error.to_string())?;
+    let read = crate::repositories::endgame::EndgameRepository::read_completion_input_with_contract_and_threads(
+        &handle,
+        project_id,
+        None,
+        &continuity_snapshot,
+    )
+    .map_err(|error| error.to_string())?;
     let input = read.input;
     let revision = read.revision;
     if revision != expected_revision {
@@ -4278,8 +4304,12 @@ pub fn complete_book_impl(
         crate::repositories::endgame::EndgameRepository::final_chapter_summary(&handle, project_id)
             .map_err(|error| error.to_string())?;
     let domain_digests =
-        crate::repositories::endgame::EndgameRepository::domain_digests(&handle, project_id)
-            .map_err(|error| error.to_string())?;
+        crate::repositories::endgame::EndgameRepository::domain_digests_with_threads(
+            &handle,
+            project_id,
+            &continuity_snapshot,
+        )
+        .map_err(|error| error.to_string())?;
     let exit_artifact_id = format!("book-exit-state:{project_id}:{command_id}");
     let report_artifact_id = format!("book-completion-report:{project_id}:{command_id}");
     let completion_receipt_id = format!("completion-receipt:{command_id}");
@@ -9883,5 +9913,98 @@ mod c1_settings_secret_tests {
             let settings = query.await.unwrap().unwrap();
             assert_eq!(settings["secretStatus"], "AVAILABLE");
         });
+    }
+}
+
+#[cfg(test)]
+mod fx8_endgame_commands_tests {
+    use super::*;
+    use crate::production::{ProductionModelGateway, ProductionModelResponse};
+
+    const NOW: &str = "2026-10-12T00:00:00Z";
+    const PROJECT_ID: &str = "project:fx8-endgame-build-once";
+
+    struct Fx8EndgameGateway;
+
+    impl ProductionModelGateway for Fx8EndgameGateway {
+        fn provider(&self) -> &str {
+            "fx8-test-provider"
+        }
+
+        fn model(&self, _capability: &str) -> String {
+            "fx8-test-model".into()
+        }
+
+        fn invoke(
+            &self,
+            _capability: &str,
+            _input: &Value,
+        ) -> Result<ProductionModelResponse, String> {
+            Ok(ProductionModelResponse::deterministic(json!({
+                "kind":"CreativeProposal",
+                "status":"OK",
+                "summary":"仅供作者参考的完结建议。",
+                "suggestions":["保持角色选择与结局一致。"],
+                "runtimeCheckRequests":[{"kind":"THREAD_STATE","refs":[]}]
+            })))
+        }
+    }
+
+    fn seed_ready_project(state: &KernelState) {
+        let connection = state
+            .manager
+            .create(PROJECT_ID, "FX-8 endgame", NOW)
+            .unwrap();
+        crate::repositories::endgame::seed_fx8_ready_project(&connection, PROJECT_ID, NOW);
+    }
+
+    #[test]
+    fn fx8_endgame_commands_build_threads_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = KernelState::with_production_gateway(
+            AppPaths::new(temp.path()),
+            Arc::new(Fx8EndgameGateway),
+        );
+        seed_ready_project(&state);
+
+        crate::repositories::endgame::EndgameRepository::reset_fx7_continuity_build_count();
+        let contract = create_endgame_contract_impl(
+            &state,
+            &json!({"payload":{"requestedEnding":{"summary":"承担选择带来的代价。","confirmationSource":"USER_CONFIRMED","confirmedAt":NOW}}}),
+            PROJECT_ID,
+            "cmd:fx8:endgame-contract",
+            "key:fx8:endgame-contract",
+            NOW,
+            Some(0),
+        ).unwrap();
+        assert_eq!(contract["finalStatus"], "committed");
+        assert_eq!(
+            crate::repositories::endgame::EndgameRepository::fx7_continuity_build_count(),
+            1
+        );
+
+        crate::repositories::endgame::EndgameRepository::reset_fx7_continuity_build_count();
+        let completed = complete_book_impl(
+            &state,
+            PROJECT_ID,
+            "cmd:fx8:complete-book",
+            "key:fx8:complete-book",
+            NOW,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(completed["finalStatus"], "committed");
+        assert_eq!(
+            crate::repositories::endgame::EndgameRepository::fx7_continuity_build_count(),
+            1
+        );
+
+        crate::repositories::endgame::EndgameRepository::reset_fx7_continuity_build_count();
+        let advice = query_endgame_advice_impl(&state, json!({"projectId":PROJECT_ID})).unwrap();
+        assert_eq!(advice["softOnly"], true);
+        assert_eq!(
+            crate::repositories::endgame::EndgameRepository::fx7_continuity_build_count(),
+            1
+        );
     }
 }

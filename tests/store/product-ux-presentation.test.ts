@@ -42,6 +42,15 @@ describe('Product UX 展示语义映射', () => {
     expect(productErrorMessage('连接服务失败，请检查 Endpoint')).toContain('模型服务连接失败')
     expect(productErrorMessage('PROTOCOL / projectId=secret payloadHash=abc')).not.toMatch(/projectId|payloadHash|PROTOCOL/)
     expect(commandMessage({ status: 'failed', message: 'EVIDENCE_GAP' })).toContain('现有信息不足，暂时无法给出可靠结论')
+    expect(productErrorMessage('B08_RESPONSIBILITY_CHANGE_REQUEST_CREATED')).toContain('当前责任保持不变')
+    const request = receiptSummary({
+      finalStatus: 'committed',
+      actionStatus: 'CHANGE_REQUEST_SUBMITTED',
+      changeRequestId: 'change-request:fx8',
+      message: 'B08_RESPONSIBILITY_CHANGE_REQUEST_CREATED',
+    })
+    expect(request.title).toBe('已提交变更请求')
+    expect(request.detail).toContain('当前责任保持不变')
   })
 
   it('shows the formal HARD blocker source and scope without exposing internal codes', () => {

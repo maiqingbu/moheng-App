@@ -227,6 +227,7 @@ fn insert_book_goal(fixture: &Fixture, description: &str) {
         "PROJECT",
         &scope("PROJECT", None),
         &json!({
+            "payloadSchema": "book-plan.r1",
             "planningMaturity": "APPROVED",
             "mustAchieve": [{"id":"book-goal","description":description}],
             "futureReservations": [],

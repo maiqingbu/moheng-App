@@ -2,6 +2,7 @@ use crate::commit::CommitService;
 use crate::generated::types::{
     ArtifactEnvelope, ArtifactRef, CommitBundle, CommitReceipt, ContextManifestR1,
     ContextManifestR1Budget, EvidenceRef, OmittedSource, SourceRef, VolumeProgressProjection,
+    VolumeProgressProjectionPlanningPressure,
 };
 use crate::hash::sha256_canonical;
 use crate::repositories::narrative::{
@@ -422,6 +423,7 @@ pub struct VolumeProgressInput {
     pub volume_id: String,
     pub remaining_chapter_capacity: i64,
     pub tasks: Vec<TaskStateRecord>,
+    pub planning_pressure: VolumeProgressProjectionPlanningPressure,
     pub generated_revision: i64,
 }
 
@@ -437,16 +439,12 @@ pub fn build_volume_progress(input: VolumeProgressInput) -> VolumeProgressProjec
     }
     active.sort();
     blocked.sort();
-    let mut pressure = BTreeMap::new();
-    pressure.insert("activeCount".into(), json!(active.len()));
-    pressure.insert("blockedCount".into(), json!(blocked.len()));
-    pressure.insert("exitGapCount".into(), json!(blocked.len()));
     VolumeProgressProjection {
         volume_id: input.volume_id,
         active_task_ids: active,
         blocked_task_ids: blocked,
         remaining_chapter_capacity: input.remaining_chapter_capacity.max(0),
-        planning_pressure: pressure,
+        planning_pressure: input.planning_pressure,
         generated_revision: input.generated_revision,
     }
 }

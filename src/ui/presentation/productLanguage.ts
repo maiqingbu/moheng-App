@@ -76,6 +76,7 @@ const errorLabels: Record<string, string> = {
   AUDIT_STALE: '正文已变化，需重新审计最终版本。',
   CANON_CONFLICT: '正文与正式事实存在冲突，请核对依据并通过正式变更流程处理。',
   B08_RESPONSIBILITY_CHANGE_REQUEST_REQUIRED: '这项责任来自正式来源，不能直接撤销或降级；请通过变更请求提交调整。',
+  B08_RESPONSIBILITY_CHANGE_REQUEST_CREATED: '已提交责任变更请求，当前责任保持不变；请在正式变更流程中确认。',
   GATE_POLICY_UPGRADE_REQUIRED: '当前仍使用旧开篇一致性规则。请先采用默认规则集，再重新编译长篇规划。',
   GATE_POLICY_RULE_INVALID: '规则格式不完整或无法确定冲突范围与时间，请修正规则后重试。',
   GATE_POLICY_CANON_CONFLICT: '新规则会与已有正式事实产生冲突，未保存。请先通过正式变更流程处理这些事实。',
@@ -381,6 +382,13 @@ export function receiptSummary(receipt: unknown): ProductReceiptSummary {
   const record = receipt && typeof receipt === 'object' ? receipt as Record<string, unknown> : {}
   const finalStatus = textOf(record.finalStatus).toLowerCase()
   const result = record.result && typeof record.result === 'object' ? record.result as Record<string, unknown> : {}
+  if (record.actionStatus === 'CHANGE_REQUEST_SUBMITTED') {
+    return {
+      status: 'success',
+      title: '已提交变更请求',
+      detail: productErrorMessage(record.message, '责任变更请求已提交，当前责任保持不变。'),
+    }
+  }
   if (finalStatus === 'committed') {
     return {
       status: 'success',

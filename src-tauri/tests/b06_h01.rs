@@ -647,15 +647,44 @@ fn b06_progress_context_digest_and_stale_evaluation_are_bounded_and_order_stable
             chapter_id: None,
         },
     ];
+    let capacity = ai_novel_production_system_core::planning::VolumeCapacityContext {
+        committed_in_volume: 0,
+        max_chapters: 8,
+        remaining_chapter_capacity: 8,
+        current_chapter_no: 1,
+        current_chapter_id: None,
+    };
+    let task_reality_values = serde_json::to_value(&tasks)
+        .unwrap()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let planning_pressure = ai_novel_production_system_core::planning::compile_planning_pressure(
+        &capacity,
+        &json!({"tasks": []}),
+        &json!({}),
+        &task_reality_values,
+        &[],
+        &[],
+    );
+    let planning_pressure = serde_json::from_value(planning_pressure).unwrap();
     let progress = build_volume_progress(VolumeProgressInput {
         volume_id: "volume:2".into(),
         remaining_chapter_capacity: 8,
         tasks: tasks.clone(),
+        planning_pressure,
         generated_revision: 4,
     });
     assert_eq!(progress.active_task_ids, vec!["task:active"]);
     assert_eq!(progress.blocked_task_ids, vec!["task:blocked"]);
     assert_eq!(progress.remaining_chapter_capacity, 8);
+    let progress_value = serde_json::to_value(&progress).unwrap();
+    assert!(
+        progress_value
+            .pointer("/planningPressure/exitGapCount")
+            .is_none(),
+        "build_volume_progress must not synthesize planning pressure"
+    );
     let state = populated_state();
     let thread_context = ResumeContext::default();
     let threads = build_continuity_threads(&[], &[], &[], &[], &thread_context).unwrap();

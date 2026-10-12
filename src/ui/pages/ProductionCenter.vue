@@ -652,7 +652,10 @@ function costText(value: number | null | undefined) {
         <div v-if="!['ABANDONED', 'RESOLVED', 'SUPERSEDED'].includes(item.lifecycle)" class="actions">
           <template v-if="item.authorityLevel === 'B'">
             <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DOWNGRADE')">降为 C 级</button>
-            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">撤销责任</button>
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">提交变更请求</button>
+          </template>
+          <template v-else-if="item.authorityLevel === 'A'">
+            <button class="btn" :disabled="responsibilityAdjustmentInFlight !== null" @click="adjustResponsibility(item, 'DELETE')">提交变更请求</button>
           </template>
           <template v-else-if="item.authorityLevel === 'C'">
             <div class="responsibility-upgrade-fields" style="display:grid;gap:8px;flex-basis:100%;min-width:260px">

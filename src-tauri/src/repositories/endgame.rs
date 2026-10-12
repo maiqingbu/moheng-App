@@ -24,6 +24,59 @@ pub enum EndgameRepositoryError {
 
 pub struct EndgameRepository;
 
+#[cfg(test)]
+pub(crate) fn seed_fx8_ready_project(connection: &Connection, project_id: &str, now: &str) {
+    let insert_committed_artifact = |artifact_id: &str,
+                                     artifact_type: &str,
+                                     scope_level: &str,
+                                     scope_key: &str,
+                                     payload: &Value| {
+        let payload_hash = sha256_canonical(payload).unwrap();
+        connection.execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES (?1,?2,?3,?4,?5,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','C',?6,'{}',?7,?7)",
+            libsql_rusqlite::params![artifact_id, project_id, artifact_type, scope_level, scope_key, payload_hash, now],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES (?1,?2,?3,?4,?5,1,?6)",
+            libsql_rusqlite::params![project_id, artifact_type, scope_level, scope_key, artifact_id, payload_hash],
+        ).unwrap();
+    };
+
+    let project_scope = json!({"level":"PROJECT"}).to_string();
+    let book_id = "book:fx8-endgame";
+    let volume_id = "volume:fx8-endgame";
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES (?1,?2,1,'FX-8 Book','COMPLETED',?3,?3)",
+        libsql_rusqlite::params![book_id, project_id, now],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,chapter_start,chapter_end,target_words,created_at,updated_at) VALUES (?1,?2,?3,1,'FX-8 Final Volume','CLOSED',1,1,1000,?4,?4)",
+        libsql_rusqlite::params![volume_id, project_id, book_id, now],
+    ).unwrap();
+    insert_committed_artifact(
+        "book-plan:fx8-endgame",
+        "BookPlan",
+        "PROJECT",
+        &project_scope,
+        &json!({"payloadSchema":"book-plan.r1","majorMysteryGoals":[],"futureReservations":[]}),
+    );
+    insert_committed_artifact(
+        "volume-exit:fx8-endgame",
+        "VolumeExitState",
+        "VOLUME",
+        &json!({"level":"VOLUME","volumeId":volume_id}).to_string(),
+        &json!({"payloadSchema":"volume-exit-state.r1","volumeId":volume_id,"status":"CLOSED"}),
+    );
+    connection.execute(
+        "INSERT INTO mystery_states(mystery_id,project_id,mystery_type,status,created_at,updated_at) VALUES ('mystery:fx8-resolved',?1,'已解决谜团','RESOLVED',?2,?2)",
+        libsql_rusqlite::params![project_id, now],
+    ).unwrap();
+}
+
 #[derive(Debug, Clone)]
 pub struct CompletionRead {
     pub input: CompletionInput,
@@ -48,14 +101,40 @@ impl EndgameRepository {
         NarrativeRepository::continuity_threads_complete(connection, project_id).map_err(Into::into)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_fx7_continuity_build_count() {
+        FX7_ENDGAME_CONTINUITY_BUILD_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fx7_continuity_build_count() -> usize {
+        FX7_ENDGAME_CONTINUITY_BUILD_COUNT.with(std::cell::Cell::get)
+    }
+
+    pub fn build_continuity_snapshot(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Vec<ContinuityThreadView>, EndgameRepositoryError> {
+        Self::continuity_threads_complete(connection, project_id)
+    }
+
     pub fn instance_responsibilities(
         connection: &Connection,
         project_id: &str,
     ) -> Result<Value, EndgameRepositoryError> {
+        let continuity = Self::build_continuity_snapshot(connection, project_id)?;
+        Self::instance_responsibilities_with_threads(connection, project_id, &continuity)
+    }
+
+    pub fn instance_responsibilities_with_threads(
+        connection: &Connection,
+        project_id: &str,
+        continuity_threads: &[ContinuityThreadView],
+    ) -> Result<Value, EndgameRepositoryError> {
         let mut result = Vec::new();
         let mut statement = connection.prepare("SELECT obligation_id,authority_level FROM narrative_obligations WHERE project_id=?1 AND authority_level IN ('A','B') AND lifecycle NOT IN ('RESOLVED','ABANDONED','SUPERSEDED') ORDER BY obligation_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"kind":"OBLIGATION","responsibilityId":format!("obligation:{}",row.get::<_,String>(0)?),"sourceRefs":[format!("obligation:{}",row.get::<_,String>(0)?)],"authorityClass":row.get::<_,String>(1)?,"requiredDisposition":"RESOLVED_BEFORE_COMPLETION"})))? { result.push(row?); }
-        for thread in Self::continuity_threads_complete(connection, project_id)? {
+        for thread in continuity_threads {
             if matches!(thread.authority_level.as_str(), "A" | "B")
                 && matches!(thread.logical_status.as_str(), "OPEN" | "SUSPENDED")
             {
@@ -883,14 +962,23 @@ impl EndgameRepository {
         connection: &Connection,
         project_id: &str,
     ) -> Result<Value, EndgameRepositoryError> {
+        let continuity = Self::build_continuity_snapshot(connection, project_id)?;
+        Self::domain_digests_with_threads(connection, project_id, &continuity)
+    }
+
+    pub fn domain_digests_with_threads(
+        connection: &Connection,
+        project_id: &str,
+        continuity_threads: &[ContinuityThreadView],
+    ) -> Result<Value, EndgameRepositoryError> {
         let mut canon = Vec::new();
         let mut statement = connection.prepare("SELECT fact_id,subject_id,predicate,object_json,valid_from_chapter_id,valid_to_chapter_id,source_artifact_id,source_version,authority_level FROM canon_facts WHERE project_id=?1 ORDER BY fact_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"factId":row.get::<_,String>(0)?,"subjectId":row.get::<_,String>(1)?,"predicate":row.get::<_,String>(2)?,"objectJson":serde_json::from_str::<Value>(&row.get::<_,String>(3)?).unwrap_or(Value::Null),"validFrom":row.get::<_,Option<String>>(4)?,"validTo":row.get::<_,Option<String>>(5)?,"sourceArtifactId":row.get::<_,Option<String>>(6)?,"sourceVersion":row.get::<_,Option<i64>>(7)?,"authority":row.get::<_,String>(8)?})))? { canon.push(row?); }
         let mut knowledge = Vec::new();
         let mut statement = connection.prepare("SELECT knowledge_id,knower_id,fact_id,epistemic_state,visibility_scope,from_chapter_id,until_chapter_id FROM canon_knowledge WHERE project_id=?1 ORDER BY knowledge_id")?;
         for row in statement.query_map([project_id], |row| Ok(json!({"knowledgeId":row.get::<_,String>(0)?,"knowerId":row.get::<_,String>(1)?,"factId":row.get::<_,Option<String>>(2)?,"epistemicState":row.get::<_,String>(3)?,"visibilityScope":row.get::<_,Option<String>>(4)?,"fromChapterId":row.get::<_,Option<String>>(5)?,"untilChapterId":row.get::<_,Option<String>>(6)?})))? { knowledge.push(row?); }
-        let continuity = Self::continuity_threads_complete(connection, project_id)?
-            .into_iter()
+        let continuity = continuity_threads
+            .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
         let reservation = Self::payload_for_head(connection, project_id, "BookPlan")?
@@ -921,13 +1009,34 @@ impl EndgameRepository {
         connection: &Connection,
         project_id: &str,
     ) -> Result<CompletionRead, EndgameRepositoryError> {
-        Self::read_completion_input_with_contract(connection, project_id, None)
+        let continuity = Self::build_continuity_snapshot(connection, project_id)?;
+        Self::read_completion_input_with_contract_and_threads(
+            connection,
+            project_id,
+            None,
+            &continuity,
+        )
     }
 
     pub fn read_completion_input_with_contract(
         connection: &Connection,
         project_id: &str,
         contract_override: Option<&Value>,
+    ) -> Result<CompletionRead, EndgameRepositoryError> {
+        let continuity = Self::build_continuity_snapshot(connection, project_id)?;
+        Self::read_completion_input_with_contract_and_threads(
+            connection,
+            project_id,
+            contract_override,
+            &continuity,
+        )
+    }
+
+    pub fn read_completion_input_with_contract_and_threads(
+        connection: &Connection,
+        project_id: &str,
+        contract_override: Option<&Value>,
+        continuity_snapshot: &[ContinuityThreadView],
     ) -> Result<CompletionRead, EndgameRepositoryError> {
         let revision: i64 = connection.query_row(
             "SELECT revision FROM project_meta WHERE project_id=?1 AND maintenance_state='READY'",
@@ -949,8 +1058,9 @@ impl EndgameRepository {
         )?;
         let unresolved_hard_payoffs =
             Self::hard_payoff_count(connection, project_id, endgame_contract.as_ref())?;
-        let continuity_threads = Self::continuity_threads_complete(connection, project_id)?
-            .into_iter()
+        let continuity_threads = continuity_snapshot
+            .iter()
+            .cloned()
             .map(|thread| (thread.thread_id.clone(), thread))
             .collect::<HashMap<_, _>>();
         let open_hard_continuity = continuity_threads

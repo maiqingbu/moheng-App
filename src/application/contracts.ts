@@ -985,6 +985,8 @@ export interface CommandReceipt {
   acceptedAt: string
   finalStatus: Exclude<CommandStatus, 'idle' | 'submitting' | 'accepted' | 'processing'>
   message: string
+  actionStatus?: 'CHANGE_REQUEST_SUBMITTED'
+  changeRequestId?: string
   receiptId?: string
   beforeRevision?: number
   afterRevision?: number
