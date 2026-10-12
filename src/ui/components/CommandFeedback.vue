@@ -5,6 +5,12 @@ import { commandMessage, statusLabel } from '../presentation/productLanguage'
 const props = defineProps<{ state: CommandUiState; onConfirm?: () => unknown }>()
 const label = computed(() => props.state.confirmation === 'pending' ? '结果待确认' : statusLabel(props.state.status, ''))
 const message = computed(() => commandMessage(props.state))
+// Loaded on demand so rendering feedback never initializes the project store.
+const retry = async () => {
+  if (!props.state.retryKey) return
+  const { useProjectStore } = await import('../stores/projectStore')
+  await useProjectStore().retryCommand(props.state.retryKey).catch(() => undefined)
+}
 const sourceKindLabels: Record<string, string> = {
   CONTRACT: '目标合同',
   ENTITY: '人物或实体',
@@ -33,5 +39,6 @@ const sourceName = (source: NonNullable<CommandUiState['contextBudget']>['source
       </li>
     </ul>
     <button v-if="state.confirmation === 'pending' && onConfirm" class="btn small" @click="onConfirm?.()">重新读取结果</button>
+    <button v-if="state.retryable && state.retryKey" class="btn small" @click="retry">重试</button>
   </div>
 </template>

@@ -14,10 +14,12 @@ pub use connection::DatabaseError;
 use connection::{migrate_project, open_connection, project_needs_migration, quick_check};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use paths::{AppPaths, PathError};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
 /// Fixed read-time timestamp used when a read does not carry a caller-supplied
 /// wall-clock value. Reading the catalog's authoritative `project_path` does not
@@ -81,7 +83,7 @@ pub struct LibraryProjection {
 pub struct ProjectHandle {
     connection: Connection,
     project_id: String,
-    writers: Arc<Mutex<HashSet<String>>>,
+    writers: Arc<WriterRegistry>,
 }
 
 impl Deref for ProjectHandle {
@@ -94,9 +96,63 @@ impl Deref for ProjectHandle {
 
 impl Drop for ProjectHandle {
     fn drop(&mut self) {
-        if let Ok(mut writers) = self.writers.lock() {
-            writers.remove(&self.project_id);
+        self.writers.release(&self.project_id);
+    }
+}
+
+/// One writer per project. A request for a held project waits (bounded by
+/// [`WRITER_WAIT_TIMEOUT`]) for the holder to release; see ADR-032.
+#[derive(Default)]
+struct WriterRegistry {
+    holders: Mutex<HashMap<String, ThreadId>>,
+    released: Condvar,
+}
+
+impl WriterRegistry {
+    fn acquire(&self, project_id: &str, wait: bool) -> Result<(), ManagerError> {
+        let current = std::thread::current().id();
+        let deadline = Instant::now() + WRITER_WAIT_TIMEOUT;
+        let mut holders = self
+            .holders
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?;
+        loop {
+            match holders.get(project_id) {
+                None => {
+                    holders.insert(project_id.to_string(), current);
+                    return Ok(());
+                }
+                // Waiting on our own lease could never succeed.
+                Some(holder) if wait && *holder == current => {
+                    return Err(ManagerError::AlreadyOpen)
+                }
+                Some(_) => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !wait || remaining.is_zero() {
+                return Err(ManagerError::ProjectBusy);
+            }
+            holders = self
+                .released
+                .wait_timeout(holders, remaining)
+                .map_err(|_| ManagerError::WriterLockPoisoned)?
+                .0;
         }
+    }
+
+    fn release(&self, project_id: &str) {
+        if let Ok(mut holders) = self.holders.lock() {
+            holders.remove(project_id);
+        }
+        self.released.notify_all();
+    }
+
+    fn is_held(&self, project_id: &str) -> Result<bool, ManagerError> {
+        Ok(self
+            .holders
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?
+            .contains_key(project_id))
     }
 }
 
@@ -130,11 +186,15 @@ impl Drop for ReadLease {
 #[derive(Clone)]
 pub struct ProjectManager {
     paths: AppPaths,
-    writers: Arc<Mutex<HashSet<String>>>,
+    writers: Arc<WriterRegistry>,
     read_pool: Arc<Mutex<read_pool::ReadPool>>,
     maintenance: Arc<Mutex<HashSet<String>>>,
     restore_test_hook: Arc<Mutex<Option<RestoreTestHook>>>,
 }
+
+/// Upper bound a writer request waits for another holder to release the
+/// project before failing with [`ManagerError::ProjectBusy`] (ADR-032).
+pub const WRITER_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type RestoreTestHook = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
@@ -173,7 +233,7 @@ impl ProjectManager {
     pub fn new(paths: AppPaths) -> Self {
         Self {
             paths,
-            writers: Arc::new(Mutex::new(HashSet::new())),
+            writers: Arc::new(WriterRegistry::default()),
             read_pool: Arc::new(Mutex::new(read_pool::ReadPool::new(16, 4))),
             maintenance: Arc::new(Mutex::new(HashSet::new())),
             restore_test_hook: Arc::new(Mutex::new(None)),
@@ -190,20 +250,11 @@ impl ProjectManager {
     }
 
     fn acquire_writer(&self, project_id: &str) -> Result<(), ManagerError> {
-        let mut writers = self
-            .writers
-            .lock()
-            .map_err(|_| ManagerError::WriterLockPoisoned)?;
-        if !writers.insert(project_id.to_string()) {
-            return Err(ManagerError::AlreadyOpen);
-        }
-        Ok(())
+        self.writers.acquire(project_id, true)
     }
 
     fn release_writer(&self, project_id: &str) {
-        if let Ok(mut writers) = self.writers.lock() {
-            writers.remove(project_id);
-        }
+        self.writers.release(project_id);
     }
 
     /// Creates a project using a frozen, atomic staging flow.
@@ -644,7 +695,8 @@ impl ProjectManager {
         backup_path: &Path,
         expected_checksum: &str,
     ) -> Result<ProjectCommandOutcome<crate::repositories::ops::RestoreReport>, ManagerError> {
-        self.acquire_writer(spec.project_id)?;
+        // Structural operation: fail fast instead of queueing behind a writer.
+        self.writers.acquire(spec.project_id, false)?;
         let result = (|| {
             let _maintenance_guard = self.begin_maintenance(spec.project_id)?;
             let directory = self.resolve_registered_project_path(spec.project_id)?;
@@ -923,13 +975,8 @@ impl ProjectManager {
         if new_id == source_id {
             return Err(ManagerError::InvalidProjectId);
         }
-        if self
-            .writers
-            .lock()
-            .map_err(|_| ManagerError::WriterLockPoisoned)?
-            .contains(source_id)
-        {
-            return Err(ManagerError::AlreadyOpen);
+        if self.writers.is_held(source_id)? {
+            return Err(ManagerError::ProjectBusy);
         }
         let source_dir = self.resolve_registered_project_path(source_id)?;
         let source_db = source_dir.join("project.db");
@@ -1008,13 +1055,8 @@ impl ProjectManager {
                 }
             }
         }
-        if self
-            .writers
-            .lock()
-            .map_err(|_| ManagerError::WriterLockPoisoned)?
-            .contains(project_id)
-        {
-            return Err(ManagerError::AlreadyOpen);
+        if self.writers.is_held(project_id)? {
+            return Err(ManagerError::ProjectBusy);
         }
         let source_dir = self.paths.project_dir(project_id)?;
         if !source_dir.join("project.db").is_file() {
@@ -1025,7 +1067,7 @@ impl ProjectManager {
         std::fs::create_dir_all(&trash_dir)?;
         let target_dir = trash_dir.join(project_id);
         if target_dir.exists() {
-            return Err(ManagerError::AlreadyOpen);
+            return Err(ManagerError::ProjectBusy);
         }
         std::fs::rename(&source_dir, &target_dir)?;
         CatalogRepository::set_project_path(
@@ -1053,13 +1095,8 @@ impl ProjectManager {
         ) {
             return Err(ManagerError::ProjectNotFound);
         }
-        if self
-            .writers
-            .lock()
-            .map_err(|_| ManagerError::WriterLockPoisoned)?
-            .contains(project_id)
-        {
-            return Err(ManagerError::AlreadyOpen);
+        if self.writers.is_held(project_id)? {
+            return Err(ManagerError::ProjectBusy);
         }
         if lifecycle.as_deref() == Some("DELETING") {
             return Ok(());
@@ -1377,6 +1414,8 @@ pub enum ManagerError {
     InvalidProjectId,
     #[error("project writer already open")]
     AlreadyOpen,
+    #[error("PROJECT_BUSY")]
+    ProjectBusy,
     #[error("writer lock poisoned")]
     WriterLockPoisoned,
     #[error("invalid project title")]

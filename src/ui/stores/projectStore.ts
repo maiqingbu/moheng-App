@@ -53,6 +53,8 @@ export interface CommandUiState {
   receiptId?: string
   repairOutcome?: 'receipt' | 'unknown' | 'not_executed'
   contextBudget?: ContextHardBudgetFailure
+  retryable?: boolean
+  retryKey?: string
 }
 
 export interface CommandBinding {
@@ -123,6 +125,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const pendingConfirmations = new Map<string, PendingCommandConfirmation>()
   const workspaceSequences = new Map<string, number>()
   const inFlightCommands = new Map<string, Promise<CommandReceipt>>()
+  const busyRetryRequests = new Map<string, CommandRequest>()
 
   const project = computed(() => overview.value?.project ?? null)
   const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
@@ -749,6 +752,11 @@ export const useProjectStore = defineStore('project-projection', () => {
           message: '正式写入结果待确认。请只重新读取；系统不会再次提交。',
           commandId,
         })
+      } else if (/\bPROJECT_BUSY\b/.test(message)) {
+        // Nothing was written (ADR-032); keep the request so the user can resubmit it.
+        const { commandId: _id, idempotencyKey: _key, requestedAt: _at, ...retryRequest } = request
+        busyRetryRequests.set(key, retryRequest)
+        setStateIfCurrent({ status: 'failed', message, commandId, retryable: true, retryKey: key })
       } else {
         setStateIfCurrent({ status: 'failed', message, commandId, contextBudget })
       }
@@ -786,6 +794,13 @@ export const useProjectStore = defineStore('project-projection', () => {
     if (['planning_create_volume_intent', 'planning_create_volume_plan', 'planning_prepare_next_chapter'].includes(request.type) && typeof volumeId !== 'string') return null
     if (request.type === 'planning_compile_chapter_plan' && typeof chapterIdForPlan !== 'string') return null
     return [projectId, request.type, chapterId ?? chapterIdForPlan ?? volumeId ?? ''].join('|')
+  }
+
+  async function retryCommand(key: string) {
+    const request = busyRetryRequests.get(key)
+    if (!request) return undefined
+    busyRetryRequests.delete(key)
+    return runCommand(key, request)
   }
 
   async function runCommand(key: string, request: CommandRequest) {
@@ -865,7 +880,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
-    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })
