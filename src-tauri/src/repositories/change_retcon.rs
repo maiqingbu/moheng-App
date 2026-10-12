@@ -15,6 +15,8 @@ pub enum ChangeRetconRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Narrative(#[from] crate::repositories::narrative::NarrativeRepositoryError),
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +593,7 @@ pub fn load_authority_head(
          ORDER BY h.artifact_type,h.scope_key
          LIMIT 1",
     )?;
-    statement
+    let head = statement
         .query_row(
             libsql_rusqlite::params![
                 project_id,
@@ -601,22 +603,47 @@ pub fn load_authority_head(
                 scope_key
             ],
             |row| {
-                let raw_payload: Option<String> = row.get(6)?;
-                Ok(AuthorityHeadRecord {
-                    artifact_id: row.get(0)?,
-                    version: row.get(1)?,
-                    payload_hash: row.get(2)?,
-                    artifact_type: row.get(3)?,
-                    scope_level: row.get(4)?,
-                    scope_key: row.get(5)?,
-                    payload: raw_payload
-                        .and_then(|value| serde_json::from_str(&value).ok())
-                        .unwrap_or(Value::Null),
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
             },
         )
-        .optional()
-        .map_err(Into::into)
+        .optional()?;
+    head.map(
+        |(
+            artifact_id,
+            version,
+            payload_hash,
+            artifact_type,
+            scope_level,
+            scope_key,
+            raw_payload,
+        )| {
+            let payload = raw_payload
+                .map(|raw| {
+                    crate::repositories::narrative::parse_formal_payload(&artifact_type, &raw)
+                        .map_err(ChangeRetconRepositoryError::from)
+                })
+                .transpose()?
+                .unwrap_or(Value::Null);
+            Ok(AuthorityHeadRecord {
+                artifact_id,
+                version,
+                payload_hash,
+                artifact_type,
+                scope_level,
+                scope_key,
+                payload,
+            })
+        },
+    )
+    .transpose()
 }
 
 pub fn mark_impact_stale(

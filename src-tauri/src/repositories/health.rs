@@ -265,6 +265,8 @@ pub enum HealthRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("authority: {0}")]
     Authority(String),
+    #[error(transparent)]
+    Narrative(#[from] crate::repositories::narrative::NarrativeRepositoryError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("HEALTH_CURSOR_STALE")]
@@ -864,9 +866,14 @@ impl HealthRepository {
         let projection = projection_raw
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
-        let route = route_raw
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+        let route = match (artifact_type.as_deref(), route_raw.as_deref()) {
+            (Some("VolumePlan"), Some(raw)) => Some(
+                crate::repositories::narrative::parse_formal_payload("VolumePlan", raw)
+                    .map_err(HealthRepositoryError::from)?,
+            ),
+            (_, Some(raw)) => serde_json::from_str::<Value>(raw).ok(),
+            (_, None) => None,
+        };
         let route_payload_valid = route.is_some();
         let projection_valid = projection.is_some();
         let mut task_summary_available = false;

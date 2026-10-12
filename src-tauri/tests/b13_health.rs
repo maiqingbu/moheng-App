@@ -157,13 +157,13 @@ fn large_route_fixture(command_id: &str) -> (TempKernelState, String, ProjectHan
         libsql_rusqlite::params![project_id, "a".repeat(64), NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b-r2-03:shared-route',1,'{\"tasks\":[]}',?1)",
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b-r2-03:shared-route',1,'{\"payloadSchema\":\"volume-plan.r1\",\"tasks\":[]}',?1)",
         ["a".repeat(64)],
     ).unwrap();
     let tasks = (1..=HEALTH_SCALE_ROUTE_COUNT)
         .map(|index| json!({"taskId":format!("task:b-r2-03:scale:{index}"),"class":"OPTIONAL"}))
         .collect::<Vec<_>>();
-    let large_route_payload = json!({"tasks":tasks}).to_string();
+    let large_route_payload = json!({"payloadSchema":"volume-plan.r1","tasks":tasks}).to_string();
     connection.execute(
         "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES ('artifact:b-r2-03:large-route',?1,'VolumePlan','VOLUME','volume:b-r2-03:scale:1',1,'b-r2-03.fixture','COMMITTED',?2,'{}',?3)",
         libsql_rusqlite::params![project_id, "c".repeat(64), NOW],
@@ -489,7 +489,7 @@ fn b_r2_03_health_issue_cursor_reaches_late_risk_in_100k_route_fixture() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b-r2-03:late-route-cursor',1,'{\"tasks\":[]}',?1)",
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b-r2-03:late-route-cursor',1,'{\"payloadSchema\":\"volume-plan.r1\",\"tasks\":[]}',?1)",
             [&route_hash],
         )
         .unwrap();
@@ -679,7 +679,7 @@ fn b_r2_03_r4_issue_page_work_is_independent_of_1k_10k_100k_route_json() {
             libsql_rusqlite::params![artifact_id,project_id,format!("{volume_prefix}000001"),route_hash,NOW],
         ).unwrap();
         connection.execute(
-            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,'{\"tasks\":[]}',?2)",
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,'{\"payloadSchema\":\"volume-plan.r1\",\"tasks\":[]}',?2)",
             libsql_rusqlite::params![artifact_id,route_hash],
         ).unwrap();
         connection.execute(
@@ -1194,7 +1194,7 @@ fn b_r2_03_r4_refreshes_only_affected_scopes_and_fails_closed_while_dirty() {
     ] {
         let volume_id = format!("volume:r4:{number}");
         let artifact_id = format!("artifact:r4:{number}");
-        let payload = json!({"tasks":[{"taskId":task_id,"class":task_class}]}).to_string();
+        let payload = json!({"payloadSchema":"volume-plan.r1","tasks":[{"taskId":task_id,"class":task_class}]}).to_string();
         let hash = if number == 1 {
             "a".repeat(64)
         } else {
@@ -1287,6 +1287,7 @@ fn b_r2_03_r4_refreshes_only_affected_scopes_and_fails_closed_while_dirty() {
 
     let v2_hash = "e".repeat(64);
     let v2_payload = json!({
+        "payloadSchema":"volume-plan.r1",
         "tasks":[{"taskId":"task:r4:required","class":"REQUIRED"}],
         "compiledFromStateDigest":"f".repeat(64)
     });
@@ -1545,7 +1546,7 @@ fn b_r2_03_r4_existing_project_migration_explicitly_rebuilds_health_index() {
         libsql_rusqlite::params![project_id,hash,NOW],
     ).unwrap();
     connection.execute(
-        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:r4:migration',1,'{\"tasks\":[]}',?1)",
+        "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:r4:migration',1,'{\"payloadSchema\":\"volume-plan.r1\",\"tasks\":[]}',?1)",
         [&hash],
     ).unwrap();
     connection.execute(
@@ -1710,7 +1711,7 @@ fn b13_r1_revision_only_route_change_does_not_become_route_drift() {
     ).unwrap();
     connection.execute(
         "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:route',1,?1,?2)",
-        libsql_rusqlite::params![json!({"tasks":[],"compiledFromStateDigest":"a".repeat(64)}).to_string(), route_hash],
+        libsql_rusqlite::params![json!({"payloadSchema":"volume-plan.r1","tasks":[],"compiledFromStateDigest":"a".repeat(64)}).to_string(), route_hash],
     ).unwrap();
     connection.execute(
         "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,'volume:b13:r1:route','artifact:b13:r1:route',1,'APPROVED',3,?2)",
@@ -1920,7 +1921,7 @@ fn b13_r1_route_stale_truth_covers_scope_beyond_detail_page() {
     ).unwrap();
     connection.execute(
         "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('artifact:b13:r1:route',1,?1,?2)",
-        libsql_rusqlite::params![json!({"tasks":[]}).to_string(), "b".repeat(64)],
+        libsql_rusqlite::params![json!({"payloadSchema":"volume-plan.r1","tasks":[]}).to_string(), "b".repeat(64)],
     ).unwrap();
     for index in 1..=102_i64 {
         let volume_id = format!("volume:b13:r1:scope:{index:03}");

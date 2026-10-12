@@ -24,7 +24,7 @@ pub enum NarrativeRepositoryError {
     Invariant(String),
 }
 
-fn formal_payload_schema(artifact_type: &str) -> Option<&'static str> {
+pub(crate) fn formal_payload_schema(artifact_type: &str) -> Option<&'static str> {
     match artifact_type {
         "BookPlan" => Some("book-plan.r1"),
         "VolumeIntent" => Some("volume-intent.r1"),
@@ -37,7 +37,7 @@ fn formal_payload_schema(artifact_type: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_formal_payload(
+pub(crate) fn parse_formal_payload(
     artifact_type: &str,
     raw_payload: &str,
 ) -> Result<Value, NarrativeRepositoryError> {

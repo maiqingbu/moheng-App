@@ -18,7 +18,7 @@ pub enum EndgameRepositoryError {
     Sqlite(#[from] libsql_rusqlite::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("narrative: {0}")]
+    #[error(transparent)]
     Narrative(#[from] crate::repositories::narrative::NarrativeRepositoryError),
 }
 
@@ -440,7 +440,14 @@ impl EndgameRepository {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .map(|raw| serde_json::from_str(&raw))
+            .map(|raw| {
+                if crate::repositories::narrative::formal_payload_schema(artifact_type).is_some() {
+                    crate::repositories::narrative::parse_formal_payload(artifact_type, &raw)
+                } else {
+                    serde_json::from_str(&raw)
+                        .map_err(crate::repositories::narrative::NarrativeRepositoryError::from)
+                }
+            })
             .transpose()
             .map_err(Into::into)
     }
@@ -698,7 +705,8 @@ impl EndgameRepository {
             "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND h.scope_level='VOLUME' ORDER BY h.scope_key,h.artifact_id",
         )?;
         for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
-            let payload = serde_json::from_str::<Value>(&row?)?;
+            let payload =
+                crate::repositories::narrative::parse_formal_payload("VolumePlan", &row?)?;
             for task in payload
                 .get("tasks")
                 .and_then(Value::as_array)
@@ -755,7 +763,8 @@ impl EndgameRepository {
             "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND h.scope_level='VOLUME' ORDER BY h.scope_key,h.artifact_id",
         )?;
         for row in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
-            let payload = serde_json::from_str::<Value>(&row?)?;
+            let payload =
+                crate::repositories::narrative::parse_formal_payload("VolumePlan", &row?)?;
             for task in payload
                 .get("tasks")
                 .and_then(Value::as_array)
@@ -1232,6 +1241,48 @@ mod fx7_tests {
 
         assert_eq!(result.input.unresolved_mapped_mysteries, 1);
         assert_eq!(build_count, 1);
+    }
+
+    #[test]
+    fn fx8_endgame_rejects_untyped_book_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let connection = manager
+            .create("project:fx8-untyped-endgame", "FX8 Untyped Endgame", NOW)
+            .unwrap();
+        let payload = json!({"planningMaturity":"SEED"});
+        let payload_hash = sha256_canonical(&payload).unwrap();
+        let scope = json!({"level":"PROJECT"}).to_string();
+        connection
+            .execute(
+                "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,semantic_lifecycle,authority_level,payload_hash,provenance_json,created_at,committed_at) VALUES ('book-plan:fx8-untyped','project:fx8-untyped-endgame','BookPlan','PROJECT',?1,1,'m0a.artifact.v1','COMMITTED','APPROVED_PLAN','C',?2,'{}',?3,?3)",
+                libsql_rusqlite::params![scope, payload_hash, NOW],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES ('book-plan:fx8-untyped',1,?1,?2)",
+                libsql_rusqlite::params![payload.to_string(), payload_hash],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('project:fx8-untyped-endgame','BookPlan','PROJECT',?1,'book-plan:fx8-untyped',1,?2)",
+                libsql_rusqlite::params![scope, payload_hash],
+            )
+            .unwrap();
+
+        let result = EndgameRepository::payload_for_head(
+            &connection,
+            "project:fx8-untyped-endgame",
+            "BookPlan",
+        );
+
+        assert!(matches!(
+            result,
+            Err(EndgameRepositoryError::Narrative(error))
+                if error.to_string() == "LEGACY_UNTYPED"
+        ));
     }
 
     #[test]

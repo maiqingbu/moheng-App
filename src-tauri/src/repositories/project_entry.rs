@@ -21,6 +21,8 @@ pub enum ProjectEntryRepositoryError {
     Json(#[from] serde_json::Error),
     #[error("stable id: {0}")]
     StableId(String),
+    #[error(transparent)]
+    Narrative(#[from] crate::repositories::narrative::NarrativeRepositoryError),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +86,17 @@ fn row_from_sql(
     })
 }
 
+fn validate_formal_payload_row(
+    mut row: EntryArtifactRow,
+) -> Result<EntryArtifactRow, ProjectEntryRepositoryError> {
+    row.payload = crate::repositories::narrative::parse_formal_payload(
+        &row.artifact_type,
+        &row.payload.to_string(),
+    )
+    .map_err(ProjectEntryRepositoryError::from)?;
+    Ok(row)
+}
+
 pub fn list_artifacts(
     connection: &Connection,
     project_id: &str,
@@ -105,6 +118,9 @@ pub fn list_artifacts(
             libsql_rusqlite::params![project_id, artifact_type, bound + 1, offset],
             row_from_sql,
         )?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(validate_formal_payload_row)
         .collect::<Result<Vec<_>, _>>()?;
     let has_more = rows.len() as i64 > bound;
     let mut rows = rows;
@@ -138,6 +154,7 @@ pub fn artifact_by_id(
         )
         .optional()
         .map_err(Into::into)
+        .and_then(|row| row.map(validate_formal_payload_row).transpose())
 }
 
 pub fn artifact_ref_by_id(
@@ -189,6 +206,7 @@ pub fn canonical_head(
         )
         .optional()
         .map_err(Into::into)
+        .and_then(|row| row.map(validate_formal_payload_row).transpose())
 }
 
 pub fn canonical_chapter_head(
@@ -206,6 +224,7 @@ pub fn canonical_chapter_head(
         )
         .optional()
         .map_err(Into::into)
+        .and_then(|row| row.map(validate_formal_payload_row).transpose())
 }
 
 pub fn canonical_head_ref(
