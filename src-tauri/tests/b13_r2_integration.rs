@@ -400,7 +400,7 @@ fn b13_r2_formal_owner_path_rebuilds_projection_without_compatibility_fields() {
         )
         .unwrap();
     let book_scope = json!({"level":"PROJECT"}).to_string();
-    let book_plan = json!({"planningMaturity":"APPROVED"});
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED"});
     let book_plan_hash = insert_committed_artifact(
         &connection,
         &project_id,

@@ -154,7 +154,7 @@ fn volume_plan_bundle() -> CommitBundle {
         command_id,
         "volume-plan:p1:1",
         "VolumePlan",
-        json!({"volumeId":VOLUME_ID,"targetChapters":1,"state":"APPROVED_PLAN"}),
+        json!({"payloadSchema":"volume-plan.r1","volumeId":VOLUME_ID,"targetChapters":1,"state":"APPROVED_PLAN"}),
     );
     let contract = volume_artifact(
         "p1",

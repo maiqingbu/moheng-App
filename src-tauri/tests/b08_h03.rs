@@ -419,7 +419,56 @@ struct MutatingGateway {
 
 struct PostGateCanonConflictGateway {
     database: PathBuf,
+    inject_before_snapshot: bool,
     injected: std::sync::atomic::AtomicBool,
+    attempts: AtomicUsize,
+    revision_after_external_write: AtomicUsize,
+    revalidation_attempt: AtomicUsize,
+}
+
+impl PostGateCanonConflictGateway {
+    fn inject_external_conflict(&self, attempt: usize) -> Result<(), String> {
+        if attempt == 0
+            && self
+                .injected
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            let connection =
+                ai_novel_production_system_core::project_db::connection::open_connection(
+                    &self.database,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            let expected_revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(&connection, "p-b08-post-gate-conflict")
+                .map_err(|error| error.to_string())?;
+            let external_bundle: CommitBundle = serde_json::from_value(json!({
+                "commitId":"commit:fx8:external-canon",
+                "projectId":"p-b08-post-gate-conflict",
+                "commandId":"cmd:fx8:external-canon",
+                "idempotencyKey":"key:fx8:external-canon",
+                "expectedProjectRevision":expected_revision,
+                "contractVersion":"m0a.v1",
+                "createdAt":NOW,
+                "artifacts":[],
+                "canonDelta":[{
+                    "factId":"fact:late-conflict:committed",
+                    "subjectId":"entity:late-conflict",
+                    "predicate":"location",
+                    "objectJson":{"place":"other-city"},
+                    "authorityLevel":"A",
+                    "payloadJson":{"storyTime":"2020-01-01T00:00:00Z","storyTimeEnd":"2021-01-01T00:00:00Z","createdAt":NOW}
+                }],
+                "receiptDraft":{"domain":"FX8_EXTERNAL_CANON","payload":{"testExternalCommit":true}}
+            }))
+            .map_err(|error| error.to_string())?;
+            let receipt = CommitService::commit(&connection, &external_bundle, NOW)
+                .map_err(|error| error.to_string())?;
+            self.revision_after_external_write
+                .store(receipt.after_revision as usize, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
 
 impl ProductionModelGateway for PostGateCanonConflictGateway {
@@ -444,32 +493,26 @@ impl ProductionModelGateway for PostGateCanonConflictGateway {
         _connection: &Connection,
         attempt: usize,
     ) -> Result<(), String> {
-        if attempt == 0
-            && self
-                .injected
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        {
-            let connection =
-                ai_novel_production_system_core::project_db::connection::open_connection(
-                    &self.database,
-                    false,
-                )
-                .map_err(|error| error.to_string())?;
-            connection
-                .execute(
-                    "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,story_time_from,story_time_to,created_at,updated_at) VALUES ('fact:late-conflict:committed','p-b08-post-gate-conflict','entity:late-conflict','location','{\"place\":\"other-city\"}','A','2020-01-01T00:00:00Z','2021-01-01T00:00:00Z',?1,?1)",
-                    [NOW],
-                )
-                .map_err(|error| error.to_string())?;
-            connection
-                .execute(
-                    "UPDATE project_meta SET revision=revision+1 WHERE project_id='p-b08-post-gate-conflict'",
-                    [],
-                )
-                .map_err(|error| error.to_string())?;
+        if !self.inject_before_snapshot {
+            self.inject_external_conflict(attempt)?;
         }
         Ok(())
+    }
+
+    fn before_commit_snapshot(
+        &self,
+        _connection: &Connection,
+        attempt: usize,
+    ) -> Result<(), String> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self.inject_before_snapshot {
+            self.inject_external_conflict(attempt)?;
+        }
+        Ok(())
+    }
+
+    fn on_chapter_gate_revalidation(&self, attempt: usize) {
+        self.revalidation_attempt.store(attempt, Ordering::SeqCst);
     }
 }
 
@@ -5058,7 +5101,11 @@ fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_r
         paths,
         Arc::new(PostGateCanonConflictGateway {
             database,
+            inject_before_snapshot: false,
             injected: std::sync::atomic::AtomicBool::new(false),
+            attempts: AtomicUsize::new(0),
+            revision_after_external_write: AtomicUsize::new(0),
+            revalidation_attempt: AtomicUsize::new(usize::MAX),
         }),
     );
     let connection = state
@@ -5121,6 +5168,80 @@ fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_r
             .unwrap(),
         1,
         "concurrent Canon commit remains authoritative"
+    );
+}
+
+#[test]
+fn fx8_external_write_before_first_commit_attempt_revalidates_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let project_id = "p-b08-post-gate-conflict";
+    let database = paths.project_dir(project_id).unwrap().join("project.db");
+    let gateway = Arc::new(PostGateCanonConflictGateway {
+        database,
+        inject_before_snapshot: true,
+        injected: std::sync::atomic::AtomicBool::new(false),
+        attempts: AtomicUsize::new(0),
+        revision_after_external_write: AtomicUsize::new(0),
+        revalidation_attempt: AtomicUsize::new(usize::MAX),
+    });
+    let state = KernelState::with_production_gateway(paths, gateway.clone());
+    let connection = state
+        .manager
+        .create(project_id, "FX-8 first attempt recheck", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    connection
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES ('entity:late-conflict','p-b08-post-gate-conflict','未选中实体','CHARACTER',?1,?1)",
+            [NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:fx8:first-attempt-recheck",
+            "idempotencyKey":"key:fx8:first-attempt-recheck","projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(error, "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED");
+    assert_eq!(gateway.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        gateway.revalidation_attempt.load(Ordering::SeqCst),
+        0,
+        "the first commit attempt must revalidate the gate after an external commit"
+    );
+
+    let connection = state
+        .manager
+        .open(project_id, "FX-8 first attempt recheck", NOW)
+        .unwrap();
+    let final_revision: i64 = connection
+        .query_row(
+            "SELECT revision FROM project_meta WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        final_revision as usize,
+        gateway.revision_after_external_write.load(Ordering::SeqCst),
+        "the gate rejection must not write a production commit after the external change"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
     );
 }
 

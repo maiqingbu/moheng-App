@@ -92,7 +92,7 @@ fn b07_h02_long_book_relevant_scale_certification() {
     );
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumeIntent','VOLUME',?1,'artifact:b07-scale-intent',1,?2)", libsql_rusqlite::params![intent_scope, intent_hash]).unwrap();
     connection.execute("INSERT INTO canonical_heads(project_id,artifact_type,scope_level,scope_key,artifact_id,version,payload_hash) VALUES ('p1','VolumePlan','VOLUME',?1,'artifact:b07-scale-plan',1,?2)", libsql_rusqlite::params![intent_scope, plan_hash]).unwrap();
-    let book_plan = json!({"planningMaturity":"APPROVED","futureReservations":[]});
+    let book_plan = json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","futureReservations":[]});
     let book_hash = insert_committed_artifact(
         &connection,
         "p1",

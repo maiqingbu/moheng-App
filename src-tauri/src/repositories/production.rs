@@ -338,29 +338,33 @@ impl ProductionRepository {
             .as_ref()
             .and_then(|(_, _, chapter, _, _)| chapter.clone())
             .or_else(|| next_chapter.as_ref().map(|row| row.0.clone()));
-        let plan_row: Option<(String, i64, String, String)> = active_chapter_id
-            .as_ref()
-            .and_then(|chapter_id| {
-                connection
-                    .query_row(
-                        "SELECT h.artifact_id,h.version,h.payload_hash,p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
-                        libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()
-            });
-        let plan_projection = plan_row.as_ref().and_then(|(id, version, hash, raw)| {
-            serde_json::from_str::<Value>(raw).ok().map(|payload| {
-                json!({
-                    "ref":{"artifactId":id,"version":version,"payloadHash":hash},
-                    "chapterGoal":payload.get("chapterGoal"), "contextManifestRef":payload.get("contextManifestRef"),
-                    "activeTaskRefs":payload.get("activeTaskRefs").cloned().unwrap_or_else(|| json!([])),
-                    "continuityActions":payload.get("continuityActions").cloned().unwrap_or_else(|| json!([])),
-                    "compiledFromProjectRevision":payload.get("compiledFromProjectRevision"),
-                    "compiledFromStateDigest":payload.get("compiledFromStateDigest")
+        let plan_row: Option<(String, i64, String, Value)> = if let Some(chapter_id) =
+            active_chapter_id.as_ref()
+        {
+            connection
+                .query_row(
+                    "SELECT h.artifact_id,h.version,h.payload_hash,p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER' AND h.scope_key=?2",
+                    libsql_rusqlite::params![project_id, json!({"level":"CHAPTER","chapterId":chapter_id}).to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, String>(3)?)),
+                )
+                .optional()?
+                .map(|(artifact_id, version, payload_hash, raw)| {
+                    crate::repositories::narrative::parse_formal_payload("ChapterPlan", &raw)
+                    .map(|payload| (artifact_id, version, payload_hash, payload))
+                    .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))
                 })
+                .transpose()?
+        } else {
+            None
+        };
+        let plan_projection = plan_row.as_ref().map(|(id, version, hash, payload)| {
+            json!({
+                "ref":{"artifactId":id,"version":version,"payloadHash":hash},
+                "chapterGoal":payload.get("chapterGoal"), "contextManifestRef":payload.get("contextManifestRef"),
+                "activeTaskRefs":payload.get("activeTaskRefs").cloned().unwrap_or_else(|| json!([])),
+                "continuityActions":payload.get("continuityActions").cloned().unwrap_or_else(|| json!([])),
+                "compiledFromProjectRevision":payload.get("compiledFromProjectRevision"),
+                "compiledFromStateDigest":payload.get("compiledFromStateDigest")
             })
         });
         let current_revision: i64 = connection.query_row(
@@ -616,13 +620,18 @@ impl ProductionRepository {
             .ok()
             .flatten()
         });
-        let seed_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(p.payload_json,'$.planningMaturity')='SEED'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        let mut seed_count = 0_i64;
+        let mut book_plans = connection.prepare(
+            "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='BookPlan'",
+        )?;
+        for row in book_plans.query_map([project_id], |row| row.get::<_, String>(0))? {
+            let payload =
+                crate::repositories::narrative::parse_formal_payload("BookPlan", &row?)
+                    .map_err(|error| ProductionRepositoryError::Narrative(error.to_string()))?;
+            if payload.get("planningMaturity").and_then(Value::as_str) == Some("SEED") {
+                seed_count += 1;
+            }
+        }
         let book_plan_status = book_plan_payload
             .as_ref()
             .and_then(|payload| payload.get("planningMaturity").and_then(Value::as_str))

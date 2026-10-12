@@ -54,13 +54,60 @@ pub fn execute_adjustment(
         &format!("narrative-obligation-set:{project_id}:{obligation_id}"),
     )
     .map_err(|error| error.to_string())?;
+    let change_request_id = StableIdentityFactory::from_command(
+        StableIdKind::Artifact,
+        &format!("responsibility-change-request:{project_id}:{command_id}"),
+    )
+    .map_err(|error| error.to_string())?;
     let connection = manager
         .open(project_id, "", requested_at)
         .map_err(|error| error.to_string())?;
 
-    if let Some(previous) = CommitService::find_receipt(&connection, project_id, idempotency_key)
-        .map_err(|error| error.to_string())?
-    {
+    let mut previous_receipt =
+        CommitService::find_receipt(&connection, project_id, idempotency_key)
+            .map_err(|error| error.to_string())?;
+    if previous_receipt.is_none() && action == "DELETE" {
+        let previous_key = NarrativeRepository::commit_receipt_idempotency_key_by_command(
+            &connection,
+            project_id,
+            command_id,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(previous_key) = previous_key {
+            previous_receipt = CommitService::find_receipt(&connection, project_id, &previous_key)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if let Some(previous) = previous_receipt {
+        let previous_proposal = previous
+            .committed_artifact_refs
+            .iter()
+            .find(|reference| reference.artifact_id == change_request_id)
+            .and_then(|reference| {
+                NarrativeRepository::artifact_payload_by_ref(&connection, project_id, reference)
+                    .ok()
+                    .flatten()
+            });
+        if previous_proposal
+            .as_ref()
+            .and_then(|proposal| proposal.get("requestDigest"))
+            .and_then(Value::as_str)
+            == Some(request_digest)
+        {
+            return Ok(json!({
+                "commandId":previous.command_id,
+                "projectId":project_id,
+                "finalStatus":"committed",
+                "actionStatus":"CHANGE_REQUEST_SUBMITTED",
+                "message":"B08_RESPONSIBILITY_CHANGE_REQUEST_CREATED",
+                "changeRequestId":change_request_id,
+                "receiptId":previous.receipt_id,
+                "beforeRevision":previous.before_revision,
+                "afterRevision":previous.after_revision,
+                "replayed":true,
+                "receipt":previous
+            }));
+        }
         let previous_snapshot = previous
             .committed_artifact_refs
             .iter()
@@ -134,6 +181,20 @@ pub fn execute_adjustment(
         "DELETE" => record.authority_level.as_str(),
         _ => return Err("IPC_INVALID:action".into()),
     };
+    if action == "DELETE" && matches!(record.authority_level.as_str(), "A" | "B") {
+        return create_responsibility_change_request(
+            &connection,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            request_digest,
+            requested_at,
+            thread_ref,
+            &record,
+            &change_request_id,
+        );
+    }
     let fulfillment_object = if action == "UPGRADE" {
         payload
             .get("fulfillmentObject")
@@ -325,6 +386,103 @@ pub fn execute_adjustment(
         "projectId":project_id,
         "finalStatus":"committed",
         "message":"责任调整已正式提交，历史版本与原始证据均已保留。",
+        "receiptId":receipt.receipt_id,
+        "beforeRevision":receipt.before_revision,
+        "afterRevision":receipt.after_revision,
+        "replayed":false,
+        "receipt":receipt
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_responsibility_change_request(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    request_digest: &str,
+    requested_at: &str,
+    thread_ref: &str,
+    record: &crate::repositories::narrative::ResponsibilityAdjustmentRecord,
+    change_request_id: &str,
+) -> Result<Value, String> {
+    let source_ref = NarrativeRepository::artifact_ref_for_version(
+        connection,
+        project_id,
+        &record.source_artifact_id,
+        record.source_version,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "B08_RESPONSIBILITY_SOURCE_UNAVAILABLE".to_string())?;
+    let payload = json!({
+        "payloadSchema":"b12-change-request.r1",
+        "changeRequestId":change_request_id,
+        "changeType":"CHANGE",
+        "status":"PROPOSED",
+        "summary":format!("申请撤销{}级责任：{}", record.authority_level, record.description),
+        "requestedChange":{"kind":"WITHDRAW_RESPONSIBILITY","responsibilityRef":thread_ref},
+        "responsibilityRef":thread_ref,
+        "basedOnRevision":expected_revision,
+        "sourceRef":source_ref,
+        "sourceEvidenceRefs":record.evidence_refs,
+        "requestDigest":request_digest
+    });
+    let payload_hash = sha256_canonical(&payload).map_err(|error| error.to_string())?;
+    let version = crate::repositories::artifacts::ArtifactRepository::next_version(
+        connection,
+        change_request_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact_ref = ArtifactRef {
+        artifact_id: change_request_id.to_owned(),
+        version,
+        payload_hash: payload_hash.clone(),
+    };
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":change_request_id,
+        "projectId":project_id,
+        "artifactType":"ChangeRequest",
+        "scope":{"level":"PROJECT"},
+        "version":version,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"MATERIALIZED",
+        "payload":payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":[source_ref],
+        "provenance":{"createdBy":"B08::ResponsibilityChangeRequestOwner","commandId":command_id},
+        "createdAt":requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let decision_id = StableIdentityFactory::from_command(
+        StableIdKind::Decision,
+        &format!("responsibility-change-request:{project_id}:{command_id}"),
+    )
+    .map_err(|error| error.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":idempotency_key,
+        "expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":requested_at,
+        "artifacts":[artifact],
+        "headUpdates":[{"artifactType":"ChangeRequest","scope":{"level":"PROJECT"},"artifactId":change_request_id,"version":version,"payloadHash":payload_hash}],
+        "decisionUpdates":[{"decisionId":decision_id,"decisionType":"NO_LONGER_APPLICABLE_CHANGE_REQUEST","outcome":"PROPOSED","reason":"用户请求撤销 A/B 级责任，等待正式变更流程确认。","sourceRef":thread_ref,"payloadJson":{"changeRequestRef":artifact_ref,"responsibilityRef":thread_ref}}],
+        "receiptDraft":{"domain":"B08_RESPONSIBILITY_CHANGE_REQUEST","payload":{"changeRequestRef":artifact_ref,"responsibilityRef":thread_ref,"status":"PROPOSED"}}
+    }))
+    .map_err(|error| error.to_string())?;
+    let receipt = CommitService::commit(connection, &bundle, requested_at)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "finalStatus":"committed",
+        "actionStatus":"CHANGE_REQUEST_SUBMITTED",
+        "message":"B08_RESPONSIBILITY_CHANGE_REQUEST_CREATED",
+        "changeRequestId":change_request_id,
         "receiptId":receipt.receipt_id,
         "beforeRevision":receipt.before_revision,
         "afterRevision":receipt.after_revision,
