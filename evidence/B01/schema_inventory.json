@@ -1,6 +1,6 @@
 {
   "foreign_key_violations": 0,
-  "index_count": 219,
+  "index_count": 220,
   "indexes": [
     "idx_arcs_volume",
     "idx_artifact_schemas_project",
@@ -55,6 +55,7 @@
     "idx_model_cost_ledger_project",
     "idx_model_runs_job_paging",
     "idx_model_runs_step_status",
+    "idx_obligation_evidence_project_obligation_created",
     "idx_obligations_lifecycle",
     "idx_production_events_created",
     "idx_production_events_job",

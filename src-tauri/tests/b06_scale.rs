@@ -271,9 +271,13 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
         && hard_serialized_bytes_max
             > ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
         && observed_budget_blocker.is_some();
+    println!("B06_H01_SCALE_DIAGNOSTIC p50_ms={p50:.3} p95_ms={p95:.3} max_ms={max:.3} bounded_query_ok={bounded_query_ok} hard_budget_enforced={hard_budget_enforced} hard_serialized_bytes_max={hard_serialized_bytes_max} limit={} hard_budget_blocked_samples={hard_budget_blocked_samples}", ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT);
     assert!(p95 <= 300.0 && bounded_query_ok && hard_budget_enforced);
     drop(connection);
+    #[cfg(debug_assertions)]
     let kernel = KernelState::new(paths.clone());
+    #[cfg(not(debug_assertions))]
+    let kernel = KernelState::for_scale_bench(paths.clone());
     let context_error = query_context_manifest_impl(&kernel, json!({"projectId":"p1","volumeId":volume_id,"chapterId":chapter_id,"entityIds":[entity_id],"references":["fact:b06-scale-identity","event:b06-scale-promise","artifact:b06-scale-evidence"],"includeSoftSources":true})).unwrap_err();
     let context_blocked_by_hard_gate = context_error.contains("CONTEXT_HARD_BUDGET_EXCEEDED")
         || context_error.contains("CONTEXT_HARD_INCOMPLETE")

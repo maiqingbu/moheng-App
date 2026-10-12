@@ -207,13 +207,115 @@ fn b09_h04_long_book_scale_certification_uses_real_shared_database() {
             |row| row.get(0),
         )
         .unwrap();
-    let entity_id: String = connection
-        .query_row(
-            "SELECT entity_id FROM canon_entities WHERE project_id='p1' ORDER BY entity_id LIMIT 1",
-            [],
-            |row| row.get(0),
+    let entity_id = "entity:b09-context".to_string();
+    connection
+        .execute(
+            "INSERT INTO canon_entities(entity_id,project_id,canonical_name,entity_type,created_at,updated_at) VALUES (?1,'p1','Context fixture entity','CHARACTER',?2,?2)",
+            libsql_rusqlite::params![entity_id, NOW],
         )
         .unwrap();
+    connection
+        .execute(
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,created_at,updated_at) VALUES ('fact:b09:context-support','p1',?1,'support','{\"value\":\"scale context\"}','B',?2,?2)",
+            libsql_rusqlite::params![entity_id, NOW],
+        )
+        .unwrap();
+    let project_scope = r#"{"level":"PROJECT"}"#;
+    let story_payload = json!({
+        "payloadSchema":"story-constitution.r1",
+        "storyCore":{
+            "protagonist":"主角",
+            "desire":"查明事实",
+            "mechanism":"每项判断依赖可核验事实",
+            "conflict":"证据与隐瞒冲突",
+            "readerPromise":"每章推进真实任务",
+            "worldRules":[],
+            "forbiddenReveals":[]
+        }
+    });
+    let story_hash = insert_committed_artifact(
+        &connection,
+        "p1",
+        "artifact:b09-scale-story",
+        "StoryConstitution",
+        "PROJECT",
+        project_scope,
+        &story_payload,
+        NOW,
+    );
+    insert_head(
+        &connection,
+        "p1",
+        "StoryConstitution",
+        "PROJECT",
+        project_scope,
+        "artifact:b09-scale-story",
+        &story_hash,
+    );
+    let main_payload = json!({
+        "payloadSchema":"main-contract.r1",
+        "storyConstitutionRef":{
+            "artifactId":"artifact:b09-scale-story",
+            "version":1,
+            "payloadHash":story_hash
+        },
+        "scope":"BOOK",
+        "hardRules":["依据正式证据推进"],
+        "softPreferences":[]
+    });
+    let main_hash = insert_committed_artifact(
+        &connection,
+        "p1",
+        "artifact:b09-scale-main",
+        "MainContract",
+        "PROJECT",
+        project_scope,
+        &main_payload,
+        NOW,
+    );
+    insert_head(
+        &connection,
+        "p1",
+        "MainContract",
+        "PROJECT",
+        project_scope,
+        "artifact:b09-scale-main",
+        &main_hash,
+    );
+    let book_payload = json!({
+        "payloadSchema":"book-plan.r1",
+        "planningMaturity":"APPROVED",
+        "storyPromise":"推进实际任务",
+        "protagonistMacroDirection":"主动查证",
+        "endingBoundary":"基于证据解决当前问题",
+        "mustAchieve":[],
+        "mustNotBreak":[],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[],
+        "futureReservations":[],
+        "volumeIntentSeeds":[],
+        "openingHypotheses":[],
+        "globalLengthBudget":{"preferredWords":1000000}
+    });
+    let book_hash = insert_committed_artifact(
+        &connection,
+        "p1",
+        "artifact:b09-scale-book",
+        "BookPlan",
+        "PROJECT",
+        project_scope,
+        &book_payload,
+        NOW,
+    );
+    insert_head(
+        &connection,
+        "p1",
+        "BookPlan",
+        "PROJECT",
+        project_scope,
+        "artifact:b09-scale-book",
+        &book_hash,
+    );
     seed_route_authority(&connection, &volume_id, NOW);
     let initial_backfill = SearchService::ensure_projection(&connection, "p1", NOW).unwrap();
     assert!(
@@ -261,7 +363,10 @@ fn b09_h04_long_book_scale_certification_uses_real_shared_database() {
     drop(connection);
     drop(manager);
 
+    #[cfg(debug_assertions)]
     let state = KernelState::new(paths.clone());
+    #[cfg(not(debug_assertions))]
+    let state = KernelState::for_scale_bench(paths.clone());
     let mut lifecycle_durations = Vec::with_capacity(30);
     let mut compiler_durations = Vec::with_capacity(30);
     let mut route_durations = Vec::with_capacity(30);
@@ -385,6 +490,7 @@ fn b09_h04_long_book_scale_certification_uses_real_shared_database() {
     let p95 = percentile(&lifecycle_durations, 0.95);
     let max = *lifecycle_durations.last().unwrap();
     let compiler_p95 = percentile(&compiler_durations, 0.95);
+    println!("B09_H04_SCALE_DIAGNOSTIC lifecycle_p50_ms={p50:.3} lifecycle_p95_ms={p95:.3} lifecycle_max_ms={max:.3} compiler_p95_ms={compiler_p95:.3} route_p95_ms={:.3} volume_page_p95_ms={:.3} chapter_page_p95_ms={:.3} single_chapter_p95_ms={:.3}", percentile(&route_durations, 0.95), percentile(&volume_page_durations, 0.95), percentile(&chapter_page_durations, 0.95), percentile(&single_chapter_durations, 0.95));
     assert!(p95 <= 1_000.0);
     assert!(compiler_p95 <= 1_000.0);
     assert!(percentile(&route_durations, 0.95) <= 1_000.0);

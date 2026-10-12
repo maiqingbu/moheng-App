@@ -36,7 +36,10 @@ fn insert_committed_artifact(
 #[ignore = "B07/H02 relevant scale runs once after non-scale release gates"]
 fn b07_h02_long_book_relevant_scale_certification() {
     let temp = tempfile::tempdir().unwrap();
+    #[cfg(debug_assertions)]
     let state = KernelState::new(AppPaths::new(temp.path()));
+    #[cfg(not(debug_assertions))]
+    let state = KernelState::for_scale_bench(AppPaths::new(temp.path()));
     let connection = state
         .manager
         .create("p1", "B07 H02 LONG_BOOK_10M", "2026-08-30T00:00:00Z")
