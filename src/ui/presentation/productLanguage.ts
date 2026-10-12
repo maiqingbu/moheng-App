@@ -70,6 +70,7 @@ const statusLabels: Record<string, string> = {
 const errorLabels: Record<string, string> = {
   COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
+  PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',
   CONTEXT_HARD_BUDGET_EXCEEDED: '本章必需资料超出预算，请调整当前任务范围后重新准备；不能省略硬性约束。',
   CONTEXT_INCOMPLETE: '本章必需资料不完整，暂时不能继续生产。',
   AUDIT_INCOMPLETE: '正文审计未完成，不能作为无变更结果提交。',

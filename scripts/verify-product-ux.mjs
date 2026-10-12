@@ -135,6 +135,16 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     && /m14-error/.test(production)
   const canonDisplayLeak = /(?:summary|impact|message)\s*[:=][^\n]*\bCanon\b/.test(demoPort)
   const canonUserSurface = !canonDisplayLeak
+  // FX-10 / ADR-032: a busy writer is shown in product language with a retry,
+  // never as the raw manager error text.
+  const rawWriterErrorLeak = [...activeFiles.map(item => item.source), feedback, language, historyStore]
+    .some(source => /project writer already open/i.test(source))
+  const projectBusyRecovery = /PROJECT_BUSY:\s*'项目正在处理后台任务，请稍后再试/.test(language)
+    && /retryCommand/.test(feedback)
+    && />重试</.test(feedback)
+    && /function retryCommand/.test(historyStore)
+    && /PROJECT_BUSY/.test(historyStore)
+    && !rawWriterErrorLeak
   const checks = {
     active_ui_language: missing.length === 0 && visibleLeaks.length === 0,
     presentation_mapping: /commandMessage/.test(feedback) && /productErrorMessage/.test(library) && /scopeLabel/.test(history) && /statusLabel/.test(canon) && /productErrorMessage/.test(production) && /sanitizeProductText/.test(volume) && /versionReason/.test(reader) && /export function (?:statusLabel|productErrorMessage|receiptSummary)/.test(language),
@@ -148,6 +158,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     retcon_plan_user_surface: retconPlanUserSurface,
     browser_evidence_fixtures: browserEvidenceFixtures,
     canon_user_surface: canonUserSurface,
+    project_busy_recovery: projectBusyRecovery,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
     b13_health_surface: /LongFormHealth\.vue/.test(router) && /factorLabel/.test(healthPage) && /statusLabel/.test(healthPage) && /factorLabel/.test(healthLanguage) && /issueKey/.test(healthLanguage),
@@ -246,6 +257,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     retconPlanUserSurface: { status: checks.retcon_plan_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'browser demo user-visible copy scan' },
     browserEvidenceFixtures: { status: checks.browser_evidence_fixtures ? 'PASS' : 'FAIL', verifiedBy: 'explicit demo-only M11-M14 route fixtures' },
     canonUserSurface: { status: checks.canon_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'user-visible summary/impact/message surface scan', detectedDisplayLeak: canonDisplayLeak },
+    projectBusyRecovery: { status: checks.project_busy_recovery ? 'PASS' : 'FAIL', verifiedBy: 'PROJECT_BUSY product message, retry with a new command id, no raw writer text' },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },
     futureShellDeferred: { status: checks.future_feature_boundary ? 'PASS' : 'FAIL', deferred: ['LongFormHealth.vue'], note: 'B13 formal health workspace is active.' },

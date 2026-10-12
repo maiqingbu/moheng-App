@@ -329,3 +329,29 @@ test('Product UX gate fails closed when Canon returns to user-visible impact cop
   assert.equal(result.status, 'FAIL')
   assert.equal(result.checks.canon_user_surface, 'FAIL')
 })
+
+test('FX-10 product UX gate requires the PROJECT_BUSY message and retry path', () => {
+  assert.equal(evaluateProductUx().checks.project_busy_recovery, 'PASS')
+  const withoutMapping = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/presentation/productLanguage.ts'
+      ? read(relative).replace(/\s*PROJECT_BUSY: '[^']*',/, '')
+      : read(relative),
+  })
+  assert.equal(withoutMapping.checks.project_busy_recovery, 'FAIL')
+  const withoutRetry = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/components/CommandFeedback.vue'
+      ? read(relative).replaceAll('retryCommand', 'noop')
+      : read(relative),
+  })
+  assert.equal(withoutRetry.checks.project_busy_recovery, 'FAIL')
+})
+
+test('FX-10 product UX gate fails closed when the raw writer error text reaches the UI', () => {
+  const result = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/ProductionCenter.vue'
+      ? read(relative).replace('</template>', '<p>project writer already open</p></template>')
+      : read(relative),
+  })
+  assert.equal(result.status, 'FAIL')
+  assert.equal(result.checks.project_busy_recovery, 'FAIL')
+})
