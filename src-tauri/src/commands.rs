@@ -6730,7 +6730,7 @@ fn execute_runtime_command(
                             DurableJobService::transition_for_worker(
                                 connection,
                                 project_id,
-                                &job_id,
+                                job_id,
                                 next,
                                 worker_id,
                                 requested_at,
@@ -6740,7 +6740,7 @@ fn execute_runtime_command(
                             DurableJobService::transition(
                                 connection,
                                 project_id,
-                                &job_id,
+                                job_id,
                                 next,
                                 requested_at,
                             )
@@ -6751,7 +6751,7 @@ fn execute_runtime_command(
                             DurableJobService::release_lease(
                                 connection,
                                 project_id,
-                                &job_id,
+                                job_id,
                                 requested_at,
                             )
                             .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;

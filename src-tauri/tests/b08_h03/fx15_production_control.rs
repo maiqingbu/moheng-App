@@ -615,10 +615,7 @@ fn fx15_commit_guard_rejects_a_control_that_arrives_after_commit_started() {
             .find_project_command_receipt(project_id, "key:fx15:late-cancel")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            stored_cancel.control_result.as_ref().unwrap().applied,
-            false
-        );
+        assert!(!stored_cancel.control_result.as_ref().unwrap().applied);
         assert_eq!(
             stored_cancel.control_result.as_ref().unwrap().job_id,
             ai_novel_production_system_core::stable_id::StableIdentityFactory::from_command(
