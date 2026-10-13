@@ -867,10 +867,11 @@ impl HealthRepository {
             .as_deref()
             .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
         let route = match (artifact_type.as_deref(), route_raw.as_deref()) {
-            (Some("VolumePlan"), Some(raw)) => Some(
-                crate::repositories::narrative::parse_formal_payload("VolumePlan", raw)
-                    .map_err(HealthRepositoryError::from)?,
-            ),
+            // FR-030: an untyped route is never interpreted; it surfaces as this
+            // scope's unavailable source instead of failing every other scope.
+            (Some("VolumePlan"), Some(raw)) => {
+                crate::repositories::narrative::parse_formal_payload("VolumePlan", raw).ok()
+            }
             (_, Some(raw)) => serde_json::from_str::<Value>(raw).ok(),
             (_, None) => None,
         };
