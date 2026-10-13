@@ -1,6 +1,7 @@
 use crate::generated::schema_versions::CONTRACT_VERSION;
 use crate::generated::types::{
     ArtifactRef, CommitBundle, CommitReceipt, DomainReceipt, HeadChange, ProjectCommandReceipt,
+    ProjectCommandReceiptControlResult,
 };
 use crate::generated::types::{ArtifactScopeLevel, ArtifactType};
 use crate::generated::validators::validate_commit_bundle;
@@ -86,6 +87,19 @@ impl CommitService {
         spec: ProjectCommandSpec<'_>,
         apply: impl FnOnce(&Connection) -> Result<T, CommitError>,
     ) -> Result<ProjectCommandOutcome<T>, CommitError> {
+        Self::commit_project_command_with_control_result(connection, spec, |connection| {
+            apply(connection).map(|value| (value, None))
+        })
+    }
+
+    pub fn commit_project_command_with_control_result<T>(
+        connection: &Connection,
+        spec: ProjectCommandSpec<'_>,
+        apply: impl FnOnce(
+            &Connection,
+        )
+            -> Result<(T, Option<ProjectCommandReceiptControlResult>), CommitError>,
+    ) -> Result<ProjectCommandOutcome<T>, CommitError> {
         connection.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             if let Some(previous) = Self::find_project_command_receipt(
@@ -113,7 +127,14 @@ impl CommitService {
                 }
             }
 
-            let value = apply(connection)?;
+            let (value, control_result) = apply(connection)?;
+            if control_result.is_some()
+                && !matches!(spec.command_type, "production_pause" | "production_cancel")
+            {
+                return Err(CommitError::ContractInvalid(
+                    "controlResult is only valid for production controls".into(),
+                ));
+            }
             let after = if spec.advance_revision {
                 before + 1
             } else {
@@ -147,6 +168,7 @@ impl CommitService {
                 request_digest: spec.request_digest.to_string(),
                 committed_at: spec.now.to_string(),
                 receipt_digest: String::new(),
+                control_result,
             };
             let mut digest_input = serde_json::to_value(&receipt)?;
             digest_input["receiptDigest"] = serde_json::json!("");
@@ -197,8 +219,11 @@ impl CommitService {
             )
             .optional()?;
         row.map(|(receipt_json, stored_digest)| {
-            let receipt: ProjectCommandReceipt = serde_json::from_str(&receipt_json)?;
-            let mut digest_input = serde_json::to_value(&receipt)?;
+            // Hash the stored object shape so v1 receipts stay byte-for-contract
+            // compatible and explicit `controlResult: null` cannot be normalized
+            // into the old field-absent digest.
+            let mut digest_input: serde_json::Value = serde_json::from_str(&receipt_json)?;
+            let receipt: ProjectCommandReceipt = serde_json::from_value(digest_input.clone())?;
             digest_input["receiptDigest"] = serde_json::json!("");
             let expected = sha256_canonical(&digest_input)?;
             if receipt.receipt_digest != expected || stored_digest != expected {

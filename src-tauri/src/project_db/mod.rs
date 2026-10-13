@@ -7,13 +7,14 @@ pub use read_pool::ReadPool;
 use crate::catalog::CatalogRepository;
 use crate::commit::{CommitError, CommitService};
 pub use crate::commit::{ProjectCommandOutcome, ProjectCommandSpec};
-use crate::generated::types::ProjectCommandReceipt;
+use crate::generated::types::{ProjectCommandReceipt, ProjectCommandReceiptControlResult};
 use crate::hash::sha256_canonical;
 use crate::repositories::ops::record_runtime_profile;
 pub use connection::DatabaseError;
 use connection::{migrate_project, open_connection, project_needs_migration, quick_check};
 use libsql_rusqlite::{Connection, OptionalExtension};
 use paths::{AppPaths, PathError};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::path::Path;
@@ -187,9 +188,131 @@ impl Drop for ReadLease {
 pub struct ProjectManager {
     paths: AppPaths,
     writers: Arc<WriterRegistry>,
+    production_control_lock: Arc<ProductionControlLockRegistry>,
     read_pool: Arc<Mutex<read_pool::ReadPool>>,
     maintenance: Arc<Mutex<HashSet<String>>>,
     restore_test_hook: Arc<Mutex<Option<RestoreTestHook>>>,
+    production_control_commit_test_hook: Arc<Mutex<Option<ProductionControlCommitTestHook>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProductionControlRequestOutcome {
+    Requested {
+        job_id: String,
+    },
+    NotRunning,
+    Replayed {
+        accepted: bool,
+        job_id: Option<String>,
+    },
+    Conflict,
+    Pending,
+}
+
+pub struct ProductionControlCommand<'a> {
+    pub project_id: &'a str,
+    pub action: &'a str,
+    pub job_id: &'a str,
+    pub command_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub request_digest: &'a str,
+    pub requested_at: &'a str,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionControlRequest {
+    pub action: String,
+    pub command_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub job_id: String,
+    pub requested_at: String,
+    #[serde(default = "default_production_control_accepted")]
+    pub accepted: bool,
+}
+
+fn default_production_control_accepted() -> bool {
+    true
+}
+
+pub fn production_control_result(
+    action: &str,
+    job_id: &str,
+    applied: bool,
+) -> ProjectCommandReceiptControlResult {
+    let cancelled = action == "CANCEL";
+    ProjectCommandReceiptControlResult {
+        job_id: job_id.into(),
+        control: action.into(),
+        applied,
+        action_status: if !applied {
+            "PRODUCTION_CONTROL_NOT_ACCEPTED".into()
+        } else if cancelled {
+            "PRODUCTION_CANCELLED".into()
+        } else {
+            "PRODUCTION_PAUSED".into()
+        },
+        message: if !applied {
+            if cancelled {
+                "本章正文已提交或作业已结束，取消未生效。".into()
+            } else {
+                "本章作业已结束，暂停未生效。".into()
+            }
+        } else if cancelled {
+            "本章生成已取消，未提交任何正文。".into()
+        } else {
+            "本章生成已暂停，可以稍后继续。".into()
+        },
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ProductionControlFile {
+    #[serde(default)]
+    pending: Option<ProductionControlRequest>,
+}
+
+/// Holds the short per-process serialization boundary shared by control
+/// requests and the final production commit.
+pub struct ProductionControlGuard {
+    registry: Arc<ProductionControlLockRegistry>,
+    project_id: String,
+}
+
+#[derive(Default)]
+struct ProductionControlLockRegistry {
+    held: Mutex<HashSet<String>>,
+    released: Condvar,
+}
+
+impl ProductionControlLockRegistry {
+    fn acquire(self: &Arc<Self>, project_id: &str) -> Result<ProductionControlGuard, ManagerError> {
+        let mut held = self
+            .held
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?;
+        while held.contains(project_id) {
+            held = self
+                .released
+                .wait(held)
+                .map_err(|_| ManagerError::WriterLockPoisoned)?;
+        }
+        held.insert(project_id.to_string());
+        Ok(ProductionControlGuard {
+            registry: Arc::clone(self),
+            project_id: project_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ProductionControlGuard {
+    fn drop(&mut self) {
+        if let Ok(mut held) = self.registry.held.lock() {
+            held.remove(&self.project_id);
+        }
+        self.registry.released.notify_all();
+    }
 }
 
 /// Upper bound a writer request waits for another holder to release the
@@ -197,6 +320,7 @@ pub struct ProjectManager {
 pub const WRITER_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub type RestoreTestHook = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+pub type ProductionControlCommitTestHook = Box<dyn FnOnce() + Send>;
 
 pub struct ProjectMaintenanceGuard {
     maintenance: Arc<Mutex<HashSet<String>>>,
@@ -234,9 +358,11 @@ impl ProjectManager {
         Self {
             paths,
             writers: Arc::new(WriterRegistry::default()),
+            production_control_lock: Arc::new(ProductionControlLockRegistry::default()),
             read_pool: Arc::new(Mutex::new(read_pool::ReadPool::new(16, 4))),
             maintenance: Arc::new(Mutex::new(HashSet::new())),
             restore_test_hook: Arc::new(Mutex::new(None)),
+            production_control_commit_test_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -246,6 +372,246 @@ impl ProjectManager {
             .restore_test_hook
             .lock()
             .map_err(|_| ManagerError::WriterLockPoisoned)? = hook;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn set_production_control_commit_test_hook(
+        &self,
+        hook: Option<ProductionControlCommitTestHook>,
+    ) -> Result<(), ManagerError> {
+        *self
+            .production_control_commit_test_hook
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)? = hook;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn run_production_control_commit_test_hook(&self) -> Result<(), ManagerError> {
+        let hook = self
+            .production_control_commit_test_hook
+            .lock()
+            .map_err(|_| ManagerError::WriterLockPoisoned)?
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(())
+    }
+
+    /// Whether some command currently holds this project's writer.
+    pub fn writer_is_held(&self, project_id: &str) -> Result<bool, ManagerError> {
+        self.writers.is_held(project_id)
+    }
+
+    pub fn lock_production_control(
+        &self,
+        project_id: &str,
+    ) -> Result<ProductionControlGuard, ManagerError> {
+        self.production_control_lock.acquire(project_id)
+    }
+
+    fn production_control_path(
+        &self,
+        project_id: &str,
+    ) -> Result<std::path::PathBuf, ManagerError> {
+        Ok(self
+            .resolve_registered_project_path(project_id)?
+            .join("control")
+            .join("production-control.json"))
+    }
+
+    /// FX-15: records one pause/cancel signal for the exact chapter job that
+    /// currently holds the writer. A different request cannot replace a
+    /// pending signal before its CommitService receipt is durable.
+    pub fn request_production_control(
+        &self,
+        guard: &ProductionControlGuard,
+        request: ProductionControlCommand<'_>,
+    ) -> Result<ProductionControlRequestOutcome, ManagerError> {
+        let ProductionControlCommand {
+            project_id,
+            action,
+            job_id,
+            command_id,
+            idempotency_key,
+            request_digest,
+            requested_at,
+        } = request;
+        if guard.project_id != project_id {
+            return Err(ManagerError::ProjectCommand(
+                "PRODUCTION_CONTROL_PROJECT_MISMATCH".into(),
+            ));
+        }
+        let path = self.production_control_path(project_id)?;
+        let mut control_file = Self::read_production_control_file(&path)?;
+        if let Some(pending) = control_file.pending.as_ref() {
+            if pending.command_id == command_id || pending.idempotency_key == idempotency_key {
+                if pending.command_id == command_id
+                    && pending.idempotency_key == idempotency_key
+                    && pending.request_digest == request_digest
+                    && pending.action == action
+                    && pending.job_id == job_id
+                {
+                    return Ok(ProductionControlRequestOutcome::Replayed {
+                        accepted: pending.accepted,
+                        job_id: Some(pending.job_id.clone()),
+                    });
+                }
+                return Ok(ProductionControlRequestOutcome::Conflict);
+            }
+            return Ok(ProductionControlRequestOutcome::Pending);
+        }
+
+        let latest_job = if self.writers.is_held(project_id)? {
+            self.with_read_connection(project_id, requested_at, |connection| {
+                crate::repositories::runtime::DurableJobService::latest_job(connection, project_id)
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            })?
+        } else {
+            None
+        };
+        let active_job_id = latest_job
+            .as_ref()
+            .and_then(|(latest_id, job_type, status)| {
+                (latest_id == job_id
+                    && job_type == "CHAPTER"
+                    && matches!(status.as_str(), "RUNNING" | "WAITING_MODEL"))
+                .then_some(latest_id.clone())
+            });
+        let accepted = active_job_id.is_some();
+        control_file.pending = Some(ProductionControlRequest {
+            action: action.into(),
+            command_id: command_id.into(),
+            idempotency_key: idempotency_key.into(),
+            request_digest: request_digest.into(),
+            job_id: job_id.into(),
+            requested_at: requested_at.into(),
+            accepted,
+        });
+        Self::write_production_control_file(&path, &control_file)?;
+        if accepted {
+            Ok(ProductionControlRequestOutcome::Requested {
+                job_id: job_id.into(),
+            })
+        } else {
+            Ok(ProductionControlRequestOutcome::NotRunning)
+        }
+    }
+
+    pub fn replay_production_control(
+        &self,
+        guard: &ProductionControlGuard,
+        project_id: &str,
+        command_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<Option<ProductionControlRequestOutcome>, ManagerError> {
+        if guard.project_id != project_id {
+            return Err(ManagerError::ProjectCommand(
+                "PRODUCTION_CONTROL_PROJECT_MISMATCH".into(),
+            ));
+        }
+        let path = self.production_control_path(project_id)?;
+        let control_file = Self::read_production_control_file(&path)?;
+        Ok(control_file.pending.as_ref().and_then(|pending| {
+            if pending.command_id != command_id && pending.idempotency_key != idempotency_key {
+                return None;
+            }
+            if pending.command_id == command_id
+                && pending.idempotency_key == idempotency_key
+                && pending.request_digest == request_digest
+            {
+                Some(ProductionControlRequestOutcome::Replayed {
+                    accepted: pending.accepted,
+                    job_id: Some(pending.job_id.clone()),
+                })
+            } else {
+                Some(ProductionControlRequestOutcome::Conflict)
+            }
+        }))
+    }
+
+    /// Reads the single temporary production control signal without consuming it.
+    pub fn peek_production_control(
+        &self,
+        guard: &ProductionControlGuard,
+        project_id: &str,
+    ) -> Result<Option<ProductionControlRequest>, ManagerError> {
+        if guard.project_id != project_id {
+            return Err(ManagerError::ProjectCommand(
+                "PRODUCTION_CONTROL_PROJECT_MISMATCH".into(),
+            ));
+        }
+        let path = self.production_control_path(project_id)?;
+        Ok(Self::read_production_control_file(&path)?.pending)
+    }
+
+    /// Clears a signal only after its authoritative command receipt has committed.
+    pub fn clear_production_control(
+        &self,
+        guard: &ProductionControlGuard,
+        project_id: &str,
+        idempotency_key: &str,
+    ) -> Result<(), ManagerError> {
+        if guard.project_id != project_id {
+            return Err(ManagerError::ProjectCommand(
+                "PRODUCTION_CONTROL_PROJECT_MISMATCH".into(),
+            ));
+        }
+        let path = self.production_control_path(project_id)?;
+        let mut control_file = Self::read_production_control_file(&path)?;
+        if control_file
+            .pending
+            .as_ref()
+            .is_some_and(|request| request.idempotency_key == idempotency_key)
+        {
+            control_file.pending = None;
+            Self::write_production_control_file(&path, &control_file)?;
+        }
+        Ok(())
+    }
+
+    fn read_production_control_file(path: &Path) -> Result<ProductionControlFile, ManagerError> {
+        match std::fs::read_to_string(path) {
+            Ok(raw) => {
+                let value: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                if value.get("pending").is_some() {
+                    serde_json::from_value(value)
+                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                } else if value.get("action").is_some() {
+                    Ok(ProductionControlFile {
+                        pending: serde_json::from_value(value)
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?,
+                    })
+                } else {
+                    Ok(ProductionControlFile::default())
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(ProductionControlFile::default())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn write_production_control_file(
+        path: &Path,
+        control_file: &ProductionControlFile,
+    ) -> Result<(), ManagerError> {
+        let directory = path.parent().ok_or(ManagerError::ProjectNotFound)?;
+        std::fs::create_dir_all(directory)?;
+        let staging = directory.join("production-control.json.tmp");
+        let contents = serde_json::to_vec(control_file)
+            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+        {
+            let mut file = std::fs::File::create(&staging)?;
+            std::io::Write::write_all(&mut file, &contents)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&staging, path)?;
         Ok(())
     }
 
@@ -622,6 +988,22 @@ impl ProjectManager {
         };
         let connection: &Connection = &handle;
         CommitService::commit_project_command(connection, spec, |connection| {
+            apply(connection).map_err(|error| CommitError::ProjectCommandApply(error.to_string()))
+        })
+        .map_err(manager_error_from_commit)
+    }
+
+    pub fn commit_project_command_with_control_result<T>(
+        &self,
+        spec: ProjectCommandSpec<'_>,
+        apply: impl FnOnce(
+            &Connection,
+        )
+            -> Result<(T, Option<ProjectCommandReceiptControlResult>), ManagerError>,
+    ) -> Result<ProjectCommandOutcome<T>, ManagerError> {
+        let handle = self.open(spec.project_id, "", spec.now)?;
+        let connection: &Connection = &handle;
+        CommitService::commit_project_command_with_control_result(connection, spec, |connection| {
             apply(connection).map_err(|error| CommitError::ProjectCommandApply(error.to_string()))
         })
         .map_err(manager_error_from_commit)

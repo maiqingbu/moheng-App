@@ -128,6 +128,37 @@ export const useProjectStore = defineStore('project-projection', () => {
   const workspaceSequences = new Map<string, number>()
   const inFlightCommands = new Map<string, Promise<CommandReceipt>>()
   const busyRetryRequests = new Map<string, CommandRequest>()
+  const busyProjectCounts = ref(new Map<string, number>())
+  // FX-15: while a chapter generates or an AI suggestion runs, the backend holds
+  // this work's writer; writes are refused up front instead of waiting to fail.
+  function isProjectWriteLocked(projectId: string | null) {
+    return projectId !== null && (
+      (currentProjectId.value === projectId && production.value?.isActive === true)
+      || (busyProjectCounts.value.get(projectId) ?? 0) > 0
+    )
+  }
+  const writeLocked = computed(() => isProjectWriteLocked(currentProjectId.value))
+  const writeLockAllowed = new Set(['production_pause', 'production_cancel'])
+  const globalCommandTypes = new Set(['project_create_from_idea', 'project_create_from_market', 'global_settings_save'])
+  const modelBusyCommandTypes = new Set([
+    'production_start', 'story_directions_generate', 'pitch_regenerate',
+    'opening_evaluate', 'book_plan_revise', 'planning_prepare_next_chapter',
+  ])
+  async function withProjectBusy<T>(work: () => Promise<T>, projectId = currentProjectId.value): Promise<T> {
+    if (!projectId) return work()
+    const counts = new Map(busyProjectCounts.value)
+    counts.set(projectId, (counts.get(projectId) ?? 0) + 1)
+    busyProjectCounts.value = counts
+    try {
+      return await work()
+    } finally {
+      const next = new Map(busyProjectCounts.value)
+      const count = (next.get(projectId) ?? 1) - 1
+      if (count > 0) next.set(projectId, count)
+      else next.delete(projectId)
+      busyProjectCounts.value = next
+    }
+  }
 
   const project = computed(() => overview.value?.project ?? null)
   const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
@@ -816,6 +847,21 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   async function runCommand(key: string, request: CommandRequest) {
+    const projectId = request.projectId ?? currentProjectId.value
+    const targetsProject = projectId !== null && !globalCommandTypes.has(request.type)
+    const dedupeKey = inFlightCommandKey(request)
+    const duplicateInFlightCommand = dedupeKey !== null && inFlightCommands.has(dedupeKey)
+    if (targetsProject && isProjectWriteLocked(projectId) && !writeLockAllowed.has(request.type) && !duplicateInFlightCommand) {
+      commandStates.value[key] = { status: 'blocked', message: 'PROJECT_WRITE_LOCKED' }
+      throw new Error('PROJECT_WRITE_LOCKED')
+    }
+    if (targetsProject && modelBusyCommandTypes.has(request.type)) {
+      return withProjectBusy(() => dispatchCommand(key, request), projectId)
+    }
+    return dispatchCommand(key, request)
+  }
+
+  async function dispatchCommand(key: string, request: CommandRequest) {
     if (request.type === 'repair_execute') {
       const repairPlanId = request.payload?.repairPlanId
       const authorizationId = request.payload?.authorizationId
@@ -886,13 +932,13 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, decisions,
+    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, writeLocked, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
-    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, testProvider, commandState,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

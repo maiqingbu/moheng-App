@@ -85,7 +85,7 @@
     {
       "name": "project-command-receipt",
       "path": "schemas/command/project-command-receipt.schema.json",
-      "version": "m0a.project-command-receipt.v1"
+      "version": "m0a.project-command-receipt.v2"
     },
     {
       "name": "commit-bundle",

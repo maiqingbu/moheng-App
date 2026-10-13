@@ -1,0 +1,14 @@
+{
+  "receiptId": "project-receipt:cmd:null-result",
+  "projectId": "project:control",
+  "resultProjectId": "project:control",
+  "commandId": "cmd:null-result",
+  "idempotencyKey": "key:null-result",
+  "commandType": "production_cancel",
+  "beforeRevision": 5,
+  "afterRevision": 6,
+  "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "committedAt": "2026-10-14T00:01:00Z",
+  "receiptDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "controlResult": null
+}

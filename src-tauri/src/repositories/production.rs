@@ -740,7 +740,8 @@ impl ProductionRepository {
             .as_ref()
             .and_then(|(_, _, _, _, error_code)| error_code.clone());
         let is_active = matches!(job_status.as_deref(), Some("RUNNING" | "WAITING_MODEL"));
-        let can_retry = job_status.as_deref() == Some("FAILED") && final_ref.is_none();
+        let can_retry =
+            matches!(job_status.as_deref(), Some("FAILED" | "PAUSED")) && final_ref.is_none();
         let gate_status = if job_status.as_deref() == Some("FAILED") {
             "BLOCKED"
         } else if final_ref.is_some() {
