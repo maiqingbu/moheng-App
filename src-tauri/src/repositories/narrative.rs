@@ -9,6 +9,12 @@ pub const TASK_STATE_CHUNK_SIZE: usize = 100;
 pub const CONTINUITY_SOURCE_CHUNK_SIZE: i64 = 100;
 pub const TASK_STATES_BY_IDS_SQL: &str = "SELECT state_id, value_json, chapter_id FROM state_deltas WHERE project_id=?1 AND state_type='volume.task.progress' AND state_id IN (SELECT value FROM json_each(?2)) ORDER BY updated_at DESC, state_id LIMIT ?3";
 pub const ARTIFACT_PAYLOAD_BY_REF_SQL: &str = "SELECT a.artifact_type,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.version=?3 AND a.payload_hash=?4";
+pub(crate) const CANON_FACTS_FOR_SEMANTIC_KEY_SQL: &str = "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f INDEXED BY idx_canon_facts_subject_time LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id LIMIT ?4";
+pub(crate) const CANON_SEMANTIC_GROUPS_SQL: &str = "SELECT f.subject_id,f.predicate,f.fact_id,f.object_json,f.valid_from_chapter_id,f.valid_to_chapter_id,f.story_time_from,f.story_time_to,from_chapter.chapter_no,to_chapter.chapter_no FROM canon_facts f INDEXED BY idx_canon_facts_predicate_subject LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.superseded_by IS NULL AND f.predicate IN (SELECT value FROM json_each(?2)) ORDER BY f.subject_id,f.predicate,f.fact_id LIMIT ?3";
+pub(crate) const CURRENT_CANON_BOUNDED_SQL: &str = "SELECT f.fact_id, f.subject_id, f.predicate, f.object_json, f.authority_level FROM (SELECT DISTINCT value FROM json_each(?2)) requested CROSS JOIN canon_facts f WHERE f.rowid IN (SELECT rowid FROM canon_facts INDEXED BY idx_canon_facts_current_subject_fact WHERE project_id=?1 AND subject_id=requested.value AND superseded_by IS NULL ORDER BY fact_id LIMIT ?3) ORDER BY f.fact_id LIMIT ?3";
+pub(crate) const RECENT_CHAPTER_ENTITY_IDS_SQL: &str = "SELECT entity_id FROM (SELECT subject_id AS entity_id FROM canon_facts INDEXED BY idx_canon_facts_source_chapter WHERE project_id=?1 AND source_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT subject_id AS entity_id FROM canon_facts INDEXED BY idx_canon_facts_valid_from_chapter WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT subject_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT object_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT knower_id AS entity_id FROM canon_knowledge WHERE project_id=?1 AND from_chapter_id IN (SELECT value FROM json_each(?2))) WHERE entity_id IS NOT NULL ORDER BY entity_id LIMIT ?3";
+pub(crate) const CANON_FACTS_FOR_CHAPTERS_SQL: &str = "SELECT f.fact_id, f.subject_id, f.predicate, f.object_json, f.authority_level FROM (SELECT rowid AS rid FROM canon_facts INDEXED BY idx_canon_facts_source_chapter WHERE project_id=?1 AND source_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT rowid FROM canon_facts INDEXED BY idx_canon_facts_valid_from_chapter WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2))) scoped CROSS JOIN canon_facts f ON f.rowid=scoped.rid WHERE f.superseded_by IS NULL ORDER BY f.fact_id LIMIT ?3";
+pub(crate) const OPENING_ACTUAL_FACTS_SQL: &str = "SELECT f.fact_id,f.subject_id,e.canonical_name,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,f.evidence_range_json FROM (SELECT rowid AS rid FROM canon_facts WHERE project_id=?1 AND fact_id IN (SELECT value FROM json_each(?2)) UNION SELECT rowid FROM canon_facts INDEXED BY idx_canon_facts_source_chapter WHERE project_id=?1 AND source_chapter_id IN (SELECT value FROM json_each(?3))) scoped CROSS JOIN canon_facts f ON f.rowid=scoped.rid LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id ORDER BY f.fact_id LIMIT 100";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NarrativeRepositoryError {
@@ -652,9 +658,7 @@ impl NarrativeRepository {
         limit: i64,
     ) -> Result<(Vec<SemanticCanonFactRecord>, bool), NarrativeRepositoryError> {
         let query_limit = Self::limit(limit).saturating_add(1);
-        let mut statement = connection.prepare(
-            "SELECT f.fact_id, f.object_json, f.valid_from_chapter_id, f.valid_to_chapter_id, f.story_time_from, f.story_time_to, from_chapter.chapter_no, to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.subject_id=?2 AND f.predicate=?3 AND f.superseded_by IS NULL ORDER BY f.fact_id LIMIT ?4",
-        )?;
+        let mut statement = connection.prepare(CANON_FACTS_FOR_SEMANTIC_KEY_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, subject_id, predicate, query_limit],
             |row| {
@@ -687,9 +691,7 @@ impl NarrativeRepository {
     ) -> Result<(Vec<SemanticCanonFactGroup>, bool), NarrativeRepositoryError> {
         let predicates_json = serde_json::to_string(predicates)?;
         let query_limit = (limit as i64).saturating_add(1);
-        let mut statement = connection.prepare(
-            "SELECT f.subject_id,f.predicate,f.fact_id,f.object_json,f.valid_from_chapter_id,f.valid_to_chapter_id,f.story_time_from,f.story_time_to,from_chapter.chapter_no,to_chapter.chapter_no FROM canon_facts f LEFT JOIN chapters from_chapter ON from_chapter.project_id=f.project_id AND from_chapter.chapter_id=f.valid_from_chapter_id LEFT JOIN chapters to_chapter ON to_chapter.project_id=f.project_id AND to_chapter.chapter_id=f.valid_to_chapter_id WHERE f.project_id=?1 AND f.superseded_by IS NULL AND f.predicate IN (SELECT value FROM json_each(?2)) ORDER BY f.subject_id,f.predicate,f.fact_id LIMIT ?3",
-        )?;
+        let mut statement = connection.prepare(CANON_SEMANTIC_GROUPS_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, predicates_json, query_limit],
             |row| {
@@ -1008,7 +1010,7 @@ impl NarrativeRepository {
     ) -> Result<(Vec<CanonFactRecord>, bool), NarrativeRepositoryError> {
         let bound = Self::limit(limit);
         let entity_ids = Self::ids_json(entity_ids)?;
-        let mut statement = connection.prepare("SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND subject_id IN (SELECT value FROM json_each(?2)) AND superseded_by IS NULL ORDER BY fact_id LIMIT ?3")?;
+        let mut statement = connection.prepare(CURRENT_CANON_BOUNDED_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, entity_ids, bound + 1],
             |row| {
@@ -1059,9 +1061,7 @@ impl NarrativeRepository {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         )?;
-        let mut statement = connection.prepare(
-            "SELECT entity_id FROM (SELECT subject_id AS entity_id FROM canon_facts WHERE project_id=?1 AND (source_chapter_id IN (SELECT value FROM json_each(?2)) OR valid_from_chapter_id IN (SELECT value FROM json_each(?2))) UNION SELECT subject_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT object_id AS entity_id FROM canon_relations WHERE project_id=?1 AND valid_from_chapter_id IN (SELECT value FROM json_each(?2)) UNION SELECT knower_id AS entity_id FROM canon_knowledge WHERE project_id=?1 AND from_chapter_id IN (SELECT value FROM json_each(?2))) WHERE entity_id IS NOT NULL ORDER BY entity_id LIMIT ?3",
-        )?;
+        let mut statement = connection.prepare(RECENT_CHAPTER_ENTITY_IDS_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, chapter_ids, bound + 1],
             |row| row.get(0),
@@ -1113,9 +1113,7 @@ impl NarrativeRepository {
     ) -> Result<(Vec<CanonFactRecord>, bool), NarrativeRepositoryError> {
         let ids = Self::ids_json(chapter_ids)?;
         let bound = Self::limit(limit);
-        let mut statement = connection.prepare(
-            "SELECT fact_id, subject_id, predicate, object_json, authority_level FROM canon_facts WHERE project_id=?1 AND superseded_by IS NULL AND (source_chapter_id IN (SELECT value FROM json_each(?2)) OR valid_from_chapter_id IN (SELECT value FROM json_each(?2))) ORDER BY fact_id LIMIT ?3",
-        )?;
+        let mut statement = connection.prepare(CANON_FACTS_FOR_CHAPTERS_SQL)?;
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, ids, bound + 1],
             |row| {
@@ -2102,9 +2100,7 @@ impl NarrativeRepository {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         )?;
-        let mut facts_statement = connection.prepare(
-            "SELECT f.fact_id,f.subject_id,e.canonical_name,f.predicate,f.object_json,f.source_chapter_id,f.source_artifact_id,f.source_version,f.evidence_range_json FROM canon_facts f LEFT JOIN canon_entities e ON e.project_id=f.project_id AND e.entity_id=f.subject_id WHERE f.project_id=?1 AND (f.fact_id IN (SELECT value FROM json_each(?2)) OR f.source_chapter_id IN (SELECT value FROM json_each(?3))) ORDER BY f.fact_id LIMIT 100",
-        )?;
+        let mut facts_statement = connection.prepare(OPENING_ACTUAL_FACTS_SQL)?;
         let facts = facts_statement
             .query_map(
                 libsql_rusqlite::params![project_id, canon_json, chapter_json],
@@ -3355,4 +3351,114 @@ mod fx8_legacy_payload_tests {
 pub struct CanonFactTimingRecord {
     pub story_time: Option<String>,
     pub source_chapter_no: Option<i64>,
+}
+
+#[cfg(test)]
+mod fx11_scoped_canon_lookup_tests {
+    use super::*;
+    use crate::project_db::paths::AppPaths;
+    use crate::project_db::ProjectManager;
+
+    /// Binds every placeholder to a literal so the plan matches production
+    /// shapes (JSON lists for `json_each`, small integers for limits).
+    fn plan(connection: &Connection, sql: &str) -> String {
+        let bound = sql
+            .replace("?1", "'p'")
+            .replace("json_each(?2)", "json_each('[\"x\"]')")
+            .replace("json_each(?3)", "json_each('[\"x\"]')")
+            .replace("?2", "'x'")
+            .replace("?3", "'x'")
+            .replace("?4", "100");
+        let bound = bound.replace("LIMIT 'x'", "LIMIT 100");
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {bound}"))
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" | ")
+    }
+
+    #[test]
+    fn fx11_current_canon_bounded_keeps_global_order_truncation_and_dedup() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let connection = manager
+            .create("p", "FX-11", "2026-10-13T00:00:00Z")
+            .unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        // a: facts 01,04,07 ; b: 02,03,05,06 ; b:03 is superseded.
+        for (fact, subject, superseded) in [
+            ("fact:01", "a", None),
+            ("fact:02", "b", None),
+            ("fact:03", "b", Some("fact:99")),
+            ("fact:04", "a", None),
+            ("fact:05", "b", None),
+            ("fact:06", "b", None),
+            ("fact:07", "a", None),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,superseded_by,created_at,updated_at) VALUES (?1,'p',?2,'k','{}',?3,'t','t')",
+                    libsql_rusqlite::params![fact, subject, superseded],
+                )
+                .unwrap();
+        }
+        let ids = |records: &[CanonFactRecord]| {
+            records
+                .iter()
+                .map(|record| record.fact_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let (records, truncated) =
+            NarrativeRepository::current_canon_bounded(&connection, "p", &["b", "a", "b"], 4)
+                .unwrap();
+        assert_eq!(ids(&records), "fact:01,fact:02,fact:04,fact:05");
+        assert!(truncated);
+
+        let (records, truncated) =
+            NarrativeRepository::current_canon_bounded(&connection, "p", &["a"], 3).unwrap();
+        assert_eq!(ids(&records), "fact:01,fact:04,fact:07");
+        assert!(!truncated);
+
+        let (records, truncated) =
+            NarrativeRepository::current_canon_bounded(&connection, "p", &[], 3).unwrap();
+        assert!(records.is_empty() && !truncated);
+    }
+
+    #[test]
+    fn fx11_canon_lookups_use_scoped_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ProjectManager::new(AppPaths::new(temp.path()));
+        let connection = manager
+            .create("p", "FX-11", "2026-10-13T00:00:00Z")
+            .unwrap();
+        for (name, sql) in [
+            (
+                "CANON_FACTS_FOR_SEMANTIC_KEY_SQL",
+                CANON_FACTS_FOR_SEMANTIC_KEY_SQL,
+            ),
+            ("CANON_SEMANTIC_GROUPS_SQL", CANON_SEMANTIC_GROUPS_SQL),
+            ("CURRENT_CANON_BOUNDED_SQL", CURRENT_CANON_BOUNDED_SQL),
+            (
+                "RECENT_CHAPTER_ENTITY_IDS_SQL",
+                RECENT_CHAPTER_ENTITY_IDS_SQL,
+            ),
+            ("CANON_FACTS_FOR_CHAPTERS_SQL", CANON_FACTS_FOR_CHAPTERS_SQL),
+            ("OPENING_ACTUAL_FACTS_SQL", OPENING_ACTUAL_FACTS_SQL),
+        ] {
+            let plan = plan(&connection, sql);
+            // NFR-001: walking (project_id, fact_id) visits every fact in the book.
+            assert!(
+                !plan.contains("sqlite_autoindex_canon_facts_2 (project_id=?)")
+                    && !plan.contains("SCAN canon_facts")
+                    && !plan.contains("SCAN f "),
+                "{name} must use a scoped canon_facts index: {plan}"
+            );
+        }
+    }
 }

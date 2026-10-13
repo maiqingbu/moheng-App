@@ -207,6 +207,16 @@ fn b09_h04_long_book_scale_certification_uses_real_shared_database() {
             |row| row.get(0),
         )
         .unwrap();
+    // FX-11: the fixture puts every one of its 1M facts on a single entity.
+    // That entity must fail closed (asserted below); the measured context
+    // compile uses an ordinary entity instead.
+    let dense_entity_id: String = connection
+        .query_row(
+            "SELECT entity_id FROM canon_entities WHERE project_id='p1' ORDER BY entity_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let entity_id = "entity:b09-context".to_string();
     connection
         .execute(
@@ -377,6 +387,15 @@ fn b09_h04_long_book_scale_certification_uses_real_shared_database() {
     let mut pagination_ok = true;
     let lifecycle_request = json!({"projectId":"p1","volumeId":volume_id,"maxResults":100});
     let context_request = json!({"projectId":"p1","volumeId":volume_id,"chapterId":chapter_id,"entityIds":[entity_id],"references":[],"executionMode":"LONG_FORM"});
+    let dense_error = query_context_manifest_impl(
+        &state,
+        json!({"projectId":"p1","volumeId":volume_id,"chapterId":chapter_id,"entityIds":[dense_entity_id],"references":[],"executionMode":"LONG_FORM"}),
+    )
+    .unwrap_err();
+    assert!(
+        dense_error.contains("CONTEXT_HARD_INCOMPLETE|sources=CANON"),
+        "an entity with more current facts than the HARD bound must fail closed: {dense_error}"
+    );
     let route_request =
         json!({"projectId":"p1","volumeId":volume_id,"currentChapter":1,"maxResults":100});
     for _ in 0..30 {
