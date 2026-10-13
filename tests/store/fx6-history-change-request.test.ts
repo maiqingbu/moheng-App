@@ -38,6 +38,8 @@ describe('FX-6 continuity ChangeRequest navigation', () => {
       loadHistory: vi.fn(async () => { harness.store.history = projection(); return harness.store.history }),
       isWorkspaceLoading: () => false,
       commandState: () => ({ status: 'idle', message: '' }),
+      withdrawRequests: null,
+      loadWithdrawRequests: vi.fn(async () => null),
       confirmCommandResult: vi.fn(),
       runCommand: vi.fn(async (key: string, request: Record<string, any>) => {
         calls.push({ key, request })

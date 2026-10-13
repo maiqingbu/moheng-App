@@ -562,3 +562,370 @@ fn b08_user_responsibility_adjustments_are_versioned_and_replayable() {
     assert_eq!(snapshot_v2["previousAdjustmentRef"]["version"], 1);
     let _ = (chapter_id, volume_id);
 }
+
+fn fx12_withdraw_decide(
+    state: &KernelState,
+    project_id: &str,
+    change_request_id: &str,
+    decision: &str,
+    command: &str,
+    expected_revision: i64,
+) -> Result<Value, String> {
+    execute_command_impl(
+        state,
+        json!({
+            "type":"thread_withdraw_decide","commandId":format!("cmd:fx12:{command}"),
+            "idempotencyKey":format!("key:fx12:{command}"),"projectId":project_id,
+            "expectedRevision":expected_revision,"requestedAt":NOW,
+            "payload":{"changeRequestId":change_request_id,"decision":decision}
+        }),
+    )
+}
+
+fn fx12_state(state: &KernelState, project_id: &str, change_request_id: &str) -> Value {
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    let lifecycle: String = connection.query_row(
+        "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:existing'",
+        [project_id], |row| row.get(0),
+    ).unwrap();
+    let request_status: String = connection.query_row(
+        "SELECT json_extract(p.payload_json,'$.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 ORDER BY a.version DESC LIMIT 1",
+        libsql_rusqlite::params![project_id, change_request_id], |row| row.get(0),
+    ).unwrap();
+    let decision_outcome: String = connection.query_row(
+        "SELECT outcome FROM decisions WHERE project_id=?1 AND decision_type='NO_LONGER_APPLICABLE_CHANGE_REQUEST' AND json_extract(payload_json,'$.changeRequestRef.artifactId')=?2",
+        libsql_rusqlite::params![project_id, change_request_id], |row| row.get(0),
+    ).unwrap();
+    let revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(&connection, project_id).unwrap();
+    let source: String = connection.query_row(
+        "SELECT source_artifact_id||'@'||source_version||'#'||authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:existing'",
+        [project_id], |row| row.get(0),
+    ).unwrap();
+    let thread_status = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::continuity_threads_complete(&connection, project_id)
+        .unwrap()
+        .into_iter()
+        .find(|thread| thread.thread_id == "thread:promise:existing")
+        .map(|thread| thread.logical_status);
+    json!({"lifecycle":lifecycle,"requestStatus":request_status,"decision":decision_outcome,"revision":revision,"threadStatus":thread_status,"source":source})
+}
+
+/// A B-level, audit-added responsibility deleted by the user becomes a pending
+/// withdraw request (FX-8.6). Returns (change request id, revision).
+fn fx12_user_withdraw_request(state: &KernelState, project_id: &str) -> (String, i64) {
+    let _ = seed_b08_long_form_project(state, project_id);
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    seed_b4a_existing_obligation(&connection, project_id);
+    connection.execute(
+        "INSERT INTO decisions(decision_id,project_id,decision_type,outcome,reason,source_ref,payload_json,created_at,updated_at) VALUES ('decision:fx12:promotion',?1,'THREAD_PROMOTION_RULE','B','FX-12 审计新增责任','thread:promise:existing','{\"ruleVersion\":\"thread-promotion.r1\"}',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    drop(connection);
+    let deleted = execute_command_impl(state, json!({
+        "type":"thread_responsibility_adjust","commandId":"cmd:fx12:delete",
+        "idempotencyKey":"key:fx12:delete","projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"threadRef":"thread:promise:existing","action":"DELETE"}
+    })).unwrap();
+    assert_eq!(deleted["actionStatus"], "CHANGE_REQUEST_SUBMITTED");
+    (
+        deleted["changeRequestId"].as_str().unwrap().to_owned(),
+        deleted["afterRevision"].as_i64().unwrap(),
+    )
+}
+
+#[test]
+fn fx12_withdraw_request_from_user_delete_abandons_after_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx12-user-approve";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let (request_id, revision) = fx12_user_withdraw_request(&state, project_id);
+    let before = fx12_state(&state, project_id, &request_id);
+    assert_eq!(before["lifecycle"], "PROGRESSING");
+    let pending = ai_novel_production_system_core::commands::query_pending_withdraw_requests_impl(
+        &state,
+        json!({"projectId":project_id}),
+    )
+    .unwrap();
+    assert_eq!(pending["items"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["items"][0]["changeRequestId"], request_id.as_str());
+    assert_eq!(
+        pending["items"][0]["responsibilityRef"],
+        "thread:promise:existing"
+    );
+    assert_eq!(pending["items"][0]["origin"], "USER_DELETE");
+
+    let approved = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "approve",
+        revision,
+    )
+    .unwrap();
+    assert_eq!(approved["finalStatus"], "committed");
+    assert_eq!(approved["actionStatus"], "WITHDRAW_APPROVED");
+    let after = fx12_state(&state, project_id, &request_id);
+    assert_eq!(after["lifecycle"], "ABANDONED");
+    assert_eq!(after["requestStatus"], "APPROVED");
+    assert_eq!(after["decision"], "APPROVED");
+    assert_eq!(after["threadStatus"], "ABANDONED");
+    assert_eq!(after["revision"], revision + 1, "one atomic commit");
+    assert_eq!(
+        after["source"], before["source"],
+        "withdrawal keeps the original source and level"
+    );
+    let pending = ai_novel_production_system_core::commands::query_pending_withdraw_requests_impl(
+        &state,
+        json!({"projectId":project_id}),
+    )
+    .unwrap();
+    assert!(
+        pending["items"].as_array().unwrap().is_empty(),
+        "decided requests leave the pending list"
+    );
+
+    let replay = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "approve",
+        revision,
+    )
+    .unwrap();
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(
+        fx12_state(&state, project_id, &request_id)["revision"],
+        revision + 1
+    );
+}
+
+#[test]
+fn fx12_withdraw_request_rejected_keeps_responsibility() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx12-user-reject";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let (request_id, revision) = fx12_user_withdraw_request(&state, project_id);
+
+    let rejected = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "REJECT",
+        "reject",
+        revision,
+    )
+    .unwrap();
+    assert_eq!(rejected["actionStatus"], "WITHDRAW_REJECTED");
+    let after = fx12_state(&state, project_id, &request_id);
+    assert_eq!(after["lifecycle"], "PROGRESSING");
+    assert_eq!(after["requestStatus"], "REJECTED");
+    assert_eq!(after["decision"], "REJECTED");
+
+    let again = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "approve-after-reject",
+        revision + 1,
+    )
+    .unwrap_err();
+    assert!(
+        again.contains("RESPONSIBILITY_WITHDRAW_NOT_PENDING"),
+        "{again}"
+    );
+    assert_eq!(
+        fx12_state(&state, project_id, &request_id)["lifecycle"],
+        "PROGRESSING"
+    );
+}
+
+#[test]
+fn fx12_withdraw_request_stale_or_inactive_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx12-stale";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(RecordingGateway),
+    );
+    let (request_id, revision) = fx12_user_withdraw_request(&state, project_id);
+
+    let stale = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "stale",
+        revision - 1,
+    )
+    .unwrap_err();
+    assert!(stale.contains("REVISION_CONFLICT"), "{stale}");
+    assert_eq!(
+        fx12_state(&state, project_id, &request_id)["revision"],
+        revision
+    );
+
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    connection.execute(
+        "UPDATE narrative_obligations SET lifecycle='RESOLVED' WHERE project_id=?1 AND obligation_id='promise:existing'",
+        [project_id],
+    ).unwrap();
+    drop(connection);
+    let inactive = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "inactive",
+        revision,
+    )
+    .unwrap_err();
+    assert!(
+        inactive.contains("B08_RESPONSIBILITY_NOT_ACTIVE"),
+        "{inactive}"
+    );
+    let after = fx12_state(&state, project_id, &request_id);
+    assert_eq!(after["revision"], revision);
+    assert_eq!(after["requestStatus"], "PROPOSED");
+    assert_eq!(after["decision"], "PROPOSED");
+}
+
+#[test]
+fn fx12_withdraw_request_from_audit_abandons_after_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx12-audit-approve";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(LifecycleActionGateway {
+            disposition: "NO_LONGER_APPLICABLE_CHANGE_REQUEST",
+            bridge: None,
+        }),
+    );
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    seed_b4a_existing_obligation(&connection, project_id);
+    connection
+        .execute(
+            "DELETE FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChapterPlan'",
+            [project_id],
+        )
+        .unwrap();
+    drop(connection);
+    let production_revision =
+        compile_b4a_lifecycle_plan(&state, project_id, &chapter_id, &volume_id);
+    let produced = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:fx12:audit-production",
+            "idempotencyKey":"key:fx12:audit-production","projectId":project_id,
+            "expectedRevision":production_revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":["promise:existing"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(produced["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    let request_id: String = connection.query_row(
+        "SELECT artifact_id FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChangeRequest'",
+        [project_id], |row| row.get(0),
+    ).unwrap();
+    let revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(&connection, project_id).unwrap();
+    drop(connection);
+    let pending = ai_novel_production_system_core::commands::query_pending_withdraw_requests_impl(
+        &state,
+        json!({"projectId":project_id}),
+    )
+    .unwrap();
+    assert_eq!(pending["items"][0]["origin"], "CHAPTER_AUDIT");
+
+    let approved = fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "audit-approve",
+        revision,
+    )
+    .unwrap();
+    assert_eq!(approved["actionStatus"], "WITHDRAW_APPROVED");
+    let after = fx12_state(&state, project_id, &request_id);
+    assert_eq!(after["lifecycle"], "ABANDONED");
+    assert_eq!(after["requestStatus"], "APPROVED");
+    assert_eq!(after["decision"], "APPROVED");
+    assert_eq!(after["revision"], revision + 1);
+}
+
+#[test]
+fn fx12_withdraw_request_for_foreshadow_abandons_and_keeps_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx12-foreshadow";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(LifecycleActionGateway {
+            disposition: "NO_LONGER_APPLICABLE_CHANGE_REQUEST",
+            bridge: None,
+        }),
+    );
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    // The audit gateway reports thread:promise:existing; here it is a foreshadow.
+    connection.execute(
+        "INSERT INTO foreshadows(foreshadow_id,project_id,intent,secret_payload_ref,plant_chapter_id,forbidden_reveal_before_chapter,status,source_authority,created_at,updated_at) VALUES ('promise:existing',?1,'石门后的秘密','entity:actual:linzhou',?2,?2,'PLANTED','B',?3,?3)",
+        libsql_rusqlite::params![project_id, chapter_id, NOW],
+    ).unwrap();
+    connection
+        .execute(
+            "DELETE FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChapterPlan'",
+            [project_id],
+        )
+        .unwrap();
+    drop(connection);
+    let production_revision =
+        compile_b4a_lifecycle_plan(&state, project_id, &chapter_id, &volume_id);
+    let produced = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:fx12:foreshadow-production",
+            "idempotencyKey":"key:fx12:foreshadow-production","projectId":project_id,
+            "expectedRevision":production_revision,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM",
+                "entityIds":["entity:actual:linzhou"],"references":["promise:existing"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(produced["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    let request_id: String = connection.query_row(
+        "SELECT artifact_id FROM canonical_heads WHERE project_id=?1 AND artifact_type='ChangeRequest'",
+        [project_id], |row| row.get(0),
+    ).unwrap();
+    let revision = ai_novel_production_system_core::repositories::narrative::NarrativeRepository::project_revision(&connection, project_id).unwrap();
+    drop(connection);
+
+    fx12_withdraw_decide(
+        &state,
+        project_id,
+        &request_id,
+        "APPROVE",
+        "foreshadow-approve",
+        revision,
+    )
+    .unwrap();
+    let connection = state.manager.open(project_id, "FX-12", NOW).unwrap();
+    let (status, forbidden, source, secret): (String, Option<String>, String, Option<String>) = connection.query_row(
+        "SELECT status,forbidden_reveal_before_chapter,source_authority,secret_payload_ref FROM foreshadows WHERE project_id=?1 AND foreshadow_id='promise:existing'",
+        [project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(status, "ABANDONED");
+    assert_eq!(forbidden.as_deref(), Some(chapter_id.as_str()));
+    assert_eq!(source, "B");
+    assert_eq!(secret.as_deref(), Some("entity:actual:linzhou"));
+}

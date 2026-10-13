@@ -11,6 +11,7 @@ import type {
   CommandRequest,
   CommandStatus,
   ContinuityProjection,
+  PendingWithdrawRequestsProjection,
   FrontendPort,
   DecisionItem,
   HistoryProjection,
@@ -101,6 +102,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   const volumeDetail = ref<VolumeDetailProjection | null>(null)
   const planningRoute = ref<PlanningRouteProjection | null>(null)
   const continuityProjection = ref<ContinuityProjection | null>(null)
+  const withdrawRequests = ref<PendingWithdrawRequestsProjection | null>(null)
   const continuityVolumeId = ref<string | null>(null)
   const volumeLifecycle = ref<VolumeLifecycleProjection | null>(null)
   const decisions = ref<PageResult<DecisionItem> | null>(null)
@@ -379,6 +381,16 @@ export const useProjectStore = defineStore('project-projection', () => {
       continuityProjection.value = value
       continuityVolumeId.value = volumeId
     })
+  }
+  async function loadWithdrawRequests() {
+    return withWorkspace('withdraw-requests', () => frontendPort.queryPendingWithdrawRequests(queryBase('withdraw-requests', 50)), value => { withdrawRequests.value = value })
+  }
+  async function decideWithdrawRequest(changeRequestId: string, decision: 'APPROVE' | 'REJECT') {
+    try {
+      return await runCommand(`withdraw-decision:${changeRequestId}`, { type: 'thread_withdraw_decide', payload: { changeRequestId, decision } })
+    } finally {
+      await loadWithdrawRequests()
+    }
   }
   async function loadVolumeLifecycle(volumeId:string, force=false) {
     if (volumeLifecycle.value?.volumeId === volumeId && !force) return volumeLifecycle.value
@@ -874,11 +886,11 @@ export const useProjectStore = defineStore('project-projection', () => {
   function isWorkspaceLoading(key:string){ return !!workspaceLoading.value[key] }
 
   return {
-    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, decisions,
+    currentProjectId, overview, marketStrategy, directions, storySetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
     loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadOpeningReady, loadProduction, loadVolumes,
-    loadVolumeDetail, loadPlanningRoute, loadContinuity, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
+    loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
     loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading

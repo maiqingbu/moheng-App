@@ -516,3 +516,201 @@ fn unique_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
     let end = start + quote.chars().count();
     Some((start, end))
 }
+
+/// FX-12: decides a pending WITHDRAW_RESPONSIBILITY ChangeRequest (from the B08
+/// audit or a user DELETE of an A/B responsibility). One CommitService commit
+/// updates the responsibility, the request and its proposal decision together.
+pub fn execute_withdraw_decision(
+    manager: &ProjectManager,
+    command: AdjustmentCommand<'_>,
+) -> Result<Value, String> {
+    let AdjustmentCommand {
+        request,
+        project_id,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        requested_at,
+        ..
+    } = command;
+    let expected_revision = expected_revision
+        .ok_or_else(|| "IPC_INVALID:expectedRevision required for withdraw decision".to_string())?;
+    let payload = request
+        .get("payload")
+        .ok_or_else(|| "IPC_INVALID:payload".to_string())?;
+    let change_request_id = payload
+        .get("changeRequestId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "IPC_INVALID:changeRequestId".to_string())?;
+    let approve = match payload.get("decision").and_then(Value::as_str) {
+        Some("APPROVE") => true,
+        Some("REJECT") => false,
+        _ => return Err("IPC_INVALID:decision".into()),
+    };
+    let action_status = if approve {
+        "WITHDRAW_APPROVED"
+    } else {
+        "WITHDRAW_REJECTED"
+    };
+    let connection = manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let response = |receipt: crate::generated::types::CommitReceipt, replayed: bool| {
+        json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"committed",
+            "actionStatus":action_status,
+            "changeRequestId":change_request_id,
+            "receiptId":receipt.receipt_id,
+            "beforeRevision":receipt.before_revision,
+            "afterRevision":receipt.after_revision,
+            "replayed":replayed,
+            "receipt":receipt
+        })
+    };
+    if let Some(previous) = CommitService::find_receipt(&connection, project_id, idempotency_key)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(response(previous, true));
+    }
+
+    let (request_ref, mut request_payload, request_scope) =
+        NarrativeRepository::latest_committed_artifact(
+            &connection,
+            project_id,
+            change_request_id,
+            "ChangeRequest",
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "RESPONSIBILITY_WITHDRAW_NOT_FOUND".to_string())?;
+    if request_payload
+        .pointer("/requestedChange/kind")
+        .and_then(Value::as_str)
+        != Some("WITHDRAW_RESPONSIBILITY")
+    {
+        return Err("RESPONSIBILITY_WITHDRAW_NOT_FOUND".into());
+    }
+    if request_payload.get("status").and_then(Value::as_str) != Some("PROPOSED") {
+        return Err("RESPONSIBILITY_WITHDRAW_NOT_PENDING".into());
+    }
+    let thread_ref = request_payload
+        .get("responsibilityRef")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "RESPONSIBILITY_WITHDRAW_NOT_FOUND".to_string())?
+        .to_owned();
+    let authority_id = thread_ref.strip_prefix("thread:").unwrap_or(&thread_ref);
+    let decision_id = NarrativeRepository::withdraw_request_decision_id(
+        &connection,
+        project_id,
+        change_request_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "RESPONSIBILITY_WITHDRAW_NOT_FOUND".to_string())?;
+
+    let mut obligation_delta = Vec::new();
+    let mut foreshadow_delta = Vec::new();
+    if approve {
+        if let Some(record) = NarrativeRepository::responsibility_adjustment_record(
+            &connection,
+            project_id,
+            authority_id,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            if matches!(
+                record.lifecycle.as_str(),
+                "RESOLVED" | "ABANDONED" | "SUPERSEDED"
+            ) {
+                return Err("B08_RESPONSIBILITY_NOT_ACTIVE".into());
+            }
+            obligation_delta.push(json!({
+                "obligationId":record.obligation_id,
+                "scope":record.scope,
+                "obligationType":record.obligation_type,
+                "authorityLevel":record.authority_level,
+                "lifecycle":"ABANDONED",
+                "description":record.description,
+                "mustResolveBeforeChapter":record.must_resolve_before_chapter,
+                "prerequisites":record.prerequisites,
+                "decisionRef":decision_id,
+                // Explicit source: the bundle's first artifact (the request) must
+                // not replace the responsibility's original authority source.
+                "payloadJson":{"sourceArtifactId":record.source_artifact_id,"sourceVersion":record.source_version,"resumeCondition":record.resume_condition,"fulfillmentObject":record.fulfillment_object,"action":"WITHDRAW","changeRequestRef":request_ref}
+            }));
+        } else if let Some(foreshadow) =
+            NarrativeRepository::foreshadow_authority(&connection, project_id, authority_id)
+                .map_err(|error| error.to_string())?
+        {
+            if matches!(foreshadow.status.as_str(), "RECOVERED" | "ABANDONED") {
+                return Err("B08_RESPONSIBILITY_NOT_ACTIVE".into());
+            }
+            foreshadow_delta.push(json!({
+                "foreshadowId":authority_id,
+                "intent":foreshadow.intent,
+                "status":"ABANDONED",
+                "plantChapterId":foreshadow.plant_chapter_id,
+                "recoverWindowEndChapter":foreshadow.recover_window_end_chapter,
+                "forbiddenRevealBeforeChapter":foreshadow.forbidden_reveal_before_chapter,
+                "secretPayloadRef":foreshadow.secret_payload_ref,
+                "payloadJson":{"sourceAuthority":foreshadow.source_authority,"changeRequestRef":request_ref}
+            }));
+        } else {
+            return Err("B08_RESPONSIBILITY_NOT_FOUND".into());
+        }
+    }
+
+    let outcome = if approve { "APPROVED" } else { "REJECTED" };
+    request_payload["status"] = json!(outcome);
+    request_payload["decidedAt"] = json!(requested_at);
+    request_payload["decisionCommandId"] = json!(command_id);
+    let payload_hash = sha256_canonical(&request_payload).map_err(|error| error.to_string())?;
+    let version = crate::repositories::artifacts::ArtifactRepository::next_version(
+        &connection,
+        change_request_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({
+        "artifactId":change_request_id,
+        "projectId":project_id,
+        "artifactType":"ChangeRequest",
+        "scope":request_scope,
+        "version":version,
+        "schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE",
+        "semanticLifecycle":"MATERIALIZED",
+        "payload":request_payload,
+        "payloadHash":payload_hash,
+        "dependencyRefs":[request_ref],
+        "provenance":{"createdBy":"B08::ResponsibilityWithdrawDecisionOwner","commandId":command_id},
+        "createdAt":requested_at
+    }))
+    .map_err(|error| error.to_string())?;
+    let bundle = json!({
+        "commitId":format!("commit:{command_id}"),
+        "projectId":project_id,
+        "commandId":command_id,
+        "idempotencyKey":idempotency_key,
+        "expectedProjectRevision":expected_revision,
+        "contractVersion":"m0a.v1",
+        "createdAt":requested_at,
+        "artifacts":[artifact],
+        "headUpdates":[{"artifactType":"ChangeRequest","scope":request_scope,"artifactId":change_request_id,"version":version,"payloadHash":payload_hash}],
+        "obligationDelta":obligation_delta,
+        "foreshadowDelta":foreshadow_delta,
+        "decisionUpdates":[{
+            "decisionId":decision_id,
+            "decisionType":"NO_LONGER_APPLICABLE_CHANGE_REQUEST",
+            "outcome":outcome,
+            "reason":if approve { "用户批准撤销这项责任；原审计记录与证据保留。" } else { "用户拒绝撤销，这项责任保持有效。" },
+            "sourceRef":thread_ref,
+            "payloadJson":{"threadRef":thread_ref,"changeRequestRef":{"artifactId":change_request_id,"version":version,"payloadHash":payload_hash},"previousChangeRequestRef":request_ref,"actor":"USER","decidedAt":requested_at}
+        }],
+        "receiptDraft":{"domain":"B08_RESPONSIBILITY_WITHDRAW_DECISION","payload":{"threadRef":thread_ref,"changeRequestId":change_request_id,"outcome":outcome}}
+    });
+    let bundle: CommitBundle = serde_json::from_value(bundle).map_err(|error| error.to_string())?;
+    let receipt = CommitService::commit(&connection, &bundle, requested_at)
+        .map_err(|error| error.to_string())?;
+    Ok(response(receipt, false))
+}
