@@ -43,6 +43,8 @@ async function mountHistory(
     loadHistory,
     isWorkspaceLoading: () => false,
     commandState: () => ({ status: 'idle', message: '' }),
+    withdrawRequests: null,
+    loadWithdrawRequests: vi.fn(async () => null),
   })
   const root = document.createElement('div')
   document.body.appendChild(root)

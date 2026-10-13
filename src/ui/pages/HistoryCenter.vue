@@ -249,8 +249,20 @@ async function restoreChange(changeId: string) {
   }
 }
 
+// FX-12: withdraw-responsibility requests decided here, outside the B12 impact flow.
+const withdrawItems = computed(() => store.withdrawRequests?.items ?? [])
+const withdrawOriginLabel = (origin: string) => origin === 'USER_DELETE' ? '你删除的责任' : '章节审核发现'
+async function decideWithdraw(changeRequestId: string, decision: 'APPROVE' | 'REJECT') {
+  try {
+    await store.decideWithdrawRequest(changeRequestId, decision)
+  } catch (error) {
+    actionMessage.value = productErrorMessage(error, '撤销请求未能处理，请刷新后重试。')
+  }
+}
+
 onMounted(() => {
   void loadHistoryKind('all', false)
+  void store.loadWithdrawRequests().catch(() => undefined)
   if (productUxEvidenceMode.value === 'm12') {
     activeChange.value = {
       id: 'r1r2-demo-change',
@@ -489,6 +501,19 @@ async function approveAndApply() {
       <span>{{ historyFilterError }}</span>
       <button v-if="failedHistoryKind" class="btn small" style="margin-left:10px" @click="retryHistoryFilter">重试</button>
     </div>
+
+    <section v-if="withdrawItems.length" class="card pad section" data-withdraw-requests>
+      <div class="card-head"><div><h2 class="card-title">待确认的撤销责任请求</h2><p class="card-subtitle">批准后这项责任正式撤销，原审计记录与证据仍然保留；保留则责任继续有效。</p></div><span class="badge warning">{{ withdrawItems.length }} 项</span></div>
+      <div v-for="item in withdrawItems" :key="item.changeRequestId" class="list-row">
+        <div><strong>{{ sanitizeProductText(item.summary, '撤销一项剧情责任') }}</strong><div class="muted">{{ withdrawOriginLabel(item.origin) }}</div></div>
+        <div class="actions">
+          <button class="btn small warning" @click="decideWithdraw(item.changeRequestId, 'APPROVE')">批准撤销</button>
+          <button class="btn small" @click="decideWithdraw(item.changeRequestId, 'REJECT')">保留责任</button>
+        </div>
+        <CommandFeedback :state="store.commandState(`withdraw-decision:${item.changeRequestId}`)" />
+      </div>
+      <p v-if="store.withdrawRequests?.truncated" class="banner info">仅显示部分，已截断。</p>
+    </section>
 
     <section v-if="activeChange" class="card pad section">
       <div class="card-head"><div><h2 class="card-title">{{ readerProposalOnly ? '章节修改建议' : '当前变更方案' }}</h2><p class="card-subtitle">{{ readerProposalOnly ? '这条建议仅作意见留存并用于影响分析，尚无正式修订方案。' : '先看预计影响，再决定是否继续；正式执行后会再次核对结果。' }}</p></div><span class="badge" :class="!readerProposalOnly && activeChange.status === 'APPLIED' ? 'success' : 'warning'">{{ activeChangeStatusLabel }}</span></div>

@@ -214,6 +214,19 @@ pub struct ForeshadowAuthorityRecord {
     pub plant_chapter_id: Option<String>,
     pub recover_window_end_chapter: Option<String>,
     pub secret_payload_ref: Option<String>,
+    pub forbidden_reveal_before_chapter: Option<String>,
+    pub source_authority: String,
+}
+
+/// A user-visible withdraw-responsibility request still awaiting a decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingWithdrawRequest {
+    pub change_request_id: String,
+    pub responsibility_ref: String,
+    pub summary: String,
+    pub origin: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3192,10 +3205,86 @@ impl NarrativeRepository {
         foreshadow_id: &str,
     ) -> Result<Option<ForeshadowAuthorityRecord>, NarrativeRepositoryError> {
         connection.query_row(
-            "SELECT intent,status,plant_chapter_id,recover_window_end_chapter,secret_payload_ref FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2",
+            "SELECT intent,status,plant_chapter_id,recover_window_end_chapter,secret_payload_ref,forbidden_reveal_before_chapter,source_authority FROM foreshadows WHERE project_id=?1 AND foreshadow_id=?2",
             libsql_rusqlite::params![project_id, foreshadow_id],
-            |row| Ok(ForeshadowAuthorityRecord { intent: row.get(0)?, status: row.get(1)?, plant_chapter_id: row.get(2)?, recover_window_end_chapter: row.get(3)?, secret_payload_ref: row.get(4)? }),
+            |row| Ok(ForeshadowAuthorityRecord { intent: row.get(0)?, status: row.get(1)?, plant_chapter_id: row.get(2)?, recover_window_end_chapter: row.get(3)?, secret_payload_ref: row.get(4)?, forbidden_reveal_before_chapter: row.get(5)?, source_authority: row.get(6)? }),
         ).optional().map_err(Into::into)
+    }
+
+    /// Latest committed version of one artifact: its ref, plain JSON payload
+    /// and scope object.
+    pub fn latest_committed_artifact(
+        connection: &Connection,
+        project_id: &str,
+        artifact_id: &str,
+        artifact_type: &str,
+    ) -> Result<Option<(ArtifactRef, Value, Value)>, NarrativeRepositoryError> {
+        let row: Option<(i64, String, String, String)> = connection
+            .query_row(
+                "SELECT a.version,a.payload_hash,p.payload_json,a.scope_key FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_id=?2 AND a.artifact_type=?3 AND a.artifact_status='COMMITTED' ORDER BY a.version DESC LIMIT 1",
+                libsql_rusqlite::params![project_id, artifact_id, artifact_type],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        row.map(|(version, payload_hash, raw, scope_key)| {
+            Ok((
+                ArtifactRef {
+                    artifact_id: artifact_id.to_owned(),
+                    version,
+                    payload_hash,
+                },
+                serde_json::from_str(&raw)?,
+                serde_json::from_str(&scope_key)?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// The proposal decision recorded when a withdraw request was created.
+    pub fn withdraw_request_decision_id(
+        connection: &Connection,
+        project_id: &str,
+        change_request_id: &str,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT decision_id FROM decisions WHERE project_id=?1 AND decision_type='NO_LONGER_APPLICABLE_CHANGE_REQUEST' AND json_extract(payload_json,'$.changeRequestRef.artifactId')=?2 ORDER BY created_at LIMIT 1",
+                libsql_rusqlite::params![project_id, change_request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Withdraw-responsibility requests whose latest version is still PROPOSED.
+    pub fn pending_withdraw_requests(
+        connection: &Connection,
+        project_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PendingWithdrawRequest>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT a.artifact_id,json_extract(p.payload_json,'$.responsibilityRef'),json_extract(p.payload_json,'$.summary'),json_extract(a.provenance_json,'$.createdBy'),a.created_at FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChangeRequest' AND a.artifact_status='COMMITTED' AND a.version=(SELECT MAX(latest.version) FROM artifacts latest WHERE latest.project_id=a.project_id AND latest.artifact_id=a.artifact_id AND latest.artifact_status='COMMITTED') AND json_extract(p.payload_json,'$.requestedChange.kind')='WITHDRAW_RESPONSIBILITY' AND json_extract(p.payload_json,'$.status')='PROPOSED' ORDER BY a.created_at DESC,a.artifact_id LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, Self::limit(limit)],
+            |row| {
+                let created_by: Option<String> = row.get(3)?;
+                Ok(PendingWithdrawRequest {
+                    change_request_id: row.get(0)?,
+                    responsibility_ref: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    summary: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    origin: if created_by.as_deref()
+                        == Some("B08::ResponsibilityChangeRequestOwner")
+                    {
+                        "USER_DELETE".into()
+                    } else {
+                        "CHAPTER_AUDIT".into()
+                    },
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 

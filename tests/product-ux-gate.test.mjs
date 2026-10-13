@@ -355,3 +355,19 @@ test('FX-10 product UX gate fails closed when the raw writer error text reaches 
   assert.equal(result.status, 'FAIL')
   assert.equal(result.checks.project_busy_recovery, 'FAIL')
 })
+
+test('FX-12 product UX gate requires the withdraw-request surface and its product messages', () => {
+  assert.equal(evaluateProductUx().checks.withdraw_request_surface, 'PASS')
+  const withoutDecision = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/pages/HistoryCenter.vue'
+      ? read(relative).replaceAll('decideWithdrawRequest', 'noop')
+      : read(relative),
+  })
+  assert.equal(withoutDecision.checks.withdraw_request_surface, 'FAIL')
+  const withoutMessage = evaluateProductUx({
+    sourceReader: relative => relative === 'src/ui/presentation/productLanguage.ts'
+      ? read(relative).replace(/\s*RESPONSIBILITY_WITHDRAW_NOT_PENDING: '[^']*',/, '')
+      : read(relative),
+  })
+  assert.equal(withoutMessage.checks.withdraw_request_surface, 'FAIL')
+})

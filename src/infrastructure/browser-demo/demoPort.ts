@@ -25,6 +25,7 @@ import type {
   ProjectLibraryProjection,
   ProjectOverviewProjection,
   ProjectQueryRequest,
+  PendingWithdrawRequestsProjection,
   DependencySummaryBootstrapProjection,
   RetconContextProjection,
   SearchHit,
@@ -684,6 +685,7 @@ export class BrowserDemoPort implements FrontendPort {
 
   async queryNarrativeState(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_narrative_state') }
   async queryContinuity(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_continuity') }
+  async queryPendingWithdrawRequests(request: ProjectQueryRequest): Promise<PendingWithdrawRequestsProjection> { return { projectId: request.projectId, projectRevision: 0, items: [], truncated: false } }
   async queryVolumeProgress(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_volume_progress') }
   async queryContextManifest(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_context_manifest') }
   async queryPlanStale(): Promise<never> { throw new Error('IPC_UNSUPPORTED:query_plan_stale') }

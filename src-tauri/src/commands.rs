@@ -3255,6 +3255,34 @@ pub fn query_narrative_state_impl(state: &KernelState, request: Value) -> Result
         .map_err(|e| e.to_string())
 }
 
+/// FX-12: withdraw-responsibility requests awaiting the user's decision.
+pub fn query_pending_withdraw_requests_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    const LIMIT: i64 = 50;
+    let project_id = required_string(&request, "projectId")?;
+    let revision = state
+        .manager
+        .project_revision(project_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            let mut items =
+                crate::repositories::narrative::NarrativeRepository::pending_withdraw_requests(
+                    connection,
+                    project_id,
+                    LIMIT + 1,
+                )
+                .map_err(|e| ManagerError::ProjectCommand(e.to_string()))?;
+            let truncated = items.len() as i64 > LIMIT;
+            items.truncate(LIMIT as usize);
+            Ok(json!({"projectId":project_id,"projectRevision":revision,"items":items,"truncated":truncated}))
+        })
+        .map_err(|e| e.to_string())
+}
+
 pub fn query_continuity_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let project_id = required_string(&request, "projectId")?;
     let revision = state
@@ -8332,6 +8360,21 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 },
             )
         }
+        "thread_withdraw_decide" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            crate::narrative::responsibility::execute_withdraw_decision(
+                &state.manager,
+                crate::narrative::responsibility::AdjustmentCommand {
+                    request: &request,
+                    project_id: id,
+                    command_id,
+                    idempotency_key,
+                    expected_revision,
+                    request_digest: &digest,
+                    requested_at,
+                },
+            )
+        }
         "gate_policy_update" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             crate::gate_policy::execute_update(
@@ -9308,6 +9351,14 @@ pub fn query_continuity(state: State<'_, KernelState>, request: Value) -> Result
 }
 
 #[tauri::command]
+pub fn query_pending_withdraw_requests(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_pending_withdraw_requests_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_volume_progress(
     state: State<'_, KernelState>,
     request: Value,
@@ -9641,6 +9692,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_dependency_summary_bootstrap,
         query_narrative_state,
         query_continuity,
+        query_pending_withdraw_requests,
         query_volume_progress,
         query_context_manifest,
         query_plan_stale,

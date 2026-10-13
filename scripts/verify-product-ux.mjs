@@ -145,6 +145,14 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     && /function retryCommand/.test(historyStore)
     && /PROJECT_BUSY/.test(historyStore)
     && !rawWriterErrorLeak
+  // FX-12: withdraw-responsibility requests are decided in the History Center
+  // with product-language outcomes, never raw codes.
+  const withdrawRequestSurface = /data-withdraw-requests/.test(history)
+    && /decideWithdrawRequest/.test(history)
+    && /withdrawOriginLabel/.test(history)
+    && /function decideWithdrawRequest/.test(historyStore)
+    && /RESPONSIBILITY_WITHDRAW_NOT_PENDING:\s*'[\u4e00-\u9fff]/.test(language)
+    && /WITHDRAW_APPROVED/.test(language)
   const checks = {
     active_ui_language: missing.length === 0 && visibleLeaks.length === 0,
     presentation_mapping: /commandMessage/.test(feedback) && /productErrorMessage/.test(library) && /scopeLabel/.test(history) && /statusLabel/.test(canon) && /productErrorMessage/.test(production) && /sanitizeProductText/.test(volume) && /versionReason/.test(reader) && /export function (?:statusLabel|productErrorMessage|receiptSummary)/.test(language),
@@ -159,6 +167,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     browser_evidence_fixtures: browserEvidenceFixtures,
     canon_user_surface: canonUserSurface,
     project_busy_recovery: projectBusyRecovery,
+    withdraw_request_surface: withdrawRequestSurface,
     error_receipt_diagnostics: /receiptSummary/.test(language) && /receiptSummary\(receipt\)/.test(sourceReader('src/ui/stores/projectStore.ts')) && /productErrorMessage/.test(language) && /commandMessage/.test(feedback) && /repairMessage/.test(assistant) && /actionMessage/.test(history),
     ai_trace_lint: aiLeaks.length === 0,
     b13_health_surface: /LongFormHealth\.vue/.test(router) && /factorLabel/.test(healthPage) && /statusLabel/.test(healthPage) && /factorLabel/.test(healthLanguage) && /issueKey/.test(healthLanguage),
@@ -257,6 +266,7 @@ export function evaluateProductUx({ sourceReader = read } = {}) {
     retconPlanUserSurface: { status: checks.retcon_plan_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'browser demo user-visible copy scan' },
     browserEvidenceFixtures: { status: checks.browser_evidence_fixtures ? 'PASS' : 'FAIL', verifiedBy: 'explicit demo-only M11-M14 route fixtures' },
     canonUserSurface: { status: checks.canon_user_surface ? 'PASS' : 'FAIL', verifiedBy: 'user-visible summary/impact/message surface scan', detectedDisplayLeak: canonDisplayLeak },
+    withdrawRequestSurface: { status: checks.withdraw_request_surface ? 'PASS' : 'FAIL', verifiedBy: 'History Center withdraw requests with product-language decisions' },
     projectBusyRecovery: { status: checks.project_busy_recovery ? 'PASS' : 'FAIL', verifiedBy: 'PROJECT_BUSY product message, retry with a new command id, no raw writer text' },
     errorReceiptDiagnostics: { status: checks.error_receipt_diagnostics ? 'PASS' : 'FAIL' },
     aiTraceLint: { status: checks.ai_trace_lint ? 'PASS' : 'FAIL', blockingMatches: aiLeaks },

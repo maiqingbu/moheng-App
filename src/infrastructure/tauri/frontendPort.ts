@@ -27,6 +27,7 @@ import type {
   NarrativeRuntimeQueryRequest,
   NarrativeStateProjection,
   ContinuityProjection,
+  PendingWithdrawRequestsProjection,
   PlanStaleProjection,
   PlanningRouteProjection,
   SupportSessionProjection,
@@ -76,6 +77,7 @@ export class TauriFrontendPort implements FrontendPort {
   queryGlobalSettings(): Promise<SettingsProjection> { return invokeQuery(this.ipc, 'query_global_settings') }
   queryNarrativeState(request: NarrativeRuntimeQueryRequest): Promise<NarrativeStateProjection> { return invokeQuery(this.ipc, 'query_narrative_state', { request }) }
   queryContinuity(request: NarrativeRuntimeQueryRequest): Promise<ContinuityProjection> { return invokeQuery(this.ipc, 'query_continuity', { request }) }
+  queryPendingWithdrawRequests(request: ProjectQueryRequest): Promise<PendingWithdrawRequestsProjection> { return invokeQuery(this.ipc, 'query_pending_withdraw_requests', { request }) }
   queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<VolumeProgressProjection> { return invokeQuery(this.ipc, 'query_volume_progress', { request }) }
   queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection> { return invokeQuery(this.ipc, 'query_context_manifest', { request }) }
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection> { return invokeQuery(this.ipc, 'query_plan_stale', { request }) }

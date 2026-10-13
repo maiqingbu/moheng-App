@@ -92,6 +92,20 @@ export interface ContinuityProjection {
   threads: ContinuityThreadViewProjection[]
   truncated: boolean
 }
+/** FX-12: a withdraw-responsibility request awaiting the user's decision. */
+export interface PendingWithdrawRequest {
+  changeRequestId: string
+  responsibilityRef: string
+  summary: string
+  origin: 'USER_DELETE' | 'CHAPTER_AUDIT'
+  createdAt: string
+}
+export interface PendingWithdrawRequestsProjection {
+  projectId: string
+  projectRevision: number
+  items: PendingWithdrawRequest[]
+  truncated: boolean
+}
 export interface NarrativeContextProjection { payloadSchema: string; compiledFromProjectRevision: number; compiledFromStateDigest: string; [key: string]: unknown }
 /** Optional backend projection for the 2026-09-19 PRD. Absence is not PASS. */
 export interface NarrativeValidationProjection {
@@ -1034,6 +1048,7 @@ export type CommandType =
   | 'volume_handoff'
   | 'decision_submit'
   | 'thread_responsibility_adjust'
+  | 'thread_withdraw_decide'
   | 'gate_policy_update'
   | 'revision_request'
   | 'change_request_create'
@@ -1104,6 +1119,7 @@ export interface FrontendPort {
   queryGlobalSettings(): Promise<SettingsProjection>
   queryNarrativeState(request: NarrativeRuntimeQueryRequest): Promise<NarrativeStateProjection>
   queryContinuity(request: NarrativeRuntimeQueryRequest): Promise<ContinuityProjection>
+  queryPendingWithdrawRequests(request: ProjectQueryRequest): Promise<PendingWithdrawRequestsProjection>
   queryVolumeProgress(request: NarrativeRuntimeQueryRequest & { volumeId: string; taskIds?: string[] }): Promise<import('../generated/contracts').VolumeProgressProjection>
   queryContextManifest(request: NarrativeRuntimeQueryRequest & { executionMode?: 'OPENING_BOOTSTRAP' | 'LONG_FORM' }): Promise<NarrativeContextProjection>
   queryPlanStale(request: NarrativeRuntimeQueryRequest & { compiledFromProjectRevision: number; compiledFromStateDigest: string; currentStateDigest?: string }): Promise<PlanStaleProjection>

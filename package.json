@@ -58,7 +58,7 @@
     "verify:package-consistency": "node scripts/verify-package-consistency.mjs",
     "verify:b12": "node scripts/run-b12-evidence-gates.mjs && node scripts/generate-b12-acceptance.mjs",
     "verify:real-llm-r3": "node scripts/verify-real-llm-closed-loop-r3.mjs",
-    "verify:product-ux": "node scripts/verify-product-ux.mjs && node --test tests/product-ux-copy.test.mjs tests/product-ux-gate.test.mjs && vitest run tests/store/product-ux-presentation.test.ts tests/store/fx10-project-busy-message.test.ts tests/store/b11-assistant-presentation.test.ts tests/store/b12-retcon-ux.test.ts tests/store/r1r1-boundary-evidence.test.ts",
+    "verify:product-ux": "node scripts/verify-product-ux.mjs && node --test tests/product-ux-copy.test.mjs tests/product-ux-gate.test.mjs && vitest run tests/store/product-ux-presentation.test.ts tests/store/fx10-project-busy-message.test.ts tests/store/fx12-withdraw-request-actions.test.ts tests/store/fx12-withdraw-request-store.test.ts tests/store/b11-assistant-presentation.test.ts tests/store/b12-retcon-ux.test.ts tests/store/r1r1-boundary-evidence.test.ts",
     "verify:post-b14-ui-r5": "node scripts/run-post-b14-ui-r5-evidence.mjs",
     "package:post-b14-ui-r5": "node scripts/assemble-post-b14-ui-r5-package.mjs",
     "verify:post-b14-ui-r6": "node scripts/run-post-b14-ui-r6-evidence.mjs",
