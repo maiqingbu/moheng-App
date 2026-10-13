@@ -245,3 +245,38 @@ fn fx10_background_completion_race_stress() {
         assert_eq!(again["result"]["status"], "READY", "iteration {index}");
     }
 }
+
+#[test]
+fn fx14_trash_name_conflict_is_reported_as_its_own_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    drop(manager.create("p-fx14-trash", "FX-14", NOW).unwrap());
+    std::fs::create_dir_all(temp.path().join("trash/p-fx14-trash")).unwrap();
+
+    let result = manager.delete_to_trash("p-fx14-trash", NOW);
+
+    assert!(
+        matches!(result, Err(ManagerError::TrashTargetExists)),
+        "a trash name conflict is not a busy writer: {result:?}"
+    );
+    assert!(temp
+        .path()
+        .join("projects/p-fx14-trash/project.db")
+        .is_file());
+    let catalog = ai_novel_production_system_core::catalog::CatalogRepository::open(
+        &AppPaths::new(temp.path()),
+        NOW,
+    )
+    .unwrap();
+    let lifecycle: String = catalog
+        .query_row(
+            "SELECT lifecycle FROM projects WHERE project_id='p-fx14-trash'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lifecycle, "ACTIVE",
+        "a refused delete must not leave the project DELETING"
+    );
+}

@@ -25,6 +25,10 @@ pub struct ReadPool {
     idle: HashMap<String, Vec<Connection>>,
     checked_out: HashMap<String, usize>,
     live: usize,
+    /// Monotonic release counter per project, used to pick which idle
+    /// connection to close when the global cap is reached.
+    last_released: HashMap<String, u64>,
+    release_tick: u64,
 }
 
 impl ReadPool {
@@ -37,7 +41,31 @@ impl ReadPool {
             idle: HashMap::new(),
             checked_out: HashMap::new(),
             live: 0,
+            last_released: HashMap::new(),
+            release_tick: 0,
         }
+    }
+
+    /// Closes one idle connection of the least recently released other project.
+    /// Idle connections are not kept around at the expense of a new reader.
+    fn evict_idle_except(&mut self, project_id: &str) -> bool {
+        let victim = self
+            .idle
+            .iter()
+            .filter(|(id, idle)| id.as_str() != project_id && !idle.is_empty())
+            .min_by_key(|(id, _)| self.last_released.get(id.as_str()).copied().unwrap_or(0))
+            .map(|(id, _)| id.clone());
+        let Some(victim) = victim else {
+            return false;
+        };
+        if let Some(idle) = self.idle.get_mut(&victim) {
+            idle.pop();
+            if idle.is_empty() {
+                self.idle.remove(&victim);
+            }
+        }
+        self.live = self.live.saturating_sub(1);
+        true
     }
 
     fn project_checked_out(&self, project_id: &str) -> usize {
@@ -53,7 +81,7 @@ impl ReadPool {
                 return Ok(connection);
             }
         }
-        if self.live >= self.max_total {
+        if self.live >= self.max_total && !self.evict_idle_except(project_id) {
             return Err(PoolError::Exhausted);
         }
         if self.project_checked_out(project_id) >= self.max_per_project {
@@ -72,6 +100,9 @@ impl ReadPool {
                 *count -= 1;
             }
         }
+        self.release_tick += 1;
+        self.last_released
+            .insert(project_id.to_string(), self.release_tick);
         self.idle
             .entry(project_id.to_string())
             .or_default()
@@ -188,6 +219,72 @@ mod tests {
         assert_eq!(pool.live_len(), 2);
         pool.release("proj-a", a1);
         pool.release("proj-b", b1);
+        pool.close();
+    }
+
+    fn existing_db(root: &Path, id: &str) -> std::path::PathBuf {
+        let path = db_path(root, id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        open_connection(&path, false).unwrap();
+        path
+    }
+
+    #[test]
+    fn fx14_full_pool_evicts_least_recently_released_idle_connection_of_another_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b, c) = (
+            existing_db(temp.path(), "proj-a"),
+            existing_db(temp.path(), "proj-b"),
+            existing_db(temp.path(), "proj-c"),
+        );
+        let mut pool = ReadPool::new(2, 2);
+        let first = pool.acquire("proj-a", &a).unwrap();
+        pool.release("proj-a", first);
+        let second = pool.acquire("proj-b", &b).unwrap();
+        pool.release("proj-b", second);
+        assert_eq!(pool.live_len(), 2);
+
+        let third = pool.acquire("proj-c", &c).unwrap();
+
+        assert_eq!(pool.live_len(), 2, "the global cap still holds");
+        assert_eq!(
+            pool.idle_len("proj-a"),
+            0,
+            "the oldest idle connection is closed"
+        );
+        assert_eq!(pool.idle_len("proj-b"), 1);
+        pool.release("proj-c", third);
+        pool.close();
+    }
+
+    #[test]
+    fn fx14_full_pool_with_only_checked_out_connections_still_reports_exhausted() {
+        let temp = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            existing_db(temp.path(), "proj-a"),
+            existing_db(temp.path(), "proj-b"),
+        );
+        let mut pool = ReadPool::new(1, 1);
+        let held = pool.acquire("proj-a", &a).unwrap();
+        assert!(matches!(
+            pool.acquire("proj-b", &b),
+            Err(PoolError::Exhausted)
+        ));
+        pool.release("proj-a", held);
+        pool.close();
+    }
+
+    #[test]
+    fn fx14_many_projects_read_sequentially_without_exhausting_the_pool() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut pool = ReadPool::new(16, 4);
+        for index in 0..40 {
+            let id = format!("proj-{index:02}");
+            let path = existing_db(temp.path(), &id);
+            let connection = pool.acquire(&id, &path).unwrap();
+            pool.release(&id, connection);
+            assert!(pool.live_len() <= 16);
+        }
         pool.close();
     }
 }

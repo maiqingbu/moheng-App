@@ -1062,13 +1062,15 @@ impl ProjectManager {
         if !source_dir.join("project.db").is_file() {
             return Err(ManagerError::ProjectNotFound);
         }
-        CatalogRepository::set_lifecycle(&catalog, project_id, "DELETING", now)?;
         let trash_dir = self.paths.trash_dir();
-        std::fs::create_dir_all(&trash_dir)?;
         let target_dir = trash_dir.join(project_id);
+        // Checked before DELETING is recorded so a refused delete leaves the
+        // project usable.
         if target_dir.exists() {
-            return Err(ManagerError::ProjectBusy);
+            return Err(ManagerError::TrashTargetExists);
         }
+        CatalogRepository::set_lifecycle(&catalog, project_id, "DELETING", now)?;
+        std::fs::create_dir_all(&trash_dir)?;
         std::fs::rename(&source_dir, &target_dir)?;
         CatalogRepository::set_project_path(
             &catalog,
@@ -1416,6 +1418,8 @@ pub enum ManagerError {
     AlreadyOpen,
     #[error("PROJECT_BUSY")]
     ProjectBusy,
+    #[error("PROJECT_TRASH_TARGET_EXISTS")]
+    TrashTargetExists,
     #[error("writer lock poisoned")]
     WriterLockPoisoned,
     #[error("invalid project title")]

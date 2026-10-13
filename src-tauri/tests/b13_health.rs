@@ -2330,3 +2330,66 @@ fn b13_r1_health_query_does_not_create_model_runs_or_authority_rows() {
         "B13_R1_NO_AUTHORITY_RESULT before={before_authority:?} after={after_authority:?} unchanged=PASS status=PASS"
     );
 }
+
+#[test]
+fn fx14_untyped_route_marks_only_its_scope_unavailable() {
+    let state = state();
+    let project_id = create_project(&state, "cmd:fx14:untyped-route");
+    let connection = state.manager.open(&project_id, "FX-14", NOW).unwrap();
+    connection.execute(
+        "INSERT INTO books(book_id,project_id,book_no,title,status,created_at,updated_at) VALUES ('book:fx14',?1,1,'FX-14 fixture','ACTIVE',?2,?2)",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
+    for (number, payload) in [
+        (
+            1_i64,
+            json!({"tasks":[{"taskId":"task:fx14:legacy","class":"REQUIRED"}]}),
+        ),
+        (
+            2_i64,
+            json!({"payloadSchema":"volume-plan.r1","tasks":[{"taskId":"task:fx14:typed","class":"REQUIRED"}]}),
+        ),
+    ] {
+        let volume_id = format!("volume:fx14:{number}");
+        let artifact_id = format!("artifact:fx14:{number}");
+        let hash = format!("{number}").repeat(64);
+        connection.execute(
+            "INSERT INTO volumes(volume_id,project_id,book_id,volume_no,title,status,created_at,updated_at) VALUES (?1,?2,'book:fx14',?3,?4,'PRODUCING',?5,?5)",
+            libsql_rusqlite::params![volume_id, project_id, number, format!("FX-14 卷 {number}"), NOW],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO artifacts(artifact_id,project_id,artifact_type,scope_level,scope_key,version,schema_version,artifact_status,payload_hash,provenance_json,created_at) VALUES (?1,?2,'VolumePlan','VOLUME',?3,1,'fx14.fixture','COMMITTED',?4,'{}',?5)",
+            libsql_rusqlite::params![artifact_id, project_id, volume_id, hash, NOW],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO artifact_payloads(artifact_id,version,payload_json,payload_hash) VALUES (?1,1,?2,?3)",
+            libsql_rusqlite::params![artifact_id, payload.to_string(), hash],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO volume_plan_index(project_id,volume_id,plan_artifact_id,plan_version,plan_state,target_chapters,updated_at) VALUES (?1,?2,?3,1,'APPROVED',1,?4)",
+            libsql_rusqlite::params![project_id, volume_id, artifact_id, NOW],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO volume_planning_state_projection(project_id,volume_id,projection_revision,state_digest,projection_digest,payload_json,updated_at) VALUES (?1,?2,1,?3,?4,?5,?6)",
+            libsql_rusqlite::params![project_id, volume_id, "c".repeat(64), "d".repeat(64), json!({"remainingChapterCapacity":1,"requiredTasksRemaining":1,"planningPressure":{"remainingChapterCapacity":1}}).to_string(), NOW],
+        ).unwrap();
+    }
+
+    let refreshed = HealthRepository::flush_dirty(&connection, &project_id, NOW).unwrap();
+    assert_eq!(refreshed.route_scopes_refreshed, 2);
+    let unavailable = |volume_id: &str| -> i64 {
+        connection.query_row(
+            "SELECT is_unavailable FROM health_route_scope_projection WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+            |row| row.get(0),
+        ).unwrap()
+    };
+    assert_eq!(
+        unavailable("volume:fx14:1"),
+        1,
+        "the untyped route is reported, not interpreted"
+    );
+    assert_eq!(unavailable("volume:fx14:2"), 0);
+    ai_novel_production_system_core::health::query_book_health(&connection, &project_id, None, 50)
+        .expect("one legacy route must not fail the whole health page");
+}
