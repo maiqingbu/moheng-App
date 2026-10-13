@@ -35,6 +35,8 @@ const B_R2_03_B09_HEALTH_REFRESH_PENDING_MIGRATION: &str =
     include_str!("../../migrations/0014_b_r2_03_b09_health_refresh_pending.sql");
 const FX7_OBLIGATION_EVIDENCE_LOOKUP_MIGRATION: &str =
     include_str!("../../migrations/0015_fx7_obligation_evidence_lookup.sql");
+const FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION: &str =
+    include_str!("../../migrations/0016_fx11_canon_fact_scoped_lookup.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     let existed = path.is_file();
@@ -203,6 +205,13 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
+    let applied_v16: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 16",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(applied.is_none()
         || applied_v3.is_none()
         || applied_v4.is_none()
@@ -215,7 +224,8 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
         || applied_v12.is_none()
         || applied_v13.is_none()
         || applied_v14.is_none()
-        || applied_v15.is_none())
+        || applied_v15.is_none()
+        || applied_v16.is_none())
 }
 
 fn migration_recorded(connection: &Connection, version: i64) -> Result<bool, DatabaseError> {
@@ -330,6 +340,7 @@ pub fn migrate_project(
             FX7_OBLIGATION_EVIDENCE_LOOKUP_MIGRATION,
             now,
         )?;
+        apply_numbered_migration(connection, 16, FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION, now)?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;
         Ok::<_, DatabaseError>(())
     })();

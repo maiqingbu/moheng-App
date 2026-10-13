@@ -97,7 +97,7 @@ fn seed_support_topology(connection: &Connection, volume_id: &str, chapter_id: &
         "BookPlan",
         "PROJECT",
         "p1",
-        &json!({"futureReservations":[{"reservationId":"reservation:b06-scale-book"}]}),
+        &json!({"payloadSchema":"book-plan.r1","planningMaturity":"APPROVED","storyPromise":"推进实际任务","protagonistMacroDirection":"主动查证","endingBoundary":"基于证据解决当前问题","mustAchieve":[],"mustNotBreak":[],"relationshipMacroDirections":[],"majorMysteryGoals":[],"futureReservations":[{"reservationId":"reservation:b06-scale-book","description":"scale reservation","prerequisites":[],"mayForeshadow":true,"mayReveal":false,"authorityLevel":"B"}],"volumeIntentSeeds":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":10000000}}),
         now,
     );
     insert_head(
@@ -114,7 +114,7 @@ fn seed_support_topology(connection: &Connection, volume_id: &str, chapter_id: &
         "VolumeIntent",
         "VOLUME",
         volume_id,
-        &json!({"futureReservations":[{"reservationId":"reservation:b06-scale-volume"}]}),
+        &json!({"payloadSchema":"volume-intent.r1","volumeFunction":"scale volume","entryConditions":[],"mustAchieve":[],"mustNotBreak":[],"requiredExitConditions":[],"futureReservationRefs":[],"crossVolumeResponsibilityRefs":[],"targetChapterRange":{"min":1,"preferred":30,"max":30},"targetWordRange":{"preferred":75000}}),
         now,
     );
     insert_head(
@@ -131,7 +131,7 @@ fn seed_support_topology(connection: &Connection, volume_id: &str, chapter_id: &
         "VolumePlan",
         "VOLUME",
         volume_id,
-        &json!({"capacityBudget":{"maxChapters":30},"tasks":[{"taskId":"task:b06-scale"}]}),
+        &json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":"artifact:b06-scale-volume-intent","version":1,"payloadHash":intent_hash},"routeVersion":1,"tasks":[{"taskId":"task:b06-scale","class":"REQUIRED","objective":"scale task","dependsOnTaskIds":[],"continuityThreadRefs":[],"reservationRefs":[],"completionPredicate":{"kind":"DONE"},"estimatedChapterCost":{"preferred":1}}],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":30,"maxChapters":30}}),
         now,
     );
     insert_head(
@@ -141,6 +141,40 @@ fn seed_support_topology(connection: &Connection, volume_id: &str, chapter_id: &
         volume_id,
         "artifact:b06-scale-volume-plan",
         &plan_hash,
+    );
+    let story_hash = insert_artifact(
+        connection,
+        "artifact:b06-scale-story",
+        "StoryConstitution",
+        "PROJECT",
+        "p1",
+        &json!({"payloadSchema":"story-constitution.r1","storyCore":{"protagonist":"主角","desire":"查明事实","mechanism":"每项判断依赖可核验事实","conflict":"证据与隐瞒冲突","readerPromise":"每章推进真实任务","worldRules":[],"forbiddenReveals":[]}}),
+        now,
+    );
+    insert_head(
+        connection,
+        "StoryConstitution",
+        "PROJECT",
+        "p1",
+        "artifact:b06-scale-story",
+        &story_hash,
+    );
+    let main_hash = insert_artifact(
+        connection,
+        "artifact:b06-scale-main",
+        "MainContract",
+        "PROJECT",
+        "p1",
+        &json!({"payloadSchema":"main-contract.r1","storyConstitutionRef":{"artifactId":"artifact:b06-scale-story","version":1,"payloadHash":story_hash},"scope":"BOOK","hardRules":["依据正式证据推进"],"softPreferences":[]}),
+        now,
+    );
+    insert_head(
+        connection,
+        "MainContract",
+        "PROJECT",
+        "p1",
+        "artifact:b06-scale-main",
+        &main_hash,
     );
     let _: i64 = connection
         .query_row(
@@ -232,6 +266,7 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
     let database_path = temp.path().join("projects/p1/project.db");
     let mut durations = Vec::with_capacity(30);
     let mut hard_serialized_bytes_max = 0_usize;
+    let mut hard_tokens_max = 0_i64;
     let mut bounded_query_ok = true;
     let mut hard_budget_blocked_samples = 0_usize;
     let mut observed_budget_blocker = None::<String>;
@@ -251,6 +286,7 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
             let input = ai_novel_production_system_core::narrative::ContextCompilerInput { execution_mode:"LONG_FORM".into(), project_revision:0, goal_contract_refs:Vec::new(), goal_contract_fields:Vec::new(), state, continuity_threads:threads, plan_task_refs:Vec::new(), plan_task_contexts:Vec::new(), task_states:Vec::new(), active_task_refs:Vec::new(), future_reservation_refs:Vec::new(), selected_evidence:Vec::new(), omitted_soft_sources:Vec::new(), hard_tokens:1024, soft_tokens:256 };
             let usage = ai_novel_production_system_core::narrative::measure_context_hard_budget(&input).unwrap();
             hard_serialized_bytes_max = hard_serialized_bytes_max.max(usage.serialized_bytes);
+            hard_tokens_max = hard_tokens_max.max(usage.estimated_tokens);
             let blocker = ai_novel_production_system_core::narrative::compile_context_manifest(input).unwrap_err();
             assert!(blocker.starts_with("CONTEXT_HARD_BUDGET_EXCEEDED"));
             if let Some(previous) = &observed_budget_blocker {
@@ -267,11 +303,17 @@ fn b06_h01_long_book_context_compiler_and_bounded_query_certification() {
     let p50 = percentile(&durations, 0.50);
     let p95 = percentile(&durations, 0.95);
     let max = *durations.last().unwrap();
+    // FX-11: the hard budget blocks on whichever limit is exceeded (tokens or
+    // serialized bytes); requiring the byte limit specifically mis-attributed
+    // a token-limit block as "not enforced".
+    let hard_budget_exceeded = hard_tokens_max
+        > ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT
+        || hard_serialized_bytes_max
+            > ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT;
     let hard_budget_enforced = hard_budget_blocked_samples == 30
-        && hard_serialized_bytes_max
-            > ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT
+        && hard_budget_exceeded
         && observed_budget_blocker.is_some();
-    println!("B06_H01_SCALE_DIAGNOSTIC p50_ms={p50:.3} p95_ms={p95:.3} max_ms={max:.3} bounded_query_ok={bounded_query_ok} hard_budget_enforced={hard_budget_enforced} hard_serialized_bytes_max={hard_serialized_bytes_max} limit={} hard_budget_blocked_samples={hard_budget_blocked_samples}", ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT);
+    println!("B06_H01_SCALE_DIAGNOSTIC p50_ms={p50:.3} p95_ms={p95:.3} max_ms={max:.3} bounded_query_ok={bounded_query_ok} hard_budget_enforced={hard_budget_enforced} hard_serialized_bytes_max={hard_serialized_bytes_max} limit={} hard_tokens_max={hard_tokens_max} token_limit={} hard_budget_blocked_samples={hard_budget_blocked_samples}", ai_novel_production_system_core::narrative::CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, ai_novel_production_system_core::narrative::CONTEXT_HARD_TOKEN_LIMIT);
     assert!(p95 <= 300.0 && bounded_query_ok && hard_budget_enforced);
     drop(connection);
     #[cfg(debug_assertions)]
