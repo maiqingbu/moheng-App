@@ -71,6 +71,7 @@ const errorLabels: Record<string, string> = {
   COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
   PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',
+  PROJECT_WRITE_LOCKED: '本作品正在生成，暂时只读；生成完成或暂停后即可修改。',
   PROJECT_TRASH_TARGET_EXISTS: '回收站里已有同名作品，请先处理回收站中的同名作品后再删除。',
   CONTEXT_HARD_BUDGET_EXCEEDED: '本章必需资料超出预算，请调整当前任务范围后重新准备；不能省略硬性约束。',
   CONTEXT_INCOMPLETE: '本章必需资料不完整，暂时不能继续生产。',
@@ -387,6 +388,37 @@ export function receiptSummary(receipt: unknown): ProductReceiptSummary {
   const record = receipt && typeof receipt === 'object' ? receipt as Record<string, unknown> : {}
   const finalStatus = textOf(record.finalStatus).toLowerCase()
   const result = record.result && typeof record.result === 'object' ? record.result as Record<string, unknown> : {}
+  if (record.actionStatus === 'PRODUCTION_CONTROL_REQUESTED') {
+    const cancel = record.control === 'CANCEL'
+    return {
+      status: 'success',
+      title: cancel ? '已请求取消' : '已请求暂停',
+      detail: cancel ? '将在当前步骤后停止本章生产，不会提交正文。' : '将在当前步骤后暂停本章生产，已完成的步骤会保留。',
+    }
+  }
+  if (record.actionStatus === 'PRODUCTION_CONTROL_REPLAYED') {
+    return { status: 'success', title: '控制请求已处理', detail: '此请求只关联原章节，不会重复发送到后续章节。' }
+  }
+  if (record.actionStatus === 'PRODUCTION_CONTROL_NOT_ACCEPTED') {
+    const cancel = record.control === 'CANCEL'
+    return {
+      status: 'failed',
+      title: '本次请求未接受',
+      detail: cancel ? '本章正文已提交或作业已结束，取消未生效。' : '本章已进入最终提交或已结束，暂停未生效。',
+    }
+  }
+  if (record.actionStatus === 'PRODUCTION_CONTROL_IDEMPOTENCY_CONFLICT') {
+    return { status: 'failed', title: '控制请求不匹配', detail: '该请求标识已用于其他操作，本次未发送控制请求。' }
+  }
+  if (record.actionStatus === 'PRODUCTION_CONTROL_PENDING') {
+    return { status: 'failed', title: '已有控制请求处理中', detail: '请等待本章当前暂停或取消请求生效。' }
+  }
+  if (record.actionStatus === 'PRODUCTION_PAUSED') {
+    return { status: 'success', title: '本章生成已暂停', detail: '可以随时继续生成，已完成的步骤会直接复用。' }
+  }
+  if (record.actionStatus === 'PRODUCTION_CANCELLED') {
+    return { status: 'success', title: '本章生成已取消', detail: '没有提交任何正文，可以重新开始。' }
+  }
   if (record.actionStatus === 'WITHDRAW_APPROVED' || record.actionStatus === 'WITHDRAW_REJECTED') {
     return {
       status: 'success',

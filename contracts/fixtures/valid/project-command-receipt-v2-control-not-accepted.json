@@ -1,0 +1,20 @@
+{
+  "receiptId": "project-receipt:cmd:late-cancel",
+  "projectId": "project:control",
+  "resultProjectId": "project:control",
+  "commandId": "cmd:late-cancel",
+  "idempotencyKey": "key:late-cancel",
+  "commandType": "production_cancel",
+  "beforeRevision": 5,
+  "afterRevision": 6,
+  "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "committedAt": "2026-10-14T00:01:00Z",
+  "receiptDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "controlResult": {
+    "jobId": "job:chapter-one",
+    "control": "CANCEL",
+    "applied": false,
+    "actionStatus": "PRODUCTION_CONTROL_NOT_ACCEPTED",
+    "message": "本章正文已提交或作业已结束，取消未生效。"
+  }
+}

@@ -2,14 +2,14 @@ use ai_novel_production_system_core::commands::{
     execute_command_impl, query_project_overview_impl, KernelState,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
-use ai_novel_production_system_core::project_db::{ProjectHandle, ProjectManager};
+use ai_novel_production_system_core::project_db::{ManagerError, ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::runtime::{
     lease_expiry, DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec,
     MemorySecretStore, ModelRunSpec, ModelTransport, RuntimeError, SecretStore, TransportFailure,
     TransportResponse, TransportUsage,
 };
 use libsql_rusqlite::Connection;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
@@ -1619,7 +1619,8 @@ fn b03_real_command_path_controls_durable_job_and_runtime_projection() {
                 "idempotencyKey": format!("{command_id}-key"),
                 "projectId": "p1",
                 "expectedRevision": revision,
-                "requestedAt": NOW
+                "requestedAt": NOW,
+                "payload":{"jobId":job_spec().job_id}
             }),
         )
         .unwrap()
@@ -1682,4 +1683,183 @@ fn b03_real_command_path_controls_durable_job_and_runtime_projection() {
             .unwrap(),
         "CANCELLED"
     );
+}
+
+#[test]
+fn b03_control_receipt_replay_keeps_original_result_after_job_changes() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "A", NOW).unwrap());
+    let connection = state.manager.open("p1", "A", NOW).unwrap();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(&connection, "p1", &job_spec().job_id, "RUNNING", NOW).unwrap();
+    DurableJobService::set_runtime_state(&connection, "p1", "ACTIVE", None, NOW).unwrap();
+    drop(connection);
+
+    let command = |command_id: &str, command_type: &str, revision: i64| {
+        execute_command_impl(
+            &state,
+            json!({
+                "type":command_type,
+                "commandId":command_id,
+                "idempotencyKey":format!("{command_id}-key"),
+                "projectId":"p1",
+                "expectedRevision":revision,
+                "requestedAt":NOW,
+                "payload":{"jobId":job_spec().job_id}
+            }),
+        )
+        .unwrap()
+    };
+
+    let pause = command("b03-stable-pause", "production_pause", 0);
+    assert_eq!(pause["actionStatus"], "PRODUCTION_PAUSED");
+    let pause_receipt = state
+        .manager
+        .find_project_command_receipt("p1", "b03-stable-pause-key")
+        .unwrap()
+        .unwrap();
+    let pause_receipt_json = serde_json::to_value(pause_receipt).unwrap();
+    assert_eq!(
+        pause_receipt_json["controlResult"]["jobId"],
+        job_spec().job_id
+    );
+    assert_eq!(pause_receipt_json["controlResult"]["applied"], true);
+    assert_eq!(
+        pause_receipt_json["controlResult"]["actionStatus"],
+        "PRODUCTION_PAUSED"
+    );
+    command("b03-stable-resume", "production_resume", 1);
+    command("b03-stable-cancel", "production_cancel", 2);
+    let pause_replay = command("b03-stable-pause", "production_pause", 0);
+
+    assert_eq!(pause_replay["receiptId"], pause["receiptId"]);
+    assert_eq!(pause_replay["actionStatus"], pause["actionStatus"]);
+    assert_eq!(pause_replay["message"], pause["message"]);
+}
+
+#[test]
+fn b03_old_project_command_receipt_without_control_result_keeps_its_digest() {
+    let temp = tempdir().unwrap();
+    let manager = ProjectManager::new(AppPaths::new(temp.path()));
+    let connection = manager.create("p1", "A", NOW).unwrap();
+    let request_digest = "a".repeat(64);
+    let spec = ai_novel_production_system_core::project_db::ProjectCommandSpec {
+        project_id: "p1",
+        result_project_id: "p1",
+        command_id: "cmd:v1-receipt",
+        idempotency_key: "key:v1-receipt",
+        command_type: "project_rename",
+        request_digest: &request_digest,
+        expected_revision: None,
+        now: NOW,
+        advance_revision: false,
+    };
+    let outcome = ai_novel_production_system_core::commit::CommitService::commit_project_command(
+        &connection,
+        spec,
+        |_| Ok(()),
+    )
+    .unwrap();
+    drop(connection);
+
+    let receipt = match outcome {
+        ai_novel_production_system_core::commit::ProjectCommandOutcome::Committed {
+            receipt,
+            ..
+        } => receipt,
+        ai_novel_production_system_core::commit::ProjectCommandOutcome::Replayed(_) => {
+            panic!("first invocation must commit")
+        }
+    };
+    let serialized = serde_json::to_value(&receipt).unwrap();
+    assert!(serialized.get("controlResult").is_none());
+    let replay = manager.commit_project_command(spec, |_| Ok(())).unwrap();
+    let replay_receipt = match replay {
+        ai_novel_production_system_core::commit::ProjectCommandOutcome::Replayed(receipt) => {
+            receipt
+        }
+        ai_novel_production_system_core::commit::ProjectCommandOutcome::Committed { .. } => {
+            panic!("the old receipt must be replayed")
+        }
+    };
+    assert!(serde_json::to_value(&replay_receipt)
+        .unwrap()
+        .get("controlResult")
+        .is_none());
+    assert_eq!(replay_receipt.receipt_digest, receipt.receipt_digest);
+
+    let connection = manager.open("p1", "A", NOW).unwrap();
+    let receipt_json: String = connection
+        .query_row(
+            "SELECT receipt_json FROM project_command_receipts WHERE project_id='p1' AND idempotency_key='key:v1-receipt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy_json: Value = serde_json::from_str(&receipt_json).unwrap();
+    legacy_json["controlResult"] = Value::Null;
+    connection
+        .execute(
+            "UPDATE project_command_receipts SET receipt_json=?1 WHERE project_id='p1' AND idempotency_key='key:v1-receipt'",
+            [legacy_json.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        manager.find_project_command_receipt("p1", "key:v1-receipt"),
+        Err(ManagerError::ProjectCommandReceiptDigestMismatch)
+    ));
+}
+
+#[test]
+fn b03_tampering_with_control_result_fails_receipt_digest_verification() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "A", NOW).unwrap());
+    let connection = state.manager.open("p1", "A", NOW).unwrap();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(&connection, "p1", &job_spec().job_id, "RUNNING", NOW).unwrap();
+    DurableJobService::set_runtime_state(&connection, "p1", "ACTIVE", None, NOW).unwrap();
+    drop(connection);
+
+    execute_command_impl(
+        &state,
+        json!({
+            "type":"production_pause",
+            "commandId":"b03-tamper-pause",
+            "idempotencyKey":"b03-tamper-pause-key",
+            "projectId":"p1",
+            "expectedRevision":0,
+            "requestedAt":NOW,
+            "payload":{"jobId":job_spec().job_id}
+        }),
+    )
+    .unwrap();
+    let connection = state.manager.open("p1", "A", NOW).unwrap();
+    let receipt_json: String = connection
+        .query_row(
+            "SELECT receipt_json FROM project_command_receipts WHERE project_id='p1' AND idempotency_key='b03-tamper-pause-key'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut receipt: Value = serde_json::from_str(&receipt_json).unwrap();
+    receipt["controlResult"]["applied"] = json!(false);
+    receipt["controlResult"]["actionStatus"] = json!("PRODUCTION_CONTROL_NOT_ACCEPTED");
+    receipt["controlResult"]["message"] = json!("原控制结果被篡改");
+    connection
+        .execute(
+            "UPDATE project_command_receipts SET receipt_json=?1 WHERE project_id='p1' AND idempotency_key='b03-tamper-pause-key'",
+            [receipt.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        state
+            .manager
+            .find_project_command_receipt("p1", "b03-tamper-pause-key"),
+        Err(ManagerError::ProjectCommandReceiptDigestMismatch)
+    ));
 }

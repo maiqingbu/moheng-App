@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import { getFrontendPort } from '../../app/providers/runtimePort'
-import type { CommandStatus, CompletionStatusProjection, EndgameMappingWorkflowProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
+import type { CompletionStatusProjection, EndgameMappingWorkflowProjection, SoftCreativeAdviceProjection } from '../../application/contracts'
 import { productErrorMessage } from '../presentation/productLanguage'
 import { scopedMappingCandidates } from '../../application/endgameMapping'
 
@@ -83,6 +83,11 @@ function commandId(prefix: string) {
   return `${prefix}:${projectId.value}:${Date.now()}`
 }
 
+async function loadProjectStore() {
+  const { useProjectStore } = await import('../stores/projectStore')
+  return useProjectStore()
+}
+
 async function submit(type: 'endgame_contract_create' | 'complete_book', payload: Record<string, unknown>, successMessage: string) {
   if (!status.value || submitting.value || resultPending.value) return
   const id = commandId(type)
@@ -92,7 +97,8 @@ async function submit(type: 'endgame_contract_create' | 'complete_book', payload
   messageKind.value = 'info'
   committedReceiptId.value = ''
   try {
-    const receipt = await frontendPort.executeCommand({
+    const store = await loadProjectStore()
+    const receipt = await store.runCommand(`completion:${type}`, {
       type,
       projectId: projectId.value,
       commandId: id,
@@ -100,7 +106,7 @@ async function submit(type: 'endgame_contract_create' | 'complete_book', payload
       requestedAt: new Date().toISOString(),
       expectedRevision: status.value.projectRevision,
       payload,
-    }, (_state: CommandStatus, detail: string) => { message.value = detail })
+    })
     if (receipt.commandId !== id || receipt.projectId !== projectId.value) {
       resultPending.value = true
       messageKind.value = 'warning'
@@ -121,6 +127,11 @@ async function submit(type: 'endgame_contract_create' | 'complete_book', payload
       message.value = successMessage
     }
   } catch (cause) {
+    if (cause instanceof Error && cause.message === 'PROJECT_WRITE_LOCKED') {
+      resultPending.value = false
+      error.value = productErrorMessage(cause)
+      return
+    }
     resultPending.value = true
     messageKind.value = 'warning'
     error.value = '尚未获得可确认的操作结果，请核对正式记录，不要重复提交。'
@@ -161,14 +172,20 @@ async function completeBook() {
   await submit('complete_book', {}, '当前版本的完结状态与确认报告已经保存。')
 }
 
+// AI suggestions hold this work's writer while the model runs (FX-15); the
+// project store is loaded on demand so this page does not initialize it.
+async function whileProjectBusy<T>(work: () => Promise<T>): Promise<T> {
+  return (await loadProjectStore()).withProjectBusy(work, projectId.value || null)
+}
+
 async function requestEndgameAdvice() {
   if (!projectId.value) return
-  endgameAdvice.value = await frontendPort.queryEndgameAdvice({ projectId: projectId.value, scope: 'completion-advice', pageSize: 1 })
+  endgameAdvice.value = await whileProjectBusy(() => frontendPort.queryEndgameAdvice({ projectId: projectId.value!, scope: 'completion-advice', pageSize: 1 }))
 }
 
 async function requestQualityReview() {
   if (!projectId.value) return
-  qualityReview.value = await frontendPort.queryCompletionQuality({ projectId: projectId.value, scope: 'completion-quality', pageSize: 1 })
+  qualityReview.value = await whileProjectBusy(() => frontendPort.queryCompletionQuality({ projectId: projectId.value!, scope: 'completion-quality', pageSize: 1 }))
 }
 
 onMounted(() => { void load() })

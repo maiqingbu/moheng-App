@@ -4,6 +4,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import ProjectAssistantDock from './ProjectAssistantDock.vue'
+import WriteLockBanner from './WriteLockBanner.vue'
 import { phaseLabel } from '../presentation/projectLabels'
 import { productErrorMessage } from '../presentation/productLanguage'
 
@@ -65,7 +66,7 @@ watch(() => route.fullPath, () => {
         </template>
       </nav>
 
-      <main ref="workspaceEl" class="prototype-workspace"><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><div v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel">正在读取作品记录…</div><slot v-else /></main>
+      <main ref="workspaceEl" class="prototype-workspace"><WriteLockBanner :locked="inWorkspace && store.writeLocked" /><div v-if="inWorkspace && store.loadError" class="prototype-panel"><strong>暂时无法读取作品</strong><p>{{ productErrorMessage(store.loadError, '请返回作品库后重试。') }}</p><button class="prototype-btn" type="button" @click="store.refresh">重试</button></div><div v-else-if="inWorkspace && store.loading && !store.overview" class="prototype-panel">正在读取作品记录…</div><slot v-else /></main>
       <ProjectAssistantDock v-if="inWorkspace" :collapsed="assistantCollapsed" @toggle="assistantCollapsed = !assistantCollapsed" />
     </div>
   </div>

@@ -1,0 +1,13 @@
+{
+  "receiptId": "project-receipt:cmd:legacy",
+  "projectId": "project:legacy",
+  "resultProjectId": "project:legacy",
+  "commandId": "cmd:legacy",
+  "idempotencyKey": "key:legacy",
+  "commandType": "project_rename",
+  "beforeRevision": 1,
+  "afterRevision": 2,
+  "requestDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "committedAt": "2026-10-14T00:00:00Z",
+  "receiptDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

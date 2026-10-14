@@ -50,6 +50,12 @@ function volume(overrides: Record<string, unknown> = {}) {
     loadPlanningRoute: vi.fn(async () => harness.store.planningRoute), loadVolumeLifecycle: vi.fn(async () => null),
   })
 }
+function completionStore() {
+  harness.store = reactive({
+    currentProjectId: 'p',
+    runCommand: vi.fn((_key: string, request: unknown) => harness.port.executeCommand(request)),
+  })
+}
 
 afterEach(() => { mounted.splice(0).forEach(app => app.unmount()); document.body.innerHTML = '' })
 
@@ -481,6 +487,7 @@ describe('R2 完结操作回执与刷新', () => {
     boxes[boxes.length - 1].dispatchEvent(new Event('change'))
     await nextTick()
     Array.from(page.querySelectorAll('button')).find(button => button.textContent === '提交全书完结')!.click()
+    await new Promise(resolve => setTimeout(resolve, 0))
     for (let i = 0; i < 12; i++) await Promise.resolve()
     await nextTick()
   }
@@ -489,6 +496,7 @@ describe('R2 完结操作回执与刷新', () => {
       queryCompletionStatus: vi.fn(async () => ready),
       executeCommand: vi.fn(async (request: any) => ({ commandId: request.commandId, projectId: 'p', finalStatus: 'blocked', message: '还有未完成的正式责任' })),
     }
+    completionStore()
     const page = await render(Completion)
     await submitCompletion(page)
     expect(page.textContent).toContain('还有未完成的正式责任')
@@ -499,6 +507,7 @@ describe('R2 完结操作回执与刷新', () => {
       queryCompletionStatus: vi.fn().mockResolvedValueOnce(ready).mockRejectedValueOnce(new Error('unavailable')),
       executeCommand: vi.fn(async (request: any) => ({ commandId: request.commandId, projectId: 'p', finalStatus: 'committed', receiptId: 'r' })),
     }
+    completionStore()
     const page = await render(Completion)
     await submitCompletion(page)
     expect(page.textContent).toContain('结果待确认')
@@ -509,6 +518,21 @@ describe('R2 完结操作回执与刷新', () => {
     await nextTick()
     expect(page.textContent).toContain('当前版本已完成完结确认')
     expect(harness.port.executeCommand).toHaveBeenCalledTimes(1)
+  })
+  it('FX-15: Given 作品只读 When 提交完结 Then 中文提示且不发送请求', async () => {
+    harness.port = {
+      queryCompletionStatus: vi.fn(async () => ready),
+      executeCommand: vi.fn(),
+    }
+    harness.store = reactive({
+      currentProjectId: 'p',
+      runCommand: vi.fn(async () => { throw new Error('PROJECT_WRITE_LOCKED') }),
+    })
+    const page = await render(Completion)
+    await submitCompletion(page)
+    expect(page.textContent).toContain('本作品正在生成，暂时只读')
+    expect(harness.port.executeCommand).not.toHaveBeenCalled()
+    expect(page.textContent).not.toContain('结果待确认')
   })
   it('Given 未执行的规划阶段 When 展示时间线 Then 不声称已经完成', async () => {
     production({ timeline: [{ id: 'plan', order: 2, title: 'PLAN', status: 'pending' }] })

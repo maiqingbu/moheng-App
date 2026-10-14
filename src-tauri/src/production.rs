@@ -9,11 +9,14 @@
 use crate::commit::CommitService;
 use crate::generated::types::{
     ArtifactEnvelope, ArtifactEnvelopeProvenance, ArtifactRef, ArtifactStatus, ArtifactType,
-    CommitBundle,
+    CommitBundle, ProjectCommandReceiptControlResult,
 };
 use crate::hash::sha256_canonical;
 use crate::narrative::{PromotionSignal, ThreadResponsibilityLevel};
-use crate::project_db::{ProjectCommandOutcome, ProjectCommandSpec, ProjectHandle, ProjectManager};
+use crate::project_db::{
+    ProductionControlRequest, ProjectCommandOutcome, ProjectCommandSpec, ProjectHandle,
+    ProjectManager,
+};
 use crate::provider::{
     OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
     ProviderRequest, ProviderResponse,
@@ -1796,7 +1799,12 @@ fn make_certificate(
     Ok(certificate)
 }
 
+/// Error used to unwind at a step boundary after observing a control signal.
+/// The signal remains pending until its CommitService receipt is durable.
+const PRODUCTION_CONTROL_APPLIED: &str = "PRODUCTION_CONTROL_APPLIED";
+
 fn update_stage(
+    manager: &ProjectManager,
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
     job_id: &str,
@@ -1806,8 +1814,59 @@ fn update_stage(
     if !STAGES.contains(&stage) {
         return Err(format!("B08_INVALID_STAGE:{stage}"));
     }
+    // FX-15: step boundaries are where a pause/cancel request takes effect;
+    // an in-flight model call is never interrupted.
+    if !matches!(stage, "CONTEXT" | "COMPLETED") {
+        apply_production_control(manager, project_id, job_id)?;
+    }
     DurableJobService::update_stage(connection, project_id, job_id, stage, now)
         .map_err(|error| error.to_string())
+}
+
+fn apply_production_control(
+    manager: &ProjectManager,
+    project_id: &str,
+    job_id: &str,
+) -> Result<(), String> {
+    let guard = manager
+        .lock_production_control(project_id)
+        .map_err(|error| error.to_string())?;
+    let Some(request) = manager
+        .peek_production_control(&guard, project_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    if !request.accepted || request.job_id != job_id {
+        return Ok(());
+    }
+    Err(PRODUCTION_CONTROL_APPLIED.into())
+}
+
+fn update_commit_stage(
+    manager: &ProjectManager,
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    job_id: &str,
+    now: &str,
+) -> Result<crate::project_db::ProductionControlGuard, String> {
+    let guard = manager
+        .lock_production_control(project_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(request) = manager
+        .peek_production_control(&guard, project_id)
+        .map_err(|error| error.to_string())?
+    {
+        if request.accepted && request.job_id == job_id {
+            return Err(PRODUCTION_CONTROL_APPLIED.into());
+        }
+    }
+    DurableJobService::update_stage(connection, project_id, job_id, "COMMIT", now)
+        .map_err(|error| error.to_string())?;
+    manager
+        .run_production_control_commit_test_hook()
+        .map_err(|error| error.to_string())?;
+    Ok(guard)
 }
 
 fn block_for_recompile(
@@ -1820,6 +1879,137 @@ fn block_for_recompile(
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug)]
+pub(crate) struct ProductionControlFinalization {
+    pub request: ProductionControlRequest,
+    pub control_result: Option<ProjectCommandReceiptControlResult>,
+}
+
+/// Commits the pending control and its project-command receipt atomically.
+/// The sidecar is cleared only after CommitService succeeds.
+pub(crate) fn finalize_pending_production_control(
+    manager: &ProjectManager,
+    project_id: &str,
+) -> Result<Option<ProductionControlFinalization>, String> {
+    let guard = manager
+        .lock_production_control(project_id)
+        .map_err(|error| error.to_string())?;
+    let Some(request) = manager
+        .peek_production_control(&guard, project_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let command_type = match request.action.as_str() {
+        "PAUSE" => "production_pause",
+        "CANCEL" => "production_cancel",
+        _ => return Err("PRODUCTION_CONTROL_ACTION_INVALID".into()),
+    };
+    let spec = ProjectCommandSpec {
+        project_id,
+        result_project_id: project_id,
+        command_id: &request.command_id,
+        idempotency_key: &request.idempotency_key,
+        command_type,
+        request_digest: &request.request_digest,
+        // Production advances project revision between the click and this
+        // boundary; the original revision must not make a valid control stale.
+        expected_revision: None,
+        now: &request.requested_at,
+        advance_revision: true,
+    };
+    let outcome = manager
+        .commit_project_command_with_control_result(spec, |connection| {
+            let latest =
+                DurableJobService::latest_job(connection, project_id).map_err(|error| {
+                    crate::project_db::ManagerError::ProjectCommand(error.to_string())
+                })?;
+            let active_target = request.accepted
+                && latest
+                    .as_ref()
+                    .is_some_and(|(latest_id, job_type, status)| {
+                        latest_id == &request.job_id
+                            && job_type == "CHAPTER"
+                            && matches!(status.as_str(), "RUNNING" | "WAITING_MODEL")
+                    });
+            if !active_target {
+                return Ok((
+                    false,
+                    Some(crate::project_db::production_control_result(
+                        &request.action,
+                        &request.job_id,
+                        false,
+                    )),
+                ));
+            }
+            let (status, run_state, reason) = if request.action == "CANCEL" {
+                ("CANCELLED", "FAILED", None)
+            } else {
+                ("PAUSED", "PAUSED", Some("USER_PAUSE"))
+            };
+            DurableJobService::transition(
+                connection,
+                project_id,
+                &request.job_id,
+                status,
+                &request.requested_at,
+            )
+            .map_err(|error| crate::project_db::ManagerError::ProjectCommand(error.to_string()))?;
+            DurableJobService::release_lease(
+                connection,
+                project_id,
+                &request.job_id,
+                &request.requested_at,
+            )
+            .map_err(|error| crate::project_db::ManagerError::ProjectCommand(error.to_string()))?;
+            DurableJobService::set_runtime_state(
+                connection,
+                project_id,
+                run_state,
+                reason,
+                &request.requested_at,
+            )
+            .map_err(|error| crate::project_db::ManagerError::ProjectCommand(error.to_string()))?;
+            Ok((
+                true,
+                Some(crate::project_db::production_control_result(
+                    &request.action,
+                    &request.job_id,
+                    true,
+                )),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let control_result = match outcome {
+        ProjectCommandOutcome::Committed { receipt, .. }
+        | ProjectCommandOutcome::Replayed(receipt) => receipt.control_result,
+    };
+    manager
+        .clear_production_control(&guard, project_id, &request.idempotency_key)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(ProductionControlFinalization {
+        request,
+        control_result,
+    }))
+}
+
+fn control_result_for_production_start(
+    command_id: &str,
+    project_id: &str,
+    result: &ProjectCommandReceiptControlResult,
+) -> Value {
+    json!({
+        "commandId":command_id,
+        "projectId":project_id,
+        "jobId":result.job_id,
+        "controlResult":result,
+        "finalStatus":if result.applied { "committed" } else { "blocked" },
+        "actionStatus":result.action_status,
+        "control":result.control,
+        "message":result.message
+    })
+}
+
 /// Execute one formal B08 chapter production run. Any error after a durable
 /// job has been created is reflected in that job's FAILED state so a caller
 /// may safely submit a retry with explicit lineage.
@@ -1829,7 +2019,62 @@ pub fn run_chapter_production(
     skill_bundle_loader: &crate::creative_skills::SkillBundleLoader,
     request: &Value,
 ) -> Result<Value, String> {
+    if let (Some(project_id), Some(command_id)) = (
+        request.pointer("/projectId").and_then(Value::as_str),
+        request.pointer("/commandId").and_then(Value::as_str),
+    ) {
+        if let Some(finalized) = finalize_pending_production_control(manager, project_id)? {
+            let requested_job_id =
+                StableIdentityFactory::from_command(StableIdKind::Job, command_id)
+                    .map_err(|error| error.to_string())?;
+            if finalized.request.job_id == requested_job_id {
+                if let Some(control_result) = finalized.control_result.as_ref() {
+                    return Ok(control_result_for_production_start(
+                        command_id,
+                        project_id,
+                        control_result,
+                    ));
+                }
+            }
+        }
+    }
     let result = run_chapter_production_inner(manager, gateway, skill_bundle_loader, request);
+    let finalization = match request.pointer("/projectId").and_then(Value::as_str) {
+        Some(project_id) => match finalize_pending_production_control(manager, project_id) {
+            Ok(finalization) => finalization,
+            Err(_) if result.is_ok() => return result,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    if let Some(finalized) = finalization.as_ref() {
+        let control_unwind = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error == PRODUCTION_CONTROL_APPLIED);
+        if result.is_err()
+            && finalized
+                .control_result
+                .as_ref()
+                .is_some_and(|control_result| control_result.applied || control_unwind)
+        {
+            let command_id = request
+                .pointer("/commandId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let project_id = request
+                .pointer("/projectId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(control_result) = finalized.control_result.as_ref() {
+                return Ok(control_result_for_production_start(
+                    command_id,
+                    project_id,
+                    control_result,
+                ));
+            }
+        }
+    }
     if let Err(error) = &result {
         let project_id = request.pointer("/projectId").and_then(Value::as_str);
         let command_id = request.pointer("/commandId").and_then(Value::as_str);
@@ -2058,7 +2303,7 @@ fn run_chapter_production_inner(
     DurableJobService::set_runtime_state(connection, &project_id, "ACTIVE", None, &now)
         .map_err(|error| error.to_string())?;
 
-    update_stage(connection, &project_id, &job_id, "CONTEXT", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "CONTEXT", &now)?;
     if execution_mode == "OPENING_BOOTSTRAP" {
         crate::planning::preflight_chapter_plan_owner(connection, &project_id, &chapter_id)?;
     }
@@ -2203,7 +2448,7 @@ fn run_chapter_production_inner(
                 .map_err(|error| error.to_string())?;
             current_revision = context_receipt.after_revision;
 
-            update_stage(connection, &project_id, &job_id, "PLAN", &now)?;
+            update_stage(manager, connection, &project_id, &job_id, "PLAN", &now)?;
             let planning_run_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
                 &format!("{command_id}:plan"),
@@ -2452,7 +2697,7 @@ fn run_chapter_production_inner(
         .transpose()
         .map_err(|error| format!("B10_SKILL_PAYLOAD:{error}"))?;
 
-    update_stage(connection, &project_id, &job_id, "RENDER", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
     let target_chinese_characters = request
         .pointer("/payload/targetChineseCharacters")
         .and_then(Value::as_i64)
@@ -2531,7 +2776,7 @@ fn run_chapter_production_inner(
     }
     let body_digest = sha256_canonical(&json!(body)).map_err(|e| e.to_string())?;
     validate_candidate_evidence_range(&body, 0, body.chars().count())?;
-    update_stage(connection, &project_id, &job_id, "CANDIDATE", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "CANDIDATE", &now)?;
     let candidate_payload = json!({
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
@@ -2936,7 +3181,7 @@ fn run_chapter_production_inner(
         } else {
             (None, None, None, None)
         };
-    update_stage(connection, &project_id, &job_id, "AUDIT", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
     let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
     let reusable_audit = if candidate_repaired {
         None
@@ -3075,7 +3320,7 @@ fn run_chapter_production_inner(
     )?;
     audit.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
     validate_audit_candidate_binding(&audit.payload, &candidate_ref)?;
-    update_stage(connection, &project_id, &job_id, "GATE", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "GATE", &now)?;
     if let Err(error) = validate_plan_is_current(
         connection,
         request,
@@ -3670,7 +3915,8 @@ fn run_chapter_production_inner(
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
         "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
-    update_stage(connection, &project_id, &job_id, "COMMIT", &now)?;
+    let _commit_control_guard =
+        update_commit_stage(manager, connection, &project_id, &job_id, &now)?;
     let receipt = match commit_chapter_after_revision_recheck(
         connection,
         request,
@@ -3691,6 +3937,7 @@ fn run_chapter_production_inner(
         }
         Err(error) => return Err(error),
     };
+    drop(_commit_control_guard);
     // B09 owns the rebuildable volume planning projection. Refresh it only
     // after B08's authoritative chapter CommitBundle succeeds. Its failure is
     // recoverable and does not reverse or mislabel the committed chapter. The
@@ -3750,7 +3997,7 @@ fn run_chapter_production_inner(
         DurableJobService::set_project_phase(connection, &project_id, phase, &now)
             .map_err(|error| error.to_string())?;
     }
-    update_stage(connection, &project_id, &job_id, "COMPLETED", &now)?;
+    update_stage(manager, connection, &project_id, &job_id, "COMPLETED", &now)?;
     Ok(
         json!({"commandId":command_id,"projectId":project_id,"finalStatus":"committed","message":if planning_projection_status=="UPDATED" {"B08 章节已完成原子提交"} else {"B08 章节已提交，B09 投影待维护重试"},"stage":"COMPLETED","executionMode":execution_mode,"jobId":job_id,"candidateRef":candidate_ref,"finalChapterRef":final_ref,"planningProjectionStatus":planning_projection_status,"healthProjectionStatus":if health_projection_ready {"READY"} else {"DIRTY_OR_UNAVAILABLE"},"planningProjectionError":planning_projection_error,"reconciliationExecution":reconciliation_execution,"receipt":receipt}),
     )
