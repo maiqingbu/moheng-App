@@ -14,8 +14,47 @@
     "afterRevision": { "type": "integer", "minimum": 0 },
     "requestDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
     "committedAt": { "$ref": "../shared/definitions.schema.json#/$defs/Rfc3339Utc" },
-    "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" }
+    "receiptDigest": { "$ref": "../shared/definitions.schema.json#/$defs/Sha256" },
+    "controlResult": {
+      "type": "object",
+      "properties": {
+        "jobId": { "$ref": "../shared/definitions.schema.json#/$defs/OpaqueId" },
+        "control": { "type": "string", "enum": ["PAUSE", "CANCEL"] },
+        "applied": { "type": "boolean" },
+        "actionStatus": {
+          "type": "string",
+          "enum": ["PRODUCTION_PAUSED", "PRODUCTION_CANCELLED", "PRODUCTION_CONTROL_NOT_ACCEPTED"]
+        },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "required": ["jobId", "control", "applied", "actionStatus", "message"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "applied": { "const": true }, "control": { "const": "PAUSE" } }, "required": ["applied", "control"] },
+          "then": { "properties": { "actionStatus": { "const": "PRODUCTION_PAUSED" } } }
+        },
+        {
+          "if": { "properties": { "applied": { "const": true }, "control": { "const": "CANCEL" } }, "required": ["applied", "control"] },
+          "then": { "properties": { "actionStatus": { "const": "PRODUCTION_CANCELLED" } } }
+        },
+        {
+          "if": { "properties": { "applied": { "const": false } }, "required": ["applied"] },
+          "then": { "properties": { "actionStatus": { "const": "PRODUCTION_CONTROL_NOT_ACCEPTED" } } }
+        }
+      ]
+    }
   },
   "required": ["receiptId", "projectId", "resultProjectId", "commandId", "idempotencyKey", "commandType", "beforeRevision", "afterRevision", "requestDigest", "committedAt", "receiptDigest"],
+  "allOf": [
+    {
+      "if": { "required": ["controlResult"] },
+      "then": {
+        "properties": {
+          "commandType": { "enum": ["production_pause", "production_cancel"] }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

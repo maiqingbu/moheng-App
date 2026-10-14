@@ -689,7 +689,10 @@ impl DurableJobService {
         let Some((status, previous_chapter_id)) = previous else {
             return Err(RuntimeError::RetryJobNotFound);
         };
-        if status != "FAILED" || previous_chapter_id.as_deref() != Some(chapter_id) {
+        // FX-15: a user-paused job resumes as a retry that reuses its completed steps.
+        if !matches!(status.as_str(), "FAILED" | "PAUSED")
+            || previous_chapter_id.as_deref() != Some(chapter_id)
+        {
             return Err(RuntimeError::RetryJobInvalid);
         }
         Ok(())
@@ -949,6 +952,21 @@ impl DurableJobService {
     ) -> Result<(), RuntimeError> {
         Self::transition(connection, project_id, job_id, "CANCELLED", now)?;
         Self::release_lease(connection, project_id, job_id, now)
+    }
+
+    /// Identity, type, and status of the most recently updated job, if any.
+    pub fn latest_job(
+        connection: &Connection,
+        project_id: &str,
+    ) -> Result<Option<(String, String, String)>, RuntimeError> {
+        connection
+            .query_row(
+                "SELECT job_id, job_type, status FROM jobs WHERE project_id = ?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+                [project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn latest_job_id(

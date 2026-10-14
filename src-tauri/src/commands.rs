@@ -188,7 +188,7 @@ fn expected_revision(request: &Value) -> Result<Option<i64>, String> {
 }
 
 fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
-    json!({
+    let mut response = json!({
         "commandId": receipt.command_id,
         // `projectId` is the *source* project the command acted on; `resultProjectId`
         // is the project the command produced (equal for in-place commands, the new
@@ -203,7 +203,20 @@ fn project_command_response(receipt: &ProjectCommandReceipt) -> Value {
         "beforeRevision": receipt.before_revision,
         "afterRevision": receipt.after_revision,
         "requestDigest": receipt.request_digest,
-    })
+    });
+    if let Some(result) = &receipt.control_result {
+        response["finalStatus"] = json!(if result.applied {
+            "committed"
+        } else {
+            "blocked"
+        });
+        response["actionStatus"] = json!(result.action_status);
+        response["control"] = json!(result.control);
+        response["jobId"] = json!(result.job_id);
+        response["message"] = json!(result.message);
+        response["controlResult"] = json!(result);
+    }
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,6 +287,7 @@ fn registry_lifecycle_command(
         request_digest: request_digest.to_owned(),
         committed_at: requested_at.to_owned(),
         receipt_digest,
+        control_result: None,
     };
     let response = project_command_response(&receipt);
     let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
@@ -6571,6 +6585,64 @@ fn execute_volume_lifecycle_command(
     }))
 }
 
+fn production_control_response(
+    command_id: &str,
+    project_id: &str,
+    action: &str,
+    outcome: crate::project_db::ProductionControlRequestOutcome,
+) -> Value {
+    match outcome {
+        crate::project_db::ProductionControlRequestOutcome::Requested { job_id } => json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"accepted",
+            "actionStatus":"PRODUCTION_CONTROL_REQUESTED",
+            "control":action,
+            "jobId":job_id,
+            "message":if action == "CANCEL" { "已收到取消请求，将在当前步骤后停止本章生产。" } else { "已收到暂停请求，将在当前步骤后停止本章生产。" }
+        }),
+        crate::project_db::ProductionControlRequestOutcome::Replayed {
+            accepted: true,
+            job_id,
+        } => json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"accepted",
+            "actionStatus":"PRODUCTION_CONTROL_REPLAYED",
+            "control":action,
+            "jobId":job_id,
+            "message":"此控制请求已针对原章节处理，不会再次发送到后续章节。"
+        }),
+        crate::project_db::ProductionControlRequestOutcome::Replayed {
+            accepted: false, ..
+        }
+        | crate::project_db::ProductionControlRequestOutcome::NotRunning => json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"blocked",
+            "actionStatus":"PRODUCTION_CONTROL_NOT_ACCEPTED",
+            "control":action,
+            "message":if action == "CANCEL" { "本章正文已提交或作业已结束，取消未生效。" } else { "本章作业已结束，暂停未生效。" }
+        }),
+        crate::project_db::ProductionControlRequestOutcome::Conflict => json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"blocked",
+            "actionStatus":"PRODUCTION_CONTROL_IDEMPOTENCY_CONFLICT",
+            "control":action,
+            "message":"该控制请求标识已用于其他操作，本次未发送控制请求。"
+        }),
+        crate::project_db::ProductionControlRequestOutcome::Pending => json!({
+            "commandId":command_id,
+            "projectId":project_id,
+            "finalStatus":"blocked",
+            "actionStatus":"PRODUCTION_CONTROL_PENDING",
+            "control":action,
+            "message":"本章已有暂停或取消请求处理中，请等待当前请求生效。"
+        }),
+    }
+}
+
 // Runtime command handling intentionally carries the complete command envelope
 // into the ProjectManager-owned transaction so control receipts bind to it.
 #[allow(clippy::too_many_arguments)]
@@ -6598,7 +6670,8 @@ fn execute_runtime_command(
     );
     let outcome = state
         .manager
-        .commit_project_command(spec, |connection| {
+        .commit_project_command_with_control_result(spec, |connection| {
+            let mut control_result = None;
             match command_type {
                 "production_start" => {
                     let job = runtime_job_spec(request, command_id)
@@ -6626,57 +6699,84 @@ fn execute_runtime_command(
                     let job_id = request
                         .pointer("/payload/jobId")
                         .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .unwrap_or(
-                            DurableJobService::latest_job_id(connection, project_id)
-                                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?,
-                        );
-                    let (next, run_state, reason) = match command_type {
-                        "production_pause" => ("PAUSED", "PAUSED", Some("USER_PAUSE")),
-                        "production_resume" => ("RUNNING", "ACTIVE", None),
-                        _ => ("CANCELLED", "FAILED", None),
-                    };
-                    if command_type == "production_resume" {
-                        let worker_id = request
-                            .pointer("/payload/workerId")
-                            .and_then(Value::as_str)
-                            .unwrap_or("production-ipc");
-                        DurableJobService::transition_for_worker(
-                            connection,
-                            project_id,
-                            &job_id,
-                            next,
-                            worker_id,
-                            requested_at,
-                        )
+                        .ok_or_else(|| {
+                            ManagerError::ProjectCommand("IPC_INVALID:payload.jobId".into())
+                        })?;
+                    let latest = DurableJobService::latest_job(connection, project_id)
                         .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
-                    } else {
-                        DurableJobService::transition(
+                    let valid_status =
+                        latest
+                            .as_ref()
+                            .is_some_and(|(latest_id, job_type, status)| {
+                                latest_id == job_id
+                                    && job_type == "CHAPTER"
+                                    && if command_type == "production_resume" {
+                                        status == "PAUSED"
+                                    } else {
+                                        matches!(status.as_str(), "RUNNING" | "WAITING_MODEL")
+                                    }
+                            });
+                    if valid_status {
+                        let (next, run_state, reason) = match command_type {
+                            "production_pause" => ("PAUSED", "PAUSED", Some("USER_PAUSE")),
+                            "production_resume" => ("RUNNING", "ACTIVE", None),
+                            _ => ("CANCELLED", "FAILED", None),
+                        };
+                        if command_type == "production_resume" {
+                            let worker_id = request
+                                .pointer("/payload/workerId")
+                                .and_then(Value::as_str)
+                                .unwrap_or("production-ipc");
+                            DurableJobService::transition_for_worker(
+                                connection,
+                                project_id,
+                                job_id,
+                                next,
+                                worker_id,
+                                requested_at,
+                            )
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                        } else {
+                            DurableJobService::transition(
+                                connection,
+                                project_id,
+                                job_id,
+                                next,
+                                requested_at,
+                            )
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                        }
+                        if command_type == "production_pause" || command_type == "production_cancel"
+                        {
+                            DurableJobService::release_lease(
+                                connection,
+                                project_id,
+                                job_id,
+                                requested_at,
+                            )
+                            .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                        }
+                        DurableJobService::set_runtime_state(
                             connection,
                             project_id,
-                            &job_id,
-                            next,
+                            run_state,
+                            reason,
                             requested_at,
                         )
                         .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
                     }
-                    if command_type == "production_pause" || command_type == "production_cancel" {
-                        DurableJobService::release_lease(
-                            connection,
-                            project_id,
-                            &job_id,
-                            requested_at,
-                        )
-                        .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?;
+                    if matches!(command_type, "production_pause" | "production_cancel") {
+                        let action = if command_type == "production_cancel" {
+                            "CANCEL"
+                        } else {
+                            "PAUSE"
+                        };
+                        control_result = Some(crate::project_db::production_control_result(
+                            action,
+                            job_id,
+                            valid_status,
+                        ));
                     }
-                    DurableJobService::set_runtime_state(
-                        connection,
-                        project_id,
-                        run_state,
-                        reason,
-                        requested_at,
-                    )
-                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))?
                 }
                 _ => {
                     return Err(ManagerError::ProjectCommand(
@@ -6684,7 +6784,7 @@ fn execute_runtime_command(
                     ))
                 }
             }
-            Ok(())
+            Ok(((), control_result))
         })
         .map_err(|error| error.to_string())?;
     Ok(project_command_response(&outcome_receipt(outcome)))
@@ -8552,6 +8652,62 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                     &state.skill_bundle_loader,
                     &request,
                 );
+            }
+            if matches!(command_type, "production_pause" | "production_cancel") {
+                let action = if command_type == "production_cancel" {
+                    "CANCEL"
+                } else {
+                    "PAUSE"
+                };
+                let job_id = request
+                    .pointer("/payload/jobId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "IPC_INVALID:payload.jobId".to_string())?;
+                if let Some(replayed) =
+                    replayed_project_command(state, id, idempotency_key, &digest)?
+                {
+                    return Ok(replayed);
+                }
+                let guard = state
+                    .manager
+                    .lock_production_control(id)
+                    .map_err(|error| error.to_string())?;
+                let writer_held = state
+                    .manager
+                    .writer_is_held(id)
+                    .map_err(|error| error.to_string())?;
+                if writer_held {
+                    if let Some(outcome) = state
+                        .manager
+                        .replay_production_control(&guard, id, command_id, idempotency_key, &digest)
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Ok(production_control_response(command_id, id, action, outcome));
+                    }
+                    let outcome = state
+                        .manager
+                        .request_production_control(
+                            &guard,
+                            crate::project_db::ProductionControlCommand {
+                                project_id: id,
+                                action,
+                                job_id,
+                                command_id,
+                                idempotency_key,
+                                request_digest: &digest,
+                                requested_at,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                    return Ok(production_control_response(command_id, id, action, outcome));
+                }
+                drop(guard);
+                crate::production::finalize_pending_production_control(&state.manager, id)?;
+                if let Some(replayed) =
+                    replayed_project_command(state, id, idempotency_key, &digest)?
+                {
+                    return Ok(replayed);
+                }
             }
             execute_runtime_command(
                 state,

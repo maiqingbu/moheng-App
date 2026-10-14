@@ -310,6 +310,7 @@ export interface ProjectCommandReceipt {
   "requestDigest": Sha256
   "committedAt": Rfc3339Utc
   "receiptDigest": Sha256
+  "controlResult"?: { "jobId": OpaqueId; "control": "PAUSE" | "CANCEL"; "applied": boolean; "actionStatus": "PRODUCTION_PAUSED" | "PRODUCTION_CANCELLED" | "PRODUCTION_CONTROL_NOT_ACCEPTED"; "message": string }
 }
 
 export interface CommitBundle {

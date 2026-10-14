@@ -1023,6 +1023,18 @@ pub struct ProjectCommandReceipt {
     pub request_digest: Sha256,
     pub committed_at: Rfc3339Utc,
     pub receipt_digest: Sha256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_result: Option<ProjectCommandReceiptControlResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectCommandReceiptControlResult {
+    pub job_id: OpaqueId,
+    pub control: String,
+    pub applied: bool,
+    pub action_status: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
