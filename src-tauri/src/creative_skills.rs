@@ -408,7 +408,7 @@ impl SkillBundleLoader {
         }))
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "scale-bench"))]
     pub fn development_package() -> Self {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let package_root = manifest_dir.join("../creative-skills/v1.2.0");

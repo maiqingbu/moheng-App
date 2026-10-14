@@ -38,7 +38,9 @@ pub struct KernelState {
 }
 
 impl KernelState {
-    #[cfg(any(test, debug_assertions))]
+    // Release-mode scale certification (`--features scale-bench`) builds its
+    // fixtures through the same test constructors; product builds never enable it.
+    #[cfg(any(test, debug_assertions, feature = "scale-bench"))]
     pub fn new(paths: AppPaths) -> Self {
         Self::with_skill_bundle_loader(
             paths,
@@ -56,7 +58,7 @@ impl KernelState {
         )
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "scale-bench"))]
     pub fn with_production_gateway(
         paths: AppPaths,
         production_gateway: Arc<dyn crate::production::ProductionModelGateway>,
