@@ -5018,6 +5018,161 @@ fn knowledge_authority_is_bound(
 mod tests {
     use super::*;
 
+    fn s40_test_skill() -> crate::creative_skills::SkillMetadata {
+        crate::creative_skills::SkillMetadata {
+            id: "S40".into(),
+            slug: "surgical-repair".into(),
+            name_zh: "外科修复".into(),
+            version: "1.2.0".into(),
+            category: "repair".into(),
+            role: "repair".into(),
+            runtime_stage: "CANDIDATE".into(),
+            context_policy: "bounded".into(),
+            mutation_policy: "candidate-only".into(),
+            coverage: Vec::new(),
+            bundle_digest: "sha256:test-bundle".into(),
+            method_resource: None,
+            authority_access: "read-only".into(),
+            hard_gate_authority: false,
+            control_decision_authority: false,
+        }
+    }
+
+    fn valid_s40_repair_output() -> Value {
+        json!({
+            "skillId": "S40",
+            "skillVersion": "1.2.0",
+            "bundleDigest": "sha256:test-bundle",
+            "taskId": "task:repair-test",
+            "status": "OK",
+            "sourceRefs": ["source:chapter"],
+            "assumptions": [],
+            "payload": {
+                "repair_plan": "替换局部重复表达",
+                "target_spans": [{"start": 1, "end": 3}],
+                "protected_spans": [{"start": 0, "end": 1}, {"start": 3, "end": 4}],
+                "changes": [{"start": 1, "end": 3, "replacement": "新句"}],
+                "recheck_dimensions": ["agency", "exposition"],
+                "escalation_if_failed": "ADVISORY_ESCALATION"
+            },
+            "findings": [],
+            "contextRefs": ["context:allowed"],
+            "runtimeCheckRequests": [{"kind": "TASK_REALITY", "reason": "复核任务状态", "refs": []}],
+            "confidence": 0.9,
+            "nextSkillHints": []
+        })
+    }
+
+    fn parse_s40_test_output(output: Value, body: &str) -> Result<ParsedS40RepairOutput, String> {
+        let skill = s40_test_skill();
+        let affected_dimensions = ["agency".to_string(), "exposition".to_string()];
+        let allowed_context_refs = ["context:allowed".to_string()].into_iter().collect();
+        parse_s40_repair_output(
+            output,
+            &skill,
+            "task:repair-test",
+            body,
+            &affected_dimensions,
+            &allowed_context_refs,
+        )
+    }
+
+    #[test]
+    fn s40_repair_parser_accepts_unicode_scalar_offsets_and_exact_protected_ranges() {
+        let parsed = parse_s40_test_output(valid_s40_repair_output(), "甲😀乙丙")
+            .expect("a schema-valid S40 patch uses Unicode scalar offsets");
+        let patch = parsed.patch.expect("OK output contains a patch");
+        assert_eq!(patch.start, 1);
+        assert_eq!(patch.end, 3);
+        assert_eq!(patch.replacement, "新句");
+        assert_eq!(
+            patch.protected_spans,
+            vec![json!({"start":0,"end":1}), json!({"start":3,"end":4})]
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_non_string_source_references() {
+        let mut output = valid_s40_repair_output();
+        output["sourceRefs"] = json!([{"reference":"source:chapter"}]);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_non_string_context_references() {
+        let mut output = valid_s40_repair_output();
+        output["contextRefs"] = json!([{"reference":"context:allowed"}]);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_context_references_outside_allowed_set() {
+        let mut output = valid_s40_repair_output();
+        output["contextRefs"] = json!(["context:not-allowed"]);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_unknown_status_values() {
+        let mut output = valid_s40_repair_output();
+        output["status"] = json!("AUTO_CORRECTED");
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_mismatched_target_and_change_ranges() {
+        let mut output = valid_s40_repair_output();
+        output["payload"]["changes"][0]["end"] = json!(2);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_unknown_runtime_check_kinds() {
+        let mut output = valid_s40_repair_output();
+        output["runtimeCheckRequests"][0]["kind"] = json!("UNKNOWN_KIND");
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_byte_offsets_for_unicode_body() {
+        let mut output = valid_s40_repair_output();
+        output["payload"]["target_spans"][0]["end"] = json!(5);
+        output["payload"]["changes"][0]["end"] = json!(5);
+        output["payload"]["protected_spans"] = json!([{"start":0,"end":1}]);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_inexact_protected_ranges() {
+        let mut output = valid_s40_repair_output();
+        output["payload"]["protected_spans"] = json!([{"start":0,"end":2},{"start":3,"end":4}]);
+        assert_eq!(
+            parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+            Some("B10_REPAIR_OUTPUT_INVALID")
+        );
+    }
+
     #[test]
     fn fx5_classify_plan_reality_table() {
         let task = |task_id: &str,
