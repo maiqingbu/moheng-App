@@ -244,12 +244,12 @@ impl OpenAiCompatibleProvider {
             "REPAIR_CANDIDATE" => concat!(
                 "Return one JSON S40 SkillResultEnvelope only; top-level fields are exactly skillId, skillVersion, bundleDigest, taskId, status, sourceRefs, assumptions, payload, findings, contextRefs, runtimeCheckRequests, confidence, and nextSkillHints. No other top-level fields are allowed. ",
                 "Use these types: skillId, skillVersion, bundleDigest, taskId, and status are strings; payload is an object; confidence is a JSON number from 0 to 1 inclusive; sourceRefs, assumptions, contextRefs, and nextSkillHints are arrays of strings; findings is an array of objects; runtimeCheckRequests is an array of objects. ",
-                "skillId must equal S40. skillVersion must exactly equal the supplied SkillMetadata.version; bundleDigest must exactly equal the supplied SkillMetadata.bundle_digest; taskId must exactly equal the supplied task_id. status must be exactly one of OK, NEEDS_INPUT, NOT_APPLICABLE, ADVISORY_ESCALATION. ",
-                "Each runtimeCheckRequest must have exactly kind, reason, and refs; runtimeCheckRequest.kind must be one of CANON_CONFLICT, KNOWLEDGE_BOUNDARY, THREAD_STATE, TASK_REALITY, RESERVATION, INTEGRITY, PLAN_STALE, or EVIDENCE_GAP; reason is a non-empty string; refs is an array of at most 64 strings. Every contextRefs item must be one of the supplied allowedContextRefs. ",
+                "skillId must equal skill.skillId, and the request field skill.skillId must equal S40. skillVersion must exactly equal the request field skill.skillVersion; bundleDigest must exactly equal skill.bundleDigest; taskId must exactly equal skillTaskContext.taskId. Copy these identity values unchanged; never infer, substitute, or normalize them. status must be exactly one of OK, NEEDS_INPUT, NOT_APPLICABLE, ADVISORY_ESCALATION. ",
+                "Each runtimeCheckRequest must have exactly kind, reason, and refs; runtimeCheckRequest.kind must be one of CANON_CONFLICT, KNOWLEDGE_BOUNDARY, THREAD_STATE, TASK_REALITY, RESERVATION, INTEGRITY, PLAN_STALE, or EVIDENCE_GAP; reason is a non-empty string; refs is an array of at most 64 strings. Every contextRefs item must exactly equal a string in the top-level request field allowedContextRefs; this allow-list is derived from skillTaskContext.boundedRefs[*].reference. Do not infer references from prose or other request fields. ",
                 "payload must contain repair_plan, target_spans, protected_spans, changes, recheck_dimensions, and escalation_if_failed. target_spans, protected_spans, changes, and recheck_dimensions are arrays; escalation_if_failed is a non-empty string. For status OK, repair_plan is a non-empty string and recheck_dimensions contains exactly the unique affectedDimensions values, with no additions or omissions. ",
-                "For status OK, return exactly one target_spans item with non-negative integer start/end and exactly one corresponding changes item with non-negative integer start/end plus string replacement. start and end describe the half-open interval [start, end), with end exclusive. target_spans[0] and changes[0] must use the same exact start and end integers; require 0 <= start <= end <= candidate.body character count. ",
-                "start/end are Unicode character offsets into candidate.body; use Unicode scalar values counted by Rust str.chars().count() exactly. Never use UTF-8 byte offsets, UTF-16 code units, or grapheme-cluster counts. For the body 甲😀乙丙 the scalar indexes are 0, 1, 2, 3 and the character count is 4. ",
-                "protected_spans must equal the exact outside ranges in order: include {start:0,end:start} only when start > 0, then include {start:end,end:body_char_count} only when end < body_char_count; omit an empty prefix or suffix. For target [1,3) in 甲😀乙丙, use protected_spans [{start:0,end:1},{start:3,end:4}]. Do not add, merge, overlap, or adjust ranges. ",
+                "For status OK, return exactly one target_spans item with non-negative integer start/end and exactly one corresponding changes item with non-negative integer start/end plus string replacement. start and end describe the half-open interval [start, end), with end exclusive. target_spans[0] and changes[0] must use the same exact start and end integers; require 0 <= start <= end <= candidate.bodyCharacterCount. ",
+                "candidate.bodyCharacterCount is the request-supplied count of Unicode scalar values in candidate.body, computed with Rust str.chars().count(). start/end are Unicode scalar offsets into candidate.body using that exact count. Never use UTF-8 byte offsets, UTF-16 code units, or grapheme-cluster counts. For the body 甲😀乙丙 the scalar indexes are 0, 1, 2, 3 and the character count is 4. ",
+                "protected_spans must equal the exact outside ranges in order: include {start:0,end:start} only when start > 0, then include {start:end,end:candidate.bodyCharacterCount} only when end < candidate.bodyCharacterCount; omit an empty prefix or suffix. For target [1,3) in 甲😀乙丙, use protected_spans [{start:0,end:1},{start:3,end:4}]. Do not add, merge, overlap, or adjust ranges. ",
                 "Keep the patch local and preserve every character outside that span; never rewrite the whole chapter by default. If exact valid offsets cannot be established, return NEEDS_INPUT or ADVISORY_ESCALATION without a patch; never guess or normalize offsets. ",
                 "Follow the S40 envelope requirements in this instruction and the supplied SKILL.md with the bounded SkillTaskContext. Do not alter Canon facts, knowledge, task/reservation reality, ChapterPlan constraints, or any hard rule. If safe local repair is not possible, return NEEDS_INPUT or ADVISORY_ESCALATION with no changes. Do not query project data, commit, or write authority.",
             ),
@@ -273,7 +273,7 @@ impl OpenAiCompatibleProvider {
             .contains(".maas.aliyuncs.com/")
     }
 
-    fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
+    pub(crate) fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
         let base_prompt = Self::structured_prompt(&request.capability);
         let system_prompt = if request.capability == "AUDIT_EXTRACT" {
             let exact_evidence_prompt = base_prompt.replace(
@@ -729,31 +729,36 @@ mod tests {
         assert!(
             prompt.contains("Each runtimeCheckRequest must have exactly kind, reason, and refs")
         );
-        assert!(prompt.contains("Unicode character offsets"));
+        assert!(prompt.contains("Unicode scalar offsets into candidate.body"));
         assert!(prompt.contains("protected_spans must equal the exact outside ranges in order"));
         assert!(prompt.contains("preserve every character outside that span"));
         assert!(prompt.contains(
             "sourceRefs, assumptions, contextRefs, and nextSkillHints are arrays of strings"
         ));
         assert!(prompt.contains("findings is an array of objects"));
+        assert!(prompt.contains("skillId must equal skill.skillId"));
         assert!(
-            prompt.contains("skillVersion must exactly equal the supplied SkillMetadata.version")
+            prompt.contains("skillVersion must exactly equal the request field skill.skillVersion")
         );
-        assert!(prompt
-            .contains("bundleDigest must exactly equal the supplied SkillMetadata.bundle_digest"));
-        assert!(prompt.contains("taskId must exactly equal the supplied task_id"));
+        assert!(prompt.contains("bundleDigest must exactly equal skill.bundleDigest"));
+        assert!(prompt.contains("taskId must exactly equal skillTaskContext.taskId"));
         assert!(prompt.contains(
             "status must be exactly one of OK, NEEDS_INPUT, NOT_APPLICABLE, ADVISORY_ESCALATION"
         ));
         assert!(prompt.contains("confidence is a JSON number from 0 to 1 inclusive"));
         assert!(prompt.contains("runtimeCheckRequest.kind must be one of"));
         assert!(prompt.contains("CANON_CONFLICT, KNOWLEDGE_BOUNDARY, THREAD_STATE, TASK_REALITY, RESERVATION, INTEGRITY, PLAN_STALE, or EVIDENCE_GAP"));
-        assert!(prompt
-            .contains("Every contextRefs item must be one of the supplied allowedContextRefs"));
+        assert!(prompt.contains("top-level request field allowedContextRefs"));
+        assert!(prompt.contains("skillTaskContext.boundedRefs[*].reference"));
+        assert!(prompt.contains("candidate.bodyCharacterCount"));
+        assert!(!prompt.contains("SkillMetadata.version"));
+        assert!(!prompt.contains("SkillMetadata.bundle_digest"));
+        assert!(!prompt.contains("supplied task_id"));
         assert!(prompt
             .contains("target_spans, protected_spans, changes, and recheck_dimensions are arrays"));
         assert!(prompt.contains("escalation_if_failed is a non-empty string"));
-        assert!(prompt.contains("Unicode scalar values counted by Rust str.chars().count()"));
+        assert!(prompt.contains("candidate.bodyCharacterCount is the request-supplied count"));
+        assert!(prompt.contains("computed with Rust str.chars().count()"));
         assert!(prompt.contains(
             "Never use UTF-8 byte offsets, UTF-16 code units, or grapheme-cluster counts"
         ));

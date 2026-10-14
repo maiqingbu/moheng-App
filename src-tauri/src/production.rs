@@ -184,6 +184,14 @@ pub struct ConfiguredProductionGateway {
     settings_paths: Option<crate::project_db::paths::AppPaths>,
 }
 
+fn serialize_provider_input(input: &Value) -> String {
+    input
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| input.to_string())
+}
+
 impl ConfiguredProductionGateway {
     pub fn new(
         config: ProviderConfig,
@@ -272,15 +280,10 @@ impl ConfiguredProductionGateway {
                 "provider secret unavailable",
             )
         })?;
-        let prompt = input
-            .get("prompt")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| input.to_string());
         let request = ProviderRequest {
             capability: capability.into(),
             model_id: config.model_id.clone(),
-            prompt,
+            prompt: serialize_provider_input(input),
             timeout_ms: config.timeout_ms,
         };
         if self.settings_paths.is_some() {
@@ -636,13 +639,168 @@ struct ParsedS40RepairOutput {
     patch: Option<S40CandidatePatch>,
 }
 
-fn parse_s40_repair_output(
-    output: Value,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct S40RepairValidationBinding {
+    skill_id: String,
+    skill_version: String,
+    bundle_digest: String,
+    task_id: String,
+    body: String,
+    body_character_count: usize,
+    affected_dimensions: Vec<String>,
+    allowed_context_refs: BTreeSet<String>,
+}
+
+impl S40RepairValidationBinding {
+    fn from_serialized_request(serialized_request: &str) -> Result<Self, String> {
+        let invalid = || "B10_S40_REQUEST_BINDING_INVALID".to_string();
+        let request: Value = serde_json::from_str(serialized_request).map_err(|_| invalid())?;
+        let request_string = |path: &str| {
+            request
+                .pointer(path)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(invalid)
+        };
+        let skill_id = request_string("/skill/skillId")?;
+        let skill_version = request_string("/skill/skillVersion")?;
+        let bundle_digest = request_string("/skill/bundleDigest")?;
+        let task_id = request_string("/skillTaskContext/taskId")?;
+        if skill_id != "S40" {
+            return Err(invalid());
+        }
+
+        let body = request_string("/candidate/body")?;
+        let body_character_count = request
+            .pointer("/candidate/bodyCharacterCount")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(invalid)?;
+        if body_character_count != body.chars().count() {
+            return Err(invalid());
+        }
+
+        let read_string_set = |value: Option<&Value>| -> Result<BTreeSet<String>, String> {
+            value
+                .and_then(Value::as_array)
+                .ok_or_else(invalid)?
+                .iter()
+                .map(|item| item.as_str().map(ToOwned::to_owned).ok_or_else(invalid))
+                .collect()
+        };
+        let allowed_context_refs = read_string_set(request.get("allowedContextRefs"))?;
+        let bounded_refs = request
+            .pointer("/skillTaskContext/boundedRefs")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid)?
+            .iter()
+            .map(|item| {
+                item.get("reference")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(invalid)
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if allowed_context_refs != bounded_refs {
+            return Err(invalid());
+        }
+
+        let affected_dimensions = request
+            .get("affectedDimensions")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid)?
+            .iter()
+            .map(|item| item.as_str().map(ToOwned::to_owned).ok_or_else(invalid))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            skill_id,
+            skill_version,
+            bundle_digest,
+            task_id,
+            body,
+            body_character_count,
+            affected_dimensions,
+            allowed_context_refs,
+        })
+    }
+}
+
+struct PreparedS40RepairRequest {
+    input: Value,
+    binding: S40RepairValidationBinding,
+}
+
+fn prepare_s40_repair_request(
+    mut input: Value,
     skill: &crate::creative_skills::SkillMetadata,
-    task_id: &str,
+    task_context: &crate::creative_skills::SkillTaskContext,
     body: &str,
     affected_dimensions: &[String],
-    allowed_context_refs: &BTreeSet<String>,
+) -> Result<PreparedS40RepairRequest, String> {
+    let invalid = || "B10_S40_REQUEST_BINDING_INVALID".to_string();
+    let expected_context = serde_json::to_value(task_context).map_err(|_| invalid())?;
+    let expected_dimensions = json!(affected_dimensions);
+    if input.pointer("/skill/skillId").and_then(Value::as_str) != Some(skill.id.as_str())
+        || input.pointer("/skill/skillVersion").and_then(Value::as_str)
+            != Some(skill.version.as_str())
+        || input.pointer("/skill/bundleDigest").and_then(Value::as_str)
+            != Some(skill.bundle_digest.as_str())
+        || input.get("skillTaskContext") != Some(&expected_context)
+        || input.pointer("/candidate/body").and_then(Value::as_str) != Some(body)
+        || input.get("affectedDimensions") != Some(&expected_dimensions)
+    {
+        return Err(invalid());
+    }
+
+    let allowed_context_refs = task_context
+        .bounded_refs
+        .iter()
+        .map(|reference| reference.reference.clone())
+        .collect::<BTreeSet<_>>();
+    let allowed_context_refs_json = json!(allowed_context_refs.iter().collect::<Vec<_>>());
+    if input
+        .get("allowedContextRefs")
+        .is_some_and(|existing| existing != &allowed_context_refs_json)
+    {
+        return Err(invalid());
+    }
+    input["allowedContextRefs"] = allowed_context_refs_json;
+
+    let body_character_count = body.chars().count();
+    let body_character_count_json = json!(body_character_count);
+    let candidate = input
+        .get_mut("candidate")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(invalid)?;
+    if candidate
+        .get("bodyCharacterCount")
+        .is_some_and(|existing| existing != &body_character_count_json)
+    {
+        return Err(invalid());
+    }
+    candidate.insert("bodyCharacterCount".into(), body_character_count_json);
+
+    let serialized_request = serialize_provider_input(&input);
+    let binding = S40RepairValidationBinding::from_serialized_request(&serialized_request)?;
+    if binding.skill_id != skill.id
+        || binding.skill_version != skill.version
+        || binding.bundle_digest != skill.bundle_digest
+        || binding.task_id != task_context.task_id
+        || binding.body != body
+        || binding.body_character_count != body_character_count
+        || binding.affected_dimensions != affected_dimensions
+        || binding.allowed_context_refs != allowed_context_refs
+    {
+        return Err(invalid());
+    }
+    Ok(PreparedS40RepairRequest { input, binding })
+}
+
+fn parse_s40_repair_output(
+    output: Value,
+    binding: &S40RepairValidationBinding,
 ) -> Result<ParsedS40RepairOutput, String> {
     let object = output
         .as_object()
@@ -675,10 +833,10 @@ fn parse_s40_repair_output(
             .and_then(Value::as_str)
             .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
     };
-    if string_field("skillId")? != "S40"
-        || string_field("skillVersion")? != skill.version
-        || string_field("bundleDigest")? != skill.bundle_digest
-        || string_field("taskId")? != task_id
+    if string_field("skillId")? != binding.skill_id
+        || string_field("skillVersion")? != binding.skill_version
+        || string_field("bundleDigest")? != binding.bundle_digest
+        || string_field("taskId")? != binding.task_id
     {
         return Err("B10_REPAIR_OUTPUT_INVALID".into());
     }
@@ -750,7 +908,7 @@ fn parse_s40_repair_output(
             items
                 .iter()
                 .filter_map(Value::as_str)
-                .any(|reference| !allowed_context_refs.contains(reference))
+                .any(|reference| !binding.allowed_context_refs.contains(reference))
         })
     {
         return Err("B10_REPAIR_OUTPUT_INVALID".into());
@@ -828,7 +986,7 @@ fn parse_s40_repair_output(
                 .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut expected_dimensions = affected_dimensions.to_vec();
+    let mut expected_dimensions = binding.affected_dimensions.clone();
     supplied_dimensions.sort();
     supplied_dimensions.dedup();
     expected_dimensions.sort();
@@ -863,7 +1021,7 @@ fn parse_s40_repair_output(
     };
     let (start, end) = read_span(&target_spans[0])?;
     let (change_start, change_end) = read_span(&changes[0])?;
-    let body_len = body.chars().count();
+    let body_len = binding.body_character_count;
     if start != change_start || end != change_end || start > end || end > body_len {
         return Err("B10_REPAIR_OUTPUT_INVALID".into());
     }
@@ -2921,6 +3079,16 @@ fn run_chapter_production_inner(
                     "repairRun":1,
                     "repairRunLimit":repair_limit
                 });
+                let PreparedS40RepairRequest {
+                    input: repair_input,
+                    binding: s40_binding,
+                } = prepare_s40_repair_request(
+                    repair_input,
+                    &s40_selection.primary,
+                    &enrichment.context,
+                    &body,
+                    &affected_dimensions,
+                )?;
                 let repair_spec = ModelRunSpec {
                     model_run_id: repair_run_id.clone(),
                     job_id: Some(job_id.clone()),
@@ -2950,20 +3118,7 @@ fn run_chapter_production_inner(
                 let patch_payload = repair_result
                     .parsed
                     .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-                let allowed_context_refs = enrichment
-                    .context
-                    .bounded_refs
-                    .iter()
-                    .map(|reference| reference.reference.clone())
-                    .collect::<BTreeSet<_>>();
-                let parsed_s40 = parse_s40_repair_output(
-                    patch_payload,
-                    &s40_selection.primary,
-                    &enrichment.context.task_id,
-                    &body,
-                    &affected_dimensions,
-                    &allowed_context_refs,
-                )?;
+                let parsed_s40 = parse_s40_repair_output(patch_payload, &s40_binding)?;
                 s40_output_record = parsed_s40.skill_output.clone();
                 let requested_escalation = parsed_s40
                     .skill_output
@@ -5018,6 +5173,26 @@ fn knowledge_authority_is_bound(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct CapturingProviderAdapter {
+        request: std::sync::Mutex<Option<ProviderRequest>>,
+    }
+
+    impl ProviderAdapter for CapturingProviderAdapter {
+        fn invoke(
+            &self,
+            request: &ProviderRequest,
+            _secret: &str,
+        ) -> Result<ProviderResponse, ProviderError> {
+            *self.request.lock().unwrap() = Some(request.clone());
+            Ok(ProviderResponse {
+                raw_response: "{}".into(),
+                usage: Default::default(),
+                provider_request_id: Some("captured-test-request".into()),
+            })
+        }
+    }
+
     fn s40_test_skill() -> crate::creative_skills::SkillMetadata {
         crate::creative_skills::SkillMetadata {
             id: "S40".into(),
@@ -5038,12 +5213,71 @@ mod tests {
         }
     }
 
-    fn valid_s40_repair_output() -> Value {
+    fn s40_test_context() -> crate::creative_skills::SkillTaskContext {
+        crate::creative_skills::build_skill_task_context(
+            "project:test",
+            "task:repair-test",
+            7,
+            "context:allowed",
+            &json!({
+                "artifactId":"plan:chapter",
+                "chapterGoal":"推进目标",
+                "activeTaskRefs":[]
+            }),
+        )
+        .unwrap()
+    }
+
+    fn s40_test_dimensions() -> Vec<String> {
+        vec!["agency".into(), "exposition".into()]
+    }
+
+    fn s40_test_request_input(
+        skill: &crate::creative_skills::SkillMetadata,
+        context: &crate::creative_skills::SkillTaskContext,
+        body: &str,
+        affected_dimensions: &[String],
+    ) -> Value {
         json!({
-            "skillId": "S40",
-            "skillVersion": "1.2.0",
-            "bundleDigest": "sha256:test-bundle",
-            "taskId": "task:repair-test",
+            "skill": {
+                "skillId":skill.id,
+                "skillVersion":skill.version,
+                "bundleDigest":skill.bundle_digest,
+                "skillReference":"skills/surgical-repair/SKILL.md",
+                "skillDigest":"sha256:test-skill",
+                "skillText":"test method data",
+                "resources":[],
+                "deploymentManifestDigest":"sha256:test-deployment"
+            },
+            "skillTaskContext":context,
+            "candidate":{"candidateRef":"candidate:test","status":"CANDIDATE","body":body},
+            "findings":[],
+            "protectedSpans":[{"candidateRef":"candidate:test","bodyDigest":"sha256:test-body","preserveAllCharactersOutsideReturnedTargetSpan":true}],
+            "sceneContract":{"chapterGoal":"推进目标","sceneExecution":[],"requiredStateOutcomes":[],"forbiddenTransitions":[]},
+            "chapterPlanRef":{"artifactId":"plan:chapter","version":1,"payloadHash":"a".repeat(64)},
+            "chapterPlan":{"chapterGoal":"推进目标","sceneExecution":[],"requiredStateOutcomes":[],"forbiddenTransitions":[]},
+            "affectedDimensions":affected_dimensions,
+            "repairRun":1,
+            "repairRunLimit":2
+        })
+    }
+
+    fn s40_test_binding(body: &str) -> S40RepairValidationBinding {
+        let skill = s40_test_skill();
+        let context = s40_test_context();
+        let dimensions = s40_test_dimensions();
+        let request = s40_test_request_input(&skill, &context, body, &dimensions);
+        prepare_s40_repair_request(request, &skill, &context, body, &dimensions)
+            .unwrap()
+            .binding
+    }
+
+    fn valid_s40_repair_output_for(binding: &S40RepairValidationBinding) -> Value {
+        json!({
+            "skillId": binding.skill_id,
+            "skillVersion": binding.skill_version,
+            "bundleDigest": binding.bundle_digest,
+            "taskId": binding.task_id,
             "status": "OK",
             "sourceRefs": ["source:chapter"],
             "assumptions": [],
@@ -5052,29 +5286,156 @@ mod tests {
                 "target_spans": [{"start": 1, "end": 3}],
                 "protected_spans": [{"start": 0, "end": 1}, {"start": 3, "end": 4}],
                 "changes": [{"start": 1, "end": 3, "replacement": "新句"}],
-                "recheck_dimensions": ["agency", "exposition"],
+                "recheck_dimensions": binding.affected_dimensions,
                 "escalation_if_failed": "ADVISORY_ESCALATION"
             },
             "findings": [],
-            "contextRefs": ["context:allowed"],
+            "contextRefs": [binding.allowed_context_refs.iter().next().unwrap()],
             "runtimeCheckRequests": [{"kind": "TASK_REALITY", "reason": "复核任务状态", "refs": []}],
             "confidence": 0.9,
             "nextSkillHints": []
         })
     }
 
+    fn valid_s40_repair_output() -> Value {
+        valid_s40_repair_output_for(&s40_test_binding("甲😀乙丙"))
+    }
+
     fn parse_s40_test_output(output: Value, body: &str) -> Result<ParsedS40RepairOutput, String> {
         let skill = s40_test_skill();
-        let affected_dimensions = ["agency".to_string(), "exposition".to_string()];
-        let allowed_context_refs = ["context:allowed".to_string()].into_iter().collect();
-        parse_s40_repair_output(
-            output,
-            &skill,
-            "task:repair-test",
-            body,
-            &affected_dimensions,
-            &allowed_context_refs,
-        )
+        let context = s40_test_context();
+        let dimensions = s40_test_dimensions();
+        let request = s40_test_request_input(&skill, &context, body, &dimensions);
+        let prepared = prepare_s40_repair_request(request, &skill, &context, body, &dimensions)?;
+        parse_s40_repair_output(output, &prepared.binding)
+    }
+
+    #[test]
+    fn s40_actual_provider_request_matches_validator_identity_refs_and_body_count() {
+        let skill = s40_test_skill();
+        let context = s40_test_context();
+        let dimensions = s40_test_dimensions();
+        let raw_input = s40_test_request_input(&skill, &context, "甲😀乙丙", &dimensions);
+        let prepared =
+            prepare_s40_repair_request(raw_input, &skill, &context, "甲😀乙丙", &dimensions)
+                .unwrap();
+
+        let secret_store = crate::repositories::runtime::MemorySecretStore::new();
+        secret_store.put("test-provider", "test-secret").unwrap();
+        let adapter = std::sync::Arc::new(CapturingProviderAdapter::default());
+        let config = ProviderConfig {
+            provider_id: "test-provider".into(),
+            model_id: "test-model".into(),
+            endpoint: "https://provider.invalid/v1".into(),
+            enabled: true,
+            timeout_ms: 1_000,
+        };
+        let gateway = ConfiguredProductionGateway::new(
+            config.clone(),
+            adapter.clone(),
+            std::sync::Arc::new(secret_store),
+        );
+        gateway
+            .invoke_provider_with_config(&config, "REPAIR_CANDIDATE", &prepared.input)
+            .expect("the test provider captures the actual serialized S40 request");
+
+        let provider_request = adapter.request.lock().unwrap().clone().unwrap();
+        assert_eq!(provider_request.capability, "REPAIR_CANDIDATE");
+        assert_eq!(
+            provider_request.prompt,
+            serialize_provider_input(&prepared.input)
+        );
+        let wire_payload =
+            OpenAiCompatibleProvider::request_payload(&config.endpoint, &provider_request);
+        let system_prompt = wire_payload["messages"][0]["content"].as_str().unwrap();
+        let serialized_user_request = wire_payload["messages"][1]["content"].as_str().unwrap();
+        assert_eq!(serialized_user_request, provider_request.prompt);
+        let captured_input: Value = serde_json::from_str(serialized_user_request).unwrap();
+        let captured_binding =
+            S40RepairValidationBinding::from_serialized_request(serialized_user_request).unwrap();
+        assert_eq!(captured_input, prepared.input);
+        assert_eq!(captured_binding, prepared.binding);
+        assert_eq!(
+            captured_binding.skill_id,
+            captured_input["skill"]["skillId"]
+        );
+        assert_eq!(
+            captured_binding.skill_version,
+            captured_input["skill"]["skillVersion"]
+        );
+        assert_eq!(
+            captured_binding.bundle_digest,
+            captured_input["skill"]["bundleDigest"]
+        );
+        assert_eq!(
+            captured_binding.task_id,
+            captured_input["skillTaskContext"]["taskId"]
+        );
+        let bounded_refs = captured_input["skillTaskContext"]["boundedRefs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["reference"].as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(captured_binding.allowed_context_refs, bounded_refs);
+        assert_eq!(captured_binding.body_character_count, 4);
+        assert_eq!(
+            captured_binding.body_character_count,
+            captured_binding.body.chars().count()
+        );
+        for request_field in [
+            "skill.skillId",
+            "skill.skillVersion",
+            "skill.bundleDigest",
+            "skillTaskContext.taskId",
+            "skillTaskContext.boundedRefs[*].reference",
+            "allowedContextRefs",
+            "candidate.bodyCharacterCount",
+        ] {
+            assert!(
+                system_prompt.contains(request_field),
+                "missing {request_field}"
+            );
+        }
+
+        let model_output = valid_s40_repair_output_for(&captured_binding);
+        let parsed = parse_s40_repair_output(model_output.clone(), &captured_binding).unwrap();
+        assert_eq!(parsed.skill_output["skillId"], model_output["skillId"]);
+        assert_eq!(
+            parsed.skill_output["skillVersion"],
+            model_output["skillVersion"]
+        );
+        assert_eq!(
+            parsed.skill_output["bundleDigest"],
+            model_output["bundleDigest"]
+        );
+        assert_eq!(parsed.skill_output["taskId"], model_output["taskId"]);
+    }
+
+    #[test]
+    fn s40_request_preparation_rejects_body_count_or_reference_set_drift() {
+        let skill = s40_test_skill();
+        let context = s40_test_context();
+        let dimensions = s40_test_dimensions();
+
+        let mut wrong_body_count =
+            s40_test_request_input(&skill, &context, "甲😀乙丙", &dimensions);
+        wrong_body_count["candidate"]["bodyCharacterCount"] = json!(3);
+        assert_eq!(
+            prepare_s40_repair_request(wrong_body_count, &skill, &context, "甲😀乙丙", &dimensions)
+                .err()
+                .as_deref(),
+            Some("B10_S40_REQUEST_BINDING_INVALID")
+        );
+
+        let mut wrong_refs = s40_test_request_input(&skill, &context, "甲😀乙丙", &dimensions);
+        wrong_refs["allowedContextRefs"] = json!(["context:allowed", "context:invented"]);
+        assert_eq!(
+            prepare_s40_repair_request(wrong_refs, &skill, &context, "甲😀乙丙", &dimensions)
+                .err()
+                .as_deref(),
+            Some("B10_S40_REQUEST_BINDING_INVALID")
+        );
     }
 
     #[test]
@@ -5129,6 +5490,25 @@ mod tests {
             parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
             Some("B10_REPAIR_OUTPUT_INVALID")
         );
+    }
+
+    #[test]
+    fn s40_repair_parser_rejects_model_identity_values_that_differ_from_the_request() {
+        let mismatches = [
+            ("skillId", json!("S41")),
+            ("skillVersion", json!("1.2.1")),
+            ("bundleDigest", json!("sha256:other-bundle")),
+            ("taskId", json!("task:other")),
+        ];
+        for (field, value) in mismatches {
+            let mut output = valid_s40_repair_output();
+            output[field] = value;
+            assert_eq!(
+                parse_s40_test_output(output, "甲😀乙丙").err().as_deref(),
+                Some("B10_REPAIR_OUTPUT_INVALID"),
+                "model-returned {field} must not replace the request binding"
+            );
+        }
     }
 
     #[test]
