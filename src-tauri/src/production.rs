@@ -377,8 +377,9 @@ impl ConfiguredProductionGateway {
                 (Ok(Self::response_from_provider(response)), diagnostic)
             }
             Err(error) => {
-                let diagnostic = error.diagnostic.clone();
-                (Err(Self::transport_failure(&error)), diagnostic)
+                let failure = Self::transport_failure(&error);
+                let diagnostic = error.diagnostic.map(|diagnostic| *diagnostic);
+                (Err(failure), diagnostic)
             }
         }
     }

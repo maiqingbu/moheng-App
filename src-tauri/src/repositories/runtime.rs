@@ -1594,13 +1594,15 @@ impl DurableModelRunner {
                     record_model_transport_result(
                         connection,
                         spec,
-                        transport_started_at.as_deref(),
-                        transport.diagnostic_timeout_ms(),
-                        diagnostic.as_ref(),
-                        false,
-                        Some(&transport_failure),
-                        None,
-                        now,
+                        ModelTransportResultEvent {
+                            transport_started_at: transport_started_at.as_deref(),
+                            configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                            diagnostic: diagnostic.as_ref(),
+                            raw_response_persisted: false,
+                            transport_failure: Some(&transport_failure),
+                            persistence_failure_code: None,
+                            fallback_created_at: now,
+                        },
                     );
                 }
                 match error {
@@ -1625,13 +1627,15 @@ impl DurableModelRunner {
                 record_model_transport_result(
                     connection,
                     spec,
-                    transport_started_at.as_deref(),
-                    transport.diagnostic_timeout_ms(),
-                    diagnostic.as_ref(),
-                    false,
-                    None,
-                    Some("RAW_RESPONSE_PERSIST_FAILED"),
-                    now,
+                    ModelTransportResultEvent {
+                        transport_started_at: transport_started_at.as_deref(),
+                        configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                        diagnostic: diagnostic.as_ref(),
+                        raw_response_persisted: false,
+                        transport_failure: None,
+                        persistence_failure_code: Some("RAW_RESPONSE_PERSIST_FAILED"),
+                        fallback_created_at: now,
+                    },
                 );
             }
             mark_raw_persistence_failure(connection, spec, now)?;
@@ -1642,13 +1646,15 @@ impl DurableModelRunner {
                 record_model_transport_result(
                     connection,
                     spec,
-                    transport_started_at.as_deref(),
-                    transport.diagnostic_timeout_ms(),
-                    diagnostic.as_ref(),
-                    false,
-                    None,
-                    Some("RAW_RESPONSE_PERSIST_FAILED"),
-                    now,
+                    ModelTransportResultEvent {
+                        transport_started_at: transport_started_at.as_deref(),
+                        configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                        diagnostic: diagnostic.as_ref(),
+                        raw_response_persisted: false,
+                        transport_failure: None,
+                        persistence_failure_code: Some("RAW_RESPONSE_PERSIST_FAILED"),
+                        fallback_created_at: now,
+                    },
                 );
             }
             mark_raw_persistence_failure(connection, spec, now)?;
@@ -1658,13 +1664,15 @@ impl DurableModelRunner {
             record_model_transport_result(
                 connection,
                 spec,
-                transport_started_at.as_deref(),
-                transport.diagnostic_timeout_ms(),
-                diagnostic.as_ref(),
-                true,
-                None,
-                None,
-                now,
+                ModelTransportResultEvent {
+                    transport_started_at: transport_started_at.as_deref(),
+                    configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                    diagnostic: diagnostic.as_ref(),
+                    raw_response_persisted: true,
+                    transport_failure: None,
+                    persistence_failure_code: None,
+                    fallback_created_at: now,
+                },
             );
         }
         if defer_usage_until_raw_persist {
@@ -2292,18 +2300,23 @@ fn record_model_request_started(
     );
 }
 
+struct ModelTransportResultEvent<'a> {
+    transport_started_at: Option<&'a str>,
+    configured_timeout_ms: Option<u64>,
+    diagnostic: Option<&'a ModelTransportDiagnostic>,
+    raw_response_persisted: bool,
+    transport_failure: Option<&'a str>,
+    persistence_failure_code: Option<&'a str>,
+    fallback_created_at: &'a str,
+}
+
 fn record_model_transport_result(
     connection: &Connection,
     spec: &ModelRunSpec,
-    transport_started_at: Option<&str>,
-    configured_timeout_ms: Option<u64>,
-    diagnostic: Option<&ModelTransportDiagnostic>,
-    raw_response_persisted: bool,
-    transport_failure: Option<&str>,
-    persistence_failure_code: Option<&str>,
-    fallback_created_at: &str,
+    event: ModelTransportResultEvent<'_>,
 ) {
-    let diagnostic = diagnostic
+    let diagnostic = event
+        .diagnostic
         .cloned()
         .unwrap_or_else(|| ModelTransportDiagnostic {
             provider_send_started_at_unix_ms: None,
@@ -2317,7 +2330,7 @@ fn record_model_transport_result(
             response_bytes: None,
             provider_request_id: None,
         });
-    let created_at = diagnostic_utc_now(connection, fallback_created_at);
+    let created_at = diagnostic_utc_now(connection, event.fallback_created_at);
     let payload = json!({
         "modelRunId": spec.model_run_id,
         "jobId": spec.job_id,
@@ -2325,11 +2338,11 @@ fn record_model_transport_result(
         "model": spec.model,
         "capability": spec.capability,
         "attempt": spec.attempt_no,
-        "transportStartedAt": transport_started_at,
+        "transportStartedAt": event.transport_started_at,
         "diagnostic": {
             "providerSendStartedAtUnixMs": diagnostic.provider_send_started_at_unix_ms,
             "elapsedMs": diagnostic.elapsed_ms,
-            "timeoutMs": diagnostic.timeout_ms.or(configured_timeout_ms),
+            "timeoutMs": diagnostic.timeout_ms.or(event.configured_timeout_ms),
             "httpClientTimeoutMs": diagnostic.client_timeout_ms,
             "phase": diagnostic.phase,
             "providerErrorCode": diagnostic.provider_error_code,
@@ -2337,9 +2350,9 @@ fn record_model_transport_result(
             "responseRead": diagnostic.response_read,
             "responseBytes": diagnostic.response_bytes,
             "providerRequestId": diagnostic.provider_request_id,
-            "rawResponsePersisted": raw_response_persisted,
-            "transportFailure": transport_failure,
-            "persistenceFailureCode": persistence_failure_code,
+            "rawResponsePersisted": event.raw_response_persisted,
+            "transportFailure": event.transport_failure,
+            "persistenceFailureCode": event.persistence_failure_code,
         }
     });
     persist_model_diagnostic_event(

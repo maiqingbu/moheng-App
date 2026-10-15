@@ -67,6 +67,15 @@ pub enum ProviderResponseRead {
     Failed,
 }
 
+struct ProviderAttemptOutcome {
+    phase: ProviderAttemptPhase,
+    http_status: Option<u16>,
+    response_read: ProviderResponseRead,
+    response_bytes: Option<usize>,
+    provider_request_id: Option<String>,
+    provider_error_code: Option<String>,
+}
+
 impl ProviderResponseRead {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
@@ -97,7 +106,7 @@ pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic: Option<ProviderAttemptDiagnostic>,
+    pub diagnostic: Option<Box<ProviderAttemptDiagnostic>>,
 }
 
 impl ProviderError {
@@ -110,7 +119,7 @@ impl ProviderError {
     }
 
     fn with_diagnostic(mut self, diagnostic: ProviderAttemptDiagnostic) -> Self {
-        self.diagnostic = Some(diagnostic);
+        self.diagnostic = Some(Box::new(diagnostic));
         self
     }
 }
@@ -439,24 +448,19 @@ impl OpenAiCompatibleProvider {
         started: Instant,
         timeout_ms: u64,
         client_timeout_ms: u64,
-        phase: ProviderAttemptPhase,
-        http_status: Option<u16>,
-        response_read: ProviderResponseRead,
-        response_bytes: Option<usize>,
-        provider_request_id: Option<String>,
-        provider_error_code: Option<String>,
+        outcome: ProviderAttemptOutcome,
     ) -> ProviderAttemptDiagnostic {
         ProviderAttemptDiagnostic {
             started_at_unix_ms,
             elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             timeout_ms,
             client_timeout_ms,
-            phase,
-            http_status,
-            response_read,
-            response_bytes: response_bytes.map(|bytes| bytes as u64),
-            provider_request_id,
-            provider_error_code,
+            phase: outcome.phase,
+            http_status: outcome.http_status,
+            response_read: outcome.response_read,
+            response_bytes: outcome.response_bytes.map(|bytes| bytes as u64),
+            provider_request_id: outcome.provider_request_id,
+            provider_error_code: outcome.provider_error_code,
         }
     }
 
@@ -535,14 +539,16 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                     started,
                     timeout_ms,
                     client_timeout_ms,
-                    ProviderAttemptPhase::RequestSend,
-                    None,
-                    ProviderResponseRead::NotStarted,
-                    None,
-                    None,
-                    Some(provider_error_code),
+                    ProviderAttemptOutcome {
+                        phase: ProviderAttemptPhase::RequestSend,
+                        http_status: None,
+                        response_read: ProviderResponseRead::NotStarted,
+                        response_bytes: None,
+                        provider_request_id: None,
+                        provider_error_code: Some(provider_error_code),
+                    },
                 );
-                provider_error.diagnostic = Some(diagnostic);
+                provider_error.diagnostic = Some(Box::new(diagnostic));
                 return Err(provider_error);
             }
         };
@@ -586,18 +592,20 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                     ProviderErrorKind::UnknownRemoteOutcome,
                     "provider response body could not be read; request outcome is unknown",
                 );
-                error.diagnostic = Some(Self::attempt_diagnostic(
+                error.diagnostic = Some(Box::new(Self::attempt_diagnostic(
                     started_at_unix_ms,
                     started,
                     timeout_ms,
                     client_timeout_ms,
-                    ProviderAttemptPhase::ResponseBodyRead,
-                    Some(status),
-                    ProviderResponseRead::Failed,
-                    None,
-                    header_request_id,
-                    Some(error.kind.code().into()),
-                ));
+                    ProviderAttemptOutcome {
+                        phase: ProviderAttemptPhase::ResponseBodyRead,
+                        http_status: Some(status),
+                        response_read: ProviderResponseRead::Failed,
+                        response_bytes: None,
+                        provider_request_id: header_request_id,
+                        provider_error_code: Some(error.kind.code().into()),
+                    },
+                )));
                 return Err(error);
             }
         };
@@ -614,12 +622,14 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 started,
                 timeout_ms,
                 client_timeout_ms,
-                ProviderAttemptPhase::ResponseReceived,
-                Some(status),
-                ProviderResponseRead::Complete,
-                Some(response_bytes),
-                provider_request_id,
-                Some(provider_error_code),
+                ProviderAttemptOutcome {
+                    phase: ProviderAttemptPhase::ResponseReceived,
+                    http_status: Some(status),
+                    response_read: ProviderResponseRead::Complete,
+                    response_bytes: Some(response_bytes),
+                    provider_request_id,
+                    provider_error_code: Some(provider_error_code),
+                },
             )));
         }
         let raw_response = String::from_utf8_lossy(&response).to_string();
@@ -638,12 +648,14 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                 started,
                 timeout_ms,
                 client_timeout_ms,
-                ProviderAttemptPhase::ResponseReceived,
-                Some(status),
-                ProviderResponseRead::Complete,
-                Some(response_bytes),
-                provider_request_id,
-                None,
+                ProviderAttemptOutcome {
+                    phase: ProviderAttemptPhase::ResponseReceived,
+                    http_status: Some(status),
+                    response_read: ProviderResponseRead::Complete,
+                    response_bytes: Some(response_bytes),
+                    provider_request_id,
+                    provider_error_code: None,
+                },
             )),
         })
     }
