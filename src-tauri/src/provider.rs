@@ -461,18 +461,16 @@ impl OpenAiCompatibleProvider {
     }
 
     fn safe_provider_request_id(value: &str, secret: &str) -> Option<String> {
-        if !secret.is_empty() && value.contains(secret) {
+        if value.is_empty()
+            || value.len() > 128
+            || (!secret.is_empty() && value.contains(secret))
+            || !value.bytes().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, b'-' | b'_' | b'.' | b':')
+            })
+        {
             return None;
         }
-        let safe = value
-            .trim()
-            .chars()
-            .filter(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
-            })
-            .take(128)
-            .collect::<String>();
-        (!safe.is_empty()).then_some(safe)
+        Some(value.to_string())
     }
 
     fn provider_request_id_from_headers(headers: &HeaderMap, secret: &str) -> Option<String> {
@@ -485,24 +483,6 @@ impl OpenAiCompatibleProvider {
         .iter()
         .filter_map(|name| headers.get(*name)?.to_str().ok())
         .find_map(|value| Self::safe_provider_request_id(value, secret))
-    }
-
-    fn provider_request_id_from_body(
-        body: &[u8],
-        secret: &str,
-        allow_response_id: bool,
-    ) -> Option<String> {
-        let body: Value = serde_json::from_slice(body).ok()?;
-        let request_id = ["request_id", "requestId"]
-            .iter()
-            .find_map(|field| body.get(*field)?.as_str());
-        request_id
-            .or_else(|| {
-                allow_response_id
-                    .then(|| body.get("id")?.as_str())
-                    .flatten()
-            })
-            .and_then(|value| Self::safe_provider_request_id(value, secret))
     }
 
     pub fn request_payload_digest(
@@ -626,9 +606,7 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             "P01_PROVIDER_RESPONSE http_status={} content_type={} response_bytes={} request_payload_digest={}",
             status, content_type, response_bytes, request_payload_digest
         );
-        let provider_request_id = header_request_id.or_else(|| {
-            Self::provider_request_id_from_body(&response, secret, status_error.is_none())
-        });
+        let provider_request_id = header_request_id;
         if let Some(error) = status_error {
             let provider_error_code = error.kind.code().to_string();
             return Err(error.with_diagnostic(Self::attempt_diagnostic(
@@ -678,6 +656,22 @@ mod tests {
         CONTENT_TYPE,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn provider_request_id_is_preserved_only_when_the_exact_value_is_safe() {
+        assert_eq!(
+            OpenAiCompatibleProvider::safe_provider_request_id("acs:req-123.x_4", "secret"),
+            Some("acs:req-123.x_4".into())
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::safe_provider_request_id("acs/req-123", "secret"),
+            None
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::safe_provider_request_id(&"a".repeat(129), "secret"),
+            None
+        );
+    }
 
     #[test]
     fn provider_auth_headers_are_sensitive_and_keep_provider_conventions() {

@@ -414,7 +414,7 @@ fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
             .diagnostic
             .and_then(|diagnostic| diagnostic.provider_request_id)
             .as_deref(),
-        Some("provider-error-request-456")
+        None
     );
 }
 
@@ -875,10 +875,10 @@ fn p01_b205_keychain_reopen_child() {
 
 #[test]
 fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
-    let success_endpoint = local_provider_server(
+    let success_endpoint = local_provider_server_with_header(
         200,
         r#"{"id":"req:local","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#,
-        Duration::ZERO,
+        "x-request-id: req:local",
     );
     let response = OpenAiCompatibleProvider::new(success_endpoint)
         .invoke(

@@ -739,6 +739,105 @@ fn b03_transport_diagnostic_is_durable_without_changing_unknown_budget_decision(
     assert_eq!(persisted_events, 2);
 }
 
+#[test]
+fn b03_transport_diagnostic_insert_failure_does_not_change_unknown_result_or_budget() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:diagnostic-insert-failure", 3, 3, 5);
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_transport_diagnostic_events BEFORE INSERT ON production_events
+             WHEN NEW.event_type IN ('MODEL_REQUEST_STARTED', 'MODEL_TRANSPORT_RESULT')
+             BEGIN SELECT RAISE(ABORT, 'diagnostic insert failure'); END;",
+        )
+        .unwrap();
+
+    let mut transport = DiagnosticUnknownTransport {
+        diagnostic: Some(ModelTransportDiagnostic {
+            provider_send_started_at_unix_ms: Some(1_791_997_121_100),
+            elapsed_ms: Some(1_250),
+            timeout_ms: Some(30_000),
+            client_timeout_ms: Some(30_000),
+            phase: "response_body_read".into(),
+            provider_error_code: Some("UNKNOWN_REMOTE_OUTCOME".into()),
+            http_status: Some(200),
+            response_read: "failed".into(),
+            response_bytes: None,
+            provider_request_id: None,
+        }),
+        sends: 0,
+    };
+    let spec = budgeted_model_spec(
+        "mr:eeeeeeeeeeeeeeeeeeeeeeee",
+        "budget:diagnostic-insert-failure",
+        1,
+    );
+
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &spec, NOW),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(transport.sends, 1);
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM jobs WHERE job_id=?1",
+                [spec.job_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "WAITING_DECISION"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT error_code FROM jobs WHERE job_id=?1",
+                [spec.job_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE source_ref=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "OPEN"
+    );
+    let reservation: (String, i64, i64) = connection
+        .query_row(
+            "SELECT status,reserved_cents,settled_cents FROM budget_reservations WHERE model_run_id=?1",
+            [&spec.model_run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(reservation, ("OVER_LIMIT".into(), 1, 0));
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE event_type IN ('MODEL_REQUEST_STARTED', 'MODEL_TRANSPORT_RESULT') AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
 struct DiagnosticRawPersistFailureTransport {
     diagnostic: Option<ModelTransportDiagnostic>,
 }
