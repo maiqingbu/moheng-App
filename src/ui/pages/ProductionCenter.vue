@@ -8,8 +8,9 @@ import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import ResumeConditionFields from '../components/ResumeConditionFields.vue'
 import { useProjectStore } from '../stores/projectStore'
-import type { ProductionCenterProjection, RunState } from '../../application/contracts'
+import type { ProductionCenterProjection } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { productionRunStateForJob } from '../presentation/productionRunState'
 import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
 import { buildResponsibilityEvidence, createResumeConditionDraft, serializeResumeCondition, type ResumeConditionDraft } from '../flows/resumeCondition'
 import { resumeConditionLabel } from '../presentation/continuity'
@@ -110,19 +111,9 @@ const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed !== true
   && passingSigningPlatforms.value.length > 0)
 const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
-const authoritativeRunState = computed<RunState>(() => {
-  switch (production.value?.jobStatus) {
-    case 'FAILED': return 'FAILED'
-    case 'WAITING_DECISION': return 'WAITING_DECISION'
-    case 'PAUSED': return 'PAUSED'
-    case 'RUNNING':
-    case 'WAITING_MODEL': return 'ACTIVE'
-    case 'BLOCKED': return 'BLOCKED'
-    case 'COMPLETED': return 'COMPLETED'
-    case 'CANCELLED': return 'IDLE'
-    default: return project.value?.runState ?? 'IDLE'
-  }
-})
+const authoritativeRunState = computed(() =>
+  productionRunStateForJob(production.value?.jobStatus, project.value?.runState ?? 'IDLE'),
+)
 
 const runtimePoller = createProductionRuntimePoller({
   query: async () => {

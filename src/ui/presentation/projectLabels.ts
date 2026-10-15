@@ -49,7 +49,8 @@ export const blockReasonLabels: Record<Exclude<BlockReason, null>, string> = {
   CONTRACT_FAILURE: '创作规则检查未通过',
   CANON_CONFLICT: '正式设定发生冲突',
   RETRY_EXHAUSTED: '自动修复次数已用尽',
-  PERSISTENCE_FAILURE: '本机数据写入失败'
+  PERSISTENCE_FAILURE: '本机数据写入失败',
+  UNKNOWN_REMOTE_OUTCOME: '远端请求结果未知，等待处理决定'
 }
 
 export function phaseLabel(phase?: ProjectPhase) {

@@ -28,6 +28,7 @@ export type BlockReason =
   | 'CANON_CONFLICT'
   | 'RETRY_EXHAUSTED'
   | 'PERSISTENCE_FAILURE'
+  | 'UNKNOWN_REMOTE_OUTCOME'
 
 export type SigningStatus = 'NOT_STARTED' | 'IN_REVIEW' | 'REVISE' | 'REJECTED' | 'PASS' | 'FAIL' | 'NOT_VERIFIED' | 'STALE'
 export type CommandStatus = 'idle' | 'submitting' | 'accepted' | 'processing' | 'committed' | 'blocked' | 'failed'

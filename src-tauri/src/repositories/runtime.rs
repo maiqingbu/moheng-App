@@ -1055,6 +1055,10 @@ impl DurableJobService {
                 "BLOCKED" => ("BLOCKED", error_code),
                 "FAILED" => ("FAILED", error_code),
                 "COMPLETED" => ("COMPLETED", None),
+                "CANCELLED" => (
+                    "IDLE",
+                    error_code.filter(|reason| !reason.starts_with("UNKNOWN_REMOTE_OUTCOME")),
+                ),
                 _ => ("IDLE", error_code),
             },
             None => ("IDLE", None),

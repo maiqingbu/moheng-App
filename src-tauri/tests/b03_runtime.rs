@@ -560,6 +560,19 @@ fn b03_unknown_remote_outcome_creates_decision_and_waiting_projection() {
             .unwrap(),
         "WAITING_DECISION"
     );
+    assert_eq!(
+        connection
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        (
+            "WAITING_DECISION".into(),
+            Some("UNKNOWN_REMOTE_OUTCOME".into())
+        )
+    );
 }
 
 struct DiagnosticUnknownTransport {
@@ -1675,13 +1688,19 @@ fn b03_mark_failed_and_cancel_resolve_unknown_reservations_without_orphans() {
 }
 
 #[test]
-fn b03_cancel_job_resolves_unknown_reservation_and_closes_job() {
-    let (_temp, _manager, connection) = project();
+fn b03_cancel_job_clears_stale_projection_and_preserves_audit_after_restart() {
+    let (_temp, manager, connection) = project();
     DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
     let first = budgeted_model_spec("mr:363636363636363636363636", "budget:unknown-cancel", 5);
     seed_budget(&connection, "budget:unknown-cancel", 3, 0, 100);
     let mut timeout = FakeModelTransport::failure(TransportFailure::Timeout);
     assert!(DurableModelRunner::execute(&connection, &mut timeout, &first, NOW).is_err());
+    connection
+        .execute(
+            "UPDATE jobs SET error_code='UNKNOWN_REMOTE_OUTCOME requires explicit decision' WHERE project_id='p1' AND job_id='job:111111111111111111111111'",
+            [],
+        )
+        .unwrap();
     DurableModelRunner::resolve_unknown::<FakeModelTransport>(
         &connection,
         &first.model_run_id,
@@ -1711,6 +1730,138 @@ fn b03_cancel_job_resolves_unknown_reservation_and_closes_job() {
             )
             .unwrap(),
         0
+    );
+    assert_eq!(
+        connection
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        ("IDLE".into(), None)
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT error_code FROM jobs WHERE job_id='job:111111111111111111111111'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME requires explicit decision"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT reason FROM decisions WHERE source_ref='mr:363636363636363636363636'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "remote result is unknown"
+    );
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE event_type='UNKNOWN_COST_SETTLED_ESTIMATE' AND json_extract(payload_json, '$.modelRunId')='mr:363636363636363636363636'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let reopened = manager.open("p1", "A", NOW).unwrap();
+    assert_eq!(
+        reopened
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        ("IDLE".into(), None)
+    );
+    DurableJobService::recover_after_restart(&reopened, "p1", "2026-08-27T00:03:00Z").unwrap();
+    assert_eq!(
+        reopened
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        ("IDLE".into(), None)
+    );
+    assert_eq!(
+        DurableJobService::reconcile_runtime_projection(&reopened, "p1", "2026-08-27T00:03:01Z")
+            .unwrap(),
+        "IDLE"
+    );
+    assert_eq!(
+        reopened
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        ("IDLE".into(), None)
+    );
+    assert_eq!(
+        reopened
+            .query_row::<String, _, _>(
+                "SELECT reason FROM decisions WHERE source_ref='mr:363636363636363636363636'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "remote result is unknown"
+    );
+    assert_eq!(
+        reopened
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE event_type='UNKNOWN_COST_SETTLED_ESTIMATE' AND json_extract(payload_json, '$.modelRunId')='mr:363636363636363636363636'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn b03_cancelled_projection_keeps_unrelated_error_reason_visible() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    DurableJobService::transition(
+        &connection,
+        "p1",
+        "job:111111111111111111111111",
+        "CANCELLED",
+        NOW,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET error_code='PERSISTENCE_FAILURE' WHERE project_id='p1' AND job_id='job:111111111111111111111111'",
+            [],
+        )
+        .unwrap();
+
+    DurableJobService::reconcile_runtime_projection(&connection, "p1", NOW).unwrap();
+
+    assert_eq!(
+        connection
+            .query_row::<(String, Option<String>), _, _>(
+                "SELECT run_state, block_reason FROM project_runtime_state WHERE project_id='p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            )
+            .unwrap(),
+        ("IDLE".into(), Some("PERSISTENCE_FAILURE".into()))
     );
 }
 
