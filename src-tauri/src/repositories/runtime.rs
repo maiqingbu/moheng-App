@@ -1215,6 +1215,20 @@ pub struct TransportUsage {
     pub provider_request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTransportDiagnostic {
+    pub provider_send_started_at_unix_ms: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub client_timeout_ms: Option<u64>,
+    pub phase: String,
+    pub provider_error_code: Option<String>,
+    pub http_status: Option<u16>,
+    pub response_read: String,
+    pub response_bytes: Option<u64>,
+    pub provider_request_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransportResponse {
     pub raw_response: String,
@@ -1222,6 +1236,20 @@ pub struct TransportResponse {
 }
 
 pub trait ModelTransport {
+    /// Configured transports opt into best-effort, redacted lifecycle events.
+    fn diagnostics_enabled(&self) -> bool {
+        false
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// Returns provider metadata without changing the transport outcome.
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        None
+    }
+
     /// Test transports may inspect the database at the exact send boundary.
     /// Production transports keep the default no-op implementation.
     fn before_send(
@@ -1547,28 +1575,97 @@ impl DurableModelRunner {
             return Err(error);
         }
         let credential = transport.credential().to_owned();
+        let diagnostics_enabled = transport.diagnostics_enabled();
+        let transport_started_at = diagnostics_enabled.then(|| diagnostic_utc_now(connection, now));
+        if let Some(transport_started_at) = transport_started_at.as_deref() {
+            record_model_request_started(
+                connection,
+                spec,
+                transport_started_at,
+                transport.diagnostic_timeout_ms(),
+            );
+        }
         let response = match transport.send(spec, &credential) {
             Ok(response) => response,
-            Err(TransportFailure::Timeout | TransportFailure::UnknownRemoteOutcome) => {
-                mark_unknown_remote_outcome(connection, spec, now)?;
-                return Err(RuntimeError::UnknownRemoteOutcome);
-            }
             Err(error) => {
-                mark_confirmed_failure(connection, spec, now)?;
-                return Err(RuntimeError::Transport(error));
+                let diagnostic = transport.take_diagnostic();
+                let transport_failure = error.to_string();
+                if diagnostics_enabled {
+                    record_model_transport_result(
+                        connection,
+                        spec,
+                        transport_started_at.as_deref(),
+                        transport.diagnostic_timeout_ms(),
+                        diagnostic.as_ref(),
+                        false,
+                        Some(&transport_failure),
+                        None,
+                        now,
+                    );
+                }
+                match error {
+                    TransportFailure::Timeout | TransportFailure::UnknownRemoteOutcome => {
+                        mark_unknown_remote_outcome(connection, spec, now)?;
+                        return Err(RuntimeError::UnknownRemoteOutcome);
+                    }
+                    TransportFailure::Unavailable => {
+                        mark_confirmed_failure(connection, spec, now)?;
+                        return Err(RuntimeError::Transport(TransportFailure::Unavailable));
+                    }
+                }
             }
         };
+        let diagnostic = transport.take_diagnostic();
         let defer_usage_until_raw_persist = transport.defer_usage_until_raw_persist();
         if !defer_usage_until_raw_persist {
             settle_remote_usage(connection, spec, &response.usage, now)?;
         }
         if let Err(error) = transport.before_raw_persist(connection, spec) {
+            if diagnostics_enabled {
+                record_model_transport_result(
+                    connection,
+                    spec,
+                    transport_started_at.as_deref(),
+                    transport.diagnostic_timeout_ms(),
+                    diagnostic.as_ref(),
+                    false,
+                    None,
+                    Some("RAW_RESPONSE_PERSIST_FAILED"),
+                    now,
+                );
+            }
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(error);
         }
         if persist_raw_response(connection, spec, &response.raw_response, now).is_err() {
+            if diagnostics_enabled {
+                record_model_transport_result(
+                    connection,
+                    spec,
+                    transport_started_at.as_deref(),
+                    transport.diagnostic_timeout_ms(),
+                    diagnostic.as_ref(),
+                    false,
+                    None,
+                    Some("RAW_RESPONSE_PERSIST_FAILED"),
+                    now,
+                );
+            }
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(RuntimeError::RawResponsePersistenceFailed);
+        }
+        if diagnostics_enabled {
+            record_model_transport_result(
+                connection,
+                spec,
+                transport_started_at.as_deref(),
+                transport.diagnostic_timeout_ms(),
+                diagnostic.as_ref(),
+                true,
+                None,
+                None,
+                now,
+            );
         }
         if defer_usage_until_raw_persist {
             let usage = transport.usage_after_raw_persist(
@@ -2158,6 +2255,156 @@ fn mark_confirmed_failure(
     Ok(())
 }
 
+fn diagnostic_utc_now(connection: &Connection, fallback: &str) -> String {
+    connection
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|_| fallback.to_string())
+}
+
+fn record_model_request_started(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    transport_started_at: &str,
+    timeout_ms: Option<u64>,
+) {
+    let payload = json!({
+        "modelRunId": spec.model_run_id,
+        "jobId": spec.job_id,
+        "provider": spec.provider,
+        "model": spec.model,
+        "capability": spec.capability,
+        "attempt": spec.attempt_no,
+        "configuredTimeoutMs": timeout_ms,
+        "transportStartedAt": transport_started_at,
+    });
+    persist_model_diagnostic_event(
+        connection,
+        spec,
+        &format!(
+            "event:model-request-started:{}:{}",
+            spec.model_run_id, spec.attempt_no
+        ),
+        "MODEL_REQUEST_STARTED",
+        &payload,
+        transport_started_at,
+    );
+}
+
+fn record_model_transport_result(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    transport_started_at: Option<&str>,
+    configured_timeout_ms: Option<u64>,
+    diagnostic: Option<&ModelTransportDiagnostic>,
+    raw_response_persisted: bool,
+    transport_failure: Option<&str>,
+    persistence_failure_code: Option<&str>,
+    fallback_created_at: &str,
+) {
+    let diagnostic = diagnostic
+        .cloned()
+        .unwrap_or_else(|| ModelTransportDiagnostic {
+            provider_send_started_at_unix_ms: None,
+            elapsed_ms: None,
+            timeout_ms: None,
+            client_timeout_ms: None,
+            phase: "unreported".into(),
+            provider_error_code: None,
+            http_status: None,
+            response_read: "not_reported".into(),
+            response_bytes: None,
+            provider_request_id: None,
+        });
+    let created_at = diagnostic_utc_now(connection, fallback_created_at);
+    let payload = json!({
+        "modelRunId": spec.model_run_id,
+        "jobId": spec.job_id,
+        "provider": spec.provider,
+        "model": spec.model,
+        "capability": spec.capability,
+        "attempt": spec.attempt_no,
+        "transportStartedAt": transport_started_at,
+        "diagnostic": {
+            "providerSendStartedAtUnixMs": diagnostic.provider_send_started_at_unix_ms,
+            "elapsedMs": diagnostic.elapsed_ms,
+            "timeoutMs": diagnostic.timeout_ms.or(configured_timeout_ms),
+            "httpClientTimeoutMs": diagnostic.client_timeout_ms,
+            "phase": diagnostic.phase,
+            "providerErrorCode": diagnostic.provider_error_code,
+            "httpStatus": diagnostic.http_status,
+            "responseRead": diagnostic.response_read,
+            "responseBytes": diagnostic.response_bytes,
+            "providerRequestId": diagnostic.provider_request_id,
+            "rawResponsePersisted": raw_response_persisted,
+            "transportFailure": transport_failure,
+            "persistenceFailureCode": persistence_failure_code,
+        }
+    });
+    persist_model_diagnostic_event(
+        connection,
+        spec,
+        &format!(
+            "event:model-transport-result:{}:{}",
+            spec.model_run_id, spec.attempt_no
+        ),
+        "MODEL_TRANSPORT_RESULT",
+        &payload,
+        &created_at,
+    );
+}
+
+fn persist_model_diagnostic_event(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    event_id: &str,
+    event_type: &str,
+    payload: &Value,
+    created_at: &str,
+) {
+    let project_id =
+        connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+            row.get::<_, String>(0)
+        });
+    let Ok(project_id) = project_id else {
+        eprintln!(
+            "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+            event_type, spec.model_run_id
+        );
+        return;
+    };
+    let payload = match serde_json::to_string(payload) {
+        Ok(payload) => payload,
+        Err(_) => {
+            eprintln!(
+                "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+                event_type, spec.model_run_id
+            );
+            return;
+        }
+    };
+    if connection
+        .execute(
+            "INSERT OR IGNORE INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql_rusqlite::params![
+                event_id,
+                project_id,
+                spec.job_id,
+                event_type,
+                payload,
+                created_at,
+            ],
+        )
+        .is_err()
+    {
+        eprintln!(
+            "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+            event_type, spec.model_run_id
+        );
+    }
+}
+
 fn mark_unknown_remote_outcome(
     connection: &Connection,
     spec: &ModelRunSpec,
@@ -2410,6 +2657,18 @@ impl<T, S> SecretBackedTransport<T, S> {
 }
 
 impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport<T, S> {
+    fn diagnostics_enabled(&self) -> bool {
+        self.inner.diagnostics_enabled()
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        self.inner.diagnostic_timeout_ms()
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.inner.take_diagnostic()
+    }
+
     fn before_send(
         &mut self,
         connection: &Connection,

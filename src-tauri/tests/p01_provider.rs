@@ -5,8 +5,8 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::provider::OpenAiCompatibleProvider;
 use ai_novel_production_system_core::provider::{
-    ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind, ProviderRequest,
-    ProviderResponse, ProviderUsage, ScriptedProvider,
+    ProviderAdapter, ProviderAttemptPhase, ProviderConfig, ProviderError, ProviderErrorKind,
+    ProviderRequest, ProviderResponse, ProviderResponseRead, ProviderUsage, ScriptedProvider,
 };
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 #[cfg(target_os = "macos")]
@@ -44,6 +44,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
             provider_reported_cost_cents: Some(4),
         },
         provider_request_id: Some("req:p01".into()),
+        diagnostic: None,
     }));
     let response = provider
         .invoke(
@@ -92,6 +93,7 @@ fn p01_configured_gateway_requires_secret_and_never_returns_it() {
             raw_response: json!({"ok":true}).to_string(),
             usage: ProviderUsage::default(),
             provider_request_id: None,
+            diagnostic: None,
         }))),
         Arc::new(secret_store.clone()),
     );
@@ -238,6 +240,25 @@ fn local_provider_server_with_calls(status: u16, body: &'static str) -> (String,
     (format!("http://{address}"), calls)
 }
 
+fn local_provider_server_with_header(
+    status: u16,
+    body: &'static str,
+    response_header: &'static str,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_local_http_request(&mut stream);
+        let response = format!(
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\n{response_header}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    format!("http://{address}")
+}
+
 fn local_provider_server_with_truncated_body() -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -290,7 +311,111 @@ fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
         )
         .unwrap_err();
     assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    let diagnostic = error
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::ResponseBodyRead);
+    assert_eq!(diagnostic.response_read, ProviderResponseRead::Failed);
+    assert!(diagnostic.provider_request_id.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
+    let endpoint = local_provider_server_with_header(
+        503,
+        r#"{"error":"private-response-body"}"#,
+        "x-acs-request-id: acs-fixture-123",
+    );
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "private-prompt-canary".into(),
+                timeout_ms: 1_500,
+            },
+            "private-api-key-canary",
+        )
+        .unwrap_err();
+
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    let diagnostic = error
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.timeout_ms, 1_500);
+    assert_eq!(diagnostic.client_timeout_ms, 2_000);
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::ResponseReceived);
+    assert_eq!(diagnostic.http_status, Some(503));
+    assert_eq!(diagnostic.response_read, ProviderResponseRead::Complete);
+    assert!(diagnostic.response_bytes.unwrap_or_default() > 0);
+    assert_eq!(
+        diagnostic.provider_request_id.as_deref(),
+        Some("acs-fixture-123")
+    );
+    assert_eq!(
+        diagnostic.provider_error_code.as_deref(),
+        Some("UNKNOWN_REMOTE_OUTCOME")
+    );
+    let serialized_error = serde_json::to_string(&error).unwrap();
+    for sensitive_value in [
+        "private-api-key-canary",
+        "private-prompt-canary",
+        "private-response-body",
+    ] {
+        assert!(!serialized_error.contains(sensitive_value));
+    }
+
+    let endpoint = local_provider_server_with_header(
+        200,
+        r#"{"ok":true}"#,
+        "x-request-id: private-api-key-canary",
+    );
+    let response = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "safe request".into(),
+                timeout_ms: 1_000,
+            },
+            "private-api-key-canary",
+        )
+        .unwrap();
+    assert_eq!(
+        response
+            .diagnostic
+            .and_then(|diagnostic| diagnostic.provider_request_id),
+        None
+    );
+
+    let endpoint = local_provider_server(
+        502,
+        r#"{"request_id":"provider-error-request-456","error":"upstream"}"#,
+        Duration::ZERO,
+    );
+    let error = OpenAiCompatibleProvider::new(endpoint)
+        .invoke(
+            &ProviderRequest {
+                capability: "TEST_PROVIDER".into(),
+                model_id: "fixture-model".into(),
+                prompt: "ping".into(),
+                timeout_ms: 1_000,
+            },
+            "fixture-token-ephemeral",
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, ProviderErrorKind::UnknownRemoteOutcome);
+    assert_eq!(
+        error
+            .diagnostic
+            .and_then(|diagnostic| diagnostic.provider_request_id)
+            .as_deref(),
+        Some("provider-error-request-456")
+    );
 }
 
 fn disconnect_after_provider_request() -> String {
@@ -772,6 +897,14 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
     );
     assert_eq!(response.usage, ProviderUsage::default());
     assert_eq!(response.provider_request_id, None);
+    let diagnostic = response
+        .diagnostic
+        .as_ref()
+        .expect("provider attempt diagnostic");
+    assert_eq!(diagnostic.http_status, Some(200));
+    assert_eq!(diagnostic.timeout_ms, 2_000);
+    assert_eq!(diagnostic.client_timeout_ms, 2_000);
+    assert_eq!(diagnostic.provider_request_id.as_deref(), Some("req:local"));
 
     let auth_endpoint = local_provider_server(401, r#"{"error":"unauthorized"}"#, Duration::ZERO);
     let auth_error = OpenAiCompatibleProvider::new(auth_endpoint)
@@ -800,6 +933,15 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
         )
         .unwrap_err();
     assert_eq!(timeout_error.kind, ProviderErrorKind::Timeout);
+    let diagnostic = timeout_error
+        .diagnostic
+        .as_ref()
+        .expect("provider timeout diagnostic");
+    assert_eq!(diagnostic.timeout_ms, 500);
+    assert_eq!(diagnostic.client_timeout_ms, 1_000);
+    assert_eq!(diagnostic.phase, ProviderAttemptPhase::RequestSend);
+    assert_eq!(diagnostic.http_status, None);
+    assert_eq!(diagnostic.provider_error_code.as_deref(), Some("TIMEOUT"));
 }
 
 #[test]
@@ -840,6 +982,7 @@ impl FormalProvider {
                     ..ProviderUsage::default()
                 },
                 provider_request_id: Some("p01-formal-request".into()),
+                diagnostic: None,
             }),
             calls,
         }

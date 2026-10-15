@@ -18,13 +18,13 @@ use crate::project_db::{
     ProjectManager,
 };
 use crate::provider::{
-    OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
-    ProviderRequest, ProviderResponse,
+    OpenAiCompatibleProvider, ProviderAdapter, ProviderAttemptDiagnostic, ProviderConfig,
+    ProviderError, ProviderErrorKind, ProviderRequest, ProviderResponse,
 };
 use crate::repositories::runtime::{
     DurableJobService, DurableModelRunner, JobSpec, ModelRunOutcome, ModelRunSpec, ModelTransport,
-    OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure, TransportResponse,
-    TransportUsage,
+    ModelTransportDiagnostic, OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure,
+    TransportResponse, TransportUsage,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -69,6 +69,23 @@ impl ProductionModelResponse {
     }
 }
 
+impl From<ProviderAttemptDiagnostic> for ModelTransportDiagnostic {
+    fn from(diagnostic: ProviderAttemptDiagnostic) -> Self {
+        Self {
+            provider_send_started_at_unix_ms: Some(diagnostic.started_at_unix_ms),
+            elapsed_ms: Some(diagnostic.elapsed_ms),
+            timeout_ms: Some(diagnostic.timeout_ms),
+            client_timeout_ms: Some(diagnostic.client_timeout_ms),
+            phase: diagnostic.phase.as_str().into(),
+            provider_error_code: diagnostic.provider_error_code,
+            http_status: diagnostic.http_status,
+            response_read: diagnostic.response_read.as_str().into(),
+            response_bytes: diagnostic.response_bytes,
+            provider_request_id: diagnostic.provider_request_id,
+        }
+    }
+}
+
 pub trait ProductionModelGateway: Send + Sync {
     fn provider(&self) -> &str {
         "configured-production-gateway"
@@ -87,6 +104,10 @@ pub trait ProductionModelGateway: Send + Sync {
 
     fn fault_injection(&self) -> Option<&str> {
         None
+    }
+
+    fn transport_diagnostics_enabled(&self) -> bool {
+        false
     }
 
     /// Deterministic gateways can model a concurrent writer after the gate
@@ -143,6 +164,22 @@ pub trait ProductionModelGateway: Send + Sync {
         _profile: &ResolvedProviderProfile,
     ) -> Result<ProductionModelResponse, TransportFailure> {
         self.invoke_typed(capability, input)
+    }
+
+    fn invoke_typed_with_diagnostic(
+        &self,
+        capability: &str,
+        input: &Value,
+        profile: Option<&ResolvedProviderProfile>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        let result = match profile {
+            Some(profile) => self.invoke_typed_with_profile(capability, input, profile),
+            None => self.invoke_typed(capability, input),
+        };
+        (result, None)
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
@@ -319,6 +356,32 @@ impl ConfiguredProductionGateway {
             },
         }
     }
+
+    fn transport_failure(error: &ProviderError) -> TransportFailure {
+        match error.kind {
+            ProviderErrorKind::Timeout => TransportFailure::Timeout,
+            ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
+            _ => TransportFailure::Unavailable,
+        }
+    }
+
+    fn typed_provider_result(
+        result: Result<ProviderResponse, ProviderError>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        match result {
+            Ok(response) => {
+                let diagnostic = response.diagnostic.clone();
+                (Ok(Self::response_from_provider(response)), diagnostic)
+            }
+            Err(error) => {
+                let diagnostic = error.diagnostic.clone();
+                (Err(Self::transport_failure(&error)), diagnostic)
+            }
+        }
+    }
 }
 
 impl ProductionModelGateway for ConfiguredProductionGateway {
@@ -328,6 +391,10 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
 
     fn model(&self, _capability: &str) -> String {
         self.config.model_id.clone()
+    }
+
+    fn transport_diagnostics_enabled(&self) -> bool {
+        true
     }
 
     fn model_pricing_catalog(
@@ -357,20 +424,35 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         input: &Value,
         profile: &ResolvedProviderProfile,
     ) -> Result<ProductionModelResponse, TransportFailure> {
-        let config = ProviderConfig {
-            provider_id: profile.provider.clone(),
-            model_id: profile.model.clone(),
-            endpoint: profile.endpoint.clone(),
-            enabled: true,
-            timeout_ms: profile.timeout_ms,
+        self.invoke_typed_with_diagnostic(capability, input, Some(profile))
+            .0
+    }
+
+    fn invoke_typed_with_diagnostic(
+        &self,
+        capability: &str,
+        input: &Value,
+        profile: Option<&ResolvedProviderProfile>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        let config = match profile {
+            Some(profile) => Ok(ProviderConfig {
+                provider_id: profile.provider.clone(),
+                model_id: profile.model.clone(),
+                endpoint: profile.endpoint.clone(),
+                enabled: true,
+                timeout_ms: profile.timeout_ms,
+            }),
+            None => self.current_config(),
         };
-        self.invoke_provider_with_config(&config, capability, input)
-            .map(Self::response_from_provider)
-            .map_err(|error| match error.kind {
-                ProviderErrorKind::Timeout => TransportFailure::Timeout,
-                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
-                _ => TransportFailure::Unavailable,
-            })
+        match config {
+            Ok(config) => Self::typed_provider_result(
+                self.invoke_provider_with_config(&config, capability, input),
+            ),
+            Err(error) => Self::typed_provider_result(Err(error)),
+        }
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
@@ -384,13 +466,7 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         capability: &str,
         input: &Value,
     ) -> Result<ProductionModelResponse, TransportFailure> {
-        self.invoke_provider(capability, input)
-            .map(Self::response_from_provider)
-            .map_err(|error| match error.kind {
-                ProviderErrorKind::Timeout => TransportFailure::Timeout,
-                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
-                _ => TransportFailure::Unavailable,
-            })
+        self.invoke_typed_with_diagnostic(capability, input, None).0
     }
 }
 
@@ -400,6 +476,7 @@ pub struct GatewayTransport<'a> {
     capability: &'a str,
     input: Value,
     raw_persist_failure: bool,
+    diagnostic: Option<ModelTransportDiagnostic>,
 }
 
 impl<'a> GatewayTransport<'a> {
@@ -410,6 +487,7 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: false,
+            diagnostic: None,
         }
     }
 
@@ -425,6 +503,7 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: false,
+            diagnostic: None,
         }
     }
 
@@ -440,11 +519,24 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: true,
+            diagnostic: None,
         }
     }
 }
 
 impl ModelTransport for GatewayTransport<'_> {
+    fn diagnostics_enabled(&self) -> bool {
+        self.gateway.transport_diagnostics_enabled()
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        self.profile.map(|profile| profile.timeout_ms)
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.diagnostic.take()
+    }
+
     fn defer_usage_until_raw_persist(&self) -> bool {
         true
     }
@@ -505,13 +597,11 @@ impl ModelTransport for GatewayTransport<'_> {
         _spec: &ModelRunSpec,
         _credential: &str,
     ) -> Result<TransportResponse, TransportFailure> {
-        let response = match self.profile {
-            Some(profile) => {
-                self.gateway
-                    .invoke_typed_with_profile(self.capability, &self.input, profile)?
-            }
-            None => self.gateway.invoke_typed(self.capability, &self.input)?,
-        };
+        let (response, diagnostic) =
+            self.gateway
+                .invoke_typed_with_diagnostic(self.capability, &self.input, self.profile);
+        self.diagnostic = diagnostic.map(Into::into);
+        let response = response?;
         Ok(TransportResponse {
             raw_response: response
                 .raw_response
@@ -5189,6 +5279,7 @@ mod tests {
                 raw_response: "{}".into(),
                 usage: Default::default(),
                 provider_request_id: Some("captured-test-request".into()),
+                diagnostic: None,
             })
         }
     }

@@ -5,8 +5,8 @@ use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::{ManagerError, ProjectHandle, ProjectManager};
 use ai_novel_production_system_core::runtime::{
     lease_expiry, DurableJobService, DurableModelRunner, FakeModelTransport, JobSpec,
-    MemorySecretStore, ModelRunSpec, ModelTransport, RuntimeError, SecretStore, TransportFailure,
-    TransportResponse, TransportUsage,
+    MemorySecretStore, ModelRunSpec, ModelTransport, ModelTransportDiagnostic, RuntimeError,
+    SecretStore, TransportFailure, TransportResponse, TransportUsage,
 };
 use libsql_rusqlite::Connection;
 use serde_json::{json, Value};
@@ -559,6 +559,281 @@ fn b03_unknown_remote_outcome_creates_decision_and_waiting_projection() {
             )
             .unwrap(),
         "WAITING_DECISION"
+    );
+}
+
+struct DiagnosticUnknownTransport {
+    diagnostic: Option<ModelTransportDiagnostic>,
+    sends: usize,
+}
+
+impl ModelTransport for DiagnosticUnknownTransport {
+    fn diagnostics_enabled(&self) -> bool {
+        true
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        Some(30_000)
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.diagnostic.take()
+    }
+
+    fn send(
+        &mut self,
+        _spec: &ModelRunSpec,
+        _credential: &str,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.sends += 1;
+        Err(TransportFailure::UnknownRemoteOutcome)
+    }
+}
+
+#[test]
+fn b03_transport_diagnostic_is_durable_without_changing_unknown_budget_decision() {
+    let (_temp, manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    seed_budget(&connection, "budget:transport-diagnostic", 3, 3, 5);
+
+    let diagnostic = ModelTransportDiagnostic {
+        provider_send_started_at_unix_ms: Some(1_791_997_121_100),
+        elapsed_ms: Some(1_250),
+        timeout_ms: Some(30_000),
+        client_timeout_ms: Some(30_000),
+        phase: "response_body_read".into(),
+        provider_error_code: Some("UNKNOWN_REMOTE_OUTCOME".into()),
+        http_status: Some(200),
+        response_read: "failed".into(),
+        response_bytes: None,
+        provider_request_id: Some("acs-fixture-request-123".into()),
+    };
+    let mut transport = DiagnosticUnknownTransport {
+        diagnostic: Some(diagnostic),
+        sends: 0,
+    };
+    let spec = budgeted_model_spec(
+        "mr:dddddddddddddddddddddddd",
+        "budget:transport-diagnostic",
+        1,
+    );
+
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &spec, NOW),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(transport.sends, 1);
+
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT status FROM model_runs WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "UNKNOWN_REMOTE_OUTCOME"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT outcome FROM decisions WHERE source_ref=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "OPEN"
+    );
+    let reservation: (String, i64, i64) = connection
+        .query_row(
+            "SELECT status,reserved_cents,settled_cents FROM budget_reservations WHERE model_run_id=?1",
+            [&spec.model_run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(reservation, ("OVER_LIMIT".into(), 1, 0));
+
+    let events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM production_events WHERE event_type='MODEL_REQUEST_STARTED' AND json_extract(payload_json,'$.modelRunId')=?1",
+            [&spec.model_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(events, 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE event_type='MODEL_TRANSPORT_RESULT' AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM production_events WHERE event_type='MODEL_TRANSPORT_RESULT' AND json_extract(payload_json,'$.modelRunId')=?1",
+            [&spec.model_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["diagnostic"]["httpStatus"], 200);
+    assert_eq!(payload["diagnostic"]["responseRead"], "failed");
+    assert_eq!(payload["diagnostic"]["rawResponsePersisted"], false);
+    assert_eq!(
+        payload["diagnostic"]["transportFailure"],
+        "unknown remote outcome"
+    );
+    assert_eq!(
+        payload["diagnostic"]["providerRequestId"],
+        "acs-fixture-request-123"
+    );
+    assert!(payload.get("prompt").is_none());
+    assert!(payload.get("rawResponse").is_none());
+
+    let mut duplicate_transport = DiagnosticUnknownTransport {
+        diagnostic: Some(ModelTransportDiagnostic {
+            provider_send_started_at_unix_ms: Some(1_791_997_121_100),
+            elapsed_ms: Some(1_250),
+            timeout_ms: Some(30_000),
+            client_timeout_ms: Some(30_000),
+            phase: "response_body_read".into(),
+            provider_error_code: Some("UNKNOWN_REMOTE_OUTCOME".into()),
+            http_status: Some(200),
+            response_read: "failed".into(),
+            response_bytes: None,
+            provider_request_id: Some("acs-fixture-request-123".into()),
+        }),
+        sends: 0,
+    };
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut duplicate_transport, &spec, NOW),
+        Err(RuntimeError::UnknownRemoteOutcome)
+    ));
+    assert_eq!(duplicate_transport.sends, 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM production_events WHERE event_type='MODEL_TRANSPORT_RESULT' AND json_extract(payload_json,'$.modelRunId')=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        1
+    );
+
+    drop(connection);
+    let persisted_events = manager
+        .with_read_connection("p1", NOW, |connection| {
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT COUNT(*) FROM production_events WHERE json_extract(payload_json,'$.modelRunId')=?1",
+                    [&spec.model_run_id],
+                    |row| row.get(0),
+                )
+                .map_err(ManagerError::from)
+        })
+        .unwrap();
+    assert_eq!(persisted_events, 2);
+}
+
+struct DiagnosticRawPersistFailureTransport {
+    diagnostic: Option<ModelTransportDiagnostic>,
+}
+
+impl ModelTransport for DiagnosticRawPersistFailureTransport {
+    fn diagnostics_enabled(&self) -> bool {
+        true
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        Some(1_000)
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.diagnostic.take()
+    }
+
+    fn before_raw_persist(
+        &mut self,
+        _connection: &Connection,
+        _spec: &ModelRunSpec,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::RawResponsePersistenceFailed)
+    }
+
+    fn send(
+        &mut self,
+        _spec: &ModelRunSpec,
+        _credential: &str,
+    ) -> Result<TransportResponse, TransportFailure> {
+        Ok(TransportResponse {
+            raw_response: "private-response-body-canary".into(),
+            usage: TransportUsage::default(),
+        })
+    }
+}
+
+#[test]
+fn b03_transport_diagnostic_marks_raw_persist_failure_without_changing_error_code() {
+    let (_temp, _manager, connection) = project();
+    DurableJobService::start_job(&connection, &job_spec(), NOW).unwrap();
+    let mut transport = DiagnosticRawPersistFailureTransport {
+        diagnostic: Some(ModelTransportDiagnostic {
+            provider_send_started_at_unix_ms: Some(1_791_997_121_100),
+            elapsed_ms: Some(18),
+            timeout_ms: Some(1_000),
+            client_timeout_ms: Some(1_000),
+            phase: "response_received".into(),
+            provider_error_code: None,
+            http_status: Some(200),
+            response_read: "complete".into(),
+            response_bytes: Some(30),
+            provider_request_id: Some("fixture-request-raw-persist".into()),
+        }),
+    };
+    let spec = model_spec();
+
+    assert!(matches!(
+        DurableModelRunner::execute(&connection, &mut transport, &spec, NOW),
+        Err(RuntimeError::RawResponsePersistenceFailed)
+    ));
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT error_code FROM jobs WHERE job_id=?1",
+                [spec.job_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "RAW_RESPONSE_PERSIST_FAILED"
+    );
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM production_events WHERE event_type='MODEL_TRANSPORT_RESULT' AND json_extract(payload_json,'$.modelRunId')=?1",
+            [&spec.model_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["diagnostic"]["httpStatus"], 200);
+    assert_eq!(payload["diagnostic"]["rawResponsePersisted"], false);
+    assert_eq!(
+        payload["diagnostic"]["persistenceFailureCode"],
+        "RAW_RESPONSE_PERSIST_FAILED"
+    );
+    assert!(!payload.to_string().contains("private-response-body-canary"));
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM model_responses WHERE model_run_id=?1",
+                [&spec.model_run_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
     );
 }
 

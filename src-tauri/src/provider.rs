@@ -3,7 +3,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const AUDIT_EXTRACT_RV07_EXTENSION: &str = "For Knowledge candidates, emit storyTime on the referenced Canon fact, acquiredStoryTime, and visibilityScope; when any value is unknown, use the literal UNKNOWN. Unknown temporal or visibility information that affects a hard constraint is unresolved and must not be omitted.";
 const AUDIT_EXTRACT_RV06_EXTENSION: &str = "For each continuity candidate, preserve the exact body evidence when available. A newly observed thread not present in continuityActions may be reported as new and must not mutate any existing thread. Include description, fulfillmentObject, and a typed resumeCondition for any candidate that claims a complete promise; supported resumeCondition kinds are NEXT_MEETING, ENTITY_PRESENT, KNOWLEDGE_ACQUIRED, TASK_SATISFIED, AFTER_CHAPTER, and IN_VOLUME. Do not assign authority A. The runtime classifies a complete candidate as B only when it has exact evidence, description, explicit fulfillmentObject, a supported typed resumeCondition, and a promoting signal; otherwise it retains the candidate as C. For new candidates with incomplete evidence, omit evidence rather than fabricating a quote; the candidate will remain C. For DEFER_WITH_BRIDGE, use the plan's bridge and do not omit it.";
@@ -42,9 +42,62 @@ impl ProviderErrorKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptPhase {
+    RequestSend,
+    ResponseBodyRead,
+    ResponseReceived,
+}
+
+impl ProviderAttemptPhase {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequestSend => "request_send",
+            Self::ResponseBodyRead => "response_body_read",
+            Self::ResponseReceived => "response_received",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResponseRead {
+    NotStarted,
+    Complete,
+    Failed,
+}
+
+impl ProviderResponseRead {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAttemptDiagnostic {
+    pub started_at_unix_ms: u64,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
+    pub client_timeout_ms: u64,
+    pub phase: ProviderAttemptPhase,
+    pub http_status: Option<u16>,
+    pub response_read: ProviderResponseRead,
+    pub response_bytes: Option<u64>,
+    pub provider_request_id: Option<String>,
+    pub provider_error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderError {
     pub kind: ProviderErrorKind,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ProviderAttemptDiagnostic>,
 }
 
 impl ProviderError {
@@ -52,7 +105,13 @@ impl ProviderError {
         Self {
             kind,
             detail: detail.into(),
+            diagnostic: None,
         }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: ProviderAttemptDiagnostic) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
     }
 }
 
@@ -141,6 +200,8 @@ pub struct ProviderResponse {
     pub raw_response: String,
     pub usage: ProviderUsage,
     pub provider_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<ProviderAttemptDiagnostic>,
 }
 
 pub trait ProviderAdapter: Send + Sync {
@@ -373,6 +434,77 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    fn attempt_diagnostic(
+        started_at_unix_ms: u64,
+        started: Instant,
+        timeout_ms: u64,
+        client_timeout_ms: u64,
+        phase: ProviderAttemptPhase,
+        http_status: Option<u16>,
+        response_read: ProviderResponseRead,
+        response_bytes: Option<usize>,
+        provider_request_id: Option<String>,
+        provider_error_code: Option<String>,
+    ) -> ProviderAttemptDiagnostic {
+        ProviderAttemptDiagnostic {
+            started_at_unix_ms,
+            elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            timeout_ms,
+            client_timeout_ms,
+            phase,
+            http_status,
+            response_read,
+            response_bytes: response_bytes.map(|bytes| bytes as u64),
+            provider_request_id,
+            provider_error_code,
+        }
+    }
+
+    fn safe_provider_request_id(value: &str, secret: &str) -> Option<String> {
+        if !secret.is_empty() && value.contains(secret) {
+            return None;
+        }
+        let safe = value
+            .trim()
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+            })
+            .take(128)
+            .collect::<String>();
+        (!safe.is_empty()).then_some(safe)
+    }
+
+    fn provider_request_id_from_headers(headers: &HeaderMap, secret: &str) -> Option<String> {
+        [
+            "x-acs-request-id",
+            "x-dashscope-request-id",
+            "x-request-id",
+            "request-id",
+        ]
+        .iter()
+        .filter_map(|name| headers.get(*name)?.to_str().ok())
+        .find_map(|value| Self::safe_provider_request_id(value, secret))
+    }
+
+    fn provider_request_id_from_body(
+        body: &[u8],
+        secret: &str,
+        allow_response_id: bool,
+    ) -> Option<String> {
+        let body: Value = serde_json::from_slice(body).ok()?;
+        let request_id = ["request_id", "requestId"]
+            .iter()
+            .find_map(|field| body.get(*field)?.as_str());
+        request_id
+            .or_else(|| {
+                allow_response_id
+                    .then(|| body.get("id")?.as_str())
+                    .flatten()
+            })
+            .and_then(|value| Self::safe_provider_request_id(value, secret))
+    }
+
     pub fn request_payload_digest(
         &self,
         request: &ProviderRequest,
@@ -400,6 +532,7 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
         let headers = Self::request_headers(&self.endpoint, secret)?;
         let timeout_ms = request.timeout_ms.max(1);
         let timeout_seconds = timeout_ms / 1000 + u64::from(!timeout_ms.is_multiple_of(1000));
+        let client_timeout_ms = timeout_seconds.saturating_mul(1000);
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_seconds))
             .redirect(reqwest::redirect::Policy::none())
@@ -407,14 +540,35 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             .map_err(|_| {
                 ProviderError::new(ProviderErrorKind::Transport, "provider client unavailable")
             })?;
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .body(payload)
-            .send()
-            .map_err(Self::request_error)?;
+        let started_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or_default();
+        let started = Instant::now();
+        let response = match client.post(&url).headers(headers).body(payload).send() {
+            Ok(response) => response,
+            Err(error) => {
+                let mut provider_error = Self::request_error(error);
+                let provider_error_code = provider_error.kind.code().to_string();
+                let diagnostic = Self::attempt_diagnostic(
+                    started_at_unix_ms,
+                    started,
+                    timeout_ms,
+                    client_timeout_ms,
+                    ProviderAttemptPhase::RequestSend,
+                    None,
+                    ProviderResponseRead::NotStarted,
+                    None,
+                    None,
+                    Some(provider_error_code),
+                );
+                provider_error.diagnostic = Some(diagnostic);
+                return Err(provider_error);
+            }
+        };
         let status = response.status().as_u16();
         let content_type = Self::safe_content_type(response.headers(), secret);
+        let header_request_id = Self::provider_request_id_from_headers(response.headers(), secret);
         let status_error = match status {
             401 | 403 => Some(ProviderError::new(
                 ProviderErrorKind::Authentication,
@@ -448,10 +602,23 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
                     "P01_PROVIDER_RESPONSE http_status={} content_type={} response_bytes=unknown request_payload_digest={}",
                     status, content_type, request_payload_digest
                 );
-                return Err(ProviderError::new(
+                let mut error = ProviderError::new(
                     ProviderErrorKind::UnknownRemoteOutcome,
                     "provider response body could not be read; request outcome is unknown",
+                );
+                error.diagnostic = Some(Self::attempt_diagnostic(
+                    started_at_unix_ms,
+                    started,
+                    timeout_ms,
+                    client_timeout_ms,
+                    ProviderAttemptPhase::ResponseBodyRead,
+                    Some(status),
+                    ProviderResponseRead::Failed,
+                    None,
+                    header_request_id,
+                    Some(error.kind.code().into()),
                 ));
+                return Err(error);
             }
         };
         let response_bytes = response.len();
@@ -459,8 +626,23 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             "P01_PROVIDER_RESPONSE http_status={} content_type={} response_bytes={} request_payload_digest={}",
             status, content_type, response_bytes, request_payload_digest
         );
+        let provider_request_id = header_request_id.or_else(|| {
+            Self::provider_request_id_from_body(&response, secret, status_error.is_none())
+        });
         if let Some(error) = status_error {
-            return Err(error);
+            let provider_error_code = error.kind.code().to_string();
+            return Err(error.with_diagnostic(Self::attempt_diagnostic(
+                started_at_unix_ms,
+                started,
+                timeout_ms,
+                client_timeout_ms,
+                ProviderAttemptPhase::ResponseReceived,
+                Some(status),
+                ProviderResponseRead::Complete,
+                Some(response_bytes),
+                provider_request_id,
+                Some(provider_error_code),
+            )));
         }
         let raw_response = String::from_utf8_lossy(&response).to_string();
         if raw_response.trim().is_empty() {
@@ -473,6 +655,18 @@ impl ProviderAdapter for OpenAiCompatibleProvider {
             raw_response,
             usage: ProviderUsage::default(),
             provider_request_id: None,
+            diagnostic: Some(Self::attempt_diagnostic(
+                started_at_unix_ms,
+                started,
+                timeout_ms,
+                client_timeout_ms,
+                ProviderAttemptPhase::ResponseReceived,
+                Some(status),
+                ProviderResponseRead::Complete,
+                Some(response_bytes),
+                provider_request_id,
+                None,
+            )),
         })
     }
 }
