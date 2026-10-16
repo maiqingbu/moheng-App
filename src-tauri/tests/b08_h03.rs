@@ -9375,5 +9375,7 @@ mod b04b_rv15;
 mod b04b_rv33;
 #[path = "b08_h03/fx15_production_control.rs"]
 mod fx15_production_control;
+#[path = "b08_h03/fx18_length.rs"]
+mod fx18_length;
 #[path = "b08_h03/fx4_knowledge_time.rs"]
 mod fx4_knowledge_time;

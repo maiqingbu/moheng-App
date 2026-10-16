@@ -6960,6 +6960,15 @@ fn compile_current_chapter_plan(
                 .is_some_and(|task_id| selected_task_refs.contains(task_id))
         });
     }
+    // FX-18: long-form chapters are sized for their length range when planned.
+    let project_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &handle, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        request.get("payload").unwrap_or(&Value::Null),
+        project_settings.get("chapterLengthRange"),
+    )?;
     let planning_input = json!({
         "projectId":project_id,
         "chapterId":chapter_id,
@@ -6971,6 +6980,7 @@ fn compile_current_chapter_plan(
         "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
         "volumePlanRoute":scoped_route_payload,
         "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(&handle, project_id, chapter_id)?,
+        "chapterLengthRange":length_range.to_json(),
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
     let planning_result = crate::production::execute_production_model_with_profile(
@@ -7011,6 +7021,9 @@ fn compile_current_chapter_plan(
     plan["entityRefs"] = hard_scope["entityRefs"].clone();
     plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
     plan["hardScope"] = hard_scope;
+    if state.production_gateway.enforces_chapter_length() {
+        crate::chapter_length::validate_plan_length(&plan, length_range)?;
+    }
     let receipt = crate::planning::recompile_chapter_plan_owner(
         &handle,
         project_id,

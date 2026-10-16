@@ -313,8 +313,8 @@ impl OpenAiCompatibleProvider {
 
     fn structured_prompt(capability: &str) -> &'static str {
         match capability {
-            "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. No other top-level keys are allowed. Each horizonPreview item must be exactly {\"objective\":string,\"tentative\":true}: objective is a short Chinese sentence for that future chapter; do not omit tentative or use any other value. chapterGoal must be a non-empty Chinese sentence; use chapterGoalHint when supplied. Use horizonPreviewCapacity from the input: when it is 0–2, return 0 through that many tentative items; otherwise return 3 through min(8, horizonPreviewCapacity). Never add generic fallback horizon items or preview beyond volume completion. Fill unknown values with empty arrays or null only where the contract permits.",
-            "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain complete Chinese chapter prose and should follow targetChineseCharacters when supplied: write at least 80% of targetChineseCharacters Chinese characters (count before returning), body must not exceed targetChineseCharacters, finish the chapter completely, and never truncate the JSON string. Use authorityContext to compare current facts; do not suppress a change evidenced by the candidate body because it contradicts current authority.",
+            "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. No other top-level keys are allowed. Each horizonPreview item must be exactly {\"objective\":string,\"tentative\":true}: objective is a short Chinese sentence for that future chapter; do not omit tentative or use any other value. chapterGoal must be a non-empty Chinese sentence; use chapterGoalHint when supplied. Use horizonPreviewCapacity from the input: when it is 0–2, return 0 through that many tentative items; otherwise return 3 through min(8, horizonPreviewCapacity). Never add generic fallback horizon items or preview beyond volume completion. Every sceneExecution item must be an object with estimatedCharacters, the integer number of Chinese characters that scene will take; plan enough scenes and story events that the estimates add up to a total within chapterLengthRange.min..chapterLengthRange.max, sizing the content for that length so the writer never has to pad or compress. Fill unknown values with empty arrays or null only where the contract permits.",
+            "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain complete Chinese chapter prose whose length (all characters) falls within chapterLengthRange: at least chapterLengthRange.min and at most chapterLengthRange.max. Write each scene of chapterPlan.sceneExecution at about its estimatedCharacters, count before returning, finish the chapter completely, and never truncate the JSON string. When previousBody is supplied, its length previousCharacterCount was outside chapterLengthRange: rewrite the complete chapter for the same chapterPlan so that its length falls within the range, instead of appending to or cutting the previous body. Use authorityContext to compare current facts; do not suppress a change evidenced by the candidate body because it contradicts current authority.",
             "REPAIR_CANDIDATE" => concat!(
                 "Return one JSON S40 SkillResultEnvelope only; top-level fields are exactly skillId, skillVersion, bundleDigest, taskId, status, sourceRefs, assumptions, payload, findings, contextRefs, runtimeCheckRequests, confidence, and nextSkillHints. No other top-level fields are allowed. ",
                 "Use these types: skillId, skillVersion, bundleDigest, taskId, and status are strings; payload is an object; confidence is a JSON number from 0 to 1 inclusive; sourceRefs, assumptions, contextRefs, and nextSkillHints are arrays of strings; findings is an array of objects; runtimeCheckRequests is an array of objects. ",
@@ -945,14 +945,20 @@ mod tests {
             "Each horizonPreview item must be exactly {\"objective\":string,\"tentative\":true}"
         ));
         assert!(prompt.contains("otherwise return 3 through min(8, horizonPreviewCapacity)"));
+        assert!(
+            prompt.contains("Every sceneExecution item must be an object with estimatedCharacters")
+        );
     }
 
     #[test]
     fn renderer_prompt_requires_bounded_complete_chapter_json() {
         let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
-        assert!(prompt.contains("body must not exceed targetChineseCharacters"));
-        assert!(prompt.contains("at least 80% of targetChineseCharacters"));
-        assert!(!prompt.contains("keep the prose concise"));
+        assert!(prompt.contains("falls within chapterLengthRange"));
+        assert!(
+            prompt.contains("at least chapterLengthRange.min and at most chapterLengthRange.max")
+        );
+        assert!(prompt.contains("When previousBody is supplied"));
+        assert!(!prompt.contains("targetChineseCharacters"));
         assert!(prompt.contains("complete Chinese chapter prose"));
         assert!(prompt.contains("Use authorityContext to compare current facts"));
     }

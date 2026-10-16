@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watchEffect } from 'vue'
 import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
 import type { SettingsProjection } from '../../application/contracts'
@@ -76,7 +77,7 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
     <CommandFeedback :state="saveState" />
 
     <div class="settings-layout section">
-      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
+      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button v-if="isProjectSettings" :class="{active:section==='length'}" @click="scrollTo('length')">章节字数</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
 
       <main>
         <section id="setting-model" class="setting-section">
@@ -119,6 +120,11 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
               </div>
             </div>
           </div>
+        </section>
+
+        <section v-if="isProjectSettings" id="setting-length" class="setting-section" data-chapter-length-setting>
+          <div class="card-head"><div><h2 class="card-title">章节字数</h2><p class="card-subtitle">本作品每章的默认字数区间；开始写某一章或生成某一章计划时，可以单独改这一章。</p></div></div>
+          <ChapterLengthPicker v-model="form.chapterLengthRange" />
         </section>
 
         <section id="setting-privacy" class="setting-section">

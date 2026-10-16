@@ -45,6 +45,8 @@ fn retryable_real_production_error(error: &str) -> bool {
         "B08_PLANNING_CONTRACT",
         "B08_AUDIT_CONTRACT",
         "B08_RENDER_OUTPUT_INVALID",
+        "B08_PLAN_LENGTH_OUT_OF_RANGE",
+        "B08_RENDER_LENGTH_OUT_OF_RANGE",
     ]
     .iter()
     .any(|prefix| error.starts_with(prefix))
@@ -70,7 +72,7 @@ fn execute_real_production(
             "chapterId":chapter_id,
             "executionMode":execution_mode,
             "skillsEnabled":false,
-            "targetChineseCharacters":1800,
+            "chapterLengthRange":{"min":2000,"max":3000},
             "chapterGoalHint":chapter_goal
         });
         if let Some(volume_id) = volume_id {
@@ -558,7 +560,9 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
     assert!(receipts >= expected_chapters);
     assert!(completed_runs >= if expected_chapters == 4 { 13 } else { 9 });
     assert!(word_counts.len() >= expected_chapters as usize);
-    assert!(word_counts.iter().all(|count| *count >= 800));
+    assert!(word_counts
+        .iter()
+        .all(|count| (2000..=3300).contains(count)));
     println!(
         "REAL_THREE_CHAPTER_RESULT projectId={} finalChapters={} productionReceipts={} completedModelRuns={} wordCounts={:?} status=PASS",
         project_id, committed, receipts, completed_runs, word_counts

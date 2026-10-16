@@ -823,6 +823,8 @@ export interface SettingsProjection {
   }
   privacyMode: 'local-first' | 'balanced'
   sendDraftOnly: boolean
+  /** FX-18: the work's default chapter length range (project settings only). */
+  chapterLengthRange?: { min: number; max: number }
   exportFormat: 'DOCX' | 'Markdown' | 'TXT' | 'EPUB'
   platform: string
   theme: 'light' | 'system' | 'dark'

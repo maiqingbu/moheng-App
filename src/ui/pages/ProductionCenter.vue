@@ -7,6 +7,8 @@ import RuntimeBanner from '../components/RuntimeBanner.vue'
 import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import ResumeConditionFields from '../components/ResumeConditionFields.vue'
+import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
+import { withChapterLengthRange, type ChapterLengthRange } from '../presentation/chapterLength'
 import { useProjectStore } from '../stores/projectStore'
 import type { ProductionCenterProjection } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
@@ -267,6 +269,9 @@ async function disableGatePolicyRule(rule: Record<string, unknown>) {
   await updateGatePolicy('DISABLE_RULE', { predicate })
 }
 
+// FX-18: an opening chapter is planned at production start, so its length
+// range can be chosen here; long-form chapters choose it when the plan is made.
+const chapterLengthRange = ref<ChapterLengthRange | null>(null)
 async function startProduction() {
   if (!canStartProduction.value) return
   const chapter = production.value?.nextChapter
@@ -280,7 +285,7 @@ async function startProduction() {
   try {
     await store.runCommand(lastCommand.value, {
       type: 'production_start',
-      payload: {
+      payload: withChapterLengthRange({
         chapterId: chapter.id,
         volumeId: chapter.volumeId,
         executionMode: chapter.executionMode,
@@ -290,7 +295,7 @@ async function startProduction() {
         ...(canRetryProduction.value && production.value?.tasks[0]?.id
           ? { retryOfJobId: production.value.tasks[0].id }
           : {}),
-      },
+      }, chapter.executionMode === 'LONG_FORM' ? null : chapterLengthRange.value),
     })
   } catch {
     // The store has already placed the typed failure in CommandFeedback.
@@ -497,6 +502,9 @@ function costText(value: number | null | undefined) {
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_cancel')">取消本章生成</button>
     </PageHeader>
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
+    <div v-if="canStartProduction && !productionIsActive && production.nextChapter && production.nextChapter.executionMode !== 'LONG_FORM'" class="section" data-chapter-length-override>
+      <ChapterLengthPicker v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${production.nextChapter.number} 章字数区间`" />
+    </div>
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
     <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />

@@ -110,6 +110,13 @@ pub trait ProductionModelGateway: Send + Sync {
         false
     }
 
+    /// FX-18: configured providers must plan and write each chapter within
+    /// its length range. Deterministic gateways return fixed short fixtures
+    /// and skip the length rules.
+    fn enforces_chapter_length(&self) -> bool {
+        false
+    }
+
     /// Deterministic gateways can model a concurrent writer after the gate
     /// snapshot has been checked and immediately before CommitService runs.
     /// Configured providers keep this no-op.
@@ -395,6 +402,10 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
     }
 
     fn transport_diagnostics_enabled(&self) -> bool {
+        true
+    }
+
+    fn enforces_chapter_length(&self) -> bool {
         true
     }
 
@@ -2655,6 +2666,16 @@ fn run_chapter_production_inner(
     } else {
         None
     };
+    // FX-18: the length range this chapter is planned and written for.
+    let project_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        connection,
+        &project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        request.get("payload").unwrap_or(&Value::Null),
+        project_settings.get("chapterLengthRange"),
+    )?;
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
         {
@@ -2757,6 +2778,7 @@ fn run_chapter_production_inner(
                 "activeTaskRefs":compiler_input.active_task_refs,
                 "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
                 "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(connection, &project_id, &chapter_id)?,
+                "chapterLengthRange":length_range.to_json(),
                 "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
             });
             let planning_result = execute_production_model_with_profile(
@@ -2804,6 +2826,9 @@ fn run_chapter_production_inner(
                     &chapter_id,
                 )?,
             )?;
+            if gateway.enforces_chapter_length() {
+                crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
+            }
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
             let planning_receipt = crate::planning::recompile_chapter_plan_owner(
                 connection,
@@ -2880,6 +2905,9 @@ fn run_chapter_production_inner(
                 audit_contract,
             )
         };
+    if gateway.enforces_chapter_length() {
+        crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
+    }
     if let Err(error) = validate_plan_is_current(
         connection,
         request,
@@ -2975,12 +3003,7 @@ fn run_chapter_production_inner(
         .map_err(|error| format!("B10_SKILL_PAYLOAD:{error}"))?;
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
-    let target_chinese_characters = request
-        .pointer("/payload/targetChineseCharacters")
-        .and_then(Value::as_i64)
-        .unwrap_or(1_800)
-        .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"targetChineseCharacters":target_chinese_characters});
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
     if let Some(enrichment) = creative_enrichment_payload.clone() {
         render_input["creativeEnrichment"] = enrichment;
     }
@@ -2997,7 +3020,9 @@ fn run_chapter_production_inner(
         .transpose()
         .map_err(|error| error.to_string())?
         .flatten();
-    let (render_run_id, render_payload) = if let Some((model_run_id, parsed)) = reusable_render {
+    let rewrite_input = render_input.clone();
+    let (mut render_run_id, render_payload) = if let Some((model_run_id, parsed)) = reusable_render
+    {
         (
             model_run_id,
             parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?,
@@ -3040,6 +3065,64 @@ fn run_chapter_production_inner(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+    // FX-18 (owner decision 2026-10-17): a body outside the range is rewritten
+    // for the same plan at most twice; a body still outside it is never
+    // committed.
+    if gateway.enforces_chapter_length() {
+        use crate::chapter_length::character_count;
+        let mut rewrite = 0;
+        while !length_range.accepts(character_count(&body)) {
+            if rewrite == 2 {
+                return Err(format!(
+                    "B08_RENDER_LENGTH_OUT_OF_RANGE:{}:{}-{}",
+                    character_count(&body),
+                    length_range.min,
+                    length_range.max
+                ));
+            }
+            rewrite += 1;
+            let rewrite_run_id = StableIdentityFactory::from_command(
+                StableIdKind::ModelRun,
+                &format!("{command_id}:render:length-{rewrite}"),
+            )?;
+            let mut input = rewrite_input.clone();
+            input["previousBody"] = json!(body);
+            input["previousCharacterCount"] = json!(character_count(&body));
+            let rewrite_spec = ModelRunSpec {
+                model_run_id: rewrite_run_id.clone(),
+                job_id: Some(job_id.clone()),
+                step_id: None,
+                provider: provider_profile.provider.clone(),
+                model: provider_profile.model.clone(),
+                idempotency_key: format!("{idempotency_key}:render:length-{rewrite}"),
+                capability: "RENDER_CHAPTER".into(),
+                prompt_ref: None,
+                context_manifest_ref: Some(context_ref.artifact_id.clone()),
+                budget_id: Some(production_budget_id.clone()),
+                predicted_cost_cents: 0,
+                cost_snapshot: None,
+                attempt_no: 1 + rewrite,
+                repair_round: 0,
+            };
+            let result = execute_production_model_with_profile(
+                connection,
+                gateway,
+                &provider_profile,
+                &rewrite_spec,
+                "RENDER_CHAPTER",
+                input,
+                &now,
+            )?;
+            body = result
+                .parsed
+                .as_ref()
+                .and_then(|payload| payload.get("body"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+            render_run_id = rewrite_run_id;
+        }
+    }
     let method_injection_provenance = creative_enrichment
         .as_ref()
         .map(|enrichment| {
@@ -5481,6 +5564,12 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx18_configured_provider_enforces_the_chapter_length_range() {
+        let paths = crate::project_db::paths::AppPaths::new(std::env::temp_dir());
+        assert!(super::ConfiguredProductionGateway::for_desktop(paths).enforces_chapter_length());
+    }
+
     use super::*;
 
     #[derive(Default)]
