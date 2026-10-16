@@ -164,6 +164,7 @@ pub fn normalize_chapter_plan_model_output(
                 .as_str()
                 .or_else(|| item.get("objective").and_then(Value::as_str))
                 .or_else(|| item.get("description").and_then(Value::as_str))
+                .or_else(|| item.get("content").and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             if let Some(objective) = objective {
@@ -3014,6 +3015,26 @@ mod tests {
             assert_eq!(horizon[expected - 1]["slotNo"], expected);
             assert!(validate_chapter_plan_horizon(&normalized, capacity).is_ok());
         }
+    }
+
+    #[test]
+    fn fx17_horizon_items_written_as_content_are_kept() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fx17_plan_horizon_content_key.json"
+        )))
+        .unwrap();
+        let items = fixture["horizonPreview"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 8);
+        let normalized = normalize_chapter_plan_model_output(
+            json!({"horizonPreview":items.clone()}),
+            &[],
+            &json!({"horizonPreviewCapacity":35}),
+        );
+        let horizon = normalized["horizonPreview"].as_array().unwrap();
+        assert_eq!(horizon.len(), 8);
+        assert_eq!(horizon[0]["objective"], items[0]["content"]);
+        assert!(validate_chapter_plan_horizon(&normalized, 35).is_ok());
     }
 
     #[test]
