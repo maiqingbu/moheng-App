@@ -1884,6 +1884,24 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// FX-17: which of the given IDs are real project tasks (declared in a
+    /// committed VolumePlan route or carrying Task Reality).
+    pub fn known_task_ids(
+        connection: &Connection,
+        project_id: &str,
+        task_ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if task_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(task_ids)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM state_deltas d WHERE d.project_id=?1 AND d.state_type='volume.task.progress' AND d.state_id=c.value) OR EXISTS(SELECT 1 FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version, json_each(p.payload_json,'$.tasks') t WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND json_extract(t.value,'$.taskId')=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
     pub fn volume_plan_route(
         connection: &Connection,
         project_id: &str,

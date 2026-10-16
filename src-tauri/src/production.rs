@@ -3512,7 +3512,18 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
         )
     };
-    let audit_payload = normalize_audit_model_output(audit_payload, &body);
+    let mut audit_payload = normalize_audit_model_output(audit_payload, &body);
+    let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
+    let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
+        connection,
+        &project_id,
+        &unplanned_task_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    drop_invented_task_candidates(&mut audit_payload, &unplanned_task_ids, &known_task_ids);
     let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
         .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
     validate_audit_completeness(&audit_payload, &extraction)?;
@@ -4730,6 +4741,57 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         "invalidContinuityEvidence":invalid_continuity_evidence
     });
     payload
+}
+
+fn unplanned_task_candidate_ids(audit: &Value, plan: &Value) -> BTreeSet<String> {
+    let planned = plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    audit
+        .get("taskProgressCandidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| candidate.get("taskId").and_then(Value::as_str))
+        .filter(|task_id| !planned.contains(task_id))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// FX-17: a task ID that is neither planned nor a real project task was
+/// invented by the model ("do not invent authority refs") and is dropped like
+/// other unbound candidates. A real task outside the plan still reaches the
+/// Task Scope Gate and blocks.
+fn drop_invented_task_candidates(
+    audit: &mut Value,
+    unplanned: &BTreeSet<String>,
+    known: &BTreeSet<String>,
+) {
+    let mut dropped = 0_u64;
+    if let Some(candidates) = audit
+        .get_mut("taskProgressCandidates")
+        .and_then(Value::as_array_mut)
+    {
+        candidates.retain(|candidate| {
+            let task_id = candidate
+                .get("taskId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let invented = unplanned.contains(task_id) && !known.contains(task_id);
+            dropped += u64::from(invented);
+            !invented
+        });
+    }
+    if let Some(normalization) = audit
+        .get_mut("normalization")
+        .and_then(Value::as_object_mut)
+    {
+        normalization.insert("droppedInventedTasks".into(), json!(dropped));
+    }
 }
 
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
@@ -6167,6 +6229,40 @@ mod tests {
             &pending_entities,
             &pending_facts,
         ));
+    }
+
+    #[test]
+    fn fx17_invented_task_is_dropped_but_real_unplanned_task_is_kept_for_the_gate() {
+        let mut audit = json!({
+            "taskProgressCandidates":[
+                {"taskId":"task:first_memory_repair","status":"SATISFIED"},
+                {"taskId":"task:real_future","status":"ACTIVE"},
+                {"taskId":"task:planned","status":"ACTIVE"}
+            ],
+            "normalization":{"policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES"}
+        });
+        let plan = json!({"activeTaskRefs":["task:planned"]});
+        let unplanned = unplanned_task_candidate_ids(&audit, &plan);
+        assert_eq!(
+            unplanned,
+            BTreeSet::from([
+                "task:first_memory_repair".to_string(),
+                "task:real_future".to_string()
+            ])
+        );
+        drop_invented_task_candidates(
+            &mut audit,
+            &unplanned,
+            &BTreeSet::from(["task:real_future".to_string()]),
+        );
+        let kept = audit["taskProgressCandidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["taskId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(kept, ["task:real_future", "task:planned"]);
+        assert_eq!(audit["normalization"]["droppedInventedTasks"], 1);
     }
 
     #[test]

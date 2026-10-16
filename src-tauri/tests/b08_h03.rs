@@ -270,6 +270,7 @@ impl ProductionModelGateway for RecordingGateway {
 }
 
 struct TaskProgressCandidateGateway;
+struct InventedTaskGateway;
 struct TaskSatisfiedGateway;
 
 #[derive(Default)]
@@ -340,6 +341,17 @@ impl ProductionModelGateway for TaskProgressCandidateGateway {
                 "status":"ACTIVE",
                 "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
             }]);
+        }
+        Ok(response)
+    }
+}
+
+impl ProductionModelGateway for InventedTaskGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = TaskProgressCandidateGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["taskProgressCandidates"][0]["taskId"] =
+                json!("task:first_memory_repair");
         }
         Ok(response)
     }
@@ -3915,6 +3927,51 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         task_state_before
     );
     println!("B08_OPENING_TASK_SCOPE_RESULT rejected=PASS final=0 receipt=0 domain_receipt=0 task_state_unchanged=PASS");
+}
+
+#[test]
+fn fx17_opening_audit_with_invented_task_id_is_not_a_scope_violation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx17-invented-task";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(InventedTaskGateway),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "FX17 invented task", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_opening_without_volume_plan(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:fx17:invented-task","idempotencyKey":"key:fx17:invented-task",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    if let Err(error) = &result {
+        assert!(
+            !error.contains("TASK_SCOPE_VIOLATION"),
+            "actual error: {error}"
+        );
+    }
+    let connection = state
+        .manager
+        .open(project_id, "FX17 invented task", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id=?1 AND state_id='task:first_memory_repair'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
