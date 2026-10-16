@@ -198,6 +198,68 @@ impl CanonSemanticPolicy {
             })
     }
 
+    /// FX-17 (owner decision 2026-10-16): a single-valued, chapter-validity
+    /// fact that is still open and was established in an earlier chapter is
+    /// replaced by a different value from a later chapter — a narrative
+    /// transition, not a contradiction. A dead subject coming back to life
+    /// still requires a change request; same-chapter conflicts are unchanged.
+    pub fn narrative_transition(
+        &self,
+        predicate: &str,
+        current: &SemanticCanonFactRecord,
+        candidate: CandidateSemanticInput<'_>,
+    ) -> Result<bool, &'static str> {
+        let Some(rule) = self.rules.get(predicate) else {
+            return Ok(false);
+        };
+        let later_chapter = current
+            .valid_from_chapter_no
+            .zip(candidate.valid_from_chapter_no)
+            .is_some_and(|(from, candidate_from)| from < candidate_from);
+        let same_scope = resolve_scope(&rule.scope, &current.object_json).ok()
+            == resolve_scope(&rule.scope, candidate.object_json).ok();
+        // A World Time rule with no World Time on either side cannot be
+        // compared and falls back to Narrative Order, as Knowledge does.
+        let unknown = |time: Option<&str>| {
+            time.is_none_or(|time| time.trim().is_empty() || time == "UNKNOWN")
+        };
+        let narrative_order = match rule.time_basis {
+            Some(TimeBasis::ValidityChapter) => true,
+            Some(TimeBasis::WorldTime) => {
+                unknown(current.story_time_from.as_deref())
+                    && unknown(current.story_time_to.as_deref())
+                    && unknown(candidate.story_time)
+            }
+            None => false,
+        };
+        if rule.cardinality != Cardinality::Single
+            || !narrative_order
+            || current.valid_to_chapter_no.is_some()
+            || !later_chapter
+            || !same_scope
+            || equivalent(
+                &rule.equivalence_sets,
+                &current.object_json,
+                candidate.object_json,
+            )
+        {
+            return Ok(false);
+        }
+        let alive = |object: &Value| {
+            object
+                .get("value")
+                .or_else(|| object.get("alive"))
+                .and_then(Value::as_bool)
+        };
+        if predicate == "alive"
+            && alive(&current.object_json) == Some(false)
+            && alive(candidate.object_json) != Some(false)
+        {
+            return Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED");
+        }
+        Ok(true)
+    }
+
     pub fn evaluate(
         &self,
         predicate: &str,
@@ -507,6 +569,112 @@ mod tests {
             &json!({"canonSemantics":{"policyVersion":"v1","rules":[rule]}}),
         )
         .unwrap()
+    }
+
+    fn fx17_open_fact_from_chapter(object: Value, chapter_no: i64) -> SemanticCanonFactRecord {
+        SemanticCanonFactRecord {
+            valid_from_chapter_no: Some(chapter_no),
+            ..record(object, None, None)
+        }
+    }
+
+    fn fx17_candidate(object: &Value, chapter_no: i64) -> CandidateSemanticInput<'_> {
+        CandidateSemanticInput {
+            object_json: object,
+            story_time: None,
+            valid_from_chapter_no: Some(chapter_no),
+            valid_to_chapter_no: Some(chapter_no),
+        }
+    }
+
+    #[test]
+    fn fx17_later_chapter_value_change_is_a_narrative_transition() {
+        let single = policy(
+            json!({"predicate":"status","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}),
+        );
+        let current = fx17_open_fact_from_chapter(json!({"value":"小指透明"}), 1);
+        let changed = json!({"value":"小指及无名指透明"});
+        assert_eq!(
+            single.narrative_transition("status", &current, fx17_candidate(&changed, 2)),
+            Ok(true)
+        );
+        // same chapter, equivalent value, or a closed current fact: not a transition
+        assert_eq!(
+            single.narrative_transition("status", &current, fx17_candidate(&changed, 1)),
+            Ok(false)
+        );
+        assert_eq!(
+            single.narrative_transition(
+                "status",
+                &current,
+                fx17_candidate(&json!({"value":"小指透明"}), 2)
+            ),
+            Ok(false)
+        );
+        let closed = SemanticCanonFactRecord {
+            valid_to_chapter_no: Some(1),
+            ..current.clone()
+        };
+        assert_eq!(
+            single.narrative_transition("status", &closed, fx17_candidate(&changed, 2)),
+            Ok(false)
+        );
+        let multi = policy(
+            json!({"predicate":"opened","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}),
+        );
+        assert_eq!(
+            multi.narrative_transition("opened", &current, fx17_candidate(&changed, 2)),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn fx17_world_time_rule_without_any_world_time_falls_back_to_narrative_order() {
+        let world = policy(
+            json!({"predicate":"location","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"WORLD_TIME"}),
+        );
+        let current = fx17_open_fact_from_chapter(json!({"place":"stone-door"}), 2);
+        let moved = json!({"place":"river"});
+        assert_eq!(
+            world.narrative_transition("location", &current, fx17_candidate(&moved, 5)),
+            Ok(true)
+        );
+        let timed = SemanticCanonFactRecord {
+            story_time_from: Some("2020-01-01T00:00:00Z".into()),
+            story_time_to: Some("2021-01-01T00:00:00Z".into()),
+            ..current.clone()
+        };
+        assert_eq!(
+            world.narrative_transition("location", &timed, fx17_candidate(&moved, 5)),
+            Ok(false)
+        );
+        let mut timed_candidate = fx17_candidate(&moved, 5);
+        timed_candidate.story_time = Some("2020-06-01T00:00:00Z");
+        assert_eq!(
+            world.narrative_transition("location", &current, timed_candidate),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn fx17_dead_subject_coming_back_to_life_is_still_a_conflict() {
+        let alive = policy(
+            json!({"predicate":"alive","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}),
+        );
+        let dead = fx17_open_fact_from_chapter(json!({"value":false}), 1);
+        assert_eq!(
+            alive.narrative_transition("alive", &dead, fx17_candidate(&json!({"value":true}), 3)),
+            Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED")
+        );
+        let living = fx17_open_fact_from_chapter(json!({"value":true}), 1);
+        assert_eq!(
+            alive.narrative_transition(
+                "alive",
+                &living,
+                fx17_candidate(&json!({"value":false}), 3)
+            ),
+            Ok(true)
+        );
     }
 
     #[test]

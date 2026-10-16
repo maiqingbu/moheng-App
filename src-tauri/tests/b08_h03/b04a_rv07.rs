@@ -5,6 +5,22 @@ struct UnknownKnowledgeMetadataGateway;
 struct FutureNarrativeKnowledgeGateway;
 struct FutureNarrativeUnknownTimeGateway;
 struct ExplicitUnknownPrivateKnowledgeGateway;
+struct LocationTransitionGateway;
+impl ProductionModelGateway for LocationTransitionGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["canonCandidates"] = json!([{
+                "factId":"fact:fx17:moved","subjectId":"entity:actual:linzhou",
+                "predicate":"location","objectJson":{"place":"river"},"authorityLevel":"A",
+                "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
+            }]);
+            response.output["knowledgeCandidates"] = json!([]);
+            response.output["auditCompleteness"] = json!("COMPLETE_WITH_DELTA");
+        }
+        Ok(response)
+    }
+}
 impl ProductionModelGateway for FutureNarrativeUnknownTimeGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let mut response = FutureNarrativeKnowledgeGateway.invoke(capability, input)?;
@@ -280,4 +296,66 @@ fn fx17_explicit_unknown_time_and_private_visibility_commit_by_narrative_order()
         "SELECT visibility_scope FROM canon_knowledge WHERE project_id=?1 AND knowledge_id='knowledge:actual:flashback'",
         [project_id], |row| row.get(0)
     ).unwrap(), "CHARACTER:entity:actual:linzhou");
+}
+
+#[test]
+fn fx17_later_chapter_location_change_supersedes_the_open_earlier_fact() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx17-location-transition";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(LocationTransitionGateway),
+    );
+    let (chapter_id, volume_id, _, _) = seed_b08_long_form_project(&state, project_id);
+    let connection = state
+        .manager
+        .open(project_id, "B08 knowledge", NOW)
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET chapter_no=5 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=9 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    let earlier_chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "fx17:earlier").unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'第二章','NORMAL','COMMITTED',0,?4,?4)",
+        libsql_rusqlite::params![earlier_chapter_id, project_id, volume_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "UPDATE canon_facts SET valid_from_chapter_id=?1, source_chapter_id=?1, story_time_from=NULL, story_time_to=NULL WHERE project_id=?2 AND fact_id='fact:actual:seed'",
+        libsql_rusqlite::params![earlier_chapter_id, project_id],
+    ).unwrap();
+    drop(connection);
+    execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:fx17:location-transition",
+        "idempotencyKey":"key:fx17:location-transition","projectId":project_id,
+        "expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]}
+    })).unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 knowledge", NOW)
+        .unwrap();
+    let superseded_by = connection.query_row::<Option<String>, _, _>(
+        "SELECT superseded_by FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:seed'",
+        [project_id], |row| row.get(0)
+    ).unwrap();
+    assert_eq!(superseded_by.as_deref(), Some("fact:fx17:moved"));
+    let (object, valid_from) = connection.query_row::<(String, String), _, _>(
+        "SELECT object_json, valid_from_chapter_id FROM canon_facts WHERE project_id=?1 AND fact_id='fact:fx17:moved' AND superseded_by IS NULL",
+        [project_id], |row| Ok((row.get(0)?, row.get(1)?))
+    ).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&object).unwrap(),
+        json!({"place":"river"})
+    );
+    assert_eq!(valid_from, chapter_id);
 }

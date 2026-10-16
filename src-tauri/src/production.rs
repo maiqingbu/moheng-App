@@ -4151,7 +4151,8 @@ fn run_chapter_production_inner(
             "entityType":item.entity_type,
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
-            "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+            "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote},
+            "supersedesFactId":extraction.canon_transitions.get(&item.fact_id)
         }
     })).collect::<Vec<_>>();
     let knowledge_delta = extraction.knowledge_candidates.iter().map(|item| json!({
@@ -4483,6 +4484,9 @@ struct AuditExtraction {
     /// this audit; dropped from the commit and kept here as a durable record.
     #[serde(default)]
     dropped_unbound_knowledge: Vec<Value>,
+    /// FX-17: new fact id -> the open fact from an earlier chapter it replaces.
+    #[serde(default)]
+    canon_transitions: BTreeMap<String, String>,
 }
 
 fn validate_audit_candidate_binding(
@@ -4930,6 +4934,7 @@ fn validate_actual_extraction(
     .map_err(|error| error.to_string())?
     .ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
 
+    let mut canon_transitions = BTreeMap::new();
     for candidate in &audit.canon_candidates {
         canon_semantics
             .as_ref()
@@ -4989,8 +4994,27 @@ fn validate_actual_extraction(
             valid_from_chapter_no: candidate_from_chapter_no,
             valid_to_chapter_no: candidate_to_chapter_no,
         };
+        let mut replaced = Vec::new();
+        for fact in &current {
+            if fact.fact_id != candidate.fact_id
+                && policy.narrative_transition(
+                    &candidate.predicate,
+                    fact,
+                    candidate_input.clone(),
+                )?
+            {
+                replaced.push(fact.fact_id.clone());
+            }
+        }
+        if replaced.len() > 1 {
+            return Err("B08_CANON_TIME_UNRESOLVED".into());
+        }
+        if let Some(old_fact_id) = replaced.first() {
+            canon_transitions.insert(candidate.fact_id.clone(), old_fact_id.clone());
+        }
         for fact in current
             .iter()
+            .filter(|fact| !replaced.contains(&fact.fact_id))
             .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
         {
             if let Some(error) = policy
@@ -5013,6 +5037,7 @@ fn validate_actual_extraction(
             },
         );
     }
+    audit.canon_transitions = canon_transitions;
     for candidate in &audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
         if !active_tasks.contains(candidate.task_id.as_str()) {
