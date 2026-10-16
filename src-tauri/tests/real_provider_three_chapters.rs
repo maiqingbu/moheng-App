@@ -336,6 +336,20 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
             "让沈砚在停止调查与继续追查之间作出主动选择，并找到篡改并非事故的证据。",
             "让沈砚追踪第一条幕后线索，兑现前三章的局部谜题回报，同时保留姐姐去向悬念。",
         ][index];
+        let committed = state
+            .manager
+            .open(&project_id, "", NOW)
+            .unwrap()
+            .query_row(
+                "SELECT status='COMMITTED' FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+                [project_id.as_str(), chapter_id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        if committed {
+            // Resume mode: a chapter committed by an earlier real run is kept.
+            continue;
+        }
         let receipt = execute_real_production(
             &state,
             &project_id,
