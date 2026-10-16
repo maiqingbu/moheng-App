@@ -3536,6 +3536,10 @@ fn run_chapter_production_inner(
         &gate_policy_payload,
         &mut extraction,
     )?;
+    if !extraction.dropped_unbound_knowledge.is_empty() {
+        audit_payload["normalization"]["droppedUnboundKnowledge"] =
+            json!(extraction.dropped_unbound_knowledge);
+    }
     let planned_continuity_refs = plan_payload
         .get("continuityActions")
         .and_then(Value::as_array)
@@ -4198,7 +4202,7 @@ fn run_chapter_production_inner(
         "stateDelta":state_delta,
         "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":dependency_source_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
-        "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation}}
+        "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation,"droppedUnboundKnowledge":extraction.dropped_unbound_knowledge}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
     let _commit_control_guard =
         update_commit_stage(manager, connection, &project_id, &job_id, &now)?;
@@ -4475,6 +4479,10 @@ struct AuditExtraction {
     evidence_ranges: Vec<EvidenceSpan>,
     audit_completeness: AuditCompleteness,
     unresolved_hard: bool,
+    /// FX-17: knowledge whose knower/fact is neither existing nor extracted in
+    /// this audit; dropped from the commit and kept here as a durable record.
+    #[serde(default)]
+    dropped_unbound_knowledge: Vec<Value>,
 }
 
 fn validate_audit_candidate_binding(
@@ -5064,7 +5072,7 @@ fn validate_actual_extraction(
         .collect::<BTreeSet<_>>();
     let knowledge_candidates = std::mem::take(&mut audit.knowledge_candidates);
     let mut bound_knowledge_candidates = Vec::new();
-    for candidate in knowledge_candidates {
+    for mut candidate in knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
         let knower_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
@@ -5087,16 +5095,19 @@ fn validate_actual_extraction(
             &pending_entities,
             &pending_facts,
         ) {
-            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_UNBOUND".into());
+            audit.dropped_unbound_knowledge.push(json!({
+                "knowledgeId":candidate.knowledge_id,"knowerId":candidate.knower_id,
+                "factId":candidate.fact_id,"reason":"KNOWLEDGE_UNBOUND"
+            }));
+            continue;
         }
-        let pending_fact_time = audit
+        let pending_fact = audit
             .canon_candidates
             .iter()
-            .find(|fact| fact.fact_id == candidate.fact_id)
-            .and_then(|fact| fact.story_time.as_deref());
-        let fact_timing = if pending_fact_time.is_some() {
+            .find(|fact| fact.fact_id == candidate.fact_id);
+        let fact_timing = if let Some(pending_fact) = pending_fact {
             Some(crate::repositories::narrative::CanonFactTimingRecord {
-                story_time: pending_fact_time.map(ToOwned::to_owned),
+                story_time: pending_fact.story_time.clone(),
                 source_chapter_no: Some(current_chapter_no),
             })
         } else {
@@ -5108,21 +5119,22 @@ fn validate_actual_extraction(
             .map_err(|error| error.to_string())?
         };
         let fact_timing = fact_timing.ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
-        let acquired_time = candidate
-            .acquired_story_time
-            .as_deref()
-            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
-        let fact_time = fact_timing
-            .story_time
-            .as_deref()
-            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
-        let (Some(acquired_time), Some(fact_time)) = (acquired_time, fact_time) else {
-            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        // FX-17 (RV-07: Narrative Order and World Time are separate rules):
+        // an explicit UNKNOWN World Time leaves the Narrative Order check below
+        // to decide future knowledge; World Time is compared only when both
+        // sides state one. A missing acquiredStoryTime or a malformed time
+        // still fails closed (FX-4); a fact without storyTime is unknown.
+        let world_time = |time: Option<&str>, missing_is_unknown: bool| match time.map(str::trim) {
+            Some("UNKNOWN") => Ok(None),
+            Some(time) if !time.is_empty() => crate::canon_semantics::parse_world_time(time)
+                .map(Some)
+                .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"),
+            _ if missing_is_unknown => Ok(None),
+            _ => Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"),
         };
-        let acquired_time = crate::canon_semantics::parse_world_time(acquired_time)
-            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
-        let fact_time = crate::canon_semantics::parse_world_time(fact_time)
-            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
+        let acquired_time = world_time(candidate.acquired_story_time.as_deref(), false)?;
+        let fact_time = world_time(fact_timing.story_time.as_deref(), true)?;
+        let world_times = acquired_time.zip(fact_time);
         if fact_timing
             .source_chapter_no
             .is_some_and(|source| source > current_chapter_no)
@@ -5135,6 +5147,9 @@ fn validate_actual_extraction(
             .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
         {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        }
+        if candidate.visibility_scope.as_deref() == Some("PRIVATE") {
+            candidate.visibility_scope = Some(format!("CHARACTER:{}", candidate.knower_id));
         }
         let visibility_scope = candidate.visibility_scope.as_deref().unwrap_or_default();
         let valid_visibility_scope = visibility_scope == "PUBLIC"
@@ -5153,7 +5168,7 @@ fn validate_actual_extraction(
         if !valid_visibility_scope {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_VISIBILITY".into());
         }
-        if acquired_time < fact_time {
+        if world_times.is_some_and(|(acquired_time, fact_time)| acquired_time < fact_time) {
             return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
         }
         bound_knowledge_candidates.push(candidate);

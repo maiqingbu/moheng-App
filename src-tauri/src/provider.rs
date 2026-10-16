@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const AUDIT_EXTRACT_RV07_EXTENSION: &str = "For Knowledge candidates, emit storyTime on the referenced Canon fact, acquiredStoryTime, and visibilityScope; when any value is unknown, use the literal UNKNOWN. Unknown temporal or visibility information that affects a hard constraint is unresolved and must not be omitted.";
+const AUDIT_EXTRACT_RV07_EXTENSION: &str = "For Knowledge candidates, emit storyTime on the referenced Canon fact, acquiredStoryTime, and visibilityScope; storyTime and acquiredStoryTime are ISO 8601 world times such as 2026-01-02T00:00:00Z, given only when the candidate body states that date or time; otherwise use the literal UNKNOWN. visibilityScope must be exactly PUBLIC, CHARACTER:<knowerId>, or CHAPTER:<chapterId>; use CHARACTER:<knowerId> for knowledge only the knower has. Unknown temporal or visibility information that affects a hard constraint is unresolved and must not be omitted.";
 const AUDIT_EXTRACT_RV06_EXTENSION: &str = "For each continuity candidate, preserve the exact body evidence when available. A newly observed thread not present in continuityActions may be reported as new and must not mutate any existing thread. Include description, fulfillmentObject, and a typed resumeCondition for any candidate that claims a complete promise; supported resumeCondition kinds are NEXT_MEETING, ENTITY_PRESENT, KNOWLEDGE_ACQUIRED, TASK_SATISFIED, AFTER_CHAPTER, and IN_VOLUME. Do not assign authority A. The runtime classifies a complete candidate as B only when it has exact evidence, description, explicit fulfillmentObject, a supported typed resumeCondition, and a promoting signal; otherwise it retains the candidate as C. For new candidates with incomplete evidence, omit evidence rather than fabricating a quote; the candidate will remain C. For DEFER_WITH_BRIDGE, use the plan's bridge and do not omit it.";
 const AUDIT_EXTRACT_RV16_EXTENSION: &str = "The earlier wording about reconstructed quotes is overridden: never rely on the runtime to repair or relocate an evidence range; return exact quote text and offsets.";
 const AUDIT_EXTRACT_SOURCE_EVENT_EXTENSION: &str = "A continuity candidate may include the optional string sourceEventId when it is tied to a specific Canon event. It must exactly identify a Canon event emitted by this audit or already committed; never invent an event reference.";
@@ -796,6 +796,10 @@ mod tests {
         assert!(prompt.contains("must copy a passage of the candidate body verbatim"));
         assert!(prompt.contains("must appear exactly once in the candidate body"));
         assert!(prompt.contains("never use an ellipsis"));
+        assert!(super::AUDIT_EXTRACT_RV07_EXTENSION.contains(
+            "visibilityScope must be exactly PUBLIC, CHARACTER:<knowerId>, or CHAPTER:<chapterId>"
+        ));
+        assert!(super::AUDIT_EXTRACT_RV07_EXTENSION.contains("otherwise use the literal UNKNOWN"));
         assert!(prompt.contains("never quote only a name"));
         assert!(!prompt.contains("Quote text is reconstructed from the candidate body"));
         for suppressed_change in [
