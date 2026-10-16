@@ -1110,12 +1110,35 @@ fn parse_s40_repair_output(
             .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
         Ok((start, end))
     };
-    let (start, end) = read_span(&target_spans[0])?;
-    let (change_start, change_end) = read_span(&changes[0])?;
     let body_len = binding.body_character_count;
-    if start != change_start || end != change_end || start > end || end > body_len {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    fn quote_of(item: &Value) -> Option<&str> {
+        item.get("quote").and_then(Value::as_str)
     }
+    // FX-17: models cannot count Unicode offsets reliably, so the patch may
+    // instead quote the exact original text; the backend locates it and
+    // derives every span. The quote must occur exactly once in the body.
+    let (start, end, located_by_quote) = if let Some(quote) = quote_of(&changes[0]) {
+        if quote.is_empty() || quote_of(&target_spans[0]) != Some(quote) {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+        let byte_start = binding
+            .body
+            .find(quote)
+            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
+        let first_char_len = quote.chars().next().map_or(1, char::len_utf8);
+        if binding.body[byte_start + first_char_len..].contains(quote) {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+        let start = binding.body[..byte_start].chars().count();
+        (start, start + quote.chars().count(), true)
+    } else {
+        let (start, end) = read_span(&target_spans[0])?;
+        let (change_start, change_end) = read_span(&changes[0])?;
+        if start != change_start || end != change_end || start > end || end > body_len {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
+        (start, end, false)
+    };
     let mut expected_protected_spans = Vec::new();
     if start > 0 {
         expected_protected_spans.push((0, start));
@@ -1123,12 +1146,14 @@ fn parse_s40_repair_output(
     if end < body_len {
         expected_protected_spans.push((end, body_len));
     }
-    let supplied_protected_spans = protected_spans
-        .iter()
-        .map(read_span)
-        .collect::<Result<Vec<_>, _>>()?;
-    if supplied_protected_spans != expected_protected_spans {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
+    if !located_by_quote {
+        let supplied_protected_spans = protected_spans
+            .iter()
+            .map(read_span)
+            .collect::<Result<Vec<_>, _>>()?;
+        if supplied_protected_spans != expected_protected_spans {
+            return Err("B10_REPAIR_OUTPUT_INVALID".into());
+        }
     }
     let replacement = changes[0]
         .get("replacement")
@@ -1142,7 +1167,10 @@ fn parse_s40_repair_output(
             start,
             end,
             replacement,
-            protected_spans: protected_spans.clone(),
+            protected_spans: expected_protected_spans
+                .into_iter()
+                .map(|(start, end)| json!({"start":start,"end":end}))
+                .collect(),
         }),
     })
 }
@@ -5387,6 +5415,90 @@ mod tests {
             "confidence": 0.9,
             "nextSkillHints": []
         })
+    }
+
+    fn fx17_real_s40() -> (String, Value) {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/fx17_s40_real_repair.json"))
+                .unwrap();
+        (
+            fixture["body"].as_str().unwrap().to_owned(),
+            fixture["s40Output"].clone(),
+        )
+    }
+
+    /// The real model output with its identity bound to the test request and
+    /// its patch rewritten into the quote form.
+    fn fx17_quote_output(
+        binding: &S40RepairValidationBinding,
+        target: &str,
+        change: &str,
+    ) -> Value {
+        let mut output = valid_s40_repair_output_for(binding);
+        output["payload"]["target_spans"] = json!([{"quote": target}]);
+        output["payload"]["protected_spans"] = json!([]);
+        output["payload"]["changes"] = json!([{"quote": change, "replacement": "替换后的句子。"}]);
+        output
+    }
+
+    #[test]
+    fn fx17_s40_real_offset_output_is_still_rejected() {
+        let (body, real) = fx17_real_s40();
+        let binding = s40_test_binding(&body);
+        let mut output = valid_s40_repair_output_for(&binding);
+        output["payload"] = real["payload"].clone();
+        output["payload"]["recheck_dimensions"] = json!(binding.affected_dimensions);
+        assert_eq!(
+            parse_s40_repair_output(output, &binding).err(),
+            Some("B10_REPAIR_OUTPUT_INVALID".into()),
+            "wrong model offsets must keep failing closed"
+        );
+    }
+
+    #[test]
+    fn fx17_s40_quote_change_is_located_by_the_backend() {
+        let (body, _) = fx17_real_s40();
+        let binding = s40_test_binding(&body);
+        let quote = "神庭的审判大厅并非由砖石砌成，而是由无数悬浮的光符文构成。";
+        let byte_start = body.find(quote).unwrap();
+        let start = body[..byte_start].chars().count();
+        let end = start + quote.chars().count();
+
+        let parsed = parse_s40_repair_output(fx17_quote_output(&binding, quote, quote), &binding)
+            .expect("a unique verbatim quote is located");
+
+        let patch = parsed.patch.unwrap();
+        assert_eq!((patch.start, patch.end), (start, end));
+        assert_eq!(patch.replacement, "替换后的句子。");
+        let total = body.chars().count();
+        let mut expected = Vec::new();
+        if start > 0 {
+            expected.push(json!({"start":0,"end":start}));
+        }
+        if end < total {
+            expected.push(json!({"start":end,"end":total}));
+        }
+        assert_eq!(patch.protected_spans, expected);
+    }
+
+    #[test]
+    fn fx17_s40_missing_ambiguous_or_mismatched_quotes_are_rejected() {
+        let (body, _) = fx17_real_s40();
+        let binding = s40_test_binding(&body);
+        let unique = "神庭的审判大厅并非由砖石砌成，而是由无数悬浮的光符文构成。";
+        for (target, change) in [
+            ("这句话并不在正文里。", "这句话并不在正文里。"),
+            ("林渊", "林渊"),
+            (unique, "这句话并不在正文里。"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                parse_s40_repair_output(fx17_quote_output(&binding, target, change), &binding)
+                    .err(),
+                Some("B10_REPAIR_OUTPUT_INVALID".into()),
+                "target={target:?} change={change:?}"
+            );
+        }
     }
 
     fn valid_s40_repair_output() -> Value {
