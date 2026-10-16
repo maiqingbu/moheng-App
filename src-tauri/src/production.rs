@@ -4606,6 +4606,18 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                     "rebound":false
                 }));
             }
+            // A verbatim quote that only lost whitespace (typically paragraph
+            // breaks) still identifies one exact passage of the body.
+            if !offsets_reproduce_quote && matches.is_empty() {
+                if let Some((start, end)) = whitespace_insensitive_unique_span(&body_chars, quote) {
+                    return Some(json!({
+                        "start":start,
+                        "end":end,
+                        "quote":body_chars[start..end].iter().collect::<String>(),
+                        "rebound":false
+                    }));
+                }
+            }
         }
         let start = value.get("start")?.as_u64()? as usize;
         let end = value.get("end")?.as_u64()? as usize;
@@ -4800,6 +4812,35 @@ fn drop_invented_task_candidates(
     {
         normalization.insert("droppedInventedTasks".into(), json!(dropped));
     }
+}
+
+/// Char span of the only passage of `body` equal to `quote` once whitespace
+/// is ignored on both sides; None when absent or ambiguous.
+fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
+    let needle = quote
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if needle.is_empty() {
+        return None;
+    }
+    let positions = (0..body.len())
+        .filter(|&index| !body[index].is_whitespace())
+        .collect::<Vec<_>>();
+    let compact = positions
+        .iter()
+        .map(|&index| body[index])
+        .collect::<Vec<_>>();
+    let mut found = compact
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle.as_slice())
+        .map(|(offset, _)| offset);
+    let offset = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some((positions[offset], positions[offset + needle.len() - 1] + 1))
 }
 
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
@@ -6361,6 +6402,44 @@ mod tests {
             4 + "“城市记忆档案局”第七分部的走廊尽头".chars().count()
         );
         assert_eq!(normalized["normalization"]["reboundEvidence"], 0);
+    }
+
+    #[test]
+    fn fx17_audit_quote_missing_only_paragraph_breaks_is_located_exactly() {
+        let body = "他调出了“回溯仪”。\n\n“开始修复。”他低声说道。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[
+                {"start":0,"end":3,"quote":"调出了“回溯仪”。“开始修复。”他低声说道"},
+                {"start":0,"end":3,"quote":"不存在的引文"}
+            ]}),
+            body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(evidence["rebound"], false);
+        assert_eq!(evidence["start"], 1);
+        assert_eq!(
+            evidence["quote"],
+            "调出了“回溯仪”。\n\n“开始修复。”他低声说道"
+        );
+        let chars = body.chars().collect::<Vec<_>>();
+        assert_eq!(
+            chars[1..evidence["end"].as_u64().unwrap() as usize]
+                .iter()
+                .collect::<String>(),
+            evidence["quote"].as_str().unwrap()
+        );
+        assert_eq!(normalized["evidenceRanges"][1]["rebound"], true);
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
+    }
+
+    #[test]
+    fn fx17_audit_whitespace_insensitive_quote_must_still_be_unique() {
+        let body = "他说：好。\n他说：好。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"他说： 好。"}]}),
+            body,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
     }
 
     #[test]
