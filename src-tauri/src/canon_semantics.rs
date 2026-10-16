@@ -209,6 +209,29 @@ impl CanonSemanticPolicy {
         current: &SemanticCanonFactRecord,
         candidate: CandidateSemanticInput<'_>,
     ) -> Result<bool, &'static str> {
+        self.transition(predicate, current, candidate, true)
+    }
+
+    /// FX-19 (owner decision 2026-10-17): two values of a single-valued fact
+    /// reported for the same chapter, in reading order, are a change within
+    /// the chapter; the caller orders them by evidence position and keeps
+    /// overlapping evidence as a conflict.
+    pub fn in_chapter_transition(
+        &self,
+        predicate: &str,
+        earlier: &SemanticCanonFactRecord,
+        later: CandidateSemanticInput<'_>,
+    ) -> Result<bool, &'static str> {
+        self.transition(predicate, earlier, later, false)
+    }
+
+    fn transition(
+        &self,
+        predicate: &str,
+        current: &SemanticCanonFactRecord,
+        candidate: CandidateSemanticInput<'_>,
+        across_chapters: bool,
+    ) -> Result<bool, &'static str> {
         let Some(rule) = self.rules.get(predicate) else {
             return Ok(false);
         };
@@ -234,8 +257,7 @@ impl CanonSemanticPolicy {
         };
         if rule.cardinality != Cardinality::Single
             || !narrative_order
-            || current.valid_to_chapter_no.is_some()
-            || !later_chapter
+            || (across_chapters && (current.valid_to_chapter_no.is_some() || !later_chapter))
             || !same_scope
             || equivalent(
                 &rule.equivalence_sets,
@@ -653,6 +675,39 @@ mod tests {
         assert_eq!(
             world.narrative_transition("location", &current, timed_candidate),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn fx19_in_chapter_value_change_is_a_transition_with_the_same_guards() {
+        let single = policy(
+            json!({"predicate":"status","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}),
+        );
+        // A same-chapter pending fact is closed at this chapter.
+        let earlier = SemanticCanonFactRecord {
+            valid_to_chapter_no: Some(3),
+            ..fx17_open_fact_from_chapter(json!({"value":"失去备用钥匙"}), 3)
+        };
+        let later = json!({"value":"失去母亲遗物戒指"});
+        assert_eq!(
+            single.in_chapter_transition("status", &earlier, fx17_candidate(&later, 3)),
+            Ok(true)
+        );
+        assert_eq!(
+            single.in_chapter_transition(
+                "status",
+                &earlier,
+                fx17_candidate(&json!({"value":"失去备用钥匙"}), 3)
+            ),
+            Ok(false)
+        );
+        let alive = policy(
+            json!({"predicate":"alive","cardinality":"SINGLE","scope":{"kind":"FIXED","value":"PROJECT"},"timeBasis":"VALIDITY_CHAPTER"}),
+        );
+        let dead = fx17_open_fact_from_chapter(json!({"value":false}), 3);
+        assert_eq!(
+            alive.in_chapter_transition("alive", &dead, fx17_candidate(&json!({"value":true}), 3)),
+            Err("B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED")
         );
     }
 

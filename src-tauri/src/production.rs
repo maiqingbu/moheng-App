@@ -676,6 +676,24 @@ fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
     Some(payload)
 }
 
+/// FX-19 (owner decision 2026-10-17): a quote joining passages with an
+/// ellipsis binds to the full body passage when every part occurs exactly
+/// once in the body, in order, and at most 300 characters are omitted.
+fn bounded_ellipsis_span(body: &str, quote: &str) -> Option<(usize, usize)> {
+    let normalized = quote.replace("……", "...").replace('…', "...");
+    let parts = normalized
+        .split("...")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2 || parts.iter().any(|part| body.matches(part).count() != 1) {
+        return None;
+    }
+    let (start, end) = ellipsis_quote_span(body, quote)?;
+    let quoted = parts.iter().map(|part| part.chars().count()).sum::<usize>();
+    (end - start <= quoted + 300).then_some((start, end))
+}
+
 fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
     let normalized = quote.replace("……", "...").replace('…', "...");
     let segments = normalized
@@ -4753,7 +4771,9 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             // A verbatim quote that only lost whitespace (typically paragraph
             // breaks) still identifies one exact passage of the body.
             if !offsets_reproduce_quote && matches.is_empty() {
-                if let Some((start, end)) = whitespace_insensitive_unique_span(&body_chars, quote) {
+                let span = whitespace_insensitive_unique_span(&body_chars, quote)
+                    .or_else(|| bounded_ellipsis_span(body, quote));
+                if let Some((start, end)) = span {
                     return Some(json!({
                         "start":start,
                         "end":end,
@@ -5074,7 +5094,13 @@ fn validate_actual_extraction(
     .map_err(|error| error.to_string())?
     .ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
 
-    let mut canon_transitions = BTreeMap::new();
+    let mut canon_transitions = BTreeMap::<String, String>::new();
+    // FX-19: process Canon candidates in reading order so a later value of a
+    // single-valued fact in this chapter can replace an earlier one.
+    audit
+        .canon_candidates
+        .sort_by_key(|candidate| candidate.evidence.start);
+    let mut pending_evidence = BTreeMap::<String, (usize, usize)>::new();
     for candidate in &audit.canon_candidates {
         canon_semantics
             .as_ref()
@@ -5134,7 +5160,27 @@ fn validate_actual_extraction(
             valid_from_chapter_no: candidate_from_chapter_no,
             valid_to_chapter_no: candidate_to_chapter_no,
         };
+        let ended = canon_transitions.values().cloned().collect::<BTreeSet<_>>();
+        let current = current
+            .into_iter()
+            .filter(|fact| !ended.contains(&fact.fact_id))
+            .collect::<Vec<_>>();
         let mut replaced = Vec::new();
+        for fact in pending_canon_facts.get(&semantic_key).into_iter().flatten() {
+            let earlier_ends_first = pending_evidence
+                .get(&fact.fact_id)
+                .is_some_and(|(_, end)| *end <= candidate.evidence.start);
+            if !ended.contains(&fact.fact_id)
+                && earlier_ends_first
+                && policy.in_chapter_transition(
+                    &candidate.predicate,
+                    fact,
+                    candidate_input.clone(),
+                )?
+            {
+                replaced.push(fact.fact_id.clone());
+            }
+        }
         for fact in &current {
             if fact.fact_id != candidate.fact_id
                 && policy.narrative_transition(
@@ -5154,8 +5200,8 @@ fn validate_actual_extraction(
         }
         for fact in current
             .iter()
-            .filter(|fact| !replaced.contains(&fact.fact_id))
             .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
+            .filter(|fact| !replaced.contains(&fact.fact_id) && !ended.contains(&fact.fact_id))
         {
             if let Some(error) = policy
                 .evaluate(&candidate.predicate, fact, candidate_input.clone())
@@ -5164,6 +5210,10 @@ fn validate_actual_extraction(
                 return Err(error.into());
             }
         }
+        pending_evidence.insert(
+            candidate.fact_id.clone(),
+            (candidate.evidence.start, candidate.evidence.end),
+        );
         pending_canon_facts.entry(semantic_key).or_default().push(
             crate::repositories::narrative::SemanticCanonFactRecord {
                 fact_id: candidate.fact_id.clone(),
@@ -6604,6 +6654,57 @@ mod tests {
     }
 
     #[test]
+    fn fx19_ellipsis_quote_binds_to_the_full_passage_when_parts_are_unique_and_close() {
+        let body = format!(
+            "开头。他撕下一页纸，抄下坐标。{}他把纸条藏进口袋。结尾。",
+            "雨".repeat(40)
+        );
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[
+                {"start":0,"end":2,"quote":"他撕下一页纸，抄下坐标...他把纸条藏进口袋。"},
+                {"start":0,"end":2,"quote":"开头……结尾。"}
+            ]}),
+            &body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(evidence["rebound"], false, "{normalized}");
+        assert_eq!(
+            evidence["quote"],
+            format!(
+                "他撕下一页纸，抄下坐标。{}他把纸条藏进口袋。",
+                "雨".repeat(40)
+            )
+        );
+        let chars = body.chars().collect::<Vec<_>>();
+        let (start, end) = (
+            evidence["start"].as_u64().unwrap() as usize,
+            evidence["end"].as_u64().unwrap() as usize,
+        );
+        assert_eq!(
+            chars[start..end].iter().collect::<String>(),
+            evidence["quote"].as_str().unwrap()
+        );
+        // "开头" + ... + "结尾。" spans the whole body but is still within 300.
+        assert_eq!(normalized["evidenceRanges"][1]["rebound"], false);
+    }
+
+    #[test]
+    fn fx19_ellipsis_quote_with_a_wide_gap_or_repeated_part_stays_rebound() {
+        let wide = format!("甲乙丙。{}丁戊己。", "雨".repeat(301));
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"甲乙丙...丁戊己。"}]}),
+            &wide,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+        let repeated = "甲乙丙。中间。甲乙丙。丁戊己。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"甲乙丙...丁戊己。"}]}),
+            repeated,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+    }
+
+    #[test]
     fn fx17_new_thread_prefix_is_normalized_to_a_thread_ref() {
         let normalized = normalize_audit_model_output(
             json!({"continuityCandidates":[
@@ -6664,10 +6765,11 @@ mod tests {
                 }
             }
         }
-        // 12 model offsets were all wrong: the 9 unique verbatim quotes are now
-        // exact; two bare names and the ellipsis quote still fail closed (RV-16).
-        assert_eq!(exact, 9, "rebound: {rebound:?}");
-        assert_eq!(rebound.len(), 3);
+        // 12 model offsets were all wrong: the 9 unique verbatim quotes and
+        // (FX-19) the ellipsis quote with unique, close parts are now exact;
+        // the two bare names still fail closed (RV-16).
+        assert_eq!(exact, 10, "rebound: {rebound:?}");
+        assert_eq!(rebound.len(), 2);
         assert!(
             normalized["normalization"]["reboundEvidence"]
                 .as_u64()
