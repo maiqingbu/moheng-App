@@ -6989,7 +6989,8 @@ fn compile_current_chapter_plan(
         "chapterId":chapter_id,
         "compiledFromProjectRevision":planning_revision,
         "compiledFromStateDigest":state_digest,
-        "contextManifestRef":context_ref
+        "contextManifestRef":context_ref,
+        "horizonPreviewCapacity":planning_input["horizonPreviewCapacity"]
     });
     let mut plan = crate::planning::normalize_chapter_plan_model_output(
         raw_plan,

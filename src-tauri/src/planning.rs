@@ -170,6 +170,16 @@ pub fn normalize_chapter_plan_model_output(
                 normalized_items.push(json!({"slotNo":normalized_items.len() + 1,"objective":objective,"tentative":true}));
             }
         }
+        // FX-17: the horizon is the soft rolling preview (architecture: future
+        // 3-8 chapters). Extra tentative slots beyond the authoritative capacity
+        // are dropped in order; too few still fails in validate_chapter_plan_horizon.
+        // The untrimmed model output stays in the persisted raw response.
+        if let Some(capacity) = authoritative_bindings
+            .get("horizonPreviewCapacity")
+            .and_then(Value::as_i64)
+        {
+            normalized_items.truncate(capacity.clamp(0, 8) as usize);
+        }
         *items = normalized_items;
     }
     if triggered_thread_refs.is_empty()
@@ -2978,6 +2988,45 @@ pub fn commit_opening_chapter_plan_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fx17_real_horizon_items() -> Vec<Value> {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fx17_plan_horizon_45_items.json"
+        ))
+        .unwrap();
+        fixture["horizonPreview"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fx17_model_horizon_beyond_capacity_is_trimmed_in_order() {
+        let items = fx17_real_horizon_items();
+        assert_eq!(items.len(), 45);
+        for (capacity, expected) in [(8_i64, 8_usize), (20, 8), (5, 5)] {
+            let plan = json!({"horizonPreview":items.clone()});
+            let normalized = normalize_chapter_plan_model_output(
+                plan,
+                &[],
+                &json!({"horizonPreviewCapacity":capacity}),
+            );
+            let horizon = normalized["horizonPreview"].as_array().unwrap();
+            assert_eq!(horizon.len(), expected, "capacity {capacity}");
+            assert_eq!(horizon[0]["objective"], items[0]["description"]);
+            assert_eq!(horizon[expected - 1]["slotNo"], expected);
+            assert!(validate_chapter_plan_horizon(&normalized, capacity).is_ok());
+        }
+    }
+
+    #[test]
+    fn fx17_horizon_below_minimum_still_fails_closed() {
+        let items = fx17_real_horizon_items();
+        let plan = json!({"horizonPreview":items[..2].to_vec()});
+        let normalized =
+            normalize_chapter_plan_model_output(plan, &[], &json!({"horizonPreviewCapacity":8}));
+        assert_eq!(
+            validate_chapter_plan_horizon(&normalized, 8),
+            Err("ROLLING_HORIZON_CAPACITY_INVALID".into())
+        );
+    }
 
     fn chapter_plan() -> Value {
         json!({"payloadSchema":"chapter-plan.r1","chapterId":"chapter:1","compiledFromProjectRevision":1,"compiledFromStateDigest":"a".repeat(64),"contextManifestRef":{"artifactId":"context:1","version":1,"payloadHash":"b".repeat(64)},"chapterGoal":"advance","activeTaskRefs":["task:required"],"continuityActions":[{"threadRef":"thread:promise","disposition":"DEFER_WITH_BRIDGE","bridge":"interrupted meeting"}],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[{"slotNo":1,"objective":"one","tentative":true},{"slotNo":2,"objective":"two","tentative":true},{"slotNo":3,"objective":"three","tentative":true}]})
