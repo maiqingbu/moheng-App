@@ -124,6 +124,10 @@ impl ProviderError {
     }
 }
 
+/// FX-17: an audit call (~2k output tokens) regularly exceeds 30 s; a timeout
+/// becomes UNKNOWN_REMOTE_OUTCOME and stops production for a user decision.
+pub const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 120_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub provider_id: String,
@@ -178,7 +182,7 @@ impl ProviderConfig {
             timeout_ms: settings
                 .get("timeoutMs")
                 .and_then(Value::as_u64)
-                .unwrap_or(30_000)
+                .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_MS)
                 .clamp(500, 120_000),
         })
     }
@@ -667,6 +671,28 @@ mod tests {
         CONTENT_TYPE,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn fx17_provider_timeout_defaults_to_120_seconds_and_keeps_its_range() {
+        let base = json!({"providerId":"openai-compatible","modelId":"m","endpoint":"https://x"});
+        let config = super::ProviderConfig::from_settings(&base).unwrap();
+        assert_eq!(config.timeout_ms, 120_000);
+        let mut explicit = base.clone();
+        explicit["timeoutMs"] = json!(45_000);
+        assert_eq!(
+            super::ProviderConfig::from_settings(&explicit)
+                .unwrap()
+                .timeout_ms,
+            45_000
+        );
+        explicit["timeoutMs"] = json!(600_000);
+        assert_eq!(
+            super::ProviderConfig::from_settings(&explicit)
+                .unwrap()
+                .timeout_ms,
+            120_000
+        );
+    }
 
     #[test]
     fn provider_request_id_is_preserved_only_when_the_exact_value_is_safe() {

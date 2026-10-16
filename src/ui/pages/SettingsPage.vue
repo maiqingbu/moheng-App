@@ -12,7 +12,7 @@ const projectStore=useProjectStore()
 const libraryStore=useProjectLibraryStore()
 const isProjectSettings=computed(()=>route.meta.scope==='project')
 const section=ref('model')
-const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:null,chapterBudget:null,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:30000})
+const form=reactive<SettingsProjection>({provider:'OpenAI Compatible',model:'gpt-4o-mini',endpoint:'',monthlyBudget:null,chapterBudget:null,privacyMode:'local-first',sendDraftOnly:true,exportFormat:'DOCX',platform:'番茄小说',theme:'light',providerId:'openai-compatible',modelId:'gpt-4o-mini',enabled:false,timeoutMs:120000})
 type PricingEntry = NonNullable<SettingsProjection['modelPricing']>['entries'][number]
 const pricingEntries=ref<PricingEntry[]>([])
 const pricingVersion=ref(0)

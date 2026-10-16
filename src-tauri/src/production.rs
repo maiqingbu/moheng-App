@@ -153,7 +153,7 @@ pub trait ProductionModelGateway: Send + Sync {
             provider,
             model,
             endpoint: String::new(),
-            timeout_ms: 30_000,
+            timeout_ms: crate::provider::DEFAULT_PROVIDER_TIMEOUT_MS,
         })
     }
 
@@ -254,7 +254,7 @@ impl ConfiguredProductionGateway {
                 model_id,
                 endpoint: endpoint.clone(),
                 enabled: !endpoint.is_empty(),
-                timeout_ms: 30_000,
+                timeout_ms: crate::provider::DEFAULT_PROVIDER_TIMEOUT_MS,
             },
             std::sync::Arc::new(OpenAiCompatibleProvider::new(endpoint)),
             std::sync::Arc::new(OsKeychainSecretStore::new(
