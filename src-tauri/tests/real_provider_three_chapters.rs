@@ -4,7 +4,6 @@ use ai_novel_production_system_core::commands::{
 use ai_novel_production_system_core::production::ConfiguredProductionGateway;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
-use ai_novel_production_system_core::provider::{OpenAiCompatibleProvider, ProviderConfig};
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
 use ai_novel_production_system_core::repositories::runtime::{OsKeychainSecretStore, SecretStore};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
@@ -151,17 +150,9 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         .as_millis();
     let prefix = format!("real-qwen-three-chapters:{run}");
     let title = format!("Harness 真实三章验收 {run}");
-    let gateway = ConfiguredProductionGateway::new(
-        ProviderConfig {
-            provider_id: "openai-compatible".into(),
-            model_id: EXPECTED_MODEL.into(),
-            endpoint: EXPECTED_ENDPOINT.into(),
-            enabled: true,
-            timeout_ms: 300_000,
-        },
-        Arc::new(OpenAiCompatibleProvider::new(EXPECTED_ENDPOINT)),
-        Arc::new(secret_store),
-    );
+    // Same composition as the desktop app: provider settings, timeout and the
+    // model price table are read from the app data directory.
+    let gateway = ConfiguredProductionGateway::for_desktop(paths.clone());
     let state = KernelState::with_production_gateway(paths.clone(), Arc::new(gateway));
 
     let (project_id, chapter_ids) = if let Ok(project_id) = std::env::var("MOHENG_REAL_PROJECT_ID")
