@@ -4558,6 +4558,36 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     let mut rebound_evidence = 0_u64;
     let mut invalid_continuity_evidence = 0_u64;
     let normalize_evidence = |value: &Value| -> Option<Value> {
+        // FX-17: a verbatim quote that occurs exactly once identifies the
+        // evidence exactly, whatever offsets the model computed; offsets are
+        // only trusted when they reproduce the supplied quote. Anything else
+        // (ambiguous, absent or ellipsis quotes) stays rebound and incomplete.
+        let supplied_quote = value
+            .get("quote")
+            .and_then(Value::as_str)
+            .filter(|quote| !quote.is_empty());
+        let supplied_offsets = value
+            .get("start")
+            .and_then(Value::as_u64)
+            .zip(value.get("end").and_then(Value::as_u64))
+            .map(|(start, end)| (start as usize, end as usize));
+        if let Some(quote) = supplied_quote {
+            let offsets_reproduce_quote = supplied_offsets.is_some_and(|(start, end)| {
+                start < end
+                    && end <= body_chars.len()
+                    && body_chars[start..end].iter().collect::<String>() == quote
+            });
+            let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
+            if !offsets_reproduce_quote && matches.len() == 1 {
+                let char_start = body[..matches[0].0].chars().count();
+                return Some(json!({
+                    "start":char_start,
+                    "end":char_start + quote.chars().count(),
+                    "quote":quote,
+                    "rebound":false
+                }));
+            }
+        }
         let start = value.get("start")?.as_u64()? as usize;
         let end = value.get("end")?.as_u64()? as usize;
         if start < end && end <= body_chars.len() {
@@ -6191,6 +6221,81 @@ mod tests {
         );
     }
 
+    fn fx17_real_audit() -> (String, Value) {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fx17_audit_real_evidence.json"
+        ))
+        .unwrap();
+        (
+            fixture["body"].as_str().unwrap().to_owned(),
+            fixture["audit"].clone(),
+        )
+    }
+
+    #[test]
+    fn fx17_audit_unique_quote_with_wrong_offsets_is_located_exactly() {
+        let body = "沈砚站在“城市记忆档案局”第七分部的走廊尽头，指尖摩挲着档案。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":20,"end":24,"quote":"“城市记忆档案局”第七分部的走廊尽头"}]}),
+            body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(
+            evidence["rebound"], false,
+            "a unique verbatim quote is exact evidence"
+        );
+        assert_eq!(evidence["start"], 4);
+        assert_eq!(
+            evidence["end"],
+            4 + "“城市记忆档案局”第七分部的走廊尽头".chars().count()
+        );
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 0);
+    }
+
+    #[test]
+    fn fx17_real_audit_keeps_only_ambiguous_evidence_as_rebound() {
+        let (body, audit) = fx17_real_audit();
+        let normalized = normalize_audit_model_output(audit, &body);
+        let mut exact = 0;
+        let mut rebound = Vec::new();
+        for category in [
+            "canonCandidates",
+            "knowledgeCandidates",
+            "continuityCandidates",
+            "taskProgressCandidates",
+        ] {
+            for item in normalized[category].as_array().unwrap() {
+                let evidence = &item["evidence"];
+                let quote = evidence["quote"].as_str().unwrap();
+                let start = evidence["start"].as_u64().unwrap() as usize;
+                let end = evidence["end"].as_u64().unwrap() as usize;
+                // Whatever is kept must point at exactly its quote in the body.
+                assert_eq!(
+                    body.chars()
+                        .skip(start)
+                        .take(end - start)
+                        .collect::<String>(),
+                    quote
+                );
+                if evidence["rebound"] == true {
+                    rebound.push(quote.to_owned());
+                } else {
+                    exact += 1;
+                }
+            }
+        }
+        // 12 model offsets were all wrong: the 9 unique verbatim quotes are now
+        // exact; two bare names and the ellipsis quote still fail closed (RV-16).
+        assert_eq!(exact, 9, "rebound: {rebound:?}");
+        assert_eq!(rebound.len(), 3);
+        assert!(
+            normalized["normalization"]["reboundEvidence"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
     #[test]
     fn audit_evidence_rebinding_is_marked_and_makes_audit_incomplete() {
         let normalized = normalize_audit_model_output(
@@ -6201,11 +6306,11 @@ mod tests {
                 "continuityCandidates":[],
                 "taskProgressCandidates":[],
                 "revealedReservationRefs":[],
-                "evidenceRanges":[{"start":900,"end":901,"quote":"证据"}],
+                "evidenceRanges":[{"start":1,"end":3,"quote":"证据"}],
                 "auditCompleteness":"COMPLETE_NO_CHANGE",
                 "unresolvedHard":false
             }),
-            "正文包含证据。",
+            "证据在前，证据在后。",
         );
         assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
         assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
