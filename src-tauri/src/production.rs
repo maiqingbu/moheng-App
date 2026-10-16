@@ -4577,6 +4577,24 @@ fn validate_audit_completeness(
 }
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
+    // FX-17: models label a newly observed thread "new_thread:<id>"; the
+    // runtime's thread ref namespace is "thread:<id>". A collision with an
+    // existing thread is still blocked as THREAD_TRANSITION_OUTSIDE_PLAN.
+    if let Some(candidates) = payload
+        .get_mut("continuityCandidates")
+        .and_then(Value::as_array_mut)
+    {
+        for candidate in candidates {
+            let renamed = candidate
+                .get("threadRef")
+                .and_then(Value::as_str)
+                .and_then(|thread_ref| thread_ref.strip_prefix("new_thread:"))
+                .map(|id| format!("thread:{id}"));
+            if let Some(renamed) = renamed {
+                candidate["threadRef"] = json!(renamed);
+            }
+        }
+    }
     let body_chars = body.chars().collect::<Vec<_>>();
     let mut rebound_evidence = 0_u64;
     let mut invalid_continuity_evidence = 0_u64;
@@ -6455,6 +6473,25 @@ mod tests {
         );
         assert_eq!(normalized["evidenceRanges"][1]["rebound"], true);
         assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
+    }
+
+    #[test]
+    fn fx17_new_thread_prefix_is_normalized_to_a_thread_ref() {
+        let normalized = normalize_audit_model_output(
+            json!({"continuityCandidates":[
+                {"threadRef":"new_thread:sister_trace","disposition":"ADVANCE"},
+                {"threadRef":"thread:existing","disposition":"ADVANCE"}
+            ]}),
+            "正文",
+        );
+        assert_eq!(
+            normalized["continuityCandidates"][0]["threadRef"],
+            "thread:sister_trace"
+        );
+        assert_eq!(
+            normalized["continuityCandidates"][1]["threadRef"],
+            "thread:existing"
+        );
     }
 
     #[test]
