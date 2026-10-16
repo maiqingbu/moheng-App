@@ -1245,7 +1245,46 @@ pub fn execute_production_model(
     Ok(outcome)
 }
 
+/// FX-19 (owner decision 2026-10-17): a reply the provider cut off in the
+/// middle of the JSON (reported as a normal stop) is resent once as a new
+/// model run; the cut-off run stays recorded as failed.
 pub fn execute_production_model_with_profile(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: Value,
+    now: &str,
+) -> Result<ModelRunOutcome, String> {
+    match execute_production_model_with_profile_once(
+        connection,
+        gateway,
+        profile,
+        spec,
+        capability,
+        input.clone(),
+        now,
+    ) {
+        Err(error) if error.contains("P01_MODEL_JSON_INVALID:EOF while parsing") => {
+            let resend = ModelRunSpec {
+                model_run_id: StableIdentityFactory::from_command(
+                    StableIdKind::ModelRun,
+                    &format!("{}:truncated-resend", spec.model_run_id),
+                )?,
+                idempotency_key: format!("{}:truncated-resend", spec.idempotency_key),
+                attempt_no: spec.attempt_no + 1,
+                ..spec.clone()
+            };
+            execute_production_model_with_profile_once(
+                connection, gateway, profile, &resend, capability, input, now,
+            )
+        }
+        result => result,
+    }
+}
+
+fn execute_production_model_with_profile_once(
     connection: &libsql_rusqlite::Connection,
     gateway: &dyn ProductionModelGateway,
     profile: &ResolvedProviderProfile,
