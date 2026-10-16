@@ -6965,10 +6965,28 @@ fn compile_current_chapter_plan(
         &handle, project_id,
     )
     .map_err(|error| error.to_string())?;
-    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+    let chosen_range = crate::chapter_length::ChapterLengthRange::from_payload(
         request.get("payload").unwrap_or(&Value::Null),
+    )?;
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        chosen_range,
+        crate::repositories::provider::ProviderSettingsRepository::chapter_length_range(
+            &handle, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_ref(),
         project_settings.get("chapterLengthRange"),
     )?;
+    if let Some(range) = chosen_range {
+        crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(
+            &handle,
+            project_id,
+            chapter_id,
+            &range.to_json(),
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let planning_input = json!({
         "projectId":project_id,
         "chapterId":chapter_id,

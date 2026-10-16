@@ -286,3 +286,73 @@ fn fx18_long_form_plan_compile_is_sized_for_the_chapter_range() {
     assert_eq!(result.unwrap_err(), "B08_PLAN_LENGTH_OUT_OF_RANGE");
     assert!(head_missing);
 }
+
+#[test]
+fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[3500]));
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-fx18-long-saved";
+    let connection = state.manager.create(project_id, "FX18 long", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=4 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    drop(connection);
+    execute_command_impl(&state, json!({
+        "type":"planning_compile_chapter_plan","commandId":"cmd:fx18:saved:plan","idempotencyKey":"key:fx18:saved:plan",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"chapterLengthRange":{"min":3000,"max":4000},"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+    }))
+    .unwrap();
+    let revision = state.manager.overview(project_id).unwrap().1;
+    execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:fx18:saved:produce","idempotencyKey":"key:fx18:saved:produce",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","targetChineseCharacters":800,"entityIds":["entity:actual:linzhou"],"references":[]}
+    }))
+    .unwrap();
+    assert_eq!(
+        gateway.inputs("RENDER_CHAPTER")[0]["chapterLengthRange"],
+        json!({"min":3000,"max":4000})
+    );
+}
+
+#[test]
+fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
+    let gateway = Arc::new(LengthGateway::new(
+        &[1200, 1300, 1000],
+        &[600, 600, 600, 3500],
+    ));
+    let project_id = "p-fx18-retry-range";
+    let (_temp, state, chapter_id, result) = start(
+        gateway.clone(),
+        project_id,
+        json!({"chapterLengthRange":{"min":3000,"max":4000}}),
+        None,
+    );
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"));
+    let revision = state.manager.overview(project_id).unwrap().1;
+    execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:fx18:retry","idempotencyKey":"key:fx18:retry",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(
+        renders.last().unwrap()["chapterLengthRange"],
+        json!({"min":3000,"max":4000})
+    );
+    assert_eq!(
+        final_word_count(&state, project_id, &chapter_id),
+        Some(3500)
+    );
+}

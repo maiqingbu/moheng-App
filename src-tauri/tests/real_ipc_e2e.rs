@@ -1290,6 +1290,14 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
         .pointer("/chapterPlan/activeTaskRefs")
         .and_then(Value::as_array)
         .is_some_and(|tasks| tasks.iter().any(|task| task.as_str() == Some(task_id)));
+    // FX-18: the configured gateway enforces the chapter length range, so the
+    // local provider plans and writes for the range's midpoint.
+    let length_target = input
+        .get("chapterLengthRange")
+        .map(|range| {
+            (range["min"].as_u64().unwrap_or(2000) + range["max"].as_u64().unwrap_or(3000)) / 2
+        })
+        .unwrap_or(2500) as usize;
     match capability {
         "PLAN_STRATEGY" => {
             let active_tasks = if opening_bootstrap {
@@ -1337,11 +1345,19 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 "forbiddenTransitions":[],
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
-                "sceneExecution":[],
+                "sceneExecution":[
+                    {"objective":"推开石门","estimatedCharacters":length_target / 3},
+                    {"objective":"记录线索","estimatedCharacters":length_target / 3},
+                    {"objective":"留下调查方向","estimatedCharacters":length_target - 2 * (length_target / 3)}
+                ],
                 "horizonPreview":horizon_preview
             })
         }
-        "RENDER_CHAPTER" => json!({"body":"林舟推开石门，记录下石门之后的唯一可验证线索。"}),
+        "RENDER_CHAPTER" => {
+            let opening = "林舟推开石门，记录下石门之后的唯一可验证线索。";
+            let filler = length_target.saturating_sub(opening.chars().count() + 1);
+            json!({"body":format!("{opening}\n{}", "雨".repeat(filler))})
+        }
         "AUDIT_EXTRACT" => json!({
             "qualityFindings":[],
             "canonCandidates":[{

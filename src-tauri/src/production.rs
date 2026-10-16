@@ -2729,10 +2729,35 @@ fn run_chapter_production_inner(
         &project_id,
     )
     .map_err(|error| error.to_string())?;
+    // A long-form chapter's range was fixed when its plan was compiled.
+    let chosen_range = if execution_mode == "LONG_FORM" {
+        None
+    } else {
+        crate::chapter_length::ChapterLengthRange::from_payload(
+            request.get("payload").unwrap_or(&Value::Null),
+        )?
+    };
     let length_range = crate::chapter_length::ChapterLengthRange::resolve(
-        request.get("payload").unwrap_or(&Value::Null),
+        chosen_range,
+        crate::repositories::provider::ProviderSettingsRepository::chapter_length_range(
+            connection,
+            &project_id,
+            &chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_ref(),
         project_settings.get("chapterLengthRange"),
     )?;
+    if let Some(range) = chosen_range {
+        crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(
+            connection,
+            &project_id,
+            &chapter_id,
+            &range.to_json(),
+            &now,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
         {

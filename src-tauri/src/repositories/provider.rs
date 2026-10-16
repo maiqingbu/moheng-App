@@ -1,5 +1,5 @@
 use crate::project_db::paths::AppPaths;
-use libsql_rusqlite::Connection;
+use libsql_rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -106,6 +106,36 @@ impl ProviderSettingsRepository {
         settings["chapterBudget"] = Value::Null;
         settings["budgetHistory"] = json!([]);
         settings
+    }
+
+    /// FX-18: the length range saved for one chapter when it was chosen at
+    /// production start (opening) or plan compile (long-form).
+    pub fn chapter_length_range(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<Value>, ProviderSettingsError> {
+        let raw = connection
+            .query_row(
+                "SELECT setting_value FROM project_settings WHERE project_id=?1 AND setting_key=?2",
+                libsql_rusqlite::params![project_id, format!("chapterLengthRange:{chapter_id}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        raw.map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub fn save_chapter_length_range(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+        range: &Value,
+        now: &str,
+    ) -> Result<(), ProviderSettingsError> {
+        connection.execute("INSERT INTO project_settings(project_id,setting_key,setting_value,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(project_id,setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at", libsql_rusqlite::params![project_id, format!("chapterLengthRange:{chapter_id}"), range.to_string(), now])?;
+        Ok(())
     }
 
     pub fn read_project(

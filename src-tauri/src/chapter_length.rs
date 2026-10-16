@@ -32,19 +32,35 @@ impl ChapterLengthRange {
         }
     }
 
-    /// Per-chapter payload range first, then the legacy single target, then
-    /// the work's setting, then the default.
-    pub fn resolve(payload: &Value, project_setting: Option<&Value>) -> Result<Self, String> {
+    /// The range a command payload chooses for its chapter: an explicit
+    /// `chapterLengthRange`, or the legacy single `targetChineseCharacters`.
+    pub fn from_payload(payload: &Value) -> Result<Option<Self>, String> {
         if let Some(range) = payload.get("chapterLengthRange") {
-            return Self::from_value(range);
+            return Self::from_value(range).map(Some);
         }
         if let Some(target) = payload
             .get("targetChineseCharacters")
             .and_then(Value::as_i64)
         {
-            return Self::from_value(&json!({"min":target * 4 / 5,"max":target}));
+            return Self::from_value(&json!({"min":target * 4 / 5,"max":target})).map(Some);
         }
-        match project_setting.filter(|setting| !setting.is_null()) {
+        Ok(None)
+    }
+
+    /// A range chosen now for this chapter, then the range saved for this
+    /// chapter earlier, then the work's setting, then the default.
+    pub fn resolve(
+        chosen: Option<Self>,
+        chapter_setting: Option<&Value>,
+        work_setting: Option<&Value>,
+    ) -> Result<Self, String> {
+        if let Some(range) = chosen {
+            return Ok(range);
+        }
+        match chapter_setting
+            .filter(|setting| !setting.is_null())
+            .or(work_setting.filter(|setting| !setting.is_null()))
+        {
             Some(setting) => Self::from_value(setting),
             None => Ok(DEFAULT_CHAPTER_LENGTH_RANGE),
         }
@@ -99,34 +115,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fx18_range_resolution_prefers_chapter_then_legacy_target_then_work_then_default() {
+    fn fx18_range_resolution_prefers_chosen_then_saved_chapter_then_work_then_default() {
         let work = json!({"min":3000,"max":4000});
+        let saved = json!({"min":2500,"max":3500});
+        let range = |min, max| ChapterLengthRange { min, max };
         assert_eq!(
-            ChapterLengthRange::resolve(
-                &json!({"chapterLengthRange":{"min":4000,"max":5000}}),
-                Some(&work)
+            ChapterLengthRange::from_payload(
+                &json!({"chapterLengthRange":{"min":4000,"max":5000}})
             ),
-            Ok(ChapterLengthRange {
-                min: 4000,
-                max: 5000
-            })
+            Ok(Some(range(4000, 5000)))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(&json!({"targetChineseCharacters":1800}), Some(&work)),
-            Ok(ChapterLengthRange {
-                min: 1440,
-                max: 1800
-            })
+            ChapterLengthRange::from_payload(&json!({"targetChineseCharacters":1800})),
+            Ok(Some(range(1440, 1800)))
+        );
+        assert_eq!(ChapterLengthRange::from_payload(&json!({})), Ok(None));
+        assert_eq!(
+            ChapterLengthRange::resolve(Some(range(4000, 5000)), Some(&saved), Some(&work)),
+            Ok(range(4000, 5000))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(&json!({}), Some(&work)),
-            Ok(ChapterLengthRange {
-                min: 3000,
-                max: 4000
-            })
+            ChapterLengthRange::resolve(None, Some(&saved), Some(&work)),
+            Ok(range(2500, 3500))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(&json!({}), None),
+            ChapterLengthRange::resolve(None, None, Some(&work)),
+            Ok(range(3000, 4000))
+        );
+        assert_eq!(
+            ChapterLengthRange::resolve(None, None, None),
             Ok(DEFAULT_CHAPTER_LENGTH_RANGE)
         );
     }
