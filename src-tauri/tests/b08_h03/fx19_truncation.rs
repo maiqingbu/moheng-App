@@ -131,3 +131,44 @@ fn fx19_two_values_with_overlapping_evidence_are_still_a_conflict() {
     let error = result.unwrap_err();
     assert!(error.contains("B08_CANON_"), "{error}");
 }
+
+/// The first AUDIT_EXTRACT reply is not JSON at all (a garbled reply seen on
+/// 2026-10-18); every later reply is complete.
+#[derive(Default)]
+struct GarbledOnceAuditGateway {
+    audits: AtomicUsize,
+}
+
+impl ProductionModelGateway for GarbledOnceAuditGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "AUDIT_EXTRACT" && self.audits.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(ProductionModelResponse {
+                output: Value::Null,
+                raw_response: Some(
+                    json!({"choices":[{"message":{"content":"p\na5873...h，uFP是（，"},"finish_reason":"stop"}]})
+                        .to_string(),
+                ),
+                usage: ProductionModelResponse::deterministic(Value::Null).usage,
+            });
+        }
+        RecordingGateway.invoke(capability, input)
+    }
+}
+
+#[test]
+fn craft_a_reply_that_is_not_json_is_resent_once_and_the_chapter_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(GarbledOnceAuditGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-craft-garbled-once";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:garbled","idempotencyKey":"key:craft:garbled",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+    }))
+    .unwrap();
+    assert_eq!(gateway.audits.load(Ordering::SeqCst), 2);
+}

@@ -1329,8 +1329,9 @@ pub fn execute_production_model(
 }
 
 /// FX-19 (owner decision 2026-10-17): a reply the provider cut off in the
-/// middle of the JSON (reported as a normal stop) is resent once as a new
-/// model run; the cut-off run stays recorded as failed.
+/// middle of the JSON (reported as a normal stop), or one that is not JSON at
+/// all, is resent once as a new model run; the bad run stays recorded as
+/// failed.
 pub fn execute_production_model_with_profile(
     connection: &libsql_rusqlite::Connection,
     gateway: &dyn ProductionModelGateway,
@@ -1349,7 +1350,7 @@ pub fn execute_production_model_with_profile(
         input.clone(),
         now,
     ) {
-        Err(error) if error.contains("P01_MODEL_JSON_INVALID:EOF while parsing") => {
+        Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
             let resend = ModelRunSpec {
                 model_run_id: StableIdentityFactory::from_command(
                     StableIdKind::ModelRun,
@@ -2800,10 +2801,6 @@ fn run_chapter_production_inner(
         StableIdKind::Artifact,
         &format!("{command_id}:receipt"),
     )?;
-    let new_render_run_id = StableIdentityFactory::from_command(
-        StableIdKind::ModelRun,
-        &format!("{command_id}:render"),
-    )?;
     let new_audit_run_id = StableIdentityFactory::from_command(
         StableIdKind::ModelRun,
         &format!("{command_id}:audit"),
@@ -3213,125 +3210,118 @@ fn run_chapter_production_inner(
         &crate::chapter_craft::plan_signals(&plan_payload, chapter_number),
     )?;
     let render_profile = gateway.resolve_render_profile()?;
-    let reusable_render = retry_of_job_id
-        .as_deref()
-        .map(|previous_job_id| {
-            DurableModelRunner::completed_result_for_job(
-                connection,
-                &project_id,
-                previous_job_id,
-                "RENDER_CHAPTER",
-            )
-        })
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .flatten();
-    let rewrite_input = render_input.clone();
-    let (mut render_run_id, render_payload) = if let Some((model_run_id, parsed)) = reusable_render
-    {
-        (
-            model_run_id,
-            parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?,
-        )
-    } else {
-        let render_spec = ModelRunSpec {
-            model_run_id: new_render_run_id.clone(),
-            job_id: Some(job_id.clone()),
-            step_id: None,
-            provider: render_profile.provider.clone(),
-            model: render_profile.model.clone(),
-            idempotency_key: format!("{idempotency_key}:render"),
-            capability: "RENDER_CHAPTER".into(),
-            prompt_ref: None,
-            context_manifest_ref: Some(context_ref.artifact_id.clone()),
-            budget_id: Some(production_budget_id.clone()),
-            predicted_cost_cents: 0,
-            cost_snapshot: None,
-            attempt_no: 1,
-            repair_round: 0,
-        };
-        let result = execute_production_model_with_profile(
-            connection,
-            gateway,
-            &render_profile,
-            &render_spec,
-            "RENDER_CHAPTER",
-            render_input,
-            &now,
-        )?;
-        (
-            new_render_run_id,
-            result
-                .parsed
-                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?,
-        )
-    };
-    let mut body = render_payload
-        .get("body")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-    // FX-18 (owner decision 2026-10-17): a body outside the range is rewritten
-    // for the same plan at most twice; a body still outside it is never
-    // committed.
-    if gateway.enforces_chapter_length() {
-        use crate::chapter_length::character_count;
-        let mut rewrite = 0;
-        while !length_range.accepts(character_count(&body)) {
-            if rewrite == 2 {
-                return Err(format!(
-                    "B08_RENDER_LENGTH_OUT_OF_RANGE:{}:{}-{}",
-                    character_count(&body),
-                    length_range.min,
-                    length_range.max
-                ));
-            }
-            rewrite += 1;
-            let rewrite_run_id = StableIdentityFactory::from_command(
+    // One writer call; `suffix` names the call within this job.
+    let render_once =
+        |suffix: &str, attempt_no: i64, input: Value| -> Result<(String, String), String> {
+            let model_run_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
-                &format!("{command_id}:render:length-{rewrite}"),
+                &format!("{command_id}:render{suffix}"),
             )?;
-            let mut input = rewrite_input.clone();
-            input["lengthFeedback"] = crate::chapter_craft::length_feedback(
-                &plan_payload,
-                length_range,
-                character_count(&body),
-            );
-            let rewrite_spec = ModelRunSpec {
-                model_run_id: rewrite_run_id.clone(),
+            let spec = ModelRunSpec {
+                model_run_id: model_run_id.clone(),
                 job_id: Some(job_id.clone()),
                 step_id: None,
                 provider: render_profile.provider.clone(),
                 model: render_profile.model.clone(),
-                idempotency_key: format!("{idempotency_key}:render:length-{rewrite}"),
+                idempotency_key: format!("{idempotency_key}:render{suffix}"),
                 capability: "RENDER_CHAPTER".into(),
                 prompt_ref: None,
                 context_manifest_ref: Some(context_ref.artifact_id.clone()),
                 budget_id: Some(production_budget_id.clone()),
                 predicted_cost_cents: 0,
                 cost_snapshot: None,
-                attempt_no: 1 + rewrite,
+                attempt_no,
                 repair_round: 0,
             };
             let result = execute_production_model_with_profile(
                 connection,
                 gateway,
                 &render_profile,
-                &rewrite_spec,
+                &spec,
                 "RENDER_CHAPTER",
                 input,
                 &now,
             )?;
-            body = result
+            let body = result
                 .parsed
                 .as_ref()
                 .and_then(|payload| payload.get("body"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-            render_run_id = rewrite_run_id;
+            Ok((model_run_id, body))
+        };
+    use crate::chapter_length::character_count;
+    let length_error = |body: &str| {
+        format!(
+            "B08_RENDER_LENGTH_OUT_OF_RANGE:{}:{}-{}",
+            character_count(body),
+            length_range.min,
+            length_range.max
+        )
+    };
+    // Where length is enforced every accepted plan has several scenes (2–4
+    // beats each, enough beats for the range), so it is written in two parts.
+    let two_parts = gateway.enforces_chapter_length()
+        && crate::chapter_craft::part_split(&plan_payload).is_some();
+    let (render_run_id, mut body) = if two_parts {
+        // Owner decision (2026-10-18): a writer call yields a steady length
+        // about half a chapter, so a chapter is written in two parts; the
+        // second continues from the whole first part. Only the second part is
+        // rewritten (at most twice) so the seam stays intact; a chapter still
+        // outside the range is never committed.
+        let first_input =
+            crate::chapter_craft::part_render_input(&render_input, &plan_payload, 0, "");
+        let (_, first) = render_once(":part-1", 1, first_input)?;
+        let first = first.trim().to_owned();
+        let second_input =
+            crate::chapter_craft::part_render_input(&render_input, &plan_payload, 1, &first);
+        let (mut run_id, mut second) = render_once(":part-2", 1, second_input.clone())?;
+        let joined = |second: &str| format!("{first}\n\n{}", second.trim());
+        let mut rewrite = 0;
+        while !length_range.accepts(character_count(&joined(&second))) {
+            if rewrite == 2 {
+                return Err(length_error(&joined(&second)));
+            }
+            rewrite += 1;
+            let total = character_count(&joined(&second));
+            let mut input = second_input.clone();
+            input["partFeedback"] = json!({
+                "previousCharacterCount":character_count(&second),
+                "shortBy":(length_range.min - total).max(0),
+                "overBy":(total - length_range.ceiling()).max(0)
+            });
+            (run_id, second) =
+                render_once(&format!(":part-2-length-{rewrite}"), 1 + rewrite, input)?;
         }
-    }
+        (run_id, joined(&second))
+    } else {
+        let reusable_render = retry_of_job_id
+            .as_deref()
+            .map(|previous_job_id| {
+                DurableModelRunner::completed_result_for_job(
+                    connection,
+                    &project_id,
+                    previous_job_id,
+                    "RENDER_CHAPTER",
+                )
+            })
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .flatten();
+        let (run_id, body) = if let Some((model_run_id, parsed)) = reusable_render {
+            let payload = parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?;
+            let body = payload
+                .get("body")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+            (model_run_id, body)
+        } else {
+            render_once("", 1, render_input)?
+        };
+        (run_id, body)
+    };
     let method_injection_provenance = creative_enrichment
         .as_ref()
         .map(|enrichment| {

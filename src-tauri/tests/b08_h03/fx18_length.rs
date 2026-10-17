@@ -3,8 +3,9 @@ use libsql_rusqlite::OptionalExtension;
 use std::sync::Mutex;
 
 /// Behaves like a configured provider for the length rules. Scene estimates
-/// come from `scene_estimates`; render N (0-based) returns `body_lengths[N]`
-/// characters (the last entry repeats).
+/// come from `scene_estimates`; writer call N (0-based) returns
+/// `body_lengths[N]` characters (the last entry repeats). Plans with two or
+/// more scenes are written in two parts.
 struct LengthGateway {
     scene_estimates: Vec<i64>,
     body_lengths: Vec<usize>,
@@ -121,8 +122,8 @@ fn final_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> 
 }
 
 #[test]
-fn fx18_body_outside_the_range_is_rewritten_until_it_fits() {
-    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[900, 3500, 2600]));
+fn fx18_second_part_is_rewritten_until_the_chapter_fits() {
+    let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[900, 500, 1600]));
     let (_temp, state, chapter_id, result) =
         start(gateway.clone(), "p-fx18-rewritten", json!({}), None);
     result.unwrap();
@@ -132,26 +133,28 @@ fn fx18_body_outside_the_range_is_rewritten_until_it_fits() {
         renders[0]["chapterLengthRange"],
         json!({"min":2000,"max":3000})
     );
-    assert_eq!(renders[1]["lengthFeedback"]["previousCharacterCount"], 900);
-    assert_eq!(renders[2]["lengthFeedback"]["previousCharacterCount"], 3500);
-    assert!(renders[1].get("previousBody").is_none());
+    assert_eq!(renders[2]["part"]["index"], 2);
+    assert_eq!(renders[2]["partFeedback"]["previousCharacterCount"], 500);
+    assert!(renders[2].get("previousBody").is_none());
+    // The two parts are joined by a blank line.
     assert_eq!(
         final_word_count(&state, "p-fx18-rewritten", &chapter_id),
-        Some(2600)
+        Some(900 + 2 + 1600)
     );
 }
 
 #[test]
-fn fx18_body_still_outside_the_range_after_two_rewrites_is_not_committed() {
+fn fx18_chapter_still_outside_the_range_after_two_rewrites_is_not_committed() {
     let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[600]));
     let (_temp, state, chapter_id, result) =
         start(gateway.clone(), "p-fx18-still-short", json!({}), None);
     let error = result.unwrap_err();
     assert!(
-        error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:600:2000-3000"),
+        error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:1202:2000-3000"),
         "{error}"
     );
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 3);
+    // Two parts, then part 2 rewritten twice.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 4);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 0);
     assert_eq!(
         final_word_count(&state, "p-fx18-still-short", &chapter_id),
@@ -194,7 +197,7 @@ fn crate_head_missing(connection: &Connection, project_id: &str, chapter_id: &st
 
 #[test]
 fn fx18_work_range_applies_and_a_chapter_range_overrides_it() {
-    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[3600]));
+    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[1700, 1800]));
     let (_temp, _state, _chapter_id, result) = start(
         gateway.clone(),
         "p-fx18-work-range",
@@ -207,7 +210,7 @@ fn fx18_work_range_applies_and_a_chapter_range_overrides_it() {
         json!({"min":3000,"max":4000})
     );
 
-    let gateway = Arc::new(LengthGateway::new(&[1500, 1500, 1500], &[4500]));
+    let gateway = Arc::new(LengthGateway::new(&[1500, 1500, 1500], &[2250]));
     let (_temp, _state, _chapter_id, result) = start(
         gateway.clone(),
         "p-fx18-chapter-range",
@@ -292,7 +295,7 @@ fn fx18_long_form_plan_compile_is_sized_for_the_chapter_range() {
 #[test]
 fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
     let temp = tempfile::tempdir().unwrap();
-    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[3500]));
+    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[1700, 1800]));
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-fx18-long-saved";
     let connection = state.manager.create(project_id, "FX18 long", NOW).unwrap();
@@ -329,7 +332,7 @@ fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
 fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
     let gateway = Arc::new(LengthGateway::new(
         &[1200, 1300, 1000],
-        &[600, 600, 600, 3500],
+        &[600, 600, 600, 600, 1700, 1800],
     ));
     let project_id = "p-fx18-retry-range";
     let (_temp, state, chapter_id, result) = start(
@@ -341,6 +344,16 @@ fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
     assert!(result
         .unwrap_err()
         .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"));
+    // Two parts and their rewrites need more runs than the fixture budget.
+    state
+        .manager
+        .open(project_id, "FX18 length", NOW)
+        .unwrap()
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=20 WHERE project_id=?1",
+            [project_id],
+        )
+        .unwrap();
     let revision = state.manager.overview(project_id).unwrap().1;
     execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:fx18:retry","idempotencyKey":"key:fx18:retry",
@@ -355,6 +368,6 @@ fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
     );
     assert_eq!(
         final_word_count(&state, project_id, &chapter_id),
-        Some(3500)
+        Some(1700 + 2 + 1800)
     );
 }

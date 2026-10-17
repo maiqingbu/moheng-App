@@ -2,8 +2,8 @@ use super::*;
 use std::sync::Mutex;
 
 /// A configured-provider stand-in for the v2 craft rules. Plan N (0-based)
-/// is `plans[N]` (the last repeats); render N returns `body_lengths[N]`
-/// characters (the last repeats).
+/// is `plans[N]` (the last repeats); writer call N returns `body_lengths[N]`
+/// characters (the last repeats). Chapters are written in two parts.
 struct CraftGateway {
     plans: Vec<Value>,
     body_lengths: Vec<usize>,
@@ -123,7 +123,7 @@ fn skill_ids(guidance: &Value) -> Vec<String> {
 
 #[test]
 fn craft_v2_guidance_reaches_the_planner_and_the_writer() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
     let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-guidance");
     result.unwrap();
     let plan_input = &gateway.inputs("PLAN_STRATEGY")[0];
@@ -163,7 +163,7 @@ fn craft_v2_plan_without_beats_is_replanned_once_with_the_reason() {
     let thin = json!({"chapterRole":"普通","sceneExecution":[
         {"objective":"推进","estimatedCharacters":900},{"objective":"推进","estimatedCharacters":900},{"objective":"推进","estimatedCharacters":700}
     ]});
-    let gateway = Arc::new(CraftGateway::new(vec![thin, good_plan()], &[2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![thin, good_plan()], &[1250]));
     let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-replan");
     result.unwrap();
     let plans = gateway.inputs("PLAN_STRATEGY");
@@ -180,24 +180,44 @@ fn craft_v2_plan_without_beats_is_replanned_once_with_the_reason() {
 }
 
 #[test]
-fn craft_v2_rewrite_regenerates_from_the_plan_with_the_gap_instead_of_the_short_draft() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1500, 2600]));
-    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-rewrite");
+fn craft_v2_chapter_is_written_in_two_parts_and_only_the_second_is_rewritten() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 500, 1300]));
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-parts");
     result.unwrap();
     let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 2);
-    assert!(renders[1].get("previousBody").is_none());
-    assert_eq!(renders[1]["lengthFeedback"]["previousCharacterCount"], 1500);
-    assert_eq!(renders[1]["lengthFeedback"]["shortBy"], 500);
+    assert_eq!(renders.len(), 3);
+    // Part 1 holds the first scene and stops where the second begins.
+    assert_eq!(renders[0]["part"], json!({"index":1,"count":2}));
     assert_eq!(
-        renders[1]["lengthFeedback"]["scenes"][0]["beats"][0]["targetCharacters"],
-        300
+        renders[0]["chapterPlan"]["sceneExecution"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
+    assert_eq!(renders[0]["stopBefore"], "节拍0");
+    // Part 2 continues from the whole first part.
+    assert_eq!(renders[1]["part"], json!({"index":2,"count":2}));
+    assert_eq!(
+        renders[1]["previousText"].as_str().unwrap().chars().count(),
+        1200
+    );
+    // Only part 2 is rewritten, with the chapter's gap.
+    assert_eq!(renders[2]["part"]["index"], 2);
+    assert_eq!(renders[2]["partFeedback"]["previousCharacterCount"], 500);
+    assert_eq!(renders[2]["partFeedback"]["shortBy"], 2000 - 1702);
+    assert_eq!(renders[2]["previousText"], renders[1]["previousText"]);
+    assert!(renders
+        .iter()
+        .all(|input| input.get("previousBody").is_none()));
 }
 
 #[test]
-fn craft_v2_retry_rewrites_a_reused_short_draft_from_the_plan() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[900, 900, 900, 2500]));
+fn craft_v2_retry_writes_both_parts_again() {
+    let gateway = Arc::new(CraftGateway::new(
+        vec![good_plan()],
+        &[600, 600, 600, 600, 1200, 1300],
+    ));
     let project_id = "p-craft-retry";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     assert!(result
@@ -219,12 +239,10 @@ fn craft_v2_retry_rewrites_a_reused_short_draft_from_the_plan() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    // The reused short draft goes straight to a rewrite that carries only the
-    // gap, never the draft itself.
     let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 4);
-    assert_eq!(renders[3]["lengthFeedback"]["previousCharacterCount"], 900);
-    assert!(renders[3].get("previousBody").is_none());
+    assert_eq!(renders.len(), 6);
+    assert_eq!(renders[4]["part"]["index"], 1);
+    assert!(renders[4].get("partFeedback").is_none());
 }
 
 #[test]
@@ -232,7 +250,7 @@ fn craft_v2_long_form_plan_compile_gets_guidance_and_replans_a_rejected_plan() {
     let temp = tempfile::tempdir().unwrap();
     let no_role =
         json!({"chapterRole":null,"sceneExecution":good_plan()["sceneExecution"].clone()});
-    let gateway = Arc::new(CraftGateway::new(vec![no_role, good_plan()], &[2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![no_role, good_plan()], &[1250]));
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-craft-long";
     let connection = state.manager.create(project_id, "Craft long", NOW).unwrap();
@@ -268,7 +286,10 @@ fn craft_v2_long_form_plan_compile_gets_guidance_and_replans_a_rejected_plan() {
 #[test]
 fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
     use ai_novel_production_system_core::repositories::production::ProductionRepository;
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[900, 900, 900, 2500]));
+    let gateway = Arc::new(CraftGateway::new(
+        vec![good_plan()],
+        &[900, 900, 1200, 1300],
+    ));
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-craft-quota";
@@ -346,7 +367,7 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
 
 #[test]
 fn craft_v2_only_the_writer_uses_the_writing_model() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
     let project_id = "p-craft-writer-model";
     let (_temp, state, _chapter_id, result) = produce(gateway, project_id);
     result.unwrap();

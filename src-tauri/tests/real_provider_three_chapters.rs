@@ -536,7 +536,8 @@ fn configured_provider_generates_and_reloads_three_real_chapters() {
         .unwrap();
     let completed_runs: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND provider='openai-compatible' AND model=?2 AND capability IN ('PLAN_STRATEGY','RENDER_CHAPTER','AUDIT_EXTRACT') AND status='COMPLETED'",
+            // Chapter prose may use the configured writing model (renderModelId).
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND provider='openai-compatible' AND (model=?2 OR capability='RENDER_CHAPTER') AND capability IN ('PLAN_STRATEGY','RENDER_CHAPTER','AUDIT_EXTRACT') AND status='COMPLETED'",
             libsql_rusqlite::params![project_id, EXPECTED_MODEL],
             |row| row.get(0),
         )

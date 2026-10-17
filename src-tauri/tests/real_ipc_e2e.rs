@@ -1357,7 +1357,19 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
         }
         "RENDER_CHAPTER" => {
             let opening = "林舟推开石门，记录下石门之后的唯一可验证线索。";
-            let filler = length_target.saturating_sub(opening.chars().count() + 1);
+            // A chapter is written in two parts; each part is as long as
+            // the scenes it holds.
+            let target = if input.get("part").is_some() {
+                input["chapterPlan"]["sceneExecution"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|scene| scene["estimatedCharacters"].as_u64())
+                    .sum::<u64>() as usize
+            } else {
+                length_target
+            };
+            let filler = target.saturating_sub(opening.chars().count() + 1);
             json!({"body":format!("{opening}\n{}", "雨".repeat(filler))})
         }
         "AUDIT_EXTRACT" => json!({
@@ -2234,7 +2246,8 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
-    let expected_requests = 4;
+    // The opening chapter is written in two parts.
+    let expected_requests = 5;
     let R2LocalProviderServer {
         endpoint,
         stop,
