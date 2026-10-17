@@ -136,6 +136,15 @@ export interface SupportSessionProjection {
   /** FX-21: how the question was understood. */
   intent?: AssistantIntentResolution
 }
+/** FX-22: one backup of a work; revision is the one it was taken at. */
+export interface BackupEntry {
+  backupName: string
+  checksumSha256: string
+  createdAt: string
+  revision: number | null
+  sizeBytes: number | null
+  available: boolean
+}
 /** FX-21: how the project assistant understood a question. */
 export interface AssistantIntentResolution {
   intent: string
@@ -1080,6 +1089,7 @@ export type CommandType =
   | 'opening_evaluate'
   | 'signing_confirm'
   | 'backup_create'
+  | 'backup_restore'
   | 'integrity_check_run'
   | 'endgame_contract_create'
   | 'complete_book'
@@ -1110,6 +1120,7 @@ export interface FrontendPort {
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
+  queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>
   classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>

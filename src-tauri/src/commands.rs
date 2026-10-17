@@ -701,6 +701,21 @@ pub fn query_assistant_repair_plan_impl(
     Ok(plan)
 }
 
+/// FX-22: the work's backups, newest first, with the revision each was taken
+/// at (read from the backup file itself; a restore expects it).
+pub fn query_backups_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let backups = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ops::list_backups(connection, project_id, 50)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(json!({"projectId":project_id,"backups":backups}))
+}
+
 /// FX-21: how the project assistant understands a question for one entry.
 pub fn classify_assistant_intent_impl(
     state: &KernelState,
@@ -9367,6 +9382,11 @@ pub async fn query_assistant_repair_plan(
 }
 
 #[tauri::command]
+pub fn query_backups(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_backups_impl(&state, request)
+}
+
+#[tauri::command]
 pub async fn classify_assistant_intent(
     state: State<'_, KernelState>,
     request: Value,
@@ -9950,6 +9970,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_lifecycle,
         support_session,
         classify_assistant_intent,
+        query_backups,
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,

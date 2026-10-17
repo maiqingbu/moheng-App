@@ -914,3 +914,45 @@ fn fx19_restore_never_replays_the_replaced_database_wal() {
         .unwrap();
     assert_eq!(integrity, "ok");
 }
+
+#[test]
+fn fx22_backups_are_listed_with_the_revision_a_restore_needs() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let backup = |command_id: &str, at: &str| {
+        let revision = state.manager.overview("p1").unwrap().1;
+        execute_command_impl(
+            &state,
+            serde_json::json!({"type":"backup_create","commandId":command_id,"idempotencyKey":format!("{command_id}-key"),"projectId":"p1","expectedRevision":revision,"requestedAt":at,"payload":{"kind":"milestone"}}),
+        )
+        .unwrap();
+        revision
+    };
+    let first_revision = backup("fx22-first", "2026-08-27T00:01:00Z");
+    let second_revision = backup("fx22-second", "2026-08-27T00:02:00Z");
+    let listed = ai_novel_production_system_core::commands::query_backups_impl(
+        &state,
+        serde_json::json!({"projectId":"p1"}),
+    )
+    .unwrap();
+    let backups = listed["backups"].as_array().unwrap();
+    assert_eq!(backups.len(), 2);
+    let entry = |name: &str| {
+        backups
+            .iter()
+            .find(|item| item["backupName"] == name)
+            .unwrap_or_else(|| panic!("{listed}"))
+            .clone()
+    };
+    assert_eq!(entry("b04-fx22-first.db")["revision"], first_revision);
+    assert_eq!(entry("b04-fx22-second.db")["revision"], second_revision);
+    assert_eq!(entry("b04-fx22-first.db")["available"], true);
+    let first = entry("b04-fx22-first.db");
+    let restored = execute_command_impl(
+        &state,
+        serde_json::json!({"type":"backup_restore","commandId":"fx22-restore","idempotencyKey":"fx22-restore-key","projectId":"p1","expectedRevision":first["revision"],"requestedAt":"2026-08-27T00:05:00Z","payload":{"backupName":first["backupName"],"checksumSha256":first["checksumSha256"]}}),
+    )
+    .unwrap();
+    assert_eq!(restored["finalStatus"], "committed");
+}

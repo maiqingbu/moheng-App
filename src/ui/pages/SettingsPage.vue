@@ -4,9 +4,12 @@ import { useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
+import BaseModal from '../components/BaseModal.vue'
+import { backupRestoreRequests, restorableBackups } from '../flows/backupRestore'
+import { productTimeLabel } from '../presentation/productLanguage'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
-import type { SettingsProjection } from '../../application/contracts'
+import type { BackupEntry, SettingsProjection } from '../../application/contracts'
 
 const route=useRoute()
 const projectStore=useProjectStore()
@@ -19,7 +22,7 @@ const pricingEntries=ref<PricingEntry[]>([])
 const pricingVersion=ref(0)
 const apiKey=ref('')
 
-onMounted(()=>{ if(isProjectSettings.value) void projectStore.loadSettings(); else void libraryStore.loadGlobalSettings() })
+onMounted(()=>{ if(isProjectSettings.value) { void projectStore.loadSettings(); void loadBackups() } else void libraryStore.loadGlobalSettings() })
 watchEffect(()=>{
   if(!isProjectSettings.value && !libraryStore.globalSettings) void libraryStore.loadGlobalSettings()
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
@@ -62,7 +65,23 @@ async function test(){
   if(isProjectSettings.value) await projectStore.testProvider('provider-test',settings)
   else await libraryStore.testProvider('global-provider-test',settings)
 }
-async function backup(){ await projectStore.runCommand('project-backup',{type:'backup_create',payload:{kind:'milestone'}}) }
+async function backup(){ await projectStore.runCommand('project-backup',{type:'backup_create',payload:{kind:'milestone'}}); await loadBackups() }
+// FX-22: restore from a backup after an automatic safety backup.
+const backups=ref<BackupEntry[]>([])
+const restoreTarget=ref<BackupEntry|null>(null)
+const restoreState=computed(()=>projectStore.commandState('project-restore'))
+async function loadBackups(){ if(isProjectSettings.value) backups.value=restorableBackups((await projectStore.loadBackups()).backups) }
+async function confirmRestore(){
+  const target=restoreTarget.value
+  if(!target) return
+  restoreTarget.value=null
+  const [safety,restore]=backupRestoreRequests(target)
+  try {
+    await projectStore.runCommand('project-backup',safety)
+    await projectStore.runCommand('project-restore',restore)
+    if(projectStore.currentProjectId) await projectStore.openProject(projectStore.currentProjectId)
+  } finally { await loadBackups() }
+}
 async function integrity(){ await projectStore.runCommand('project-integrity',{type:'integrity_check_run',payload:{mode:'quick_check'}}) }
 function applyTheme(){ document.documentElement.dataset.theme=form.theme==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):form.theme }
 function scrollTo(id:string){ section.value=id; document.getElementById(`setting-${id}`)?.scrollIntoView({behavior:'smooth'}) }
@@ -142,6 +161,15 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div class="card-head"><div><h2 class="card-title">数据可靠性</h2><p class="card-subtitle">备份和完整性检查会在后台完成；页面只提交操作并展示结果，不会直接改写作品正式记录。</p></div></div>
           <div class="actions"><button class="btn" @click="backup">创建里程碑备份</button><button class="btn" @click="integrity">运行完整性检查</button></div>
           <CommandFeedback :state="backupState" /><CommandFeedback :state="integrityState" />
+          <div class="section-subgroup" data-backup-list>
+            <h3>已有备份</h3>
+            <div v-for="item in backups" :key="item.backupName" class="task-row">
+              <span>{{ productTimeLabel(item.createdAt) }}<small v-if="item.sizeBytes" class="muted"> · {{ Math.max(1, Math.round(item.sizeBytes / 1024)) }} KB</small></span>
+              <button class="btn" @click="restoreTarget=item">从此备份恢复</button>
+            </div>
+            <p v-if="!backups.length" class="muted">还没有可用的备份。先创建一个里程碑备份。</p>
+            <CommandFeedback :state="restoreState" />
+          </div>
           <div class="banner info" style="margin-top:12px"><div><div class="banner-title">可靠性基线</div><div class="banner-copy">正式实现包含本机事务、崩溃恢复、快速检查、哈希验证、引用检查和只读恢复模式。</div></div></div>
         </section>
 
@@ -154,6 +182,11 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
           <div class="card-head"><div><h2 class="card-title">外观</h2><p class="card-subtitle">保持安静、编辑部式的阅读与制作体验。</p></div></div>
           <div class="segmented"><button :class="{active:form.theme==='light'}" @click="form.theme='light';applyTheme()">浅色</button><button :class="{active:form.theme==='system'}" @click="form.theme='system';applyTheme()">跟随系统</button><button :class="{active:form.theme==='dark'}" @click="form.theme='dark';applyTheme()">深色</button></div>
         </section>
+
+        <BaseModal :open="!!restoreTarget" title="确认从备份恢复" subtitle="恢复前会先自动备份当前状态，以便需要时再找回。" @close="restoreTarget=null">
+          <p>将把作品恢复到 {{ restoreTarget ? productTimeLabel(restoreTarget.createdAt) : '' }} 的备份。备份之后的所有改动都会被覆盖，恢复前系统会先校验备份是否完整。</p>
+          <template #footer><button class="btn" @click="restoreTarget=null">取消</button><button class="btn danger" @click="confirmRestore">确认恢复</button></template>
+        </BaseModal>
 
         <div class="actions" style="justify-content:space-between"><button class="btn soft" @click="resetForm">恢复当前已保存设置</button><button class="btn primary" @click="save">保存更改</button></div>
       </main>

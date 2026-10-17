@@ -2,6 +2,7 @@ import type {
   ArtifactSummary,
   AssistantRepairPlan,
   AssistantIntentResolution,
+  BackupEntry,
   BookHealthProjection,
   ChapterListItem,
   ChapterProjection,
@@ -456,6 +457,11 @@ export class BrowserDemoPort implements FrontendPort {
       forbiddenReveals: ['前三章不揭开机制来源'],
       readerDesire: '看见主角如何用自己的选择承担代价。',
     })
+  }
+
+  async queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }> {
+    await wait(10)
+    return { projectId: request.projectId, backups: [] }
   }
 
   async classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution> {

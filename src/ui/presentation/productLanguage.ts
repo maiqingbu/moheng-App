@@ -72,6 +72,8 @@ const errorLabels: Record<string, string> = {
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
   PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',
   PROJECT_WRITE_LOCKED: '本作品正在生成，暂时只读；生成完成或暂停后即可修改。',
+  READ_POOL_BUSY: '作品正在被读取，请稍后再恢复备份。',
+  'restore integrity failed': '备份校验未通过，作品没有任何改动。',
   CHAPTER_LENGTH_RANGE_INVALID: '字数区间无效：最少 500 字、最多 10000 字，且最少字数要小于最多字数。',
   B08_PLAN_LENGTH_OUT_OF_RANGE: '本章规划的篇幅与字数区间不符，未写入；请重新生成本章（会重新规划），或调整字数区间。',
   B08_RENDER_LENGTH_OUT_OF_RANGE: '正文重写两次后仍不在字数区间内，本章未提交；可以重新生成本章，或调整字数区间。',

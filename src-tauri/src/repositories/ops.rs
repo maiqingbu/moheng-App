@@ -618,6 +618,51 @@ pub struct IntegrityReport {
     pub failures: Vec<String>,
 }
 
+/// FX-22: the work's backups, newest first, with the revision each backup
+/// file holds (a restore expects it); unreadable files are marked.
+pub fn list_backups(
+    connection: &Connection,
+    project_id: &str,
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, OpsError> {
+    let mut statement = connection.prepare(
+        "SELECT backup_path, checksum_sha256, created_at FROM backup_manifests WHERE project_id=?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(path, checksum, created_at)| {
+            let path = std::path::PathBuf::from(path);
+            let name = path.file_name()?.to_str()?.to_owned();
+            let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok();
+            let revision = Connection::open_with_flags(
+                &path,
+                libsql_rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .and_then(|backup| {
+                backup.query_row(
+                    "SELECT revision FROM project_meta WHERE project_id=?1",
+                    [project_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .ok();
+            Some(serde_json::json!({
+                "backupName":name,"checksumSha256":checksum,"createdAt":created_at,
+                "revision":revision,"sizeBytes":size_bytes,"available":revision.is_some()
+            }))
+        })
+        .collect())
+}
+
 pub fn deep_integrity_check(
     connection: &Connection,
     project_id: &str,
