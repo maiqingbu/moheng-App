@@ -32,7 +32,7 @@
     "macOS": {
       "minimumSystemVersion": "13.0"
     },
-    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": {
       "../creative-skills/v1.2.0/": "creative-skills/v1.2.0/",
       "resources/creative-skills-v1.2.0.deployment.json": "creative-skills/v1.2.0/deployment-manifest.json"
