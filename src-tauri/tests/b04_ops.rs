@@ -824,3 +824,93 @@ fn b04_volume_and_chapter_queries_are_server_paginated() {
 
 #[allow(dead_code)]
 fn _connection_is_explicitly_used(_connection: &Connection) {}
+
+#[test]
+fn fx19_canon_evidence_check_matches_a_canonical_json_chapter_scope_key() {
+    let (_temp, _manager, connection) = project();
+    // Only the evidence check is under test; skip building the chapter graph.
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let payload = serde_json::json!({"body":"正文"});
+    let payload_hash = ai_novel_production_system_core::hash::sha256_canonical(&payload).unwrap();
+    for (artifact_id, chapter_id) in [
+        ("art:fx19:final-1", "chap:fx19:one"),
+        ("art:fx19:final-2", "chap:fx19:two"),
+    ] {
+        let scope_key = serde_json::json!({"chapterId":chapter_id,"level":"CHAPTER"}).to_string();
+        connection.execute("INSERT INTO artifacts(artifact_id, project_id, artifact_type, scope_level, scope_key, version, schema_version, artifact_status, payload_hash, provenance_json, created_at) VALUES (?1,'p1','FinalChapter','CHAPTER',?2,1,'m0a.artifact.v1','COMMITTED',?3,'{}',?4)", libsql_rusqlite::params![artifact_id, scope_key, payload_hash, NOW]).unwrap();
+        connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![artifact_id, payload.to_string(), payload_hash]).unwrap();
+    }
+    // Real commits record the bare chapter id on canon_evidence.
+    connection.execute("INSERT INTO canon_evidence(evidence_id,project_id,fact_id,final_chapter_id,source_artifact_id,source_version,evidence_type,quote,range_start,range_end,created_at) VALUES ('evidence:fx19','p1',NULL,'chap:fx19:one','art:fx19:final-1',1,'DIRECT_QUOTE','正文',0,2,?1)", [NOW]).unwrap();
+    let report = deep_integrity_check(&connection, "p1", NOW).unwrap();
+    let missing = report
+        .failures
+        .iter()
+        .filter(|failure| *failure == "FINAL_CHAPTER_CANON_EVIDENCE_MISSING")
+        .count();
+    assert_eq!(
+        missing, 1,
+        "only the chapter without evidence is reported: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn fx19_restore_never_replays_the_replaced_database_wal() {
+    let temp = tempdir().unwrap();
+    let state = KernelState::new(AppPaths::new(temp.path()));
+    drop(state.manager.create("p1", "B04", NOW).unwrap());
+    let connection = state.manager.open("p1", "B04", NOW).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_settings(project_id, setting_key, setting_value, updated_at) VALUES ('p1','restore-proof','before',?1)",
+            [NOW],
+        )
+        .unwrap();
+    let backup = temp.path().join("projects/p1/backups/wal.db");
+    let manifest =
+        BackupService::create_snapshot(&connection, &backup, "p1", "2026-08-27T00:01:00Z").unwrap();
+    drop(connection);
+    // Another connection keeps the database open, so the change made after
+    // the backup is still only in project.db-wal when the restore swaps files.
+    let database = temp.path().join("projects/p1/project.db");
+    let holder = libsql_rusqlite::Connection::open(&database).unwrap();
+    holder.execute_batch("PRAGMA wal_autocheckpoint=0").unwrap();
+    holder
+        .execute("UPDATE project_settings SET setting_value='after' WHERE project_id='p1' AND setting_key='restore-proof'", [])
+        .unwrap();
+    assert!(
+        temp.path()
+            .join("projects/p1/project.db-wal")
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+    let receipt = execute_command_impl(
+        &state,
+        serde_json::json!({
+            "type":"backup_restore","commandId":"fx19-restore","idempotencyKey":"fx19-restore-key",
+            "projectId":"p1","expectedRevision":0,"requestedAt":"2026-08-27T00:02:00Z",
+            "payload":{"backupName":"wal.db","checksumSha256":manifest.checksum_sha256}
+        }),
+    )
+    .unwrap();
+    assert_eq!(receipt["finalStatus"], "committed");
+    drop(holder);
+    let fresh = libsql_rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(
+        fresh
+            .query_row::<String, _, _>(
+                "SELECT setting_value FROM project_settings WHERE project_id='p1' AND setting_key='restore-proof'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        "before"
+    );
+    let integrity: String = fresh
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}

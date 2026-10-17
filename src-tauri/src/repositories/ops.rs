@@ -682,7 +682,9 @@ pub fn deep_integrity_check(
     // normalized Canon. The check is conditional on a committed FinalChapter so
     // candidate work and historical planning artifacts remain valid.
     let mut final_chapters = connection.prepare(
-        "SELECT scope_key FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
+        // FX-19: chapter scope keys are canonical JSON ({"chapterId":..,
+        // "level":"CHAPTER"}); canon_evidence stores the bare chapter id.
+        "SELECT CASE WHEN json_valid(scope_key) THEN COALESCE(json_extract(scope_key,'$.chapterId'), scope_key) ELSE scope_key END FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
     )?;
     let final_chapter_ids = final_chapters
         .query_map([project_id], |row| row.get::<_, String>(0))?
