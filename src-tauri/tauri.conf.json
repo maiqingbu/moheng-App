@@ -32,6 +32,11 @@
     "macOS": {
       "minimumSystemVersion": "13.0"
     },
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
     "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": {
       "../creative-skills/v1.2.0/": "creative-skills/v1.2.0/",

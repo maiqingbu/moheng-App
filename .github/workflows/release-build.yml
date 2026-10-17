@@ -40,7 +40,7 @@ jobs:
           targets: ${{ matrix.target }}
       - run: npm ci
       - name: Build ${{ matrix.bundle }} with the pinned Tauri CLI
-        run: npx --yes @tauri-apps/cli@2.10.1 build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+        run: npx --yes @tauri-apps/cli@2.10.1 build --verbose --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
       - name: Record SHA-256 of the installer
         shell: bash
         run: |
