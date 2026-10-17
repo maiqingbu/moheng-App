@@ -3,10 +3,9 @@ use crate::commit::CommitService;
 use crate::generated::types::ProjectCommandReceipt;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle};
 use crate::harness::{
-    grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
-    BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine,
-    EvidenceLedgerEntry, ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint,
-    SupportSessionReceipt,
+    grounded_finding, registry_digest_map, resolve_project_scope, BoundedCapabilityExecutor,
+    CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine, EvidenceLedgerEntry,
+    ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint, SupportSessionReceipt,
 };
 use crate::hash::sha256_canonical;
 use crate::narrative::{
@@ -678,13 +677,45 @@ pub fn query_assistant_repair_plan_impl(
         .get("requestedAt")
         .and_then(Value::as_str)
         .unwrap_or("2026-01-01T00:00:00Z");
-    state
+    let intent = crate::assistant_intent::resolve_intent(
+        state,
+        project_id,
+        crate::assistant_intent::AssistantEntry::Repair,
+        question,
+        now,
+    );
+    let mut plan = state
         .manager
         .with_read_connection(project_id, now, |connection| {
-            crate::project_entry::assistant_repair_plan(connection, project_id, question, now)
-                .map_err(ManagerError::ProjectCommand)
+            crate::project_entry::assistant_repair_plan_for_kind(
+                connection,
+                project_id,
+                question,
+                &intent.intent,
+                now,
+            )
+            .map_err(ManagerError::ProjectCommand)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    plan["intent"] = intent.to_json();
+    Ok(plan)
+}
+
+/// FX-21: how the project assistant understands a question for one entry.
+pub fn classify_assistant_intent_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let entry =
+        crate::assistant_intent::AssistantEntry::from_code(required_string(&request, "entry")?)?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    Ok(crate::assistant_intent::resolve_intent(state, project_id, entry, question, now).to_json())
 }
 
 /// B08 production projection.  This is a bounded read projection assembled
@@ -5184,7 +5215,14 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         .project_revision(project_id)
         .map_err(|e| e.to_string())?;
     let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
-    let mut plan = plan_support(&scope, question, requested_at)?;
+    let intent = crate::assistant_intent::resolve_intent(
+        state,
+        project_id,
+        crate::assistant_intent::AssistantEntry::Diagnose,
+        question,
+        requested_at,
+    );
+    let mut plan = crate::harness::plan_support_for_intent(&scope, &intent.intent, requested_at)?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
@@ -5440,7 +5478,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         finished_at: requested_at.into(),
     };
     Ok(
-        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt}),
+        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt,"intent":intent.to_json()}),
     )
 }
 
@@ -9317,11 +9355,26 @@ pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Res
 }
 
 #[tauri::command]
-pub fn query_assistant_repair_plan(
+pub async fn query_assistant_repair_plan(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
-    query_assistant_repair_plan_impl(&state, request)
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_assistant_repair_plan_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
+pub async fn classify_assistant_intent(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || classify_assistant_intent_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9583,8 +9636,15 @@ pub fn query_volume_lifecycle(
 }
 
 #[tauri::command]
-pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
-    support_session_impl(&state, request)
+pub async fn support_session(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || support_session_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9889,6 +9949,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_plan_route,
         query_volume_lifecycle,
         support_session,
+        classify_assistant_intent,
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,

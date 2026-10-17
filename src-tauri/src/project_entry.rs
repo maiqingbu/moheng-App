@@ -2007,7 +2007,7 @@ fn explicit_repair_requested(question: &str) -> bool {
     )
 }
 
-fn repair_question_kind(question: &str) -> &'static str {
+pub(crate) fn repair_question_kind(question: &str) -> &'static str {
     let lower = question.to_lowercase();
     if contains_any_text(
         &lower,
@@ -2107,12 +2107,28 @@ pub fn assistant_repair_plan(
     question: &str,
     now: &str,
 ) -> Result<Value, String> {
+    assistant_repair_plan_for_kind(
+        connection,
+        project_id,
+        question,
+        repair_question_kind(question),
+        now,
+    )
+}
+
+/// FX-21: the repair plan for a kind already resolved from the question.
+pub fn assistant_repair_plan_for_kind(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    question: &str,
+    kind: &str,
+    now: &str,
+) -> Result<Value, String> {
     let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
         connection, project_id,
     )
     .map_err(|error| error.to_string())?;
     let source_refs = assistant_authority_refs(connection, project_id)?;
-    let kind = repair_question_kind(question);
     match kind {
         "REBUILD_PROJECTION" => {
             let healthy =

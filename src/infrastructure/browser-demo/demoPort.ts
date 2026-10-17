@@ -1,6 +1,7 @@
 import type {
   ArtifactSummary,
   AssistantRepairPlan,
+  AssistantIntentResolution,
   BookHealthProjection,
   ChapterListItem,
   ChapterProjection,
@@ -455,6 +456,16 @@ export class BrowserDemoPort implements FrontendPort {
       forbiddenReveals: ['前三章不揭开机制来源'],
       readerDesire: '看见主角如何用自己的选择承担代价。',
     })
+  }
+
+  async classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution> {
+    await wait(10)
+    // The demo has no model: keyword routing only.
+    const intent = request.entry === 'CHANGE'
+      ? (/事实|改成|原来|没有死|其实/.test(request.question) ? 'RETCON' : 'CHANGE')
+      : request.entry === 'REPAIR' ? (/搜索|索引/.test(request.question) ? 'REBUILD_FTS' : 'NO_ACTION')
+      : (/知道/.test(request.question) ? 'KNOWLEDGE' : 'PROJECT_OVERVIEW')
+    return { intent, source: 'KEYWORD', subjects: [], attribute: null, modelRunId: null, fallbackReason: 'DEMO_NO_MODEL' }
   }
 
   async queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan> {

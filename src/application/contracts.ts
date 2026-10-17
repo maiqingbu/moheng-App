@@ -133,6 +133,17 @@ export interface SupportSessionProjection {
   finding: Record<string, unknown>
   receipt: Record<string, unknown>
   evidenceLedger?: Record<string, unknown>[]
+  /** FX-21: how the question was understood. */
+  intent?: AssistantIntentResolution
+}
+/** FX-21: how the project assistant understood a question. */
+export interface AssistantIntentResolution {
+  intent: string
+  source: 'MODEL' | 'KEYWORD'
+  subjects?: string[]
+  attribute?: string | null
+  modelRunId?: string | null
+  fallbackReason?: string | null
 }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
 
@@ -168,6 +179,8 @@ export interface OpeningProgressProjection {
 
 export interface AssistantRepairPlan {
   action?: 'EXECUTABLE' | 'PROPOSAL_ONLY' | 'NO_ACTION'
+  /** FX-21: how the repair request was understood. */
+  intent?: AssistantIntentResolution
   repairPlanId: string
   projectId: string
   basedOnProjectRevision: number
@@ -1097,6 +1110,7 @@ export interface FrontendPort {
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
+  classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>
   queryVolumeDetail(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeDetailProjection>

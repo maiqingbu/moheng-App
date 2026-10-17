@@ -117,6 +117,12 @@ pub trait ProductionModelGateway: Send + Sync {
         false
     }
 
+    /// FX-21: configured providers classify project assistant questions;
+    /// deterministic gateways keep the keyword routing.
+    fn classifies_assistant_intent(&self) -> bool {
+        false
+    }
+
     /// Deterministic gateways can model a concurrent writer after the gate
     /// snapshot has been checked and immediately before CommitService runs.
     /// Configured providers keep this no-op.
@@ -406,6 +412,10 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
     }
 
     fn enforces_chapter_length(&self) -> bool {
+        true
+    }
+
+    fn classifies_assistant_intent(&self) -> bool {
         true
     }
 
