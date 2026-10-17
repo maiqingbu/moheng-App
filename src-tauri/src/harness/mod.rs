@@ -413,7 +413,9 @@ pub fn plan_support(
         "capacity",
         "容量",
         "planner",
-        "承诺",
+        // FX-20: "承诺" alone is a continuity question; a promise that
+        // constrains the next chapter is a planning question.
+        "约束",
         "任务",
         "规划",
     ]
