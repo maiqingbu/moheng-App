@@ -860,6 +860,8 @@ pub struct ChapterPlanR1 {
     pub compiled_from_state_digest: String,
     pub context_manifest_ref: ArtifactRef,
     pub chapter_goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapter_role: Option<String>,
     pub active_task_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_refs: Option<Vec<String>>,

@@ -1757,6 +1757,61 @@ type SingleChapterRow = (
     String,
 );
 
+/// A chapter's number and what the committed chapters before it did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChapterHistory {
+    pub chapter_no: Option<i64>,
+    /// Newest first: `{chapterNo, chapterGoal, ending}`.
+    pub recent: Vec<serde_json::Value>,
+}
+
+impl ChapterHistory {
+    pub fn number(&self) -> Option<u32> {
+        self.chapter_no
+            .and_then(|number| u32::try_from(number).ok())
+    }
+}
+
+/// Goals and closing passages (last 200 characters) of the last `limit`
+/// committed chapters before `chapter_id`, so the planner continues the
+/// story instead of repeating it.
+pub fn chapter_history(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    limit: i64,
+) -> Result<ChapterHistory, OpsError> {
+    let chapter_no: Option<i64> = connection
+        .query_row(
+            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(number) = chapter_no else {
+        return Ok(ChapterHistory {
+            chapter_no,
+            recent: Vec::new(),
+        });
+    };
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal') \
+         FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+         LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+         WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' ORDER BY c.chapter_no DESC LIMIT ?3",
+    )?;
+    let recent = statement
+        .query_map(libsql_rusqlite::params![project_id, number, limit], |row| {
+            Ok(json!({
+                "chapterNo":row.get::<_, i64>(0)?,
+                "chapterGoal":row.get::<_, Option<String>>(2)?,
+                "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default()
+            }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ChapterHistory { chapter_no, recent })
+}
+
 /// Formal reader query for one chapter. It returns authority metadata and the
 /// body from the chapter's committed FinalChapter artifact when available.
 pub fn single_chapter(

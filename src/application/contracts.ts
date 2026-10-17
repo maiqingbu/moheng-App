@@ -725,6 +725,7 @@ export interface ProductionCenterProjection {
     title: string
     volumeId: string
     executionMode: 'OPENING_BOOTSTRAP' | 'LONG_FORM'
+    quota?: { used: number; limit: number; allowance: number } | null
   } | null
   chapterPlan?: {
     ref: { artifactId: string; version: number; payloadHash: string }
@@ -1062,6 +1063,7 @@ export type CommandType =
   | 'production_pause'
   | 'production_resume'
   | 'production_cancel'
+  | 'production_reset_chapter_quota'
   | 'repair_plan_create'
   | 'repair_authorize'
   | 'repair_execute'

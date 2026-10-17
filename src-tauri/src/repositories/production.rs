@@ -169,7 +169,81 @@ fn b02_phase_steps_with_labels(phases: &[&str], current: Option<&str>, status: &
         .collect()
 }
 
+/// Model runs a chapter gets per allowance; also the size of a manual reset.
+pub const CHAPTER_RUN_ALLOWANCE: i64 = 12;
+
 impl ProductionRepository {
+    /// Model runs the chapter has used against its limit: the larger of the
+    /// commit gate's count (model runs of the chapter's jobs) and the runtime
+    /// budget's count (reservations), so a limit above it satisfies both.
+    pub fn chapter_quota(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+    ) -> Result<Option<Value>, ProductionRepositoryError> {
+        let Some((budget_id, limit)) = connection
+            .query_row(
+                "SELECT budget_id, hard_max_model_runs FROM chapter_production_budgets WHERE project_id=?1 AND chapter_id=?2",
+                [project_id, chapter_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let runs: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM model_runs AS model_run JOIN jobs ON jobs.job_id=model_run.job_id WHERE model_run.project_id=?1 AND jobs.chapter_id=?2",
+            [project_id, chapter_id],
+            |row| row.get(0),
+        )?;
+        let reserved: i64 = connection.query_row(
+            "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+            [project_id, budget_id.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(Some(
+            json!({"used":runs.max(reserved),"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}),
+        ))
+    }
+
+    /// Owner decision (2026-10-17): the user may give a chapter a fresh
+    /// allowance by hand. History is kept; the limit moves to what is already
+    /// used plus one allowance, and jobs held for budget become retryable.
+    pub fn reset_chapter_quota(
+        connection: &Connection,
+        project_id: &str,
+        chapter_id: &str,
+        now: &str,
+    ) -> Result<Value, ProductionRepositoryError> {
+        let quota = Self::chapter_quota(connection, project_id, chapter_id)?.ok_or_else(|| {
+            ProductionRepositoryError::Narrative("CHAPTER_BUDGET_NOT_FOUND".into())
+        })?;
+        let used = quota["used"].as_i64().unwrap_or(0);
+        let limit = used + CHAPTER_RUN_ALLOWANCE;
+        connection.execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=?3 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id, limit],
+        )?;
+        connection.execute(
+            "UPDATE jobs SET status='FAILED', updated_at=?3 WHERE project_id=?1 AND chapter_id=?2 AND status='WAITING_BUDGET'",
+            [project_id, chapter_id, now],
+        )?;
+        connection.execute(
+            "UPDATE project_runtime_state SET run_state='IDLE', block_reason=NULL, updated_at=?2 WHERE project_id=?1 AND run_state='WAITING_BUDGET'",
+            [project_id, now],
+        )?;
+        connection.execute(
+            "INSERT INTO decisions(decision_id, project_id, decision_type, outcome, reason, payload_json, created_at, updated_at) VALUES (?1, ?2, 'CHAPTER_QUOTA_RESET', 'APPLIED', '用户手动重置本章额度', ?3, ?4, ?4) ON CONFLICT(decision_id) DO NOTHING",
+            libsql_rusqlite::params![
+                format!("decision:quota-reset:{chapter_id}:{used}"),
+                project_id,
+                json!({"chapterId":chapter_id,"usedBefore":used,"limitBefore":quota["limit"],"limitAfter":limit}).to_string(),
+                now
+            ],
+        )?;
+        Ok(json!({"used":used,"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}))
+    }
+
     pub fn center_projection(
         connection: &Connection,
         project_id: &str,
@@ -729,8 +803,9 @@ impl ProductionRepository {
             } else {
                 "OPENING_BOOTSTRAP"
             };
+            let quota = Self::chapter_quota(connection, project_id, &id)?;
             Some(
-                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode}),
+                json!({"id":id,"number":number,"title":title,"volumeId":volume_id,"executionMode":execution_mode,"quota":quota}),
             )
         } else {
             None

@@ -9,6 +9,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import ResumeConditionFields from '../components/ResumeConditionFields.vue'
 import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
 import { withChapterLengthRange, type ChapterLengthRange } from '../presentation/chapterLength'
+import { chapterQuotaLabel, chapterQuotaResetRequest, isChapterQuotaExhausted } from '../presentation/chapterQuota'
 import { useProjectStore } from '../stores/projectStore'
 import type { ProductionCenterProjection } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
@@ -304,6 +305,24 @@ async function startProduction() {
   }
 }
 
+// Owner decision 2026-10-17: a chapter whose model-run quota is used up can
+// be given a fresh allowance by hand, after a second confirmation.
+const chapterQuota = computed(() => production.value?.nextChapter?.quota ?? null)
+const chapterQuotaExhausted = computed(() => isChapterQuotaExhausted(chapterQuota.value))
+const quotaResetPending = ref(false)
+async function resetChapterQuota() {
+  const chapter = production.value?.nextChapter
+  if (!chapter) return
+  quotaResetPending.value = false
+  lastCommand.value = 'chapter-quota-reset'
+  try {
+    await store.runCommand(lastCommand.value, chapterQuotaResetRequest(chapter.id))
+    await store.loadProduction(true)
+  } catch {
+    // CommandFeedback displays the typed backend result.
+  }
+}
+
 function evaluationStatusLabel() {
   if (signing.value?.status === 'STALE') return '签约规则已更新，请重新评估'
   if (signing.value?.evaluation?.status === 'FAILED') return '评估未完成'
@@ -504,6 +523,14 @@ function costText(value: number | null | undefined) {
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
     <div v-if="canStartProduction && !productionIsActive && production.nextChapter && production.nextChapter.executionMode !== 'LONG_FORM'" class="section" data-chapter-length-override>
       <ChapterLengthPicker v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${production.nextChapter.number} 章字数区间`" />
+    </div>
+    <div v-if="chapterQuota && chapterQuotaExhausted && !productionIsActive" class="banner warning" data-chapter-quota>
+      <span>{{ chapterQuotaLabel(chapterQuota) }}，已用完。重置后本章可再调用 {{ chapterQuota.allowance }} 次，已花费的记录会保留。</span>
+      <button v-if="!quotaResetPending" class="btn" @click="quotaResetPending = true">重置本章额度</button>
+      <template v-else>
+        <button class="btn primary" @click="resetChapterQuota">确认重置</button>
+        <button class="btn" @click="quotaResetPending = false">取消</button>
+      </template>
     </div>
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>

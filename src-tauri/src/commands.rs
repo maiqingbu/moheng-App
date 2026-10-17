@@ -7059,18 +7059,17 @@ fn compile_current_chapter_plan(
         "chapterLengthRange":length_range.to_json(),
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
-    let planning_result = crate::production::execute_production_model_with_profile(
-        &handle,
-        state.production_gateway.as_ref(),
-        &profile,
-        &planning_spec,
-        "PLAN_STRATEGY",
-        planning_input.clone(),
-        requested_at,
+    // Craft v2: the planner sees what the recent chapters did and the
+    // selected planning skills.
+    let history = crate::repositories::ops::chapter_history(&handle, project_id, chapter_id, 3)
+        .map_err(|error| error.to_string())?;
+    let mut planning_input = planning_input;
+    crate::chapter_craft::extend_planning_input(
+        &mut planning_input,
+        history.number(),
+        &history.recent,
+        length_range,
     )?;
-    let raw_plan = planning_result
-        .parsed
-        .ok_or_else(|| "B05_PLANNING_OUTPUT_INVALID".to_string())?;
     let bindings = json!({
         "chapterId":chapter_id,
         "compiledFromProjectRevision":planning_revision,
@@ -7078,28 +7077,42 @@ fn compile_current_chapter_plan(
         "contextManifestRef":context_ref,
         "horizonPreviewCapacity":planning_input["horizonPreviewCapacity"]
     });
-    let mut plan = crate::planning::normalize_chapter_plan_model_output(
-        raw_plan,
-        &context_input
-            .continuity_threads
-            .iter()
-            .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-            .map(|thread| thread.thread_id.clone())
-            .collect::<Vec<_>>(),
-        &bindings,
-    );
-    plan["compiledFromProjectRevision"] = json!(planning_revision);
-    plan["compiledFromStateDigest"] = json!(state_digest);
-    plan["contextManifestRef"] =
-        serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+    let triggered_threads = context_input
+        .continuity_threads
+        .iter()
+        .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    let enforces_length = state.production_gateway.enforces_chapter_length();
     let hard_scope = crate::narrative::context_hard_scope(&context_input);
-    plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
-    plan["entityRefs"] = hard_scope["entityRefs"].clone();
-    plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
-    plan["hardScope"] = hard_scope;
-    if state.production_gateway.enforces_chapter_length() {
-        crate::chapter_length::validate_plan_length(&plan, length_range)?;
-    }
+    let accept = |raw: Value| -> Result<Value, String> {
+        let mut plan = crate::planning::normalize_chapter_plan_model_output(
+            raw,
+            &triggered_threads,
+            &bindings,
+        );
+        plan["compiledFromProjectRevision"] = json!(planning_revision);
+        plan["compiledFromStateDigest"] = json!(state_digest);
+        plan["contextManifestRef"] =
+            serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+        plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+        plan["entityRefs"] = hard_scope["entityRefs"].clone();
+        plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+        plan["hardScope"] = hard_scope.clone();
+        if enforces_length {
+            crate::chapter_craft::check_plan(&plan, length_range, &history.recent)?;
+        }
+        Ok(plan)
+    };
+    let (plan, planning_run_id) = crate::production::plan_chapter_with_feedback(
+        &handle,
+        state.production_gateway.as_ref(),
+        &profile,
+        &planning_spec,
+        planning_input.clone(),
+        requested_at,
+        &accept,
+    )?;
     let receipt = crate::planning::recompile_chapter_plan_owner(
         &handle,
         project_id,
@@ -8524,6 +8537,43 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             requested_at,
             &digest,
         ),
+        "production_reset_chapter_quota" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            let chapter_id = request
+                .pointer("/payload/chapterId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "B08_CHAPTER_REQUIRED".to_string())?;
+            let spec = project_command_spec(
+                id,
+                id,
+                command_id,
+                idempotency_key,
+                command_type,
+                &digest,
+                expected_revision,
+                requested_at,
+                true,
+            );
+            let outcome = state
+                .manager
+                .commit_project_command(spec, |connection| {
+                    crate::repositories::production::ProductionRepository::reset_chapter_quota(
+                        connection,
+                        id,
+                        chapter_id,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
+            let (quota, receipt) = match outcome {
+                ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+                ProjectCommandOutcome::Replayed(receipt) => (Value::Null, receipt),
+            };
+            let mut response = project_command_response(&receipt);
+            response["result"] = json!({"chapterQuota":quota});
+            Ok(response)
+        }
         "decision_submit" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_decision_submit(

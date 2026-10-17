@@ -956,3 +956,49 @@ fn fx22_backups_are_listed_with_the_revision_a_restore_needs() {
     .unwrap();
     assert_eq!(restored["finalStatus"], "committed");
 }
+
+#[test]
+fn craft_previous_chapters_report_goals_and_endings_newest_first() {
+    let (_temp, _manager, connection) = project();
+    // Only the history query is under test; skip building the chapter graph.
+    connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let body = |n: usize| format!("{}第{n}章结尾。", "正文".repeat(150));
+    for n in 1..=4_usize {
+        let chapter_id = format!("chap:craft:{n}");
+        let committed = n < 4;
+        let final_id = format!("art:craft:final-{n}");
+        let plan_id = format!("art:craft:plan-{n}");
+        connection.execute("INSERT INTO chapters(chapter_id, project_id, volume_id, chapter_no, title, importance_class, status, word_count, final_artifact_id, final_version, created_at, updated_at) VALUES (?1,'p1','vol:craft',?2,'章','NORMAL',?3,1,?4,?5,?6,?6)", libsql_rusqlite::params![chapter_id, n as i64, if committed { "COMMITTED" } else { "PLANNED" }, committed.then_some(final_id.clone()), committed.then_some(1_i64), NOW]).unwrap();
+        if committed {
+            let plan = serde_json::json!({"chapterGoal":format!("第{n}章目标")});
+            let final_payload = serde_json::json!({"body":body(n),"chapterPlanRef":{"artifactId":plan_id,"version":1}});
+            for (id, payload) in [(&plan_id, plan), (&final_id, final_payload)] {
+                connection.execute("INSERT INTO artifact_payloads(artifact_id, version, payload_json, payload_hash) VALUES (?1,1,?2,?3)", libsql_rusqlite::params![id, payload.to_string(), "c".repeat(64)]).unwrap();
+            }
+        }
+    }
+    let history = ai_novel_production_system_core::repositories::ops::chapter_history(
+        &connection,
+        "p1",
+        "chap:craft:4",
+        2,
+    )
+    .unwrap();
+    assert_eq!(history.chapter_no, Some(4));
+    assert_eq!(history.recent.len(), 2);
+    assert_eq!(history.recent[0]["chapterNo"], 3);
+    assert_eq!(history.recent[0]["chapterGoal"], "第3章目标");
+    let ending = history.recent[0]["ending"].as_str().unwrap();
+    assert!(ending.ends_with("第3章结尾。"));
+    assert_eq!(ending.chars().count(), 200);
+    assert_eq!(history.recent[1]["chapterNo"], 2);
+    let first = ai_novel_production_system_core::repositories::ops::chapter_history(
+        &connection,
+        "p1",
+        "chap:craft:1",
+        2,
+    )
+    .unwrap();
+    assert_eq!(first.chapter_no, Some(1));
+    assert!(first.recent.is_empty());
+}

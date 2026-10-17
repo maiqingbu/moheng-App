@@ -183,6 +183,7 @@ export interface ChapterPlanR1 {
   "compiledFromStateDigest": string
   "contextManifestRef": ArtifactRef
   "chapterGoal": string
+  "chapterRole"?: "普通" | "过渡" | "重要" | "升级" | "回报" | "高潮前" | "高潮"
   "activeTaskRefs": Array<string>
   "entityRefs"?: Array<string>
   "hardScope"?: { "taskRefs": Array<string>; "responsibilityRefs": Array<string>; "reservationRefs": Array<string>; "entityRefs": Array<string> }

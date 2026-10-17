@@ -1338,7 +1338,9 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 "compiledFromProjectRevision":input["compiledFromProjectRevision"],
                 "compiledFromStateDigest":input["compiledFromStateDigest"],
                 "contextManifestRef":input["contextManifestRef"],
-                "chapterGoal":"林舟打开石门并记录可核对线索",
+                // Each chapter gets its own goal and a role, as the craft rules require.
+                "chapterGoal":format!("第{}章：林舟打开石门并记录可核对线索", input["chapterNumber"]),
+                "chapterRole":"普通",
                 "activeTaskRefs":active_tasks,
                 "continuityActions":[],
                 "requiredStateOutcomes":[],
@@ -1346,9 +1348,9 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 "knowledgeBoundaries":[],
                 "reservationRefs":[],
                 "sceneExecution":[
-                    {"objective":"推开石门","estimatedCharacters":length_target / 3},
-                    {"objective":"记录线索","estimatedCharacters":length_target / 3},
-                    {"objective":"留下调查方向","estimatedCharacters":length_target - 2 * (length_target / 3)}
+                    {"objective":"推开石门","sceneType":"调查","beats":["试探","受挫","发现","决定"],"estimatedCharacters":length_target / 3},
+                    {"objective":"记录线索","sceneType":"调查","beats":["试探","受挫","发现","决定"],"estimatedCharacters":length_target / 3},
+                    {"objective":"留下调查方向","sceneType":"调查","beats":["试探","受挫","发现","决定"],"estimatedCharacters":length_target - 2 * (length_target / 3)}
                 ],
                 "horizonPreview":horizon_preview
             })

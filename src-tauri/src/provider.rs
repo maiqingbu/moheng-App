@@ -313,8 +313,8 @@ impl OpenAiCompatibleProvider {
 
     fn structured_prompt(capability: &str) -> &'static str {
         match capability {
-            "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. No other top-level keys are allowed. Each horizonPreview item must be exactly {\"objective\":string,\"tentative\":true}: objective is a short Chinese sentence for that future chapter; do not omit tentative or use any other value. chapterGoal must be a non-empty Chinese sentence; use chapterGoalHint when supplied. Use horizonPreviewCapacity from the input: when it is 0–2, return 0 through that many tentative items; otherwise return 3 through min(8, horizonPreviewCapacity). Never add generic fallback horizon items or preview beyond volume completion. Every sceneExecution item must be an object with estimatedCharacters, the integer number of Chinese characters that scene will take; plan enough scenes and story events that the estimates add up to a total within chapterLengthRange.min..chapterLengthRange.max, sizing the content for that length so the writer never has to pad or compress. Fill unknown values with empty arrays or null only where the contract permits.",
-            "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain complete Chinese chapter prose whose length (all characters) falls within chapterLengthRange: at least chapterLengthRange.min and at most chapterLengthRange.max. Write each scene of chapterPlan.sceneExecution at about its estimatedCharacters, count before returning, finish the chapter completely, and never truncate the JSON string. When previousBody is supplied, its length previousCharacterCount was outside chapterLengthRange: rewrite the complete chapter for the same chapterPlan so that its length falls within the range, instead of appending to or cutting the previous body. Use authorityContext to compare current facts; do not suppress a change evidenced by the candidate body because it contradicts current authority.",
+            "PLAN_STRATEGY" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"payloadSchema\":string,\"chapterId\":string,\"compiledFromProjectRevision\":number,\"compiledFromStateDigest\":string,\"contextManifestRef\":object,\"chapterGoal\":string,\"chapterRole\":string,\"activeTaskRefs\":array,\"continuityActions\":array,\"requiredStateOutcomes\":array,\"forbiddenTransitions\":array,\"knowledgeBoundaries\":array,\"reservationRefs\":array,\"sceneExecution\":array,\"horizonPreview\":array}. No other top-level keys are allowed. Each horizonPreview item must be exactly {\"objective\":string,\"tentative\":true}: objective is a short Chinese sentence for that future chapter; do not omit tentative or use any other value. chapterGoal must be a non-empty Chinese sentence; use chapterGoalHint when supplied. Use horizonPreviewCapacity from the input: when it is 0–2, return 0 through that many tentative items; otherwise return 3 through min(8, horizonPreviewCapacity). Never add generic fallback horizon items or preview beyond volume completion. Every sceneExecution item must be an object with estimatedCharacters, the integer number of Chinese characters that scene will take; plan enough scenes and story events that the estimates add up to a total within chapterLengthRange.min..chapterLengthRange.max, sizing the content for that length so the writer never has to pad or compress. chapterRole must be one role from chapterRoleOptions; size the scene estimates so their total falls within that role's min..max. Every sceneExecution item must also have sceneType (a short Chinese label such as 战斗, 对话为主, 情绪峰值, 揭示, 调查, 日常, 过渡), goal, conflict, turn, result, and beats: an array of 2 to 4 beats, each a Chinese sentence saying what happens in that step, with about 250 to 400 characters of prose per beat; plan enough real events (setbacks, discoveries, choices) for the range instead of padding. recentChapters lists the latest committed chapters newest first: continue from the latest ending and give this chapter a goal that differs from every recentChapters goal. craftGuidance holds the selected writing methods for this step; follow them. When planFeedback is supplied, the previous plan was rejected for that reason: return a corrected complete plan. Fill unknown values with empty arrays or null only where the contract permits.",
+            "RENDER_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"body\":string}. The body must contain complete Chinese chapter prose whose length (all characters) falls within chapterLengthRange: at least chapterLengthRange.min and at most chapterLengthRange.max. Write each scene of chapterPlan.sceneExecution at about its estimatedCharacters, count before returning, finish the chapter completely, and never truncate the JSON string. Write every scene beat by beat as planned in chapterPlan.sceneExecution. craftGuidance holds the selected writing methods for this chapter; follow them. When lengthFeedback is supplied, the previous draft missed chapterLengthRange and was discarded: write the complete chapter again from chapterPlan, developing every beat to its targetCharacters, without repeating content or adding material unrelated to the scene goals. Use authorityContext to compare current facts; do not suppress a change evidenced by the candidate body because it contradicts current authority.",
             "REPAIR_CANDIDATE" => concat!(
                 "Return one JSON S40 SkillResultEnvelope only; top-level fields are exactly skillId, skillVersion, bundleDigest, taskId, status, sourceRefs, assumptions, payload, findings, contextRefs, runtimeCheckRequests, confidence, and nextSkillHints. No other top-level fields are allowed. ",
                 "Use these types: skillId, skillVersion, bundleDigest, taskId, and status are strings; payload is an object; confidence is a JSON number from 0 to 1 inclusive; sourceRefs, assumptions, contextRefs, and nextSkillHints are arrays of strings; findings is an array of objects; runtimeCheckRequests is an array of objects. ",
@@ -347,6 +347,16 @@ impl OpenAiCompatibleProvider {
             .contains(".maas.aliyuncs.com/")
     }
 
+    /// Planning and writing are creative and need variety; extraction and
+    /// repair must stay exact.
+    fn temperature(capability: &str) -> Value {
+        match capability {
+            "PLAN_STRATEGY" => json!(0.7),
+            "RENDER_CHAPTER" => json!(0.8),
+            _ => json!(0),
+        }
+    }
+
     pub(crate) fn request_payload(endpoint: &str, request: &ProviderRequest) -> Value {
         let base_prompt = Self::structured_prompt(&request.capability);
         let system_prompt = if request.capability == "AUDIT_EXTRACT" {
@@ -364,7 +374,7 @@ impl OpenAiCompatibleProvider {
                 {"role":"system","content":system_prompt},
                 {"role":"user","content":request.prompt}
             ],
-            "temperature": 0
+            "temperature": Self::temperature(&request.capability)
         });
         if Self::is_xiaomi_endpoint(endpoint) {
             payload["temperature"] = json!(1.0);
@@ -953,13 +963,46 @@ mod tests {
     }
 
     #[test]
+    fn craft_planner_prompt_requires_role_beats_continuity_and_guidance() {
+        let prompt = OpenAiCompatibleProvider::structured_prompt("PLAN_STRATEGY");
+        assert!(prompt.contains("\"chapterRole\":string"));
+        assert!(prompt.contains("chapterRoleOptions"));
+        assert!(prompt.contains("sceneType"));
+        assert!(prompt.contains("2 to 4 beats"));
+        assert!(prompt.contains("recentChapters"));
+        assert!(prompt.contains("craftGuidance"));
+        assert!(prompt.contains("planFeedback"));
+    }
+
+    #[test]
+    fn craft_creative_steps_use_a_nonzero_temperature_and_extraction_stays_exact() {
+        let payload = |capability: &str| {
+            OpenAiCompatibleProvider::request_payload(
+                "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                &ProviderRequest {
+                    capability: capability.into(),
+                    model_id: "qwen-flash".into(),
+                    prompt: "bounded-input".into(),
+                    timeout_ms: 1000,
+                },
+            )
+        };
+        assert_eq!(payload("PLAN_STRATEGY")["temperature"], 0.7);
+        assert_eq!(payload("RENDER_CHAPTER")["temperature"], 0.8);
+        assert_eq!(payload("AUDIT_EXTRACT")["temperature"], 0);
+        assert_eq!(payload("REPAIR_CANDIDATE")["temperature"], 0);
+    }
+
+    #[test]
     fn renderer_prompt_requires_bounded_complete_chapter_json() {
         let prompt = OpenAiCompatibleProvider::structured_prompt("RENDER_CHAPTER");
         assert!(prompt.contains("falls within chapterLengthRange"));
         assert!(
             prompt.contains("at least chapterLengthRange.min and at most chapterLengthRange.max")
         );
-        assert!(prompt.contains("When previousBody is supplied"));
+        assert!(prompt.contains("When lengthFeedback is supplied"));
+        assert!(!prompt.contains("previousBody"));
+        assert!(prompt.contains("craftGuidance"));
         assert!(!prompt.contains("targetChineseCharacters"));
         assert!(prompt.contains("complete Chinese chapter prose"));
         assert!(prompt.contains("Use authorityContext to compare current facts"));

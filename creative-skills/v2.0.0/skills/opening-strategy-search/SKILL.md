@@ -4,13 +4,14 @@ slug: opening-strategy-search
 title: 开篇策略比较
 version: 2.0.0
 coverage: HIGH
-stages: [story_directions, opening_plan]
+stages: [story_directions, chapter_plan]
 triggers:
   always_in: [story_directions]
+  chapter_position: [第1章]
   findings: [directions_too_similar, opening_mode_mismatch_genre]
 inject:
   story_directions: { budget_chars: 900, section: 注入要点·方向生成 }
-  opening_plan: { budget_chars: 600, section: 注入要点·开篇规划 }
+  chapter_plan: { budget_chars: 600, section: 注入要点·开篇规划 }
 sources:
   - 开头技巧 · 经典开头模式（困境开局、巅峰开局、日常突变、身份隐藏、系统降临，各自的结构与优势）
   - 开头技巧 · 不同类型的开头（玄幻、都市、历史、科幻）
@@ -78,7 +79,7 @@ sources:
       A 的节奏偏慢，C 的冲突偏向追逃，会冲淡主题。
 ```
 
-## 自检清单（审核环节使用）
+## 自检清单
 
 - [ ] 候选方向在开局模式、切入点、主角处境或卖点上是否真的不同？
 - [ ] 每个方向是否写明了第一章的切入点、留人理由、特殊之处出现的时间、第一个回报？

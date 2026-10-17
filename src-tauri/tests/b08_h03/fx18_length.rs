@@ -44,10 +44,11 @@ impl ProductionModelGateway for LengthGateway {
             .push((capability.to_string(), input.clone()));
         let mut response = RecordingGateway.invoke(capability, input)?;
         if capability == "PLAN_STRATEGY" {
+            response.output["chapterRole"] = json!("普通");
             response.output["sceneExecution"] = json!(self
                 .scene_estimates
                 .iter()
-                .map(|estimate| json!({"objective":"推进场景","estimatedCharacters":estimate}))
+                .map(|estimate| json!({"objective":"推进场景","sceneType":"调查","beats":["试探","受挫","发现","决定"],"estimatedCharacters":estimate}))
                 .collect::<Vec<_>>());
         }
         if capability == "RENDER_CHAPTER" {
@@ -131,8 +132,9 @@ fn fx18_body_outside_the_range_is_rewritten_until_it_fits() {
         renders[0]["chapterLengthRange"],
         json!({"min":2000,"max":3000})
     );
-    assert_eq!(renders[1]["previousCharacterCount"], 900);
-    assert_eq!(renders[2]["previousCharacterCount"], 3500);
+    assert_eq!(renders[1]["lengthFeedback"]["previousCharacterCount"], 900);
+    assert_eq!(renders[2]["lengthFeedback"]["previousCharacterCount"], 3500);
+    assert!(renders[1].get("previousBody").is_none());
     assert_eq!(
         final_word_count(&state, "p-fx18-rewritten", &chapter_id),
         Some(2600)

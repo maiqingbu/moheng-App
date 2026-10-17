@@ -1312,6 +1312,52 @@ pub fn execute_production_model_with_profile(
     }
 }
 
+/// Craft rule (2026-10-17): a plan rejected for a reason the planner can fix
+/// (see `chapter_craft::plan_feedback`) is planned once more with the reason;
+/// the rejected run stays recorded. Returns the accepted plan and the run
+/// that produced it.
+pub fn plan_chapter_with_feedback(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    input: Value,
+    now: &str,
+    accept: &dyn Fn(Value) -> Result<Value, String>,
+) -> Result<(Value, String), String> {
+    let plan = |spec: &ModelRunSpec, input: Value| {
+        execute_production_model_with_profile(
+            connection,
+            gateway,
+            profile,
+            spec,
+            "PLAN_STRATEGY",
+            input,
+            now,
+        )?
+        .parsed
+        .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())
+    };
+    match accept(plan(spec, input.clone())?) {
+        Err(error) if crate::chapter_craft::plan_feedback(&error).is_some() => {
+            let replan = ModelRunSpec {
+                model_run_id: StableIdentityFactory::from_command(
+                    StableIdKind::ModelRun,
+                    &format!("{}:plan-feedback", spec.model_run_id),
+                )?,
+                idempotency_key: format!("{}:plan-feedback", spec.idempotency_key),
+                attempt_no: spec.attempt_no + 1,
+                ..spec.clone()
+            };
+            let mut input = input;
+            input["planFeedback"] = json!(crate::chapter_craft::plan_feedback(&error));
+            let accepted = accept(plan(&replan, input)?)?;
+            Ok((accepted, replan.model_run_id))
+        }
+        result => result.map(|accepted| (accepted, spec.model_run_id.clone())),
+    }
+}
+
 fn execute_production_model_with_profile_once(
     connection: &libsql_rusqlite::Connection,
     gateway: &dyn ProductionModelGateway,
@@ -2768,6 +2814,11 @@ fn run_chapter_production_inner(
         )
         .map_err(|error| error.to_string())?;
     }
+    // Craft v2: what the chapters before this one already did.
+    let chapter_history =
+        crate::repositories::ops::chapter_history(connection, &project_id, &chapter_id, 3)
+            .map_err(|error| error.to_string())?;
+    let chapter_number = chapter_history.number();
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
         {
@@ -2859,7 +2910,12 @@ fn run_chapter_production_inner(
                 attempt_no: 1,
                 repair_round: 0,
             };
-            let planning_input = json!({
+            let horizon_capacity = crate::planning::horizon_capacity_after_chapter(
+                connection,
+                &project_id,
+                &chapter_id,
+            )?;
+            let mut planning_input = json!({
                 "projectId":project_id,
                 "chapterId":chapter_id,
                 "executionMode":execution_mode,
@@ -2869,58 +2925,56 @@ fn run_chapter_production_inner(
                 "authorityContext":authority_context.clone(),
                 "activeTaskRefs":compiler_input.active_task_refs,
                 "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
-                "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(connection, &project_id, &chapter_id)?,
+                "horizonPreviewCapacity":horizon_capacity,
                 "chapterLengthRange":length_range.to_json(),
                 "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
             });
-            let planning_result = execute_production_model_with_profile(
+            crate::chapter_craft::extend_planning_input(
+                &mut planning_input,
+                chapter_number,
+                &chapter_history.recent,
+                length_range,
+            )?;
+            let triggered_threads = compiler_input
+                .continuity_threads
+                .iter()
+                .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+                .map(|thread| thread.thread_id.clone())
+                .collect::<Vec<_>>();
+            let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
+            let accept = |raw: Value| -> Result<Value, String> {
+                let mut plan = crate::planning::normalize_chapter_plan_model_output(
+                    raw,
+                    &triggered_threads,
+                    &planning_input,
+                );
+                plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+                plan["entityRefs"] = hard_scope["entityRefs"].clone();
+                plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+                plan["hardScope"] = hard_scope.clone();
+                crate::generated::validators::validate_chapter_plan_r1(&plan)
+                    .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
+                crate::planning::validate_current_chapter_plan(
+                    &plan,
+                    &chapter_id,
+                    &compiler_input.active_task_refs,
+                    &triggered_threads,
+                    horizon_capacity,
+                )?;
+                if gateway.enforces_chapter_length() {
+                    crate::chapter_craft::check_plan(&plan, length_range, &chapter_history.recent)?;
+                }
+                Ok(plan)
+            };
+            let (plan_payload, planning_run_id) = plan_chapter_with_feedback(
                 connection,
                 gateway,
                 &provider_profile,
                 &planning_spec,
-                "PLAN_STRATEGY",
                 planning_input.clone(),
                 &now,
+                &accept,
             )?;
-            let plan_payload = planning_result
-                .parsed
-                .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
-            let mut plan_payload = crate::planning::normalize_chapter_plan_model_output(
-                plan_payload,
-                &compiler_input
-                    .continuity_threads
-                    .iter()
-                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                    .map(|thread| thread.thread_id.clone())
-                    .collect::<Vec<_>>(),
-                &planning_input,
-            );
-            let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
-            plan_payload["activeTaskRefs"] = hard_scope["taskRefs"].clone();
-            plan_payload["entityRefs"] = hard_scope["entityRefs"].clone();
-            plan_payload["reservationRefs"] = hard_scope["reservationRefs"].clone();
-            plan_payload["hardScope"] = hard_scope;
-            crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
-                .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
-            crate::planning::validate_current_chapter_plan(
-                &plan_payload,
-                &chapter_id,
-                &compiler_input.active_task_refs,
-                &compiler_input
-                    .continuity_threads
-                    .iter()
-                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                    .map(|thread| thread.thread_id.clone())
-                    .collect::<Vec<_>>(),
-                crate::planning::horizon_capacity_after_chapter(
-                    connection,
-                    &project_id,
-                    &chapter_id,
-                )?,
-            )?;
-            if gateway.enforces_chapter_length() {
-                crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
-            }
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
             let planning_receipt = crate::planning::recompile_chapter_plan_owner(
                 connection,
@@ -3096,9 +3150,12 @@ fn run_chapter_production_inner(
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
-    if let Some(enrichment) = creative_enrichment_payload.clone() {
-        render_input["creativeEnrichment"] = enrichment;
-    }
+    // Craft v2: the writer gets only the selected skills' render guidance;
+    // the v1.2 enrichment stays in the receipts.
+    render_input["craftGuidance"] = crate::chapter_craft::guidance(
+        "render",
+        &crate::chapter_craft::plan_signals(&plan_payload, chapter_number),
+    )?;
     let reusable_render = retry_of_job_id
         .as_deref()
         .map(|previous_job_id| {
@@ -3178,8 +3235,11 @@ fn run_chapter_production_inner(
                 &format!("{command_id}:render:length-{rewrite}"),
             )?;
             let mut input = rewrite_input.clone();
-            input["previousBody"] = json!(body);
-            input["previousCharacterCount"] = json!(character_count(&body));
+            input["lengthFeedback"] = crate::chapter_craft::length_feedback(
+                &plan_payload,
+                length_range,
+                character_count(&body),
+            );
             let rewrite_spec = ModelRunSpec {
                 model_run_id: rewrite_run_id.clone(),
                 job_id: Some(job_id.clone()),

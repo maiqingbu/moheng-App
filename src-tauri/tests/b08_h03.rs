@@ -9373,6 +9373,8 @@ mod b04b_rv08;
 mod b04b_rv15;
 #[path = "b08_h03/b04b_rv33.rs"]
 mod b04b_rv33;
+#[path = "b08_h03/craft_v2.rs"]
+mod craft_v2;
 #[path = "b08_h03/fx15_production_control.rs"]
 mod fx15_production_control;
 #[path = "b08_h03/fx18_length.rs"]

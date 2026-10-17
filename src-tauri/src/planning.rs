@@ -40,6 +40,7 @@ pub fn normalize_chapter_plan_model_output(
                     | "compiledFromStateDigest"
                     | "contextManifestRef"
                     | "chapterGoal"
+                    | "chapterRole"
                     | "activeTaskRefs"
                     | "continuityActions"
                     | "requiredStateOutcomes"
@@ -50,6 +51,15 @@ pub fn normalize_chapter_plan_model_output(
                     | "horizonPreview"
             )
         });
+    }
+    if let Some(object) = plan.as_object_mut() {
+        let valid_role = object
+            .get("chapterRole")
+            .and_then(Value::as_str)
+            .is_some_and(|role| crate::chapter_craft::CHAPTER_ROLES.contains(&role));
+        if !valid_role {
+            object.remove("chapterRole");
+        }
     }
     plan["payloadSchema"] = json!("chapter-plan.r1");
     for field in [
@@ -2989,6 +2999,29 @@ pub fn commit_opening_chapter_plan_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn craft_plan_normalization_keeps_the_chapter_role() {
+        let plan = normalize_chapter_plan_model_output(
+            json!({"chapterGoal":"目标","chapterRole":"回报","unexpected":1,"sceneExecution":[]}),
+            &[],
+            &json!({}),
+        );
+        assert_eq!(plan["chapterRole"], "回报");
+        assert!(plan.get("unexpected").is_none());
+    }
+
+    #[test]
+    fn craft_plan_normalization_drops_an_unknown_or_null_role() {
+        for role in [json!(null), json!("主线"), json!(3)] {
+            let plan = normalize_chapter_plan_model_output(
+                json!({"chapterGoal":"目标","chapterRole":role,"sceneExecution":[]}),
+                &[],
+                &json!({}),
+            );
+            assert!(plan.get("chapterRole").is_none());
+        }
+    }
 
     fn fx17_real_horizon_items() -> Vec<Value> {
         let fixture: Value = serde_json::from_str(include_str!(

@@ -2,6 +2,7 @@ pub mod assistant_intent;
 pub mod canon_semantics;
 pub mod catalog;
 pub mod change_retcon;
+pub mod chapter_craft;
 pub mod chapter_length;
 pub mod commands;
 pub mod commit;
@@ -25,6 +26,7 @@ pub mod repair;
 pub mod repositories;
 pub mod signing;
 pub mod skill_deployment;
+pub mod skills_v2;
 pub mod stable_id;
 pub mod volume_lifecycle;
 
