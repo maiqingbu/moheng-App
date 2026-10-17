@@ -48,6 +48,14 @@ impl ProductionModelGateway for CraftGateway {
         true
     }
 
+    fn resolve_render_profile(
+        &self,
+    ) -> Result<ai_novel_production_system_core::production::ResolvedProviderProfile, String> {
+        let mut profile = self.resolve_profile()?;
+        profile.model = "writer-model".into();
+        Ok(profile)
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let plans = self.inputs("PLAN_STRATEGY").len();
         let renders = self.inputs("RENDER_CHAPTER").len();
@@ -131,6 +139,10 @@ fn craft_v2_guidance_reaches_the_planner_and_the_writer() {
     let render_input = &gateway.inputs("RENDER_CHAPTER")[0];
     assert!(render_input.get("creativeEnrichment").is_none());
     assert_eq!(render_input["craftGuidance"]["stage"], "render");
+    assert_eq!(
+        render_input["beatTargets"][0]["beats"][0]["targetCharacters"],
+        300
+    );
     let render_skills = skill_ids(&render_input["craftGuidance"]);
     assert!(
         render_skills.contains(&"S27".to_string()),
@@ -330,4 +342,25 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
     let revision = state.manager.overview(project_id).unwrap().1;
     let result = start("craft:quota:retry", Some(&blocked_job), revision).unwrap();
     assert_eq!(result["finalStatus"], "committed");
+}
+
+#[test]
+fn craft_v2_only_the_writer_uses_the_writing_model() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
+    let project_id = "p-craft-writer-model";
+    let (_temp, state, _chapter_id, result) = produce(gateway, project_id);
+    result.unwrap();
+    let connection = state.manager.open(project_id, "Craft v2", NOW).unwrap();
+    let models = |capability: &str| {
+        connection
+            .prepare("SELECT DISTINCT model FROM model_runs WHERE project_id=?1 AND capability=?2")
+            .unwrap()
+            .query_map([project_id, capability], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(models("RENDER_CHAPTER"), vec!["writer-model"]);
+    assert!(!models("PLAN_STRATEGY").contains(&"writer-model".to_string()));
+    assert!(!models("AUDIT_EXTRACT").contains(&"writer-model".to_string()));
 }

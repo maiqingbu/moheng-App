@@ -1482,3 +1482,33 @@ fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
     );
     assert_eq!(project_canary_file_matches, 0);
 }
+
+#[test]
+fn craft_render_model_setting_is_saved_and_used_only_for_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    let settings = |render_model: &str| {
+        json!({
+            "providerId":"fixture","provider":"OpenAI Compatible",
+            "modelId":"plan-model","model":"plan-model",
+            "renderModelId":render_model,
+            "endpoint":"http://127.0.0.1:1","enabled":true
+        })
+    };
+    ProviderSettingsRepository::write_global(&paths, &settings("writer-model")).unwrap();
+    assert_eq!(
+        ProviderSettingsRepository::read_global(&paths).unwrap()["renderModelId"],
+        "writer-model"
+    );
+    let gateway = ConfiguredProductionGateway::for_desktop(paths.clone());
+    assert_eq!(gateway.resolve_profile().unwrap().model, "plan-model");
+    let render = gateway.resolve_render_profile().unwrap();
+    assert_eq!(render.model, "writer-model");
+    assert_eq!(render.endpoint, "http://127.0.0.1:1");
+    // A blank writing model falls back to the main model.
+    ProviderSettingsRepository::write_global(&paths, &settings("  ")).unwrap();
+    assert_eq!(
+        gateway.resolve_render_profile().unwrap().model,
+        "plan-model"
+    );
+}

@@ -853,6 +853,8 @@ export interface SettingsProjection {
   theme: 'light' | 'system' | 'dark'
   providerId?: string
   modelId?: string
+  /** Optional model used only for writing chapter prose; blank uses modelId. */
+  renderModelId?: string
   enabled?: boolean
   timeoutMs?: number
   secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'

@@ -149,6 +149,12 @@ pub trait ProductionModelGateway: Send + Sync {
     /// changing production behavior.
     fn on_chapter_gate_revalidation(&self, _attempt: usize) {}
 
+    /// The profile for writing chapter prose (owner decision 2026-10-17: the
+    /// writer may use its own model); by default the production profile.
+    fn resolve_render_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.resolve_profile()
+    }
+
     /// Resolve the provider once at the beginning of a production attempt.
     /// The returned profile is the non-secret snapshot used for every new
     /// ModelRun in that attempt.  Test/deterministic gateways retain their
@@ -440,6 +446,24 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         })
     }
 
+    fn resolve_render_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        let mut profile = self.resolve_profile()?;
+        if let Some(paths) = &self.settings_paths {
+            let settings =
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths)
+                    .map_err(|error| format!("provider settings unavailable: {error}"))?;
+            if let Some(model) = settings
+                .get("renderModelId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                profile.model = model.to_owned();
+            }
+        }
+        Ok(profile)
+    }
+
     fn invoke_typed_with_profile(
         &self,
         capability: &str,
@@ -677,13 +701,44 @@ fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|content| content.starts_with("{\"body\":\""))?;
-    let repaired = format!("{content}\"}}");
-    let payload = serde_json::from_str::<Value>(&repaired).ok()?;
+    // Writers at a creative temperature also put raw line breaks inside the
+    // body string; escaping them changes no characters of the prose.
+    let content = escape_raw_control_characters(content);
+    let payload = serde_json::from_str::<Value>(&content)
+        .or_else(|_| serde_json::from_str::<Value>(&format!("{content}\"}}")))
+        .ok()?;
     payload
         .get("body")
         .and_then(Value::as_str)
         .filter(|body| !body.trim().is_empty())?;
     Some(payload)
+}
+
+/// Escapes control characters that appear unescaped inside JSON strings.
+fn escape_raw_control_characters(json_text: &str) -> String {
+    let mut escaped = String::with_capacity(json_text.len());
+    let (mut in_string, mut after_backslash) = (false, false);
+    for character in json_text.chars() {
+        if in_string && !after_backslash && character.is_control() && (character as u32) < 0x20 {
+            match character {
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                other => escaped.push_str(&format!("\\u{:04x}", other as u32)),
+            }
+            continue;
+        }
+        if in_string && character == '\\' && !after_backslash {
+            after_backslash = true;
+        } else {
+            if character == '"' && !after_backslash {
+                in_string = !in_string;
+            }
+            after_backslash = false;
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// FX-19 (owner decision 2026-10-17): a quote joining passages with an
@@ -3152,10 +3207,12 @@ fn run_chapter_production_inner(
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
     // Craft v2: the writer gets only the selected skills' render guidance;
     // the v1.2 enrichment stays in the receipts.
+    render_input["beatTargets"] = crate::chapter_craft::beat_targets(&plan_payload);
     render_input["craftGuidance"] = crate::chapter_craft::guidance(
         "render",
         &crate::chapter_craft::plan_signals(&plan_payload, chapter_number),
     )?;
+    let render_profile = gateway.resolve_render_profile()?;
     let reusable_render = retry_of_job_id
         .as_deref()
         .map(|previous_job_id| {
@@ -3181,8 +3238,8 @@ fn run_chapter_production_inner(
             model_run_id: new_render_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: provider_profile.provider.clone(),
-            model: provider_profile.model.clone(),
+            provider: render_profile.provider.clone(),
+            model: render_profile.model.clone(),
             idempotency_key: format!("{idempotency_key}:render"),
             capability: "RENDER_CHAPTER".into(),
             prompt_ref: None,
@@ -3196,7 +3253,7 @@ fn run_chapter_production_inner(
         let result = execute_production_model_with_profile(
             connection,
             gateway,
-            &provider_profile,
+            &render_profile,
             &render_spec,
             "RENDER_CHAPTER",
             render_input,
@@ -3244,8 +3301,8 @@ fn run_chapter_production_inner(
                 model_run_id: rewrite_run_id.clone(),
                 job_id: Some(job_id.clone()),
                 step_id: None,
-                provider: provider_profile.provider.clone(),
-                model: provider_profile.model.clone(),
+                provider: render_profile.provider.clone(),
+                model: render_profile.model.clone(),
                 idempotency_key: format!("{idempotency_key}:render:length-{rewrite}"),
                 capability: "RENDER_CHAPTER".into(),
                 prompt_ref: None,
@@ -3259,7 +3316,7 @@ fn run_chapter_production_inner(
             let result = execute_production_model_with_profile(
                 connection,
                 gateway,
-                &provider_profile,
+                &render_profile,
                 &rewrite_spec,
                 "RENDER_CHAPTER",
                 input,
@@ -3293,7 +3350,7 @@ fn run_chapter_production_inner(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":provider_profile.provider.clone(),"model":provider_profile.model.clone()},
+        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":render_profile.provider.clone(),"model":render_profile.model.clone()},
         "creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null)
     });
     let mut candidate = artifact(
@@ -6492,6 +6549,34 @@ mod tests {
             parse_provider_model_payload_for_capability(value, "RENDER_CHAPTER").unwrap(),
             json!({"body":"完整正文"})
         );
+    }
+
+    #[test]
+    fn craft_renderer_payload_escapes_raw_control_characters_in_the_body() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"第一段。\n\t第二段。\"}"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(value, "RENDER_CHAPTER").unwrap(),
+            json!({"body":"第一段。\n\t第二段。"})
+        );
+        let truncated = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"第一段。\n第二段"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(truncated, "RENDER_CHAPTER").unwrap(),
+            json!({"body":"第一段。\n第二段"})
+        );
+        let plan = json!({
+            "choices": [{
+                "message": {"content": "{\"chapterGoal\":\"一\n二\"}"}
+            }]
+        });
+        assert!(parse_provider_model_payload_for_capability(plan, "PLAN_STRATEGY").is_err());
     }
 
     #[test]

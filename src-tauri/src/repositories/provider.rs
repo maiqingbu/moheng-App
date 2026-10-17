@@ -52,6 +52,7 @@ impl ProviderSettingsRepository {
             "theme",
             "providerId",
             "modelId",
+            "renderModelId",
             "enabled",
             "timeoutMs",
         ];

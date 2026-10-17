@@ -141,44 +141,13 @@ pub fn plan_signals(plan: &Value, chapter_number: Option<u32>) -> StepSignals {
     }
 }
 
-/// What a rewrite must fix when a body missed the length range: the gap and
-/// every planned beat with the length it should reach.
-pub fn length_feedback(plan: &Value, range: ChapterLengthRange, count: i64) -> Value {
-    let scenes = plan
-        .get("sceneExecution")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|scene| {
-            let beats = scene
-                .get("beats")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let estimate = scene
-                .get("estimatedCharacters")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let per_beat = estimate / (beats.len().max(1) as i64);
-            json!({
-                "sceneType":scene.get("sceneType"),
-                "estimatedCharacters":estimate,
-                "beats":beats.iter().map(|beat| json!({"beat":beat,"targetCharacters":per_beat})).collect::<Vec<_>>()
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "previousCharacterCount":count,
-        "shortBy":(range.min - count).max(0),
-        "overBy":(count - range.ceiling()).max(0),
-        "scenes":scenes,
-        "instruction":"上一稿篇幅不在区间内，已作废。按本章规划重新完整写作：逐个节拍展开到目标篇幅，补足动作、对话、感受和细节；不要重复已有内容，也不要加入与场景目标无关的描写。"
-    })
-}
-
 /// Plan rejections the planner can fix itself, with what to tell it.
-const REPLANNABLE: [(&str, &str); 5] = [
-    ("B08_PLAN_LENGTH_OUT_OF_RANGE", "场景篇幅估计之和不在 chapterLengthRange 内：按区间调整场景和节拍数量，让内容自然撑起篇幅。"),
+const REPLANNABLE: [(&str, &str); 6] = [
+    (
+        "ROLLING_HORIZON_CAPACITY_INVALID",
+        "horizonPreview 条数不符合 horizonPreviewCapacity：容量为 0～2 时返回不超过容量的条数，否则返回 3 到 min(8, 容量) 条，每条都是 {\"objective\":string,\"tentative\":true}。",
+    ),
+    ("B08_PLAN_LENGTH_OUT_OF_RANGE", "每个场景都必须给出整数 estimatedCharacters，且所有场景之和要落在 chapterLengthRange 内：按区间调整场景和节拍数量，让内容自然撑起篇幅。"),
     ("B08_PLAN_ROLE_INVALID", "chapterRole 缺失或不在 chapterRoleOptions 中：从中选择一个本章角色，并让场景篇幅总和落在该角色的区间内。"),
     ("B08_PLAN_BEATS_INVALID", "每个场景都必须写出 sceneType、goal、conflict、turn、result，以及 2～4 个节拍（beats），每个节拍说明这一步发生了什么。"),
     ("B08_PLAN_BEATS_INSUFFICIENT", "节拍总数撑不起本章篇幅：增加真正的情节节拍（新的受挫、发现或选择）或增加场景，每个节拍约 250～400 字，不要靠描写凑字数。"),
@@ -218,6 +187,46 @@ pub fn check_plan(
 ) -> Result<(), String> {
     crate::chapter_length::validate_plan_length(plan, range)?;
     validate_plan_craft(plan, range, recent_chapters)
+}
+
+/// Every planned beat with the length it should reach: each scene's
+/// estimate split evenly over its beats.
+pub fn beat_targets(plan: &Value) -> Value {
+    plan.get("sceneExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|scene| {
+            let beats = scene
+                .get("beats")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let estimate = scene
+                .get("estimatedCharacters")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let per_beat = estimate / (beats.len().max(1) as i64);
+            json!({
+                "sceneType":scene.get("sceneType"),
+                "estimatedCharacters":estimate,
+                "beats":beats.iter().map(|beat| json!({"beat":beat,"targetCharacters":per_beat})).collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
+/// What a rewrite must fix when a body missed the length range: the gap and
+/// every planned beat with the length it should reach.
+pub fn length_feedback(plan: &Value, range: ChapterLengthRange, count: i64) -> Value {
+    let scenes = beat_targets(plan);
+    json!({
+        "previousCharacterCount":count,
+        "shortBy":(range.min - count).max(0),
+        "overBy":(count - range.ceiling()).max(0),
+        "scenes":scenes,
+        "instruction":"上一稿篇幅不在区间内，已作废。按本章规划重新完整写作：逐个节拍展开到目标篇幅，补足动作、对话、感受和细节；不要重复已有内容，也不要加入与场景目标无关的描写。"
+    })
 }
 
 #[cfg(test)]
@@ -336,6 +345,35 @@ mod tests {
         assert_eq!(signals.chapter_number, Some(5));
         assert_eq!(signals.chapter_role.as_deref(), Some("回报"));
         assert_eq!(signals.scene_types, vec!["战斗", "对话为主"]);
+    }
+
+    #[test]
+    fn craft_beat_targets_split_each_scene_estimate_over_its_beats() {
+        let committed = plan(
+            "普通",
+            "目标",
+            vec![scene("调查", 3, 900), scene("对峙", 2, 1000)],
+        );
+        let targets = beat_targets(&committed);
+        assert_eq!(targets[0]["sceneType"], "调查");
+        assert_eq!(
+            targets[0]["beats"][2],
+            json!({"beat":"节拍2","targetCharacters":300})
+        );
+        assert_eq!(targets[1]["beats"][0]["targetCharacters"], 500);
+        assert!(
+            plan_feedback("ROLLING_HORIZON_CAPACITY_INVALID").unwrap()["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("horizonPreviewCapacity")
+        );
+        assert!(plan_feedback("CHAPTER_NOT_FOUND").is_none());
+        assert!(
+            plan_feedback("B08_PLAN_LENGTH_OUT_OF_RANGE").unwrap()["instruction"]
+                .as_str()
+                .unwrap()
+                .contains("estimatedCharacters")
+        );
     }
 
     #[test]
