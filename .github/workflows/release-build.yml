@@ -1,0 +1,57 @@
+name: Release build (unsigned)
+
+# Private distribution builds for the platforms the local Intel Mac cannot
+# produce. Runs only on a manual trigger or a pushed `build-*` tag (which
+# builds that exact commit); installers are kept as private workflow
+# artifacts (no GitHub Release, no signing or notarization).
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "build-*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            bundle: dmg
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: msi
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - run: npm ci
+      - name: Build ${{ matrix.bundle }} with the pinned Tauri CLI
+        run: npx --yes @tauri-apps/cli@2.10.1 build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - name: Record SHA-256 of the installer
+        shell: bash
+        run: |
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}
+          for file in *.${{ matrix.bundle }}; do sha256sum "$file" 2>/dev/null || shasum -a 256 "$file"; done | tee SHA256SUMS.txt
+          echo "commit ${GITHUB_SHA}" >> SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moheng-${{ matrix.name }}-${{ github.sha }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/*.${{ matrix.bundle }}
+            src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
