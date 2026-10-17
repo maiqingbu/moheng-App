@@ -261,12 +261,16 @@ fn estimate_input_tokens(input: &Value) -> i64 {
 
 fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
     match capability {
+        // FX-18: a body may run 10% past the chapter length range maximum.
         "RENDER_CHAPTER" => input
-            .get("targetChineseCharacters")
+            .pointer("/chapterLengthRange/max")
             .and_then(Value::as_i64)
+            .map(|max| max + max / 10)
+            .or_else(|| input.get("targetChineseCharacters").and_then(Value::as_i64))
             .unwrap_or(1_800)
             .max(1),
         "PLAN_STRATEGY" => 1_500,
+        "CLASSIFY_ASSISTANT_INTENT" => 200,
         "AUDIT_EXTRACT" => 1_200,
         "REPAIR_CANDIDATE" => 1_200,
         "GENERATE_STORY_DIRECTIONS" => 2_400,
@@ -299,6 +303,22 @@ fn round_cost_cents(yuan: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx18_render_estimate_uses_the_chapter_length_range_maximum() {
+        let input = serde_json::json!({"chapterLengthRange":{"min":3000,"max":4000}});
+        assert_eq!(
+            super::estimate_output_tokens("RENDER_CHAPTER", &input),
+            4_400
+        );
+        assert_eq!(
+            super::estimate_output_tokens(
+                "RENDER_CHAPTER",
+                &serde_json::json!({"targetChineseCharacters":1800})
+            ),
+            1_800
+        );
+    }
+
     use super::{estimate_cost_cents, validate_entries, ModelPricingEntry};
     use serde_json::json;
 
