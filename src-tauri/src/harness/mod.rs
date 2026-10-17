@@ -443,12 +443,26 @@ pub fn plan_support_for_intent(
     intent: &str,
     created_at: &str,
 ) -> Result<SupportTaskPlan, String> {
-    let capabilities = match intent {
+    plan_support_for_context(scope, intent, true, created_at)
+}
+
+/// FX-21: chapter events are queried only when the question carries a
+/// chapter; the assistant page asks at project scope without one.
+pub fn plan_support_for_context(
+    scope: &ProjectScope,
+    intent: &str,
+    has_chapter: bool,
+    created_at: &str,
+) -> Result<SupportTaskPlan, String> {
+    let mut capabilities = match intent {
         "PLANNING_CONSTRAINTS" => vec!["query_plan_route", "diagnose_planning_constraints"],
         "KNOWLEDGE" => vec!["query_knowledge", "query_events", "query_evidence"],
         "CONTINUITY" => vec!["query_continuity", "query_events", "query_evidence"],
         _ => vec!["query_project_meta", "query_context_manifest"],
     };
+    if !has_chapter {
+        capabilities.retain(|capability| *capability != "query_events");
+    }
     let steps = capabilities
         .into_iter()
         .enumerate()

@@ -132,3 +132,21 @@ fn fx21_repair_and_change_entries_use_the_model_intent() {
         "IPC_INVALID:entry"
     );
 }
+
+#[test]
+fn fx21_knowledge_question_from_the_ui_without_a_chapter_does_not_fail() {
+    let (_temp, state) = setup(Some(
+        json!({"intent":"KNOWLEDGE","subjects":["沈砚"],"attribute":"知情"}),
+    ));
+    // The assistant page sends no chapter context.
+    let session = support_session_impl(
+        &state,
+        json!({"projectId":"p1","question":"沈砚清楚姐姐在哪吗？","mode":"DIAGNOSE","scope":"PROJECT","requestedAt":NOW}),
+    )
+    .unwrap();
+    assert_eq!(
+        capabilities(&session),
+        ["query_knowledge", "query_evidence"]
+    );
+    assert_eq!(session["finding"]["supportStatus"], "INSUFFICIENT");
+}

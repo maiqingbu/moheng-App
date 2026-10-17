@@ -5237,7 +5237,12 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         question,
         requested_at,
     );
-    let mut plan = crate::harness::plan_support_for_intent(&scope, &intent.intent, requested_at)?;
+    let mut plan = crate::harness::plan_support_for_context(
+        &scope,
+        &intent.intent,
+        request.get("chapterId").and_then(Value::as_str).is_some(),
+        requested_at,
+    )?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
