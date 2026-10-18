@@ -172,3 +172,54 @@ fn craft_a_reply_that_is_not_json_is_resent_once_and_the_chapter_commits() {
     .unwrap();
     assert_eq!(gateway.audits.load(Ordering::SeqCst), 2);
 }
+
+/// The first audit quotes a sentence that is not in the body (as a real
+/// audit did on 2026-10-18 by quoting the plan); later audits are correct.
+#[derive(Default)]
+struct UnlocatableQuoteOnceGateway {
+    audit_inputs: std::sync::Mutex<Vec<Value>>,
+}
+
+impl ProductionModelGateway for UnlocatableQuoteOnceGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let mut inputs = self.audit_inputs.lock().unwrap();
+            if inputs.is_empty() {
+                response.output["canonCandidates"][0]["evidence"]["quote"] =
+                    json!("林舟推门而入，计划里的句子");
+            }
+            inputs.push(input.clone());
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_audit_with_unlocatable_evidence_is_rerun_once_with_the_quotes() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(UnlocatableQuoteOnceGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-craft-audit-quotes";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:audit-quotes","idempotencyKey":"key:craft:audit-quotes",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let inputs = gateway.audit_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs[0].get("auditFeedback").is_none());
+    assert_eq!(
+        inputs[1]["auditFeedback"]["rejectedFor"],
+        "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+    );
+    assert_eq!(
+        inputs[1]["auditFeedback"]["unlocatableQuotes"],
+        json!(["林舟推门而入，计划里的句子"])
+    );
+}

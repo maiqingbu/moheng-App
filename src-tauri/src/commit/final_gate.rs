@@ -546,17 +546,14 @@ fn validate_budget(connection: &Connection, bundle: &CommitBundle) -> Result<(),
         if over_limit > 0 {
             return Err(CommitError::BudgetHardLimit);
         }
-        let run_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM model_runs AS model_run LEFT JOIN jobs ON jobs.job_id = model_run.job_id WHERE model_run.project_id = ?1 AND jobs.chapter_id = ?2",
-            [&bundle.project_id, &chapter_id],
-            |row| row.get(0),
+        let used = crate::repositories::runtime::chapter_model_runs_used(
+            connection,
+            &bundle.project_id,
+            &chapter_id,
+            &budget_id,
         )?;
-        let reserved_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM budget_reservations WHERE project_id = ?1 AND budget_ref = ?2 AND status = 'RESERVED'",
-            [&bundle.project_id, &budget_id],
-            |row| row.get(0),
-        )?;
-        if hard_max_runs > 0 && run_count + reserved_count >= hard_max_runs {
+        // Every run within the limit was allowed, so its result may commit.
+        if hard_max_runs > 0 && used > hard_max_runs {
             return Err(CommitError::BudgetHardLimit);
         }
     }

@@ -1913,6 +1913,28 @@ fn existing_model_status(
         .optional()?)
 }
 
+/// Model runs a chapter budget has used: the larger of the runs of the
+/// chapter's jobs and the runs that reserved against the budget. The runtime
+/// budget, the commit gate and the production projection all count with it.
+pub fn chapter_model_runs_used(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    budget_id: &str,
+) -> Result<i64, libsql_rusqlite::Error> {
+    let runs: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM model_runs AS model_run JOIN jobs ON jobs.job_id=model_run.job_id WHERE model_run.project_id=?1 AND jobs.chapter_id=?2",
+        libsql_rusqlite::params![project_id, chapter_id],
+        |row| row.get(0),
+    )?;
+    let reserved: i64 = connection.query_row(
+        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+        libsql_rusqlite::params![project_id, budget_id],
+        |row| row.get(0),
+    )?;
+    Ok(runs.max(reserved))
+}
+
 fn enforce_budget(
     connection: &Connection,
     spec: &ModelRunSpec,
@@ -1986,11 +2008,14 @@ fn enforce_budget(
         mark_budget_blocked(connection, spec, now)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
-    let used: i64 = connection.query_row(
-        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
-        libsql_rusqlite::params![project_id, budget_id],
-        |row| row.get(0),
-    )?;
+    let used = match &chapter_id {
+        Some(chapter_id) => chapter_model_runs_used(connection, &project_id, chapter_id, budget_id)?,
+        None => connection.query_row(
+            "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+            libsql_rusqlite::params![project_id, budget_id],
+            |row| row.get(0),
+        )?,
+    };
     let active_reserved_cost: i64 = connection.query_row(
         "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','OVER_LIMIT')",
         libsql_rusqlite::params![project_id, budget_id],

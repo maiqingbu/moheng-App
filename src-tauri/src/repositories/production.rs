@@ -191,18 +191,11 @@ impl ProductionRepository {
         else {
             return Ok(None);
         };
-        let runs: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM model_runs AS model_run JOIN jobs ON jobs.job_id=model_run.job_id WHERE model_run.project_id=?1 AND jobs.chapter_id=?2",
-            [project_id, chapter_id],
-            |row| row.get(0),
-        )?;
-        let reserved: i64 = connection.query_row(
-            "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
-            [project_id, budget_id.as_str()],
-            |row| row.get(0),
+        let used = crate::repositories::runtime::chapter_model_runs_used(
+            connection, project_id, chapter_id, &budget_id,
         )?;
         Ok(Some(
-            json!({"used":runs.max(reserved),"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}),
+            json!({"used":used,"limit":limit,"allowance":CHAPTER_RUN_ALLOWANCE}),
         ))
     }
 

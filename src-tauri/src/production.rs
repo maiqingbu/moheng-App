@@ -3756,7 +3756,8 @@ fn run_chapter_production_inner(
             .map_err(|error| error.to_string())?
             .flatten()
     };
-    let (audit_run_id, audit_payload) = if let Some((model_run_id, parsed)) = reusable_audit {
+    let audit_reused = reusable_audit.is_some();
+    let (mut audit_run_id, raw_audit) = if let Some((model_run_id, parsed)) = reusable_audit {
         (
             model_run_id,
             parse_provider_model_payload_for_capability(parsed, "AUDIT_EXTRACT")?,
@@ -3772,7 +3773,7 @@ fn run_chapter_production_inner(
             capability: "AUDIT_EXTRACT".into(),
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
-            budget_id: Some(production_budget_id),
+            budget_id: Some(production_budget_id.clone()),
             predicted_cost_cents: 0,
             cost_snapshot: None,
             attempt_no: 1,
@@ -3784,7 +3785,7 @@ fn run_chapter_production_inner(
             &provider_profile,
             &audit_spec,
             "AUDIT_EXTRACT",
-            audit_input,
+            audit_input.clone(),
             &now,
         )?;
         (
@@ -3794,21 +3795,80 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
         )
     };
-    let mut audit_payload = normalize_audit_model_output(audit_payload, &body);
-    let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
-    let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
-        connection,
-        &project_id,
-        &unplanned_task_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| error.to_string())?;
-    drop_invented_task_candidates(&mut audit_payload, &unplanned_task_ids, &known_task_ids);
-    let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
-        .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
-    validate_audit_completeness(&audit_payload, &extraction)?;
+    let check_audit = |raw: Value| -> Result<(Value, AuditExtraction), String> {
+        let mut audit_payload = normalize_audit_model_output(raw, &body);
+        let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
+        let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
+            connection,
+            &project_id,
+            &unplanned_task_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        drop_invented_task_candidates(&mut audit_payload, &unplanned_task_ids, &known_task_ids);
+        let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
+            .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
+        validate_audit_completeness(&audit_payload, &extraction)?;
+        Ok((audit_payload, extraction))
+    };
+    // Craft rule (2026-10-18): an audit whose evidence cannot be located in
+    // the body (for example quoting the plan) is run once more with the
+    // unlocatable quotes; a second failure still blocks the chapter.
+    let (mut audit_payload, mut extraction) = match check_audit(raw_audit.clone()) {
+        Err(error)
+            if !audit_reused
+                && matches!(
+                    error.as_str(),
+                    "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+                        | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
+                ) =>
+        {
+            let rerun_id = StableIdentityFactory::from_command(
+                StableIdKind::ModelRun,
+                &format!("{command_id}:audit-feedback"),
+            )?;
+            let mut input = audit_input;
+            input["auditFeedback"] = json!({
+                "rejectedFor":error,
+                "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
+                "instruction":"上次提取中这些引文在正文 body 中找不到（可能引用了规划或改写了原文）。请重新提取：每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
+            });
+            let rerun_spec = ModelRunSpec {
+                model_run_id: rerun_id.clone(),
+                job_id: Some(job_id.clone()),
+                step_id: None,
+                provider: provider_profile.provider.clone(),
+                model: provider_profile.model.clone(),
+                idempotency_key: format!("{idempotency_key}:audit-feedback"),
+                capability: "AUDIT_EXTRACT".into(),
+                prompt_ref: None,
+                context_manifest_ref: Some(context_ref.artifact_id.clone()),
+                budget_id: Some(production_budget_id.clone()),
+                predicted_cost_cents: 0,
+                cost_snapshot: None,
+                attempt_no: 2,
+                repair_round: 0,
+            };
+            let result = execute_production_model_with_profile(
+                connection,
+                gateway,
+                &provider_profile,
+                &rerun_spec,
+                "AUDIT_EXTRACT",
+                input,
+                &now,
+            )?;
+            audit_run_id = rerun_id;
+            check_audit(
+                result
+                    .parsed
+                    .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
+            )?
+        }
+        other => other?,
+    };
     validate_actual_extraction(
         connection,
         &project_id,
@@ -4790,6 +4850,46 @@ fn validate_audit_candidate_binding_value(
     Ok(())
 }
 
+/// Evidence quotes of a raw audit reply that occur nowhere in the body, even
+/// ignoring whitespace or across an ellipsis.
+fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
+    let squeezed = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let body_squeezed = squeezed(body);
+    let mut quotes = Vec::new();
+    let fields = [
+        "canonCandidates",
+        "knowledgeCandidates",
+        "continuityCandidates",
+        "taskProgressCandidates",
+    ];
+    let candidate_quotes = fields.iter().flat_map(|field| {
+        raw.get(*field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.pointer("/evidence/quote").and_then(Value::as_str))
+    });
+    let range_quotes = raw
+        .get("evidenceRanges")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("quote").and_then(Value::as_str));
+    for quote in candidate_quotes.chain(range_quotes) {
+        let found = body.contains(quote)
+            || body_squeezed.contains(&squeezed(quote))
+            || bounded_ellipsis_span(body, quote).is_some();
+        if !quote.is_empty() && !found && !quotes.iter().any(|known| known == quote) {
+            quotes.push(quote.to_owned());
+        }
+    }
+    quotes
+}
+
 fn validate_audit_completeness(
     audit_payload: &Value,
     audit: &AuditExtraction,
@@ -5027,10 +5127,24 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                     return false;
                 };
                 let normalized_state = match state {
-                    "KNOWS" | "KNOWS_WITH_CONTEXT" | "KNOWS_WITH_EVIDENCE" | "KNOWS_FACT" => {
-                        "KNOWS"
-                    }
+                    "KNOWS"
+                    | "KNOWS_WITH_CONTEXT"
+                    | "KNOWS_WITH_EVIDENCE"
+                    | "KNOWS_FACT"
+                    | "REMEMBERS"
+                    | "REMEMBERED"
+                    | "RECALLS"
+                    | "RECALLED"
+                    | "REALIZES"
+                    | "REALIZED"
+                    | "LEARNS"
+                    | "LEARNED"
+                    | "DISCOVERS"
+                    | "DISCOVERED" => "KNOWS",
                     "BELIEVES_TRUE" | "BELIEVES" => "BELIEVES_TRUE",
+                    "DOUBTS" | "INFERS" => "SUSPECTS",
+                    "HIDES" => "CONCEALS",
+                    "FORGETS" | "FORGOT" | "FORGOTTEN" => "UNKNOWN",
                     "BELIEVES_FALSE" | "SUSPECTS" | "CONCEALS" | "UNKNOWN" => state,
                     _ => return false,
                 };
@@ -7038,6 +7152,37 @@ mod tests {
             "你好世界",
         );
         assert_eq!(unknown["knowledgeCandidates"], json!([]));
+    }
+
+    #[test]
+    fn audit_normalization_maps_common_knowledge_state_synonyms() {
+        // Seen on 2026-10-18: a real audit reported REMEMBERED.
+        for (state, expected) in [
+            ("REMEMBERED", "KNOWS"),
+            ("RECALLS", "KNOWS"),
+            ("REALIZES", "KNOWS"),
+            ("LEARNED", "KNOWS"),
+            ("DOUBTS", "SUSPECTS"),
+            ("HIDES", "CONCEALS"),
+            ("FORGOTTEN", "UNKNOWN"),
+        ] {
+            let normalized = normalize_audit_model_output(
+                json!({
+                    "knowledgeCandidates":[{
+                        "knowledgeId":"know:synonym",
+                        "knowerId":"entity:hero",
+                        "factId":"fact:hero",
+                        "epistemicState":state,
+                        "evidence":{"start":0,"end":2,"quote":"你好"}
+                    }]
+                }),
+                "你好世界",
+            );
+            assert_eq!(
+                normalized["knowledgeCandidates"][0]["epistemicState"], expected,
+                "{state}"
+            );
+        }
     }
 
     #[test]

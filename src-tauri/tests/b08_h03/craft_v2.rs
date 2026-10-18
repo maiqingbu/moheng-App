@@ -385,3 +385,33 @@ fn craft_v2_only_the_writer_uses_the_writing_model() {
     assert!(!models("PLAN_STRATEGY").contains(&"writer-model".to_string()));
     assert!(!models("AUDIT_EXTRACT").contains(&"writer-model".to_string()));
 }
+
+#[test]
+fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
+    let project_id = "p-craft-exact-limit";
+    let connection = state
+        .manager
+        .create(project_id, "Craft limit", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    // Plan, two parts and the audit: four runs (no v1.2 repair).
+    connection
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=4 WHERE project_id=?1",
+            [project_id],
+        )
+        .unwrap();
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:craft:exact","idempotencyKey":"key:craft:exact",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+}
