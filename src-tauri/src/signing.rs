@@ -1472,13 +1472,9 @@ pub fn execute_opening_evaluation_with_observer(
             return Ok((model_results(None, &chapters, Some(reason), None), None));
         }
         let profile = gateway.resolve_profile()?;
-        let first_chapter_id = chapters
-            .first()
-            .map(|chapter| chapter.chapter_id.as_str())
-            .ok_or_else(|| "B02_OPENING_THREE_CHAPTERS_REQUIRED".to_string())?;
-        let budget_id =
-            DurableModelRunner::chapter_budget_id(&handle, &project_id, first_chapter_id)
-                .map_err(|error| error.to_string())?;
+        // The evaluation belongs to the project, not to chapter 1's
+        // production quota, which a hard-won chapter may have used up.
+        let budget_id = DurableModelRunner::project_budget_id(&project_id);
         let run_id = StableIdentityFactory::from_command(
             StableIdKind::ModelRun,
             &format!("{command_id}:signing-evaluation"),
@@ -1510,14 +1506,26 @@ pub fn execute_opening_evaluation_with_observer(
             "bundleDigest":input["bundleDigest"],
             "taskContext":{"taskId":input.pointer("/taskContext/taskId")}
         });
-        let outcome = execute_production_model(
-            &handle,
-            gateway,
-            &spec,
-            SIGNING_EVALUATION_CAPABILITY,
-            input,
-            &now,
-        )?;
+        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec| {
+            if spec.attempt_no > 1 {
+                DurableJobService::reopen_b02_phase_job_for_resend(
+                    &handle,
+                    &project_id,
+                    &job_id,
+                    worker_id,
+                    &now,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            execute_production_model(
+                &handle,
+                gateway,
+                spec,
+                SIGNING_EVALUATION_CAPABILITY,
+                input.clone(),
+                &now,
+            )
+        })?;
         Ok((
             model_results(
                 outcome.parsed.as_ref(),

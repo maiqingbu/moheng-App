@@ -223,3 +223,150 @@ fn craft_audit_with_unlocatable_evidence_is_rerun_once_with_the_quotes() {
         json!(["林舟推门而入，计划里的句子"])
     );
 }
+
+/// Every audit quotes a sentence that is not in the body.
+#[derive(Default)]
+struct UnlocatableQuoteAlwaysGateway {
+    audits: std::sync::atomic::AtomicUsize,
+}
+
+impl ProductionModelGateway for UnlocatableQuoteAlwaysGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            self.audits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut extra = response.output["canonCandidates"][0].clone();
+            extra["factId"] = json!("fact:plan-quote");
+            extra["evidence"]["quote"] = json!("林舟推门而入，计划里的句子");
+            response.output["canonCandidates"]
+                .as_array_mut()
+                .unwrap()
+                .push(extra);
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_audit_still_unlocatable_after_the_rerun_drops_and_records_the_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(UnlocatableQuoteAlwaysGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-craft-audit-drop";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:audit-drop","idempotencyKey":"key:craft:audit-drop",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    assert_eq!(gateway.audits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    let dropped: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.audit.normalization.droppedUnlocatable') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.artifact_type='ReviewReport'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(dropped.contains("fact:plan-quote"));
+}
+
+/// The audit reports the reveal of a reservation the project never had, as
+/// a real audit did on 2026-10-19.
+struct InventedReservationGateway;
+
+impl ProductionModelGateway for InventedReservationGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["revealedReservationRefs"] = json!(["resv:invented:secret"]);
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_audit_reveal_of_an_unknown_reservation_is_dropped_and_recorded() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(InventedReservationGateway),
+    );
+    let project_id = "p-craft-invented-reservation";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:invented-resv","idempotencyKey":"key:craft:invented-resv",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    let dropped: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.audit.normalization.droppedInventedReservations') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.artifact_type='ReviewReport'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dropped, "[\"resv:invented:secret\"]");
+}
+
+/// The audit names a new fact with the id of a fact already in Canon, as a
+/// real audit did on 2026-10-19 by copying ids from the authority context.
+struct ReusedFactIdGateway;
+
+impl ProductionModelGateway for ReusedFactIdGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["canonCandidates"][0]["factId"] = json!("fact:actual:seed");
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_a_new_fact_reusing_an_existing_fact_id_gets_its_own_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(ReusedFactIdGateway),
+    );
+    let project_id = "p-craft-reused-fact-id";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:reused-id","idempotencyKey":"key:craft:reused-id",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    // The committed fact keeps its row; the new fact is stored beside it.
+    let seed: (String, String) = connection
+        .query_row(
+            "SELECT predicate, object_json FROM canon_facts WHERE fact_id='fact:actual:seed'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(seed, ("location".to_string(), "{\"place\":\"stone-door\"}".to_string()));
+    let opened: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE predicate='opened' AND fact_id<>'fact:actual:seed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(opened, 1);
+}

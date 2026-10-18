@@ -1847,6 +1847,25 @@ pub fn validate_task_reality(
     route_plan: &Value,
     task_states: &[(&str, &str)],
 ) -> Result<(), String> {
+    for task_ref in chapter_plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        task_ready(task_ref, route_plan, task_states)?;
+    }
+    Ok(())
+}
+
+/// Whether a chapter may work on `task_ref` now: a planned, unreserved task
+/// that is neither invalidated nor blocked and whose dependencies are met.
+pub fn task_ready(
+    task_ref: &str,
+    route_plan: &Value,
+    task_states: &[(&str, &str)],
+) -> Result<(), String> {
     let tasks = route_plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -1855,35 +1874,27 @@ pub fn validate_task_reality(
         .iter()
         .copied()
         .collect::<std::collections::BTreeMap<_, _>>();
-    for task_ref in chapter_plan
-        .get("activeTaskRefs")
+    let task = tasks
+        .iter()
+        .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
+        .ok_or("TASK_SCOPE_VIOLATION")?;
+    if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
+        return Err("TASK_SCOPE_VIOLATION".into());
+    }
+    match states.get(task_ref).copied() {
+        Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
+        Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
+        _ => {}
+    }
+    for dependency in task
+        .get("dependsOnTaskIds")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
     {
-        let task = tasks
-            .iter()
-            .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
-            .ok_or("TASK_SCOPE_VIOLATION")?;
-        if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
-            return Err("TASK_SCOPE_VIOLATION".into());
-        }
-        match states.get(task_ref).copied() {
-            Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
-            Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
-            _ => {}
-        }
-        for dependency in task
-            .get("dependsOnTaskIds")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if states.get(dependency).copied() != Some("SATISFIED") {
-                return Err("TASK_DEPENDENCY_UNMET".into());
-            }
+        if states.get(dependency).copied() != Some("SATISFIED") {
+            return Err("TASK_DEPENDENCY_UNMET".into());
         }
     }
     Ok(())

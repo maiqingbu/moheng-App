@@ -1355,15 +1355,26 @@ pub fn execute_production_model_with_profile(
     input: Value,
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
-    match execute_production_model_with_profile_once(
-        connection,
-        gateway,
-        profile,
-        spec,
-        capability,
-        input.clone(),
-        now,
-    ) {
+    resend_once_on_invalid_json(spec, |spec| {
+        execute_production_model_with_profile_once(
+            connection,
+            gateway,
+            profile,
+            spec,
+            capability,
+            input.clone(),
+            now,
+        )
+    })
+}
+
+/// Runs `run` with `spec`; a reply that is not valid JSON is resent once as
+/// a new model run (FX-19), and the bad run stays recorded as failed.
+pub fn resend_once_on_invalid_json(
+    spec: &ModelRunSpec,
+    run: impl Fn(&ModelRunSpec) -> Result<ModelRunOutcome, String>,
+) -> Result<ModelRunOutcome, String> {
+    match run(spec) {
         Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
             let resend = ModelRunSpec {
                 model_run_id: StableIdentityFactory::from_command(
@@ -1374,9 +1385,7 @@ pub fn execute_production_model_with_profile(
                 attempt_no: spec.attempt_no + 1,
                 ..spec.clone()
             };
-            execute_production_model_with_profile_once(
-                connection, gateway, profile, &resend, capability, input, now,
-            )
+            run(&resend)
         }
         result => result,
     }
@@ -3282,6 +3291,8 @@ fn run_chapter_production_inner(
     // beats each, enough beats for the range), so it is written in two parts.
     let two_parts = gateway.enforces_chapter_length()
         && crate::chapter_craft::part_split(&plan_payload).is_some();
+    // An earlier audit only fits a retry that reuses that attempt's prose.
+    let mut render_reused = false;
     let (render_run_id, mut body) = if two_parts {
         // Owner decision (2026-10-18): a writer call yields a steady length
         // about half a chapter, so a chapter is written in two parts; the
@@ -3291,9 +3302,8 @@ fn run_chapter_production_inner(
         // A phrase used a third time across the recent chapters fails the
         // signing check (F1-5), so a first part that does so is rewritten
         // once with those phrases, keeping the version with fewer.
-        let overused = |history: &[String], text: &str| {
-            crate::chapter_craft::overused_phrases(history, text)
-        };
+        let overused =
+            |history: &[String], text: &str| crate::chapter_craft::overused_phrases(history, text);
         let first_input =
             crate::chapter_craft::part_render_input(&render_input, &plan_payload, 0, "");
         let (_, first) = render_once(":part-1", 1, first_input.clone())?;
@@ -3308,8 +3318,7 @@ fn run_chapter_production_inner(
             let length = character_count(&rewrite);
             let in_range = part_range["min"].as_i64().is_some_and(|min| length >= min)
                 && part_range["max"].as_i64().is_some_and(|max| length <= max);
-            if in_range
-                && overused(&chapter_history.bodies, &rewrite).len() <= first_overused.len()
+            if in_range && overused(&chapter_history.bodies, &rewrite).len() <= first_overused.len()
             {
                 first = rewrite;
             }
@@ -3393,6 +3402,7 @@ fn run_chapter_production_inner(
             .transpose()
             .map_err(|error| error.to_string())?
             .flatten();
+        render_reused = reusable_render.is_some();
         let (run_id, body) = if let Some((model_run_id, parsed)) = reusable_render {
             let payload = parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?;
             let body = payload
@@ -3823,7 +3833,7 @@ fn run_chapter_production_inner(
         };
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
     let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
-    let reusable_audit = if candidate_repaired {
+    let reusable_audit = if candidate_repaired || !render_reused {
         None
     } else {
         retry_of_job_id
@@ -3880,8 +3890,27 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
         )
     };
-    let check_audit = |raw: Value| -> Result<(Value, AuditExtraction), String> {
+    let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
+        let claimed_fact_ids = raw
+            .get("canonCandidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("factId").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let existing_fact_ids =
+            crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
+                connection,
+                &project_id,
+                &claimed_fact_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .map_err(|error| error.to_string())?;
+        let renamed_fact_ids = fresh_audit_fact_ids(&mut raw, &existing_fact_ids, &chapter_id);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
+        if !renamed_fact_ids.is_empty() {
+            audit_payload["normalization"]["renamedFactIds"] = json!(renamed_fact_ids);
+        }
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
             connection,
@@ -3893,6 +3922,47 @@ fn run_chapter_production_inner(
         )
         .map_err(|error| error.to_string())?;
         drop_invented_task_candidates(&mut audit_payload, &unplanned_task_ids, &known_task_ids);
+        // A reveal of a reservation neither this plan nor the BookPlan names
+        // is an audit invention: it is dropped and recorded. A real
+        // reservation revealed outside the plan still fails the chapter.
+        let unplanned_reveals = audit_payload
+            .get("revealedReservationRefs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|reference| {
+                !plan_payload
+                    .get("reservationRefs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|refs| refs.iter().any(|item| item == reference))
+            })
+            .collect::<Vec<_>>();
+        let known_reservations =
+            crate::repositories::narrative::NarrativeRepository::known_reservation_refs(
+                connection,
+                &project_id,
+                &unplanned_reveals,
+            )
+            .map_err(|error| error.to_string())?;
+        let invented_reveals = unplanned_reveals
+            .into_iter()
+            .filter(|reference| !known_reservations.contains(*reference))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if let Some(reveals) = audit_payload
+            .get_mut("revealedReservationRefs")
+            .and_then(Value::as_array_mut)
+        {
+            reveals.retain(|item| {
+                !item
+                    .as_str()
+                    .is_some_and(|r| invented_reveals.iter().any(|i| i == r))
+            });
+        }
+        if !invented_reveals.is_empty() {
+            audit_payload["normalization"]["droppedInventedReservations"] = json!(invented_reveals);
+        }
         let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
             .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
         validate_audit_completeness(&audit_payload, &extraction)?;
@@ -3958,17 +4028,28 @@ fn run_chapter_production_inner(
                 &now,
             )?;
             audit_run_id = rerun_id;
-            check_audit(
-                result
-                    .parsed
-                    .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
-            )?
+            let rerun_raw = result
+                .parsed
+                .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+            match check_audit(rerun_raw.clone()) {
+                Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
+                    let (kept, dropped) = drop_unlocatable_audit_candidates(&rerun_raw, &body);
+                    let (mut payload, extraction) = check_audit(kept)?;
+                    payload["normalization"]["droppedUnlocatable"] = dropped;
+                    (payload, extraction)
+                }
+                other => other?,
+            }
         }
         other => other?,
     };
     if !extraction.dropped_unbound_knowledge.is_empty() {
         audit_payload["normalization"]["droppedUnboundKnowledge"] =
             json!(extraction.dropped_unbound_knowledge);
+    }
+    if !extraction.downgraded_task_claims.is_empty() {
+        audit_payload["normalization"]["downgradedTaskClaims"] =
+            json!(extraction.downgraded_task_claims);
     }
     let planned_continuity_refs = plan_payload
         .get("continuityActions")
@@ -4915,6 +4996,10 @@ struct AuditExtraction {
     /// this audit; dropped from the commit and kept here as a durable record.
     #[serde(default)]
     dropped_unbound_knowledge: Vec<Value>,
+    /// Completion claims whose dependencies or predicate are unmet; kept as
+    /// progress (ACTIVE) and recorded here.
+    #[serde(default)]
+    downgraded_task_claims: Vec<Value>,
     /// FX-17: new fact id -> the open fact from an earlier chapter it replaces.
     #[serde(default)]
     canon_transitions: BTreeMap<String, String>,
@@ -4951,6 +5036,7 @@ fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
             .collect::<String>()
     };
     let body_squeezed = squeezed(body);
+    let body_chars = body.chars().collect::<Vec<_>>();
     let mut quotes = Vec::new();
     let fields = [
         "canonCandidates",
@@ -4974,7 +5060,8 @@ fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
     for quote in candidate_quotes.chain(range_quotes) {
         let found = body.contains(quote)
             || body_squeezed.contains(&squeezed(quote))
-            || bounded_ellipsis_span(body, quote).is_some();
+            || bounded_ellipsis_span(body, quote).is_some()
+            || omission_unique_span(&body_chars, quote).is_some();
         if !quote.is_empty() && !found && !quotes.iter().any(|known| known == quote) {
             quotes.push(quote.to_owned());
         }
@@ -5178,7 +5265,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             // breaks) still identifies one exact passage of the body.
             if !offsets_reproduce_quote && matches.is_empty() {
                 let span = whitespace_insensitive_unique_span(&body_chars, quote)
-                    .or_else(|| bounded_ellipsis_span(body, quote));
+                    .or_else(|| bounded_ellipsis_span(body, quote))
+                    .or_else(|| omission_unique_span(&body_chars, quote));
                 if let Some((start, end)) = span {
                     return Some(json!({
                         "start":start,
@@ -5479,6 +5567,148 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
     Some((positions[offset], positions[offset + needle.len() - 1] + 1))
 }
 
+/// A new Canon fact must never reuse the id of a committed fact (the commit
+/// would overwrite it) or of another fact in the same audit. Such facts get
+/// an id of their own, and knowledge in the audit that names the reused id
+/// follows the new fact. Returns `{from, to}` for each renamed fact.
+fn fresh_audit_fact_ids(
+    raw: &mut Value,
+    existing: &BTreeSet<String>,
+    chapter_id: &str,
+) -> Vec<Value> {
+    let prefix = sha256_canonical(&json!(chapter_id))
+        .map(|digest| digest.chars().take(24).collect::<String>())
+        .unwrap_or_default();
+    let mut taken = existing.clone();
+    let mut seen = BTreeSet::new();
+    let mut renamed = Vec::new();
+    let mut mapping = BTreeMap::<String, String>::new();
+    let mut next = 1_usize;
+    if let Some(items) = raw.get_mut("canonCandidates").and_then(Value::as_array_mut) {
+        for item in items {
+            let Some(fact_id) = item.get("factId").and_then(Value::as_str).map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            if !existing.contains(&fact_id) && seen.insert(fact_id.clone()) {
+                taken.insert(fact_id);
+                continue;
+            }
+            let fresh = loop {
+                let candidate = format!("canon:{prefix}:{next}");
+                next += 1;
+                if !taken.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            taken.insert(fresh.clone());
+            item["factId"] = json!(fresh);
+            mapping.entry(fact_id.clone()).or_insert_with(|| fresh.clone());
+            renamed.push(json!({"from":fact_id,"to":fresh}));
+        }
+    }
+    if let Some(items) = raw.get_mut("knowledgeCandidates").and_then(Value::as_array_mut) {
+        for item in items {
+            let target = item
+                .get("factId")
+                .and_then(Value::as_str)
+                .and_then(|fact_id| mapping.get(fact_id))
+                .cloned();
+            if let Some(target) = target {
+                item["factId"] = json!(target);
+            }
+        }
+    }
+    renamed
+}
+
+/// Owner decision (2026-10-18): a quote that left words out of one body
+/// passage binds to that whole passage when its characters occur there in
+/// order, cover at least two thirds of it, and no other passage matches.
+fn omission_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
+    let needle = quote
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if needle.len() < 8 {
+        return None;
+    }
+    let limit = needle.len() * 3 / 2;
+    let mut spans = Vec::new();
+    for start in (0..body.len()).filter(|&index| body[index] == needle[0]) {
+        let (mut matched, mut length, mut index) = (0, 0, start);
+        while index < body.len() && matched < needle.len() && length <= limit {
+            if !body[index].is_whitespace() {
+                length += 1;
+                if body[index] == needle[matched] {
+                    matched += 1;
+                }
+            }
+            index += 1;
+        }
+        if matched == needle.len() && length <= limit {
+            spans.push((start, index));
+        }
+    }
+    // Keep only the tightest spans; one must remain.
+    let tight = spans
+        .iter()
+        .filter(|outer| {
+            !spans
+                .iter()
+                .any(|inner| inner != *outer && outer.0 <= inner.0 && inner.1 <= outer.1)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    match tight.as_slice() {
+        [span] => Some(*span),
+        _ => None,
+    }
+}
+
+/// Whether `quote` identifies exactly one passage of `body`.
+fn quote_locates_uniquely(body: &str, body_chars: &[char], quote: &str) -> bool {
+    body.matches(quote).count() == 1
+        || whitespace_insensitive_unique_span(body_chars, quote).is_some()
+        || bounded_ellipsis_span(body, quote).is_some()
+        || omission_unique_span(body_chars, quote).is_some()
+}
+
+/// Owner decision (2026-10-18): after the audit rerun, candidates whose
+/// quote still identifies no single body passage are dropped and named, as
+/// facts without evidence are; evidence ranges that fail the same way go.
+fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) {
+    let body_chars = body.chars().collect::<Vec<_>>();
+    let unlocatable = |quote: Option<&str>| {
+        quote.is_some_and(|quote| {
+            !quote.is_empty() && !quote_locates_uniquely(body, &body_chars, quote)
+        })
+    };
+    let mut kept = raw.clone();
+    let mut dropped = Vec::new();
+    for (field, id_key) in [
+        ("canonCandidates", "factId"),
+        ("knowledgeCandidates", "knowledgeId"),
+        ("continuityCandidates", "threadRef"),
+        ("taskProgressCandidates", "taskId"),
+    ] {
+        if let Some(items) = kept.get_mut(field).and_then(Value::as_array_mut) {
+            items.retain(|item| {
+                let quote = item.pointer("/evidence/quote").and_then(Value::as_str);
+                if !unlocatable(quote) {
+                    return true;
+                }
+                dropped.push(json!({"field":field,"id":item.get(id_key),"quote":quote}));
+                false
+            });
+        }
+    }
+    if let Some(ranges) = kept.get_mut("evidenceRanges").and_then(Value::as_array_mut) {
+        ranges.retain(|range| !unlocatable(range.get("quote").and_then(Value::as_str)));
+    }
+    (kept, json!(dropped))
+}
+
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
     validate_candidate_evidence_range(body, evidence.start, evidence.end)?;
     let actual = body
@@ -5736,7 +5966,10 @@ fn validate_actual_extraction(
     }
     audit.canon_transitions = canon_transitions;
     audit.canon_duplicate_transitions = duplicate_transitions;
-    for candidate in &audit.task_progress_candidates {
+    let mut downgraded = Vec::new();
+    // Completion predicates read the rest of this audit (its canon).
+    let canon_view = audit.clone();
+    for candidate in &mut audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
         if !active_tasks.contains(candidate.task_id.as_str()) {
             return Err("B08_TASK_SCOPE_VIOLATION".into());
@@ -5747,10 +5980,21 @@ fn validate_actual_extraction(
         ) {
             return Err("B08_TASK_STATUS_INVALID".into());
         }
+        // The volume plan's predicate decides completion: an audit claim it
+        // does not support only records progress (2026-10-19).
         if candidate.status == "SATISFIED" {
-            validate_task_completion_claim(connection, project_id, chapter_id, candidate, audit)?;
+            if let Err(error) =
+                validate_task_completion_claim(connection, project_id, chapter_id, candidate, &canon_view)
+            {
+                if error != "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED" {
+                    return Err(error);
+                }
+                candidate.status = "ACTIVE".into();
+                downgraded.push(json!({"taskId":candidate.task_id,"claimed":"SATISFIED","reason":error}));
+            }
         }
     }
+    audit.downgraded_task_claims = downgraded;
     for candidate in &audit.continuity_candidates {
         let planned = continuity.contains(candidate.thread_ref.as_str());
         if let Some(evidence) = &candidate.evidence {
@@ -7453,6 +7697,43 @@ mod tests {
             "只有指令"
         );
         assert_eq!(serialize_provider_input(&json!({"a":1})), "{\"a\":1}");
+    }
+
+    #[test]
+    fn omission_span_binds_a_quote_that_left_out_words_to_its_one_passage() {
+        let body = "雨停了。沈砚没动。他慢慢从内袋掏出信封，纸面泛黄卷边。门开了。"
+            .chars()
+            .collect::<Vec<_>>();
+        let (start, end) =
+            omission_unique_span(&body, "沈砚从内袋掏出信封，纸面泛黄卷边。").unwrap();
+        assert_eq!(
+            body[start..end].iter().collect::<String>(),
+            "沈砚没动。他慢慢从内袋掏出信封，纸面泛黄卷边。"
+        );
+        // Reordered or invented text never binds.
+        assert!(omission_unique_span(&body, "纸面泛黄卷边。沈砚从内袋掏出信封，").is_none());
+        assert!(omission_unique_span(&body, "确立对抗档案局掩盖真相的决心。").is_none());
+    }
+
+    #[test]
+    fn unlocatable_candidates_are_dropped_and_named() {
+        let body = "林舟推开石门。他看见一盏灯。";
+        let (kept, dropped) = drop_unlocatable_audit_candidates(
+            &json!({
+                "canonCandidates":[
+                    {"factId":"fact:door","evidence":{"start":0,"end":7,"quote":"林舟推开石门。"}},
+                    {"factId":"fact:plan","evidence":{"start":0,"end":5,"quote":"确立对抗的决心。"}}
+                ],
+                "evidenceRanges":[{"start":0,"end":5,"quote":"确立对抗的决心。"}]
+            }),
+            body,
+        );
+        assert_eq!(kept["canonCandidates"].as_array().unwrap().len(), 1);
+        assert_eq!(kept["evidenceRanges"], json!([]));
+        assert_eq!(
+            dropped,
+            json!([{"field":"canonCandidates","id":"fact:plan","quote":"确立对抗的决心。"}])
+        );
     }
 
     #[test]

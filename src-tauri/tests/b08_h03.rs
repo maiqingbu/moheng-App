@@ -857,10 +857,6 @@ impl ProductionModelGateway for AuditVariantGateway {
                         "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                     }])
                 }
-                "reservation" => {
-                    response.output["revealedReservationRefs"] =
-                        json!(["reservation:not-authorized"])
-                }
                 "blocked" => {
                     response.output["taskProgressCandidates"] = json!([{
                         "taskId":"task:actual",
@@ -5563,17 +5559,14 @@ fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks()
     }
 }
 
+/// A reveal of a reservation the project never declared is an audit
+/// invention and is dropped (fx19); a declared reservation revealed outside
+/// the plan still blocks (`plan_foreshadow_actual_reveal_is_blocked`).
 #[test]
-fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
-    for (suffix, variant, expected_error, expected_reconciliation) in [
-        (
-            "reservation",
-            "reservation",
-            Some("B08_RESERVATION_VIOLATION"),
-            None,
-        ),
-        ("blocked", "blocked", None, Some("REPLAN_VOLUME_ROUTE")),
-    ] {
+fn b08_reconciliation_uses_actual_task_state() {
+    {
+        let (suffix, variant, expected_error, expected_reconciliation) =
+            ("blocked", "blocked", None::<&str>, Some("REPLAN_VOLUME_ROUTE"));
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-b08-audit-{suffix}");
         let state = KernelState::with_production_gateway(

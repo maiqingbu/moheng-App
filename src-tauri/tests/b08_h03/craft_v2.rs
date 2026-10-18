@@ -11,6 +11,8 @@ struct CraftGateway {
     punctuation_sample: bool,
     /// Times writer call N repeats `MOTIF` (missing calls repeat it none).
     motifs: Vec<usize>,
+    /// The first audit reports an unresolved hard problem.
+    fail_first_audit: bool,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -21,6 +23,7 @@ impl CraftGateway {
             body_lengths: body_lengths.to_vec(),
             punctuation_sample: false,
             motifs: Vec::new(),
+            fail_first_audit: false,
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -77,7 +80,12 @@ impl ProductionModelGateway for CraftGateway {
             .lock()
             .unwrap()
             .push((capability.to_string(), input.clone()));
+        let audits = self.inputs("AUDIT_EXTRACT").len();
         let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" && self.fail_first_audit && audits == 1 {
+            response.output["unresolvedHard"] = json!(true);
+            response.output["auditCompleteness"] = json!("UNRESOLVED_HARD");
+        }
         if capability == "PLAN_STRATEGY" {
             let plan = self
                 .plans
@@ -591,4 +599,40 @@ fn craft_v2_a_rewritten_first_part_outside_its_length_range_is_not_kept() {
         .as_str()
         .unwrap()
         .contains("蓝莓籽"));
+}
+
+#[test]
+fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
+    let gateway = Arc::new(CraftGateway {
+        fail_first_audit: true,
+        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+    });
+    let project_id = "p-craft-retry-audit";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    assert_eq!(result.unwrap_err(), "B08_AUDIT_UNRESOLVED_HARD");
+    let connection = state.manager.open(project_id, "Craft v2", NOW).unwrap();
+    let failed_job: String = connection
+        .query_row(
+            "SELECT job_id FROM jobs WHERE project_id=?1 AND status='FAILED'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=20 WHERE project_id=?1",
+            [project_id],
+        )
+        .unwrap();
+    let revision = state.manager.overview(project_id).unwrap().1;
+    drop(connection);
+    execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:retry-audit","idempotencyKey":"key:craft:retry-audit",
+        "projectId":project_id,"expectedRevision":revision,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
+    }))
+    .unwrap();
+    // The retry wrote both parts again, so its prose gets its own audit.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 6);
+    assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 2);
 }

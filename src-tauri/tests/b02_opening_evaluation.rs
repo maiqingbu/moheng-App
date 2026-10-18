@@ -3454,3 +3454,125 @@ fn b02_book_plan_runtime_phases_are_backend_projected_with_one_active_step() {
         "B02_PLAN_PHASE_RESULT ordered=PASS backend_active=PASS terminal_zero=PASS status=PASS"
     );
 }
+
+#[test]
+fn b3b_signing_evaluation_runs_after_chapter_one_used_its_whole_run_quota() {
+    let (state, _temp) = state(true);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    // Chapter 1 has used every model run its production budget allows.
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    connection
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=(SELECT COUNT(*) FROM model_runs JOIN jobs ON jobs.job_id=model_runs.job_id WHERE jobs.chapter_id=chapter_production_budgets.chapter_id), soft_max_model_runs=0 WHERE chapter_id=(SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=1)",
+            [&project_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:after-quota",
+        "opening_evaluate",
+        json!({}),
+    );
+
+    assert!(evaluation["result"]["modelRunId"].as_str().is_some());
+}
+
+/// A real run (2026-10-19) compiled chapter 4 without a scope selection: the
+/// plan's own task pulls an opening-reality rule into the state digest, so
+/// the plan must carry the digest of the state it was planned against.
+#[test]
+fn f03_chapter_four_plan_without_scope_selection_is_not_stale() {
+    let temp = tempfile::tempdir().expect("F03 app-data directory");
+    let gateway = Arc::new(LongEvidenceGateway::new());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters_with_outputs(&state, &project_id);
+    command(&state, &project_id, "f03s:evaluate", "opening_evaluate", json!({}));
+    command(&state, &project_id, "f03s:book-plan", "book_plan_revise", json!({}));
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let volume_id: String = connection
+        .query_row(
+            "SELECT c.volume_id FROM chapters c JOIN volumes v ON v.project_id=c.project_id AND v.volume_id=c.volume_id WHERE c.project_id=?1 AND v.volume_no=1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    for (id, kind) in [
+        ("f03s:volume-intent", "planning_create_volume_intent"),
+        ("f03s:volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, id, kind, json!({"volumeId":volume_id}));
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "f03s:chapter-4-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_four = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    let compiled = command(
+        &state,
+        &project_id,
+        "f03s:chapter-4-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_four}),
+    );
+    assert_eq!(compiled["finalStatus"], "committed");
+}
+
+/// The first signing reply is broken JSON (as a real run returned on
+/// 2026-10-19); later replies are well formed.
+struct BrokenSigningOnceGateway {
+    inner: B02Gateway,
+    signings: std::sync::atomic::AtomicUsize,
+}
+
+impl ProductionModelGateway for BrokenSigningOnceGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "OPENING_SIGNING_EVALUATION"
+            && self
+                .signings
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+        {
+            return Ok(ProductionModelResponse {
+                output: Value::Null,
+                raw_response: Some(
+                    json!({"choices":[{"message":{"content":"{\"items\":[{\"itemId\":\"R2-1\" \"result\""},"finish_reason":"stop"}]})
+                        .to_string(),
+                ),
+                usage: ProductionModelResponse::deterministic(Value::Null).usage,
+            });
+        }
+        self.inner.invoke(capability, input)
+    }
+}
+
+#[test]
+fn b3b_broken_signing_json_is_resent_once() {
+    let gateway = Arc::new(BrokenSigningOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signings: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "b3b:signing:broken-json",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS");
+    assert_eq!(
+        gateway.signings.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}

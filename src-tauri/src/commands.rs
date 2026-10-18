@@ -7085,6 +7085,23 @@ fn compile_current_chapter_plan(
         .collect::<Vec<_>>();
     let enforces_length = state.production_gateway.enforces_chapter_length();
     let hard_scope = crate::narrative::context_hard_scope(&context_input);
+    let explicit_scope = request
+        .pointer("/payload/scopeSelection")
+        .is_some_and(|value| !value.is_null());
+    let task_states = context_input
+        .task_states
+        .iter()
+        .map(|state| {
+            (
+                state.state_id.as_str(),
+                state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NOT_STARTED"),
+            )
+        })
+        .collect::<Vec<_>>();
     let accept = |raw: Value| -> Result<Value, String> {
         let mut plan = crate::planning::normalize_chapter_plan_model_output(
             raw,
@@ -7099,6 +7116,21 @@ fn compile_current_chapter_plan(
         plan["entityRefs"] = hard_scope["entityRefs"].clone();
         plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
         plan["hardScope"] = hard_scope.clone();
+        if !explicit_scope {
+            // Without a chosen scope the chapter works only on the tasks it
+            // can work on now; later tasks wait for their dependencies.
+            let ready = json!(hard_scope["taskRefs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|task_ref| {
+                    crate::planning::task_ready(task_ref, &route_payload, &task_states).is_ok()
+                })
+                .collect::<Vec<_>>());
+            plan["activeTaskRefs"] = ready.clone();
+            plan["hardScope"]["taskRefs"] = ready;
+        }
         if enforces_length {
             crate::chapter_craft::check_plan(&plan, length_range, &history.recent)?;
         }
@@ -7113,6 +7145,17 @@ fn compile_current_chapter_plan(
         requested_at,
         &accept,
     )?;
+    // The plan's own scope (its tasks and entities) selects state that the
+    // context compiled before planning did not hold; the plan binds the
+    // digest of that state, as the owner and production recompute it.
+    let mut plan = plan;
+    let mut plan_authority = authority.clone();
+    plan_authority["executionMode"] = json!(execution_mode);
+    plan_authority["chapterPlan"] = plan.clone();
+    let plan_context =
+        context_input_from_authority(&handle, &plan_authority, project_id, planning_revision)?;
+    plan["compiledFromStateDigest"] =
+        json!(crate::narrative::relevant_state_digest(&plan_context)?);
     let receipt = crate::planning::recompile_chapter_plan_owner(
         &handle,
         project_id,

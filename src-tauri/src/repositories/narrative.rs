@@ -1902,6 +1902,40 @@ impl NarrativeRepository {
         rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
     }
 
+    /// The given fact ids that Canon already holds.
+    pub fn existing_canon_fact_ids(
+        connection: &Connection,
+        project_id: &str,
+        fact_ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if fact_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(fact_ids)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM canon_facts f WHERE f.project_id=?1 AND f.fact_id=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
+    /// The given reservation ids that the project's BookPlan declares.
+    pub fn known_reservation_refs(
+        connection: &Connection,
+        project_id: &str,
+        refs: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if refs.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(refs)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version, json_each(p.payload_json,'$.futureReservations') r WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(r.value,'$.reservationId')=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
     pub fn volume_plan_route(
         connection: &Connection,
         project_id: &str,

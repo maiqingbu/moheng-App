@@ -383,6 +383,29 @@ impl DurableJobService {
         Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
     }
 
+    /// A B02 phase job whose model reply was not JSON is failed by the parse
+    /// record; it runs again for the one resend (FX-19).
+    pub fn reopen_b02_phase_job_for_resend(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET status='RUNNING',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status='FAILED'",
+            libsql_rusqlite::params![now, project_id, job_id],
+        )?;
+        Self::acquire_lease(
+            connection,
+            project_id,
+            job_id,
+            worker_id,
+            &lease_expiry(now),
+            now,
+        )
+    }
+
     pub fn fail_b02_phase_job(
         connection: &Connection,
         project_id: &str,

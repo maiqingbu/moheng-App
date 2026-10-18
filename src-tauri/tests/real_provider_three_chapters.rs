@@ -45,7 +45,9 @@ fn retryable_real_production_error(error: &str) -> bool {
         "B08_PLANNING_CONTRACT",
         "B08_AUDIT_CONTRACT",
         "B08_RENDER_OUTPUT_INVALID",
-        "B08_PLAN_LENGTH_OUT_OF_RANGE",
+        // Every plan rejection the planner can fix (beats, role, length,
+        // repeated goal) is retried like model output variance.
+        "B08_PLAN_",
         "B08_RENDER_LENGTH_OUT_OF_RANGE",
         "B08_AUDIT_INCOMPLETE",
         "B08_AUDIT_TRUNCATED_OR_INVALID",
@@ -69,7 +71,8 @@ fn execute_real_production(
     chapter_goal: &str,
 ) -> serde_json::Value {
     let mut retry_of_job_id = None;
-    for attempt in 0..4 {
+    // A quota reset costs an attempt, so a chapter gets six.
+    for attempt in 0..6 {
         let command_id = if attempt == 0 {
             command_prefix.to_string()
         } else {
@@ -103,7 +106,7 @@ fn execute_real_production(
                 assert_eq!(response["stage"], "COMPLETED");
                 return response;
             }
-            Err(error) if budget_exhausted(&error) && attempt < 3 => {
+            Err(error) if budget_exhausted(&error) && attempt < 5 => {
                 // What the user does in the app: reset this chapter's quota.
                 execute(
                     state,
@@ -121,7 +124,35 @@ fn execute_real_production(
                     StableIdentityFactory::from_command(StableIdKind::Job, &command_id).unwrap(),
                 );
             }
-            Err(error) if retryable_real_production_error(&error) && attempt < 3 => {
+            Err(error) if error.contains("UNKNOWN_REMOTE_OUTCOME") && attempt < 5 => {
+                // What the user does in the app: cancel the job whose model
+                // call has an unknown outcome, then produce the chapter again.
+                let connection = state.manager.open(project_id, "", NOW).unwrap();
+                let decisions = connection
+                    .prepare("SELECT decision_id FROM decisions WHERE project_id=?1 AND decision_type='UNKNOWN_REMOTE_OUTCOME' AND outcome IN ('OPEN','PENDING') ORDER BY created_at,decision_id")
+                    .unwrap()
+                    .query_map([project_id], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                drop(connection);
+                for (index, decision_id) in decisions.iter().enumerate() {
+                    execute(
+                        state,
+                        json!({
+                            "type":"decision_submit",
+                            "commandId":format!("{command_id}:resolve-unknown:{index}"),
+                            "idempotencyKey":format!("{command_id}:resolve-unknown:{index}:key"),
+                            "projectId":project_id,
+                            "expectedRevision":current_revision(state, project_id),
+                            "requestedAt":NOW,
+                            "payload":{"decisionId":decision_id,"choice":"CANCEL_JOB"}
+                        }),
+                    );
+                }
+                retry_of_job_id = None;
+            }
+            Err(error) if retryable_real_production_error(&error) && attempt < 5 => {
                 retry_of_job_id = Some(
                     StableIdentityFactory::from_command(StableIdKind::Job, &command_id).unwrap(),
                 );
@@ -706,6 +737,23 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
             .clone()
     };
     println!("REAL_SIGNING_EVALUATION response={evaluation} signing={signing}");
+    // Owner decision (2026-10-18): this throwaway acceptance project is
+    // confirmed for Fanqie, the platform the evaluation passed.
+    let fanqie = signing["platformMatrix"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["platformId"] == "FANQIE" && item["status"] == "PASS")
+        .expect("Fanqie passes the signing evaluation");
+    execute(
+        &state,
+        json!({
+            "type":"signing_confirm","commandId":format!("{prefix}:signing-confirm"),
+            "idempotencyKey":format!("{prefix}:signing-confirm:key"),"projectId":project_id,
+            "expectedRevision":current_revision(&state, &project_id),"requestedAt":NOW,
+            "payload":{"platformId":fanqie["platformId"]}
+        }),
+    );
 
     for (step, command) in [
         ("book-plan", "book_plan_revise"),
