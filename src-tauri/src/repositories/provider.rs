@@ -53,6 +53,7 @@ impl ProviderSettingsRepository {
             "providerId",
             "modelId",
             "renderModelId",
+            "auditModelId",
             "enabled",
             "timeoutMs",
         ];

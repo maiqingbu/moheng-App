@@ -294,17 +294,28 @@ fn model_item_result(
         else {
             return empty_model_item(item_id, "引用章节不属于本次黄金三章。");
         };
-        if range_start >= range_end
-            || crate::production::exact_quote_span(
+        let offsets_match = range_start < range_end
+            && crate::production::exact_quote_span(
                 &chapter.body,
                 range_start,
                 range_end,
                 exact_quote,
             )
-            .is_err()
-        {
+            .is_ok();
+        // A verbatim quote found exactly once in its chapter is bound to where
+        // it actually is, as audit evidence is; anything else is unverified.
+        let Some((range_start, range_end)) = offsets_match
+            .then_some((range_start, range_end))
+            .or_else(|| crate::production::locate_unique_quote(&chapter.body, exact_quote))
+        else {
             return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
-        }
+        };
+        let exact_quote = chapter
+            .body
+            .chars()
+            .skip(range_start)
+            .take(range_end - range_start)
+            .collect::<String>();
         checked_evidence.push(json!({
             "chapterNo":chapter_no,
             "chapterId":chapter.chapter_id,
@@ -323,19 +334,19 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
         && value.get("bundleDigest") == expected_input.get("bundleDigest")
         && value.get("taskId") == expected_input.pointer("/taskContext/taskId")
         && value.get("status").and_then(Value::as_str) == Some("OK")
-        && value.get("sourceRefs").and_then(Value::as_array).is_some()
-        && value.get("assumptions").and_then(Value::as_array).is_some()
-        && value.get("findings").and_then(Value::as_array).is_some()
-        && value.get("contextRefs").and_then(Value::as_array).is_some()
-        && value
-            .get("runtimeCheckRequests")
-            .and_then(Value::as_array)
-            .is_some()
+        // A bookkeeping list the model left out is empty; one of another
+        // type is still malformed.
+        && [
+            "sourceRefs",
+            "assumptions",
+            "findings",
+            "contextRefs",
+            "runtimeCheckRequests",
+            "nextSkillHints",
+        ]
+        .iter()
+        .all(|field| value.get(*field).is_none_or(Value::is_array))
         && value.get("confidence").and_then(Value::as_f64).is_some()
-        && value
-            .get("nextSkillHints")
-            .and_then(Value::as_array)
-            .is_some()
         && [
             "quality_vector",
             "findings",
@@ -2097,6 +2108,51 @@ mod tests {
         );
         assert_eq!(result["result"], "NOT_VERIFIED");
         assert!(result["evidence"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signing_verbatim_unique_quote_with_wrong_offsets_is_located() {
+        let chapter = fixture_chapter(1, "雨夜里，林舟找到一页旧账。");
+        let result = model_item_result(
+            Some(&json!({
+                "itemId":"R2-5",
+                "result":"PASS",
+                "reason":"表述清晰",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":"林舟找到一页旧账"}]
+            })),
+            "R2-5",
+            &[chapter],
+            None,
+        );
+        assert_eq!(result["result"], "PASS");
+        assert_eq!(result["evidence"][0]["rangeStart"], 4);
+        assert_eq!(result["evidence"][0]["rangeEnd"], 12);
+        assert_eq!(result["evidence"][0]["exactQuote"], "林舟找到一页旧账");
+    }
+
+    #[test]
+    fn signing_envelope_treats_a_missing_bookkeeping_list_as_empty() {
+        let expected = json!({"skillVersion":"1.2.0","bundleDigest":"sha256:x","taskContext":{"taskId":"task:1"}});
+        let payload = json!({
+            "quality_vector":{},"findings":[],"promise_coverage":{},"desire_state":{},
+            "repetition":{},"signing_recommendation":"PASS","repair_scope":[],"signingEvaluationItems":[]
+        });
+        // Seen on 2026-10-18: the top-level findings list was left out.
+        let envelope = json!({
+            "skillId":"S35","skillVersion":"1.2.0","bundleDigest":"sha256:x","taskId":"task:1",
+            "status":"OK","sourceRefs":[],"assumptions":[],"contextRefs":[],
+            "runtimeCheckRequests":[],"confidence":0.9,"nextSkillHints":[],"payload":payload
+        });
+        assert!(valid_s35_signing_envelope(&envelope, &expected));
+        let mut wrong_identity = envelope.clone();
+        wrong_identity["bundleDigest"] = json!("sha256:other");
+        assert!(!valid_s35_signing_envelope(&wrong_identity, &expected));
+        let mut no_items = envelope;
+        no_items["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("signingEvaluationItems");
+        assert!(!valid_s35_signing_envelope(&no_items, &expected));
     }
 
     #[test]

@@ -31,6 +31,14 @@ use std::thread;
 
 const NOW: &str = "2026-08-30T12:00:00Z";
 
+/// `length` characters of filler prose with no repeated phrase, so the
+/// writer's repetition check never fires on test bodies.
+fn varied_prose(length: usize) -> String {
+    (0..length)
+        .map(|n| char::from_u32(0x4E00 + n as u32).unwrap())
+        .collect()
+}
+
 struct RecordingGateway;
 
 #[derive(Clone, Default)]

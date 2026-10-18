@@ -149,9 +149,10 @@ pub trait ProductionModelGateway: Send + Sync {
     /// changing production behavior.
     fn on_chapter_gate_revalidation(&self, _attempt: usize) {}
 
-    /// The profile for writing chapter prose (owner decision 2026-10-17: the
-    /// writer may use its own model); by default the production profile.
-    fn resolve_render_profile(&self) -> Result<ResolvedProviderProfile, String> {
+    /// The profile for one production step (owner decisions 2026-10-17/18:
+    /// writing and audit may use their own models); by default the
+    /// production profile.
+    fn resolve_step_profile(&self, _capability: &str) -> Result<ResolvedProviderProfile, String> {
         self.resolve_profile()
     }
 
@@ -240,12 +241,20 @@ pub struct ConfiguredProductionGateway {
     settings_paths: Option<crate::project_db::paths::AppPaths>,
 }
 
+/// The user message for a provider: an input's `prompt` instruction comes
+/// first, followed by every other field as JSON so no data is dropped.
 fn serialize_provider_input(input: &Value) -> String {
-    input
-        .get("prompt")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| input.to_string())
+    let Some(prompt) = input.get("prompt").and_then(Value::as_str) else {
+        return input.to_string();
+    };
+    let mut data = input.clone();
+    if let Some(object) = data.as_object_mut() {
+        object.remove("prompt");
+        if object.is_empty() {
+            return prompt.to_owned();
+        }
+    }
+    format!("{prompt}\n\n{data}")
 }
 
 impl ConfiguredProductionGateway {
@@ -446,14 +455,19 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         })
     }
 
-    fn resolve_render_profile(&self) -> Result<ResolvedProviderProfile, String> {
+    fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
         let mut profile = self.resolve_profile()?;
+        let setting = match capability {
+            "RENDER_CHAPTER" => "renderModelId",
+            "AUDIT_EXTRACT" => "auditModelId",
+            _ => return Ok(profile),
+        };
         if let Some(paths) = &self.settings_paths {
             let settings =
                 crate::repositories::provider::ProviderSettingsRepository::read_global(paths)
                     .map_err(|error| format!("provider settings unavailable: {error}"))?;
             if let Some(model) = settings
-                .get("renderModelId")
+                .get(setting)
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
@@ -3205,11 +3219,15 @@ fn run_chapter_production_inner(
     // Craft v2: the writer gets only the selected skills' render guidance;
     // the v1.2 enrichment stays in the receipts.
     render_input["beatTargets"] = crate::chapter_craft::beat_targets(&plan_payload);
+    let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
+    if !avoid_phrases.is_empty() {
+        render_input["avoidPhrases"] = json!(avoid_phrases);
+    }
     render_input["craftGuidance"] = crate::chapter_craft::guidance(
         "render",
         &crate::chapter_craft::plan_signals(&plan_payload, chapter_number),
     )?;
-    let render_profile = gateway.resolve_render_profile()?;
+    let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
     // One writer call; `suffix` names the call within this job.
     let render_once =
         |suffix: &str, attempt_no: i64, input: Value| -> Result<(String, String), String> {
@@ -3270,29 +3288,95 @@ fn run_chapter_production_inner(
         // second continues from the whole first part. Only the second part is
         // rewritten (at most twice) so the seam stays intact; a chapter still
         // outside the range is never committed.
+        // A phrase used a third time across the recent chapters fails the
+        // signing check (F1-5), so a first part that does so is rewritten
+        // once with those phrases, keeping the version with fewer.
+        let overused = |history: &[String], text: &str| {
+            crate::chapter_craft::overused_phrases(history, text)
+        };
         let first_input =
             crate::chapter_craft::part_render_input(&render_input, &plan_payload, 0, "");
-        let (_, first) = render_once(":part-1", 1, first_input)?;
-        let first = first.trim().to_owned();
+        let (_, first) = render_once(":part-1", 1, first_input.clone())?;
+        let mut first = crate::chapter_craft::normalize_typography(first.trim());
+        let first_overused = overused(&chapter_history.bodies, &first);
+        if !first_overused.is_empty() {
+            let part_range = first_input["partLengthRange"].clone();
+            let mut input = first_input;
+            input["repeatedPhrases"] = json!(first_overused);
+            let (_, rewrite) = render_once(":part-1r", 2, input)?;
+            let rewrite = crate::chapter_craft::normalize_typography(rewrite.trim());
+            let length = character_count(&rewrite);
+            let in_range = part_range["min"].as_i64().is_some_and(|min| length >= min)
+                && part_range["max"].as_i64().is_some_and(|max| length <= max);
+            if in_range
+                && overused(&chapter_history.bodies, &rewrite).len() <= first_overused.len()
+            {
+                first = rewrite;
+            }
+        }
+        let first_history = chapter_history
+            .bodies
+            .iter()
+            .cloned()
+            .chain([first.clone()])
+            .collect::<Vec<_>>();
         let second_input =
             crate::chapter_craft::part_render_input(&render_input, &plan_payload, 1, &first);
-        let (mut run_id, mut second) = render_once(":part-2", 1, second_input.clone())?;
-        let joined = |second: &str| format!("{first}\n\n{}", second.trim());
-        let mut rewrite = 0;
-        while !length_range.accepts(character_count(&joined(&second))) {
-            if rewrite == 2 {
-                return Err(length_error(&joined(&second)));
-            }
-            rewrite += 1;
-            let total = character_count(&joined(&second));
-            let mut input = second_input.clone();
+        // Owner decision (2026-10-18): part 2 is written twice and the
+        // version that brings the chapter into the range, closest to its
+        // middle, is kept; when neither does, two more are written with the
+        // gap of the nearest one.
+        let joined = |second: &str| {
+            format!(
+                "{first}\n\n{}",
+                crate::chapter_craft::normalize_typography(second.trim())
+            )
+        };
+        let target = (length_range.min + length_range.max) / 2;
+        // Ranked by distance outside the range, then phrases used a third
+        // time, then distance from the middle.
+        let distance = |second: &str| {
+            let total = character_count(&joined(second));
+            let outside = (length_range.min - total)
+                .max(total - length_range.ceiling())
+                .max(0);
+            let normalized = crate::chapter_craft::normalize_typography(second.trim());
+            let repeated = overused(&first_history, &normalized).len() as i64;
+            (outside, repeated, (total - target).abs())
+        };
+        let mut drafts = vec![
+            render_once(":part-2a", 1, second_input.clone())?,
+            render_once(":part-2b", 2, second_input.clone())?,
+        ];
+        let nearest = |drafts: &[(String, String)]| {
+            drafts
+                .iter()
+                .min_by_key(|(_, second)| distance(second))
+                .cloned()
+                .expect("two drafts")
+        };
+        let (outside, repeated, _) = distance(&nearest(&drafts).1);
+        if outside > 0 || repeated > 0 {
+            let (_, closest) = nearest(&drafts);
+            let total = character_count(&joined(&closest));
+            let mut input = second_input;
             input["partFeedback"] = json!({
-                "previousCharacterCount":character_count(&second),
+                "previousCharacterCount":character_count(&closest),
                 "shortBy":(length_range.min - total).max(0),
                 "overBy":(total - length_range.ceiling()).max(0)
             });
-            (run_id, second) =
-                render_once(&format!(":part-2-length-{rewrite}"), 1 + rewrite, input)?;
+            if repeated > 0 {
+                input["repeatedPhrases"] = json!(overused(
+                    &first_history,
+                    &crate::chapter_craft::normalize_typography(closest.trim())
+                ));
+            }
+            drafts.push(render_once(":part-2c", 3, input.clone())?);
+            drafts.push(render_once(":part-2d", 4, input)?);
+        }
+        let (run_id, second) = nearest(&drafts);
+        if distance(&second).0 > 0 {
+            return Err(length_error(&joined(&second)));
         }
         (run_id, joined(&second))
     } else {
@@ -3738,7 +3822,7 @@ fn run_chapter_production_inner(
             (None, None, None, None)
         };
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
-    let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
+    let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
     let reusable_audit = if candidate_repaired {
         None
     } else {
@@ -3757,6 +3841,7 @@ fn run_chapter_production_inner(
             .flatten()
     };
     let audit_reused = reusable_audit.is_some();
+    let audit_profile = gateway.resolve_step_profile("AUDIT_EXTRACT")?;
     let (mut audit_run_id, raw_audit) = if let Some((model_run_id, parsed)) = reusable_audit {
         (
             model_run_id,
@@ -3767,8 +3852,8 @@ fn run_chapter_production_inner(
             model_run_id: new_audit_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: provider_profile.provider.clone(),
-            model: provider_profile.model.clone(),
+            provider: audit_profile.provider.clone(),
+            model: audit_profile.model.clone(),
             idempotency_key: format!("{idempotency_key}:audit"),
             capability: "AUDIT_EXTRACT".into(),
             prompt_ref: None,
@@ -3782,7 +3867,7 @@ fn run_chapter_production_inner(
         let result = execute_production_model_with_profile(
             connection,
             gateway,
-            &provider_profile,
+            &audit_profile,
             &audit_spec,
             "AUDIT_EXTRACT",
             audit_input.clone(),
@@ -3811,18 +3896,29 @@ fn run_chapter_production_inner(
         let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
             .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
         validate_audit_completeness(&audit_payload, &extraction)?;
+        let mut extraction = extraction;
+        validate_actual_extraction(
+            connection,
+            &project_id,
+            &chapter_id,
+            &body,
+            &plan_payload,
+            &gate_policy_payload,
+            &mut extraction,
+        )?;
         Ok((audit_payload, extraction))
     };
     // Craft rule (2026-10-18): an audit whose evidence cannot be located in
     // the body (for example quoting the plan) is run once more with the
     // unlocatable quotes; a second failure still blocks the chapter.
-    let (mut audit_payload, mut extraction) = match check_audit(raw_audit.clone()) {
+    let (mut audit_payload, extraction) = match check_audit(raw_audit.clone()) {
         Err(error)
             if !audit_reused
                 && matches!(
                     error.as_str(),
                     "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
                         | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
+                        | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
                 ) =>
         {
             let rerun_id = StableIdentityFactory::from_command(
@@ -3833,14 +3929,15 @@ fn run_chapter_production_inner(
             input["auditFeedback"] = json!({
                 "rejectedFor":error,
                 "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
-                "instruction":"上次提取中这些引文在正文 body 中找不到（可能引用了规划或改写了原文）。请重新提取：每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
+                "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
+                "instruction":"上次提取不完整：unlocatableQuotes 中的引文在正文 body 中找不到（可能引用了规划或改写了原文），incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
             });
             let rerun_spec = ModelRunSpec {
                 model_run_id: rerun_id.clone(),
                 job_id: Some(job_id.clone()),
                 step_id: None,
-                provider: provider_profile.provider.clone(),
-                model: provider_profile.model.clone(),
+                provider: audit_profile.provider.clone(),
+                model: audit_profile.model.clone(),
                 idempotency_key: format!("{idempotency_key}:audit-feedback"),
                 capability: "AUDIT_EXTRACT".into(),
                 prompt_ref: None,
@@ -3854,7 +3951,7 @@ fn run_chapter_production_inner(
             let result = execute_production_model_with_profile(
                 connection,
                 gateway,
-                &provider_profile,
+                &audit_profile,
                 &rerun_spec,
                 "AUDIT_EXTRACT",
                 input,
@@ -3869,15 +3966,6 @@ fn run_chapter_production_inner(
         }
         other => other?,
     };
-    validate_actual_extraction(
-        connection,
-        &project_id,
-        &chapter_id,
-        &body,
-        &plan_payload,
-        &gate_policy_payload,
-        &mut extraction,
-    )?;
     if !extraction.dropped_unbound_knowledge.is_empty() {
         audit_payload["normalization"]["droppedUnboundKnowledge"] =
             json!(extraction.dropped_unbound_knowledge);
@@ -4494,7 +4582,8 @@ fn run_chapter_production_inner(
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
             "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote},
-            "supersedesFactId":extraction.canon_transitions.get(&item.fact_id)
+            "supersedesFactId":extraction.canon_transitions.get(&item.fact_id),
+            "alsoSupersedesFactIds":extraction.canon_duplicate_transitions.get(&item.fact_id)
         }
     })).collect::<Vec<_>>();
     let knowledge_delta = extraction.knowledge_candidates.iter().map(|item| json!({
@@ -4829,6 +4918,9 @@ struct AuditExtraction {
     /// FX-17: new fact id -> the open fact from an earlier chapter it replaces.
     #[serde(default)]
     canon_transitions: BTreeMap<String, String>,
+    /// New fact id -> further open facts with the same value it replaces.
+    #[serde(default)]
+    canon_duplicate_transitions: BTreeMap<String, Vec<String>>,
 }
 
 fn validate_audit_candidate_binding(
@@ -4888,6 +4980,78 @@ fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
         }
     }
     quotes
+}
+
+/// Candidates of a raw audit reply missing a required field or evidence,
+/// named so a rerun can complete them.
+fn incomplete_audit_candidates(raw: &Value) -> Value {
+    let requirements: [(&str, &str, &[&str]); 4] = [
+        (
+            "canonCandidates",
+            "factId",
+            &["factId", "subjectId", "predicate", "objectJson", "evidence"],
+        ),
+        (
+            "knowledgeCandidates",
+            "knowledgeId",
+            &[
+                "knowledgeId",
+                "knowerId",
+                "factId",
+                "epistemicState",
+                "acquiredStoryTime",
+                "visibilityScope",
+                "evidence",
+            ],
+        ),
+        (
+            "continuityCandidates",
+            "threadRef",
+            &["threadRef", "disposition"],
+        ),
+        (
+            "taskProgressCandidates",
+            "taskId",
+            &["taskId", "status", "evidence"],
+        ),
+    ];
+    let mut incomplete = Vec::new();
+    for (field, id_key, required) in requirements {
+        for item in raw
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let missing = required
+                .iter()
+                .filter(|key| item.get(**key).is_none())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                incomplete.push(json!({"field":field,"id":item.get(id_key),"missing":missing}));
+            }
+        }
+    }
+    json!(incomplete)
+}
+
+/// The chapter plan as the audit sees it: scenes keep only their type,
+/// size and reveal markers, so no plan prose can be quoted as evidence.
+fn audit_plan_view(plan: &Value) -> Value {
+    let mut view = plan.clone();
+    if let Some(scenes) = view.get_mut("sceneExecution").and_then(Value::as_array_mut) {
+        for scene in scenes {
+            if let Some(object) = scene.as_object_mut() {
+                object.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "sceneType" | "estimatedCharacters" | "action" | "reservationRef"
+                    )
+                });
+            }
+        }
+    }
+    view
 }
 
 fn validate_audit_completeness(
@@ -5086,15 +5250,28 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         ("taskProgressCandidates", &["taskId", "status"][..]),
     ];
     let mut dropped = serde_json::Map::new();
+    let mut without_evidence = Vec::new();
     for (field, required) in candidate_requirements {
         let Some(items) = payload.get_mut(field).and_then(Value::as_array_mut) else {
             continue;
         };
         let before = items.len();
+        let unquoted_before = without_evidence.len();
         items.retain_mut(|item| {
             let Some(object) = item.as_object_mut() else {
                 return false;
             };
+            // Without a stated authority a fact gets the lowest level, as the
+            // commit already assumes.
+            if field == "canonCandidates" {
+                object.entry("authorityLevel").or_insert_with(|| json!("C"));
+                // A fact object stated as a bare value keeps it under `value`.
+                if let Some(value) = object.get_mut("objectJson") {
+                    if !value.is_object() && !value.is_null() {
+                        *value = json!({"value":value.take()});
+                    }
+                }
+            }
             if !required.iter().all(|key| object.contains_key(*key)) {
                 return false;
             }
@@ -5114,6 +5291,17 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                     }
                 }
                 return true;
+            }
+            // Owner decision (2026-10-18): a candidate the model gave no
+            // evidence for cannot be verified; it is left out and recorded.
+            if !object.contains_key("evidence") {
+                let id = ["factId", "knowledgeId", "taskId"]
+                    .iter()
+                    .find_map(|key| object.get(*key))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                without_evidence.push(json!({"field":field,"id":id}));
+                return false;
             }
             let Some(evidence) = object.get("evidence").and_then(normalize_evidence) else {
                 return false;
@@ -5152,7 +5340,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             }
             true
         });
-        dropped.insert(field.into(), json!(before - items.len()));
+        let unquoted = without_evidence.len() - unquoted_before;
+        dropped.insert(field.into(), json!(before - items.len() - unquoted));
     }
     let (normalized_ranges, dropped_ranges) = payload
         .get("evidenceRanges")
@@ -5173,10 +5362,37 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     if let Some(ranges) = normalized_ranges {
         payload["evidenceRanges"] = json!(ranges);
     }
+    // "Complete with delta" and "complete, no change" only summarize whether
+    // anything was extracted, so the label follows the candidates.
+    if matches!(
+        payload.get("auditCompleteness").and_then(Value::as_str),
+        Some("COMPLETE_NO_CHANGE" | "COMPLETE_WITH_DELTA")
+    ) {
+        let has_delta = [
+            "canonCandidates",
+            "knowledgeCandidates",
+            "continuityCandidates",
+            "taskProgressCandidates",
+            "revealedReservationRefs",
+        ]
+        .iter()
+        .any(|field| {
+            payload
+                .get(*field)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        });
+        payload["auditCompleteness"] = json!(if has_delta {
+            "COMPLETE_WITH_DELTA"
+        } else {
+            "COMPLETE_NO_CHANGE"
+        });
+    }
     payload["normalization"] = json!({
         "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
         "droppedCandidates":dropped,
         "droppedEvidenceRanges":dropped_ranges,
+        "droppedWithoutEvidence":without_evidence,
         "reboundEvidence":rebound_evidence,
         "invalidContinuityEvidence":invalid_continuity_evidence
     });
@@ -5276,6 +5492,23 @@ fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
     Ok(())
 }
 
+/// Where a verbatim quote occurs exactly once in `body` (ignoring only
+/// whitespace), as character offsets; `None` when absent or ambiguous.
+pub fn locate_unique_quote(body: &str, quote: &str) -> Option<(usize, usize)> {
+    if quote.is_empty() {
+        return None;
+    }
+    let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
+    if matches.len() == 1 {
+        let start = body[..matches[0].0].chars().count();
+        return Some((start, start + quote.chars().count()));
+    }
+    if !matches.is_empty() {
+        return None;
+    }
+    whitespace_insensitive_unique_span(&body.chars().collect::<Vec<_>>(), quote)
+}
+
 pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Result<(), String> {
     exact_quote(
         body,
@@ -5351,6 +5584,7 @@ fn validate_actual_extraction(
     .ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
 
     let mut canon_transitions = BTreeMap::<String, String>::new();
+    let mut duplicate_transitions = BTreeMap::<String, Vec<String>>::new();
     // FX-19: process Canon candidates in reading order so a later value of a
     // single-valued fact in this chapter can replace an earlier one.
     audit
@@ -5416,7 +5650,11 @@ fn validate_actual_extraction(
             valid_from_chapter_no: candidate_from_chapter_no,
             valid_to_chapter_no: candidate_to_chapter_no,
         };
-        let ended = canon_transitions.values().cloned().collect::<BTreeSet<_>>();
+        let ended = canon_transitions
+            .values()
+            .chain(duplicate_transitions.values().flatten())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let current = current
             .into_iter()
             .filter(|fact| !ended.contains(&fact.fact_id))
@@ -5449,7 +5687,20 @@ fn validate_actual_extraction(
             }
         }
         if replaced.len() > 1 {
-            return Err("B08_CANON_TIME_UNRESOLVED".into());
+            // Equal open values (a restated fact) are one state and are all
+            // replaced together; different values stay ambiguous.
+            let object_of = |fact_id: &String| {
+                current
+                    .iter()
+                    .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
+                    .find(|fact| &fact.fact_id == fact_id)
+                    .map(|fact| fact.object_json.clone())
+            };
+            let first = object_of(&replaced[0]);
+            if first.is_none() || replaced.iter().any(|fact_id| object_of(fact_id) != first) {
+                return Err("B08_CANON_TIME_UNRESOLVED".into());
+            }
+            duplicate_transitions.insert(candidate.fact_id.clone(), replaced[1..].to_vec());
         }
         if let Some(old_fact_id) = replaced.first() {
             canon_transitions.insert(candidate.fact_id.clone(), old_fact_id.clone());
@@ -5484,6 +5735,7 @@ fn validate_actual_extraction(
         );
     }
     audit.canon_transitions = canon_transitions;
+    audit.canon_duplicate_transitions = duplicate_transitions;
     for candidate in &audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
         if !active_tasks.contains(candidate.task_id.as_str()) {
@@ -7183,6 +7435,154 @@ mod tests {
                 "{state}"
             );
         }
+    }
+
+    #[test]
+    fn provider_input_keeps_every_field_next_to_an_instruction() {
+        // The signing evaluation once sent only its instruction, without the
+        // chapters it was asked to evaluate.
+        let sent = serialize_provider_input(&json!({
+            "prompt":"执行黄金三章评估",
+            "chapters":[{"chapterNo":1,"body":"正文第一句"}]
+        }));
+        assert!(sent.starts_with("执行黄金三章评估"));
+        assert!(sent.contains("正文第一句"));
+        assert!(!sent.contains("\"prompt\""));
+        assert_eq!(
+            serialize_provider_input(&json!({"prompt":"只有指令"})),
+            "只有指令"
+        );
+        assert_eq!(serialize_provider_input(&json!({"a":1})), "{\"a\":1}");
+    }
+
+    #[test]
+    fn audit_normalization_wraps_a_scalar_canon_object_in_a_map() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[{
+                    "factId":"fact:awake","subjectId":"entity:hero","predicate":"is_awake",
+                    "objectJson":true,"authorityLevel":"C",
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(
+            normalized["canonCandidates"][0]["objectJson"],
+            json!({"value":true})
+        );
+    }
+
+    #[test]
+    fn audit_normalization_gives_a_canon_candidate_without_authority_the_lowest_level() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[{
+                    "factId":"fact:item","subjectId":"entity:hero","predicate":"owns_item",
+                    "objectJson":{"item":"钢笔"},
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(normalized["canonCandidates"][0]["authorityLevel"], "C");
+        assert_eq!(
+            normalized["normalization"]["droppedCandidates"]["canonCandidates"],
+            0
+        );
+    }
+
+    #[test]
+    fn audit_feedback_names_candidates_missing_fields_or_evidence() {
+        let raw = json!({
+            "canonCandidates":[
+                {"factId":"fact:ok","subjectId":"s","predicate":"p","objectJson":{},"evidence":{"quote":"你好"}},
+                {"factId":"fact:bare","subjectId":"s","predicate":"p","objectJson":{}}
+            ],
+            "knowledgeCandidates":[{"knowledgeId":"know:1","factId":"fact:ok","evidence":{"quote":"你好"}}]
+        });
+        assert_eq!(
+            incomplete_audit_candidates(&raw),
+            json!([
+                {"field":"canonCandidates","id":"fact:bare","missing":["evidence"]},
+                {"field":"knowledgeCandidates","id":"know:1","missing":["knowerId","epistemicState","acquiredStoryTime","visibilityScope"]}
+            ])
+        );
+    }
+
+    #[test]
+    fn audit_normalization_derives_the_complete_label_from_the_candidates() {
+        let candidate = json!({
+            "factId":"fact:item","subjectId":"entity:hero","predicate":"owns_item",
+            "objectJson":{"item":"钢笔"},"authorityLevel":"C",
+            "evidence":{"start":0,"end":2,"quote":"你好"}
+        });
+        // Seen on 2026-10-18: nineteen candidates labeled COMPLETE_NO_CHANGE.
+        let with_delta = normalize_audit_model_output(
+            json!({"canonCandidates":[candidate],"auditCompleteness":"COMPLETE_NO_CHANGE"}),
+            "你好世界",
+        );
+        assert_eq!(with_delta["auditCompleteness"], "COMPLETE_WITH_DELTA");
+        let no_change = normalize_audit_model_output(
+            json!({"canonCandidates":[],"auditCompleteness":"COMPLETE_WITH_DELTA"}),
+            "你好世界",
+        );
+        assert_eq!(no_change["auditCompleteness"], "COMPLETE_NO_CHANGE");
+        let incomplete = normalize_audit_model_output(
+            json!({"canonCandidates":[],"auditCompleteness":"INCOMPLETE"}),
+            "你好世界",
+        );
+        assert_eq!(incomplete["auditCompleteness"], "INCOMPLETE");
+    }
+
+    #[test]
+    fn audit_normalization_drops_and_records_candidates_without_evidence() {
+        // Owner decision (2026-10-18): an unverifiable fact is left out and
+        // recorded instead of failing the chapter.
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[
+                    {"factId":"fact:quoted","subjectId":"s","predicate":"owns_item","objectJson":{},"authorityLevel":"C","evidence":{"start":0,"end":2,"quote":"你好"}},
+                    {"factId":"fact:bare","subjectId":"s","predicate":"owns_item","objectJson":{},"authorityLevel":"C"}
+                ],
+                "qualityFindings":[],"knowledgeCandidates":[],"continuityCandidates":[],
+                "taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false
+            }),
+            "你好世界",
+        );
+        assert_eq!(normalized["canonCandidates"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            normalized["normalization"]["droppedCandidates"]["canonCandidates"],
+            0
+        );
+        assert_eq!(
+            normalized["normalization"]["droppedWithoutEvidence"],
+            json!([{"field":"canonCandidates","id":"fact:bare"}])
+        );
+        let audit: AuditExtraction = serde_json::from_value(normalized.clone()).unwrap();
+        assert!(validate_audit_completeness(&normalized, &audit).is_ok());
+    }
+
+    #[test]
+    fn audit_sees_the_plan_without_prose_it_could_quote() {
+        // Seen on 2026-10-18: audits quoted plan beats instead of the body.
+        let plan = json!({
+            "chapterGoal":"查明来源",
+            "continuityActions":[{"threadRef":"thread:1","disposition":"ADVANCE"}],
+            "sceneExecution":[{
+                "sceneType":"调查","goal":"拿到线索","conflict":"守卫","turn":"放行","result":"被盯上",
+                "beats":["沈砚接入深层网络，面对破碎的记忆碎片进行重组"],"estimatedCharacters":900
+            }]
+        });
+        let view = audit_plan_view(&plan);
+        assert_eq!(view["chapterGoal"], "查明来源");
+        assert_eq!(view["continuityActions"], plan["continuityActions"]);
+        assert_eq!(
+            view["sceneExecution"],
+            json!([{"sceneType":"调查","estimatedCharacters":900}])
+        );
+        assert!(!view.to_string().contains("深层网络"));
     }
 
     #[test]

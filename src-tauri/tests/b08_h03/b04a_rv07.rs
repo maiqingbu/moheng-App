@@ -359,3 +359,97 @@ fn fx17_later_chapter_location_change_supersedes_the_open_earlier_fact() {
     );
     assert_eq!(valid_from, chapter_id);
 }
+
+/// An earlier chapter restated the same location, leaving two equal open
+/// facts (seen on 2026-10-18); `duplicate_object` sets the second one.
+fn location_change_over_two_open_facts(
+    project_id: &str,
+    duplicate_object: &str,
+) -> (KernelState, tempfile::TempDir, Result<Value, String>) {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(LocationTransitionGateway),
+    );
+    // An opening chapter is planned at production start, so the extra fact
+    // cannot make a precompiled plan stale.
+    let connection = state
+        .manager
+        .create(project_id, "B08 knowledge", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    let volume_id: String = connection
+        .query_row(
+            "SELECT volume_id FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            [project_id, chapter_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET chapter_no=3 WHERE project_id=?1 AND chapter_id=?2",
+            libsql_rusqlite::params![project_id, chapter_id],
+        )
+        .unwrap();
+    let earlier_chapter_id =
+        StableIdentityFactory::from_command(StableIdKind::Chapter, "craft:earlier").unwrap();
+    connection.execute(
+        "INSERT INTO chapters(chapter_id,project_id,volume_id,chapter_no,title,importance_class,status,word_count,created_at,updated_at) VALUES (?1,?2,?3,2,'第二章','NORMAL','COMMITTED',0,?4,?4)",
+        libsql_rusqlite::params![earlier_chapter_id, project_id, volume_id, NOW],
+    ).unwrap();
+    connection.execute(
+        "UPDATE canon_facts SET valid_from_chapter_id=?1, source_chapter_id=?1, story_time_from=NULL, story_time_to=NULL WHERE project_id=?2 AND fact_id='fact:actual:seed'",
+        libsql_rusqlite::params![earlier_chapter_id, project_id],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, authority_level, superseded_by, created_at, updated_at) SELECT 'fact:actual:seed-again', project_id, subject_id, predicate, ?2, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, authority_level, NULL, created_at, updated_at FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:seed'",
+        libsql_rusqlite::params![project_id, duplicate_object],
+    ).unwrap();
+    let seed_object: String = connection.query_row("SELECT object_json FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:seed'", [project_id], |row| row.get(0)).unwrap();
+    if duplicate_object.is_empty() {
+        connection.execute("UPDATE canon_facts SET object_json=?2 WHERE project_id=?1 AND fact_id='fact:actual:seed-again'", libsql_rusqlite::params![project_id, seed_object]).unwrap();
+    }
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":format!("cmd:{project_id}"),
+            "idempotencyKey":format!("key:{project_id}"),"projectId":project_id,
+            "expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    (state, temp, result)
+}
+
+#[test]
+fn craft_location_change_supersedes_every_equal_open_fact() {
+    let project_id = "p-craft-equal-open-facts";
+    let (state, _temp, result) = location_change_over_two_open_facts(project_id, "");
+    result.unwrap();
+    let connection = state
+        .manager
+        .open(project_id, "B08 knowledge", NOW)
+        .unwrap();
+    for fact_id in ["fact:actual:seed", "fact:actual:seed-again"] {
+        let superseded_by = connection
+            .query_row::<Option<String>, _, _>(
+                "SELECT superseded_by FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
+                [project_id, fact_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            superseded_by.as_deref(),
+            Some("fact:fx17:moved"),
+            "{fact_id}"
+        );
+    }
+}
+
+#[test]
+fn craft_location_change_over_two_different_open_facts_stays_unresolved() {
+    let (_state, _temp, result) =
+        location_change_over_two_open_facts("p-craft-different-open-facts", "{\"place\":\"cave\"}");
+    assert_eq!(result.unwrap_err(), "B08_CANON_TIME_UNRESOLVED");
+}

@@ -101,7 +101,17 @@ fn apply_canon(
     )?;
     connection.execute("INSERT INTO canon_facts(fact_id, project_id, subject_id, predicate, object_json, valid_from_chapter_id, valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, authority_level, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15) ON CONFLICT(fact_id) DO UPDATE SET subject_id=excluded.subject_id, predicate=excluded.predicate, object_json=excluded.object_json, valid_from_chapter_id=excluded.valid_from_chapter_id, valid_to_chapter_id=excluded.valid_to_chapter_id, story_time_from=excluded.story_time_from, story_time_to=excluded.story_time_to, source_artifact_id=excluded.source_artifact_id, source_version=excluded.source_version, source_chapter_id=excluded.source_chapter_id, evidence_range_json=excluded.evidence_range_json, authority_level=excluded.authority_level, updated_at=excluded.updated_at", libsql_rusqlite::params![delta.fact_id, project_id, subject_id, predicate, object_json, delta.valid_from_chapter_id, delta.valid_to_chapter_id, story_time_from, story_time_to, source_artifact_id, source_version, source_chapter_id, evidence_range_json, delta.authority_level.as_ref().map(crate::repositories::artifacts::enum_string).transpose()?.unwrap_or_else(|| "C".into()), now])?;
     inserted += i64::from(!fact_existed);
-    if let Some(previous_fact_id) = payload_string(payload, "supersedesFactId") {
+    let also_superseded = payload
+        .and_then(|payload| payload.get("alsoSupersedesFactIds"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned);
+    for previous_fact_id in payload_string(payload, "supersedesFactId")
+        .into_iter()
+        .chain(also_superseded)
+    {
         let updated = connection.execute(
             "UPDATE canon_facts SET superseded_by=?1,updated_at=?2 WHERE project_id=?3 AND fact_id=?4 AND superseded_by IS NULL",
             libsql_rusqlite::params![delta.fact_id, now, project_id, previous_fact_id],

@@ -59,7 +59,7 @@ impl ProductionModelGateway for LengthGateway {
                 .unwrap_or_else(|| self.body_lengths.last().unwrap());
             let body = response.output["body"].as_str().unwrap().to_string();
             let filler = length.saturating_sub(body.chars().count() + 1);
-            response.output["body"] = json!(format!("{body}\n{}", "雨".repeat(filler)));
+            response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
         }
         Ok(response)
     }
@@ -122,7 +122,7 @@ fn final_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> 
 }
 
 #[test]
-fn fx18_second_part_is_rewritten_until_the_chapter_fits() {
+fn fx18_a_second_part_version_that_fits_the_range_is_kept() {
     let gateway = Arc::new(LengthGateway::new(&[800, 900, 700], &[900, 500, 1600]));
     let (_temp, state, chapter_id, result) =
         start(gateway.clone(), "p-fx18-rewritten", json!({}), None);
@@ -133,8 +133,9 @@ fn fx18_second_part_is_rewritten_until_the_chapter_fits() {
         renders[0]["chapterLengthRange"],
         json!({"min":2000,"max":3000})
     );
+    // Two versions of part 2; the 1600-character one fits the range.
     assert_eq!(renders[2]["part"]["index"], 2);
-    assert_eq!(renders[2]["partFeedback"]["previousCharacterCount"], 500);
+    assert!(renders[2].get("partFeedback").is_none());
     assert!(renders[2].get("previousBody").is_none());
     // The two parts are joined by a blank line.
     assert_eq!(
@@ -153,8 +154,8 @@ fn fx18_chapter_still_outside_the_range_after_two_rewrites_is_not_committed() {
         error.starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE:1202:2000-3000"),
         "{error}"
     );
-    // Two parts, then part 2 rewritten twice.
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 4);
+    // Part 1, two versions of part 2, then two more with the gap.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 5);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 0);
     assert_eq!(
         final_word_count(&state, "p-fx18-still-short", &chapter_id),
@@ -332,7 +333,7 @@ fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
 fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
     let gateway = Arc::new(LengthGateway::new(
         &[1200, 1300, 1000],
-        &[600, 600, 600, 600, 1700, 1800],
+        &[600, 600, 600, 600, 600, 1700, 1800],
     ));
     let project_id = "p-fx18-retry-range";
     let (_temp, state, chapter_id, result) = start(

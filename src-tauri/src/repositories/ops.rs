@@ -1763,6 +1763,8 @@ pub struct ChapterHistory {
     pub chapter_no: Option<i64>,
     /// Newest first: `{chapterNo, chapterGoal, ending}`.
     pub recent: Vec<serde_json::Value>,
+    /// Newest first: the full bodies of the same chapters.
+    pub bodies: Vec<String>,
 }
 
 impl ChapterHistory {
@@ -1792,24 +1794,33 @@ pub fn chapter_history(
         return Ok(ChapterHistory {
             chapter_no,
             recent: Vec::new(),
+            bodies: Vec::new(),
         });
     };
     let mut statement = connection.prepare(
-        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal') \
+        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body') \
          FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' ORDER BY c.chapter_no DESC LIMIT ?3",
     )?;
-    let recent = statement
+    let rows = statement
         .query_map(libsql_rusqlite::params![project_id, number, limit], |row| {
-            Ok(json!({
-                "chapterNo":row.get::<_, i64>(0)?,
-                "chapterGoal":row.get::<_, Option<String>>(2)?,
-                "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default()
-            }))
+            Ok((
+                json!({
+                    "chapterNo":row.get::<_, i64>(0)?,
+                    "chapterGoal":row.get::<_, Option<String>>(2)?,
+                    "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default()
+                }),
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(ChapterHistory { chapter_no, recent })
+    let (recent, bodies) = rows.into_iter().unzip();
+    Ok(ChapterHistory {
+        chapter_no,
+        recent,
+        bodies,
+    })
 }
 
 /// Formal reader query for one chapter. It returns authority metadata and the

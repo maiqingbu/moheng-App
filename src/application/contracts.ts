@@ -855,6 +855,8 @@ export interface SettingsProjection {
   modelId?: string
   /** Optional model used only for writing chapter prose; blank uses modelId. */
   renderModelId?: string
+  /** Optional model used only for the audit extraction; blank uses modelId. */
+  auditModelId?: string
   enabled?: boolean
   timeoutMs?: number
   secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'

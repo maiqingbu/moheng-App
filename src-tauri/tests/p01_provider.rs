@@ -1484,31 +1484,37 @@ fn p01_formal_real_openai_compatible_usage_settles_after_exact_raw_persist() {
 }
 
 #[test]
-fn craft_render_model_setting_is_saved_and_used_only_for_writing() {
+fn craft_step_model_settings_are_saved_and_used_only_for_their_step() {
     let temp = tempfile::tempdir().unwrap();
     let paths = AppPaths::new(temp.path());
-    let settings = |render_model: &str| {
+    let settings = |render_model: &str, audit_model: &str| {
         json!({
             "providerId":"fixture","provider":"OpenAI Compatible",
             "modelId":"plan-model","model":"plan-model",
-            "renderModelId":render_model,
+            "renderModelId":render_model,"auditModelId":audit_model,
             "endpoint":"http://127.0.0.1:1","enabled":true
         })
     };
-    ProviderSettingsRepository::write_global(&paths, &settings("writer-model")).unwrap();
-    assert_eq!(
-        ProviderSettingsRepository::read_global(&paths).unwrap()["renderModelId"],
-        "writer-model"
-    );
+    ProviderSettingsRepository::write_global(&paths, &settings("writer-model", "audit-model"))
+        .unwrap();
+    let saved = ProviderSettingsRepository::read_global(&paths).unwrap();
+    assert_eq!(saved["renderModelId"], "writer-model");
+    assert_eq!(saved["auditModelId"], "audit-model");
     let gateway = ConfiguredProductionGateway::for_desktop(paths.clone());
+    let model = |capability: &str| gateway.resolve_step_profile(capability).unwrap().model;
     assert_eq!(gateway.resolve_profile().unwrap().model, "plan-model");
-    let render = gateway.resolve_render_profile().unwrap();
-    assert_eq!(render.model, "writer-model");
-    assert_eq!(render.endpoint, "http://127.0.0.1:1");
-    // A blank writing model falls back to the main model.
-    ProviderSettingsRepository::write_global(&paths, &settings("  ")).unwrap();
+    assert_eq!(model("PLAN_STRATEGY"), "plan-model");
+    assert_eq!(model("RENDER_CHAPTER"), "writer-model");
+    assert_eq!(model("AUDIT_EXTRACT"), "audit-model");
     assert_eq!(
-        gateway.resolve_render_profile().unwrap().model,
-        "plan-model"
+        gateway
+            .resolve_step_profile("RENDER_CHAPTER")
+            .unwrap()
+            .endpoint,
+        "http://127.0.0.1:1"
     );
+    // Blank step models fall back to the main model.
+    ProviderSettingsRepository::write_global(&paths, &settings("  ", "")).unwrap();
+    assert_eq!(model("RENDER_CHAPTER"), "plan-model");
+    assert_eq!(model("AUDIT_EXTRACT"), "plan-model");
 }

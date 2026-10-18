@@ -7,6 +7,10 @@ use std::sync::Mutex;
 struct CraftGateway {
     plans: Vec<Value>,
     body_lengths: Vec<usize>,
+    /// Writes half-width punctuation into each part, as real writers do.
+    punctuation_sample: bool,
+    /// Times writer call N repeats `MOTIF` (missing calls repeat it none).
+    motifs: Vec<usize>,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -15,6 +19,8 @@ impl CraftGateway {
         Self {
             plans,
             body_lengths: body_lengths.to_vec(),
+            punctuation_sample: false,
+            motifs: Vec::new(),
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -29,6 +35,9 @@ impl CraftGateway {
             .collect()
     }
 }
+
+/// A recurring image a writer is known to reuse word for word.
+const MOTIF: &str = "白裙下摆扬起，褶皱里藏着三颗蓝莓籽。";
 
 fn scene(scene_type: &str, beats: usize, estimate: i64) -> Value {
     json!({
@@ -48,11 +57,16 @@ impl ProductionModelGateway for CraftGateway {
         true
     }
 
-    fn resolve_render_profile(
+    fn resolve_step_profile(
         &self,
+        capability: &str,
     ) -> Result<ai_novel_production_system_core::production::ResolvedProviderProfile, String> {
         let mut profile = self.resolve_profile()?;
-        profile.model = "writer-model".into();
+        match capability {
+            "RENDER_CHAPTER" => profile.model = "writer-model".into(),
+            "AUDIT_EXTRACT" => profile.model = "audit-model".into(),
+            _ => {}
+        }
         Ok(profile)
     }
 
@@ -73,14 +87,29 @@ impl ProductionModelGateway for CraftGateway {
                 response.output[key] = value.clone();
             }
         }
+        if capability == "RENDER_CHAPTER" && self.punctuation_sample {
+            // Half-width punctuation the writer is known to produce.
+            let mut length = *self
+                .body_lengths
+                .get(renders)
+                .unwrap_or_else(|| self.body_lengths.last().unwrap());
+            let opening = response.output["body"].as_str().unwrap().to_string();
+            length = length.saturating_sub(opening.chars().count() + 14);
+            response.output["body"] = json!(format!(
+                "{opening}\n备注:S.Y.已归档,好...{}",
+                varied_prose(length)
+            ));
+            return Ok(response);
+        }
         if capability == "RENDER_CHAPTER" {
             let length = *self
                 .body_lengths
                 .get(renders)
                 .unwrap_or_else(|| self.body_lengths.last().unwrap());
-            let body = response.output["body"].as_str().unwrap().to_string();
+            let motif = MOTIF.repeat(self.motifs.get(renders).copied().unwrap_or(0));
+            let body = format!("{}{motif}", response.output["body"].as_str().unwrap());
             let filler = length.saturating_sub(body.chars().count() + 1);
-            response.output["body"] = json!(format!("{body}\n{}", "雨".repeat(filler)));
+            response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
         }
         Ok(response)
     }
@@ -180,9 +209,10 @@ fn craft_v2_plan_without_beats_is_replanned_once_with_the_reason() {
 }
 
 #[test]
-fn craft_v2_chapter_is_written_in_two_parts_and_only_the_second_is_rewritten() {
+fn craft_v2_second_part_is_written_twice_and_the_fitting_version_is_kept() {
     let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 500, 1300]));
-    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-parts");
+    let project_id = "p-craft-parts";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
     let renders = gateway.inputs("RENDER_CHAPTER");
     assert_eq!(renders.len(), 3);
@@ -196,27 +226,63 @@ fn craft_v2_chapter_is_written_in_two_parts_and_only_the_second_is_rewritten() {
         1
     );
     assert_eq!(renders[0]["stopBefore"], "节拍0");
-    // Part 2 continues from the whole first part.
-    assert_eq!(renders[1]["part"], json!({"index":2,"count":2}));
+    // Two versions of part 2, both continuing from the whole first part.
+    for second in &renders[1..] {
+        assert_eq!(second["part"], json!({"index":2,"count":2}));
+        assert_eq!(
+            second["previousText"].as_str().unwrap().chars().count(),
+            1200
+        );
+        assert!(second.get("partFeedback").is_none());
+    }
+    // The 500-character version leaves the chapter short; the other is kept.
     assert_eq!(
-        renders[1]["previousText"].as_str().unwrap().chars().count(),
-        1200
+        committed_word_count(&state, project_id, &chapter_id),
+        1200 + 2 + 1300
     );
-    // Only part 2 is rewritten, with the chapter's gap.
-    assert_eq!(renders[2]["part"]["index"], 2);
-    assert_eq!(renders[2]["partFeedback"]["previousCharacterCount"], 500);
-    assert_eq!(renders[2]["partFeedback"]["shortBy"], 2000 - 1702);
-    assert_eq!(renders[2]["previousText"], renders[1]["previousText"]);
-    assert!(renders
-        .iter()
-        .all(|input| input.get("previousBody").is_none()));
+}
+
+#[test]
+fn craft_v2_two_more_second_parts_follow_the_gap_when_neither_fits() {
+    let gateway = Arc::new(CraftGateway::new(
+        vec![good_plan()],
+        &[1200, 500, 600, 1300, 900],
+    ));
+    let project_id = "p-craft-parts-gap";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(renders.len(), 5);
+    // The gap is taken from the version nearest the range (600 characters).
+    for retry in &renders[3..] {
+        assert_eq!(retry["partFeedback"]["previousCharacterCount"], 600);
+        assert_eq!(retry["partFeedback"]["shortBy"], 2000 - 1802);
+    }
+    // Of 1300 and 900, 1300 lands nearest the middle of the range.
+    assert_eq!(
+        committed_word_count(&state, project_id, &chapter_id),
+        1200 + 2 + 1300
+    );
+}
+
+fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> i64 {
+    state
+        .manager
+        .open(project_id, "Craft v2", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT CAST(json_extract(p.payload_json,'$.wordCount') AS INTEGER) FROM chapters c JOIN artifact_payloads p ON p.artifact_id=c.final_artifact_id AND p.version=c.final_version WHERE c.project_id=?1 AND c.chapter_id=?2",
+            [project_id, chapter_id],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 #[test]
 fn craft_v2_retry_writes_both_parts_again() {
     let gateway = Arc::new(CraftGateway::new(
         vec![good_plan()],
-        &[600, 600, 600, 600, 1200, 1300],
+        &[600, 600, 600, 600, 600, 1200, 1300],
     ));
     let project_id = "p-craft-retry";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
@@ -231,6 +297,14 @@ fn craft_v2_retry_writes_both_parts_again() {
             |row| row.get(0),
         )
         .unwrap();
+    // Two attempts with two versions of part 2 each exceed the fixture's
+    // ten-run budget.
+    connection
+        .execute(
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=20 WHERE project_id=?1",
+            [project_id],
+        )
+        .unwrap();
     let revision = state.manager.overview(project_id).unwrap().1;
     drop(connection);
     execute_command_impl(&state, json!({
@@ -240,9 +314,9 @@ fn craft_v2_retry_writes_both_parts_again() {
     }))
     .unwrap();
     let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 6);
-    assert_eq!(renders[4]["part"]["index"], 1);
-    assert!(renders[4].get("partFeedback").is_none());
+    assert_eq!(renders.len(), 8);
+    assert_eq!(renders[5]["part"]["index"], 1);
+    assert!(renders[5].get("partFeedback").is_none());
 }
 
 #[test]
@@ -366,7 +440,7 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
 }
 
 #[test]
-fn craft_v2_only_the_writer_uses_the_writing_model() {
+fn craft_v2_writing_and_audit_use_their_step_models() {
     let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
     let project_id = "p-craft-writer-model";
     let (_temp, state, _chapter_id, result) = produce(gateway, project_id);
@@ -382,8 +456,10 @@ fn craft_v2_only_the_writer_uses_the_writing_model() {
             .unwrap()
     };
     assert_eq!(models("RENDER_CHAPTER"), vec!["writer-model"]);
-    assert!(!models("PLAN_STRATEGY").contains(&"writer-model".to_string()));
-    assert!(!models("AUDIT_EXTRACT").contains(&"writer-model".to_string()));
+    assert_eq!(models("AUDIT_EXTRACT"), vec!["audit-model"]);
+    let plan_models = models("PLAN_STRATEGY");
+    assert!(!plan_models.contains(&"writer-model".to_string()));
+    assert!(!plan_models.contains(&"audit-model".to_string()));
 }
 
 #[test]
@@ -397,10 +473,11 @@ fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
         .create(project_id, "Craft limit", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
-    // Plan, two parts and the audit: four runs (no v1.2 repair).
+    // Plan, part 1, two versions of part 2 and the audit: five runs (no
+    // v1.2 repair).
     connection
         .execute(
-            "UPDATE chapter_production_budgets SET hard_max_model_runs=4 WHERE project_id=?1",
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=5 WHERE project_id=?1",
             [project_id],
         )
         .unwrap();
@@ -414,4 +491,104 @@ fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
         }),
     );
     assert_eq!(result.unwrap()["finalStatus"], "committed");
+}
+
+#[test]
+fn craft_v2_committed_prose_uses_chinese_punctuation() {
+    let gateway = Arc::new(CraftGateway {
+        punctuation_sample: true,
+        ..CraftGateway::new(vec![good_plan()], &[1250])
+    });
+    let project_id = "p-craft-typography";
+    let (_temp, state, chapter_id, result) = produce(gateway, project_id);
+    result.unwrap();
+    let connection = state.manager.open(project_id, "Craft v2", NOW).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.body') FROM chapters c JOIN artifact_payloads p ON p.artifact_id=c.final_artifact_id AND p.version=c.final_version WHERE c.project_id=?1 AND c.chapter_id=?2",
+            [project_id, chapter_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(body.contains("备注：S．Y．已归档，好……"));
+    assert!(!body.contains(':') && !body.contains(','));
+}
+
+#[test]
+fn craft_v2_a_first_part_with_a_third_use_of_a_phrase_is_rewritten_once() {
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![3],
+        ..CraftGateway::new(vec![good_plan()], &[1000, 1000, 1300])
+    });
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-overused-1");
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(renders.len(), 4);
+    assert!(renders[0].get("repeatedPhrases").is_none());
+    assert_eq!(renders[1]["part"], json!({"index":1,"count":2}));
+    assert!(renders[1]["repeatedPhrases"][0]
+        .as_str()
+        .unwrap()
+        .contains("蓝莓籽"));
+    // Part 2 continues from the rewritten first part.
+    assert!(!renders[2]["previousText"]
+        .as_str()
+        .unwrap()
+        .contains("蓝莓籽"));
+}
+
+#[test]
+fn craft_v2_a_second_part_with_a_third_use_of_a_phrase_is_not_kept() {
+    // Part 1 uses the image twice; version 2a, nearer the middle, a third time.
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![2, 1, 0],
+        ..CraftGateway::new(vec![good_plan()], &[1200, 1300, 1600])
+    });
+    let project_id = "p-craft-overused-2";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 3);
+    assert_eq!(
+        committed_word_count(&state, project_id, &chapter_id),
+        1200 + 2 + 1600
+    );
+}
+
+#[test]
+fn craft_v2_two_more_second_parts_avoid_the_phrase_when_both_reuse_it() {
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![2, 1, 1, 1, 0],
+        ..CraftGateway::new(vec![good_plan()], &[1200, 1300, 1300, 1300, 1600])
+    });
+    let project_id = "p-craft-overused-3";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert_eq!(renders.len(), 5);
+    for retry in &renders[3..] {
+        assert!(retry["repeatedPhrases"][0]
+            .as_str()
+            .unwrap()
+            .contains("蓝莓籽"));
+    }
+    assert_eq!(
+        committed_word_count(&state, project_id, &chapter_id),
+        1200 + 2 + 1600
+    );
+}
+
+#[test]
+fn craft_v2_a_rewritten_first_part_outside_its_length_range_is_not_kept() {
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![3],
+        ..CraftGateway::new(vec![good_plan()], &[1000, 100, 1300])
+    });
+    let project_id = "p-craft-overused-short";
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let renders = gateway.inputs("RENDER_CHAPTER");
+    assert!(renders[2]["previousText"]
+        .as_str()
+        .unwrap()
+        .contains("蓝莓籽"));
 }

@@ -992,6 +992,9 @@ fn craft_previous_chapters_report_goals_and_endings_newest_first() {
     assert!(ending.ends_with("第3章结尾。"));
     assert_eq!(ending.chars().count(), 200);
     assert_eq!(history.recent[1]["chapterNo"], 2);
+    assert_eq!(history.bodies.len(), 2);
+    assert!(history.bodies[0].ends_with("第3章结尾。"));
+    assert_eq!(history.bodies[0].chars().count(), 300 + 6);
     let first = ai_novel_production_system_core::repositories::ops::chapter_history(
         &connection,
         "p1",

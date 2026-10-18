@@ -737,7 +737,7 @@ fn b2_hard_context_overflow_reports_source_sizes_without_writes() {
     let manager = ProjectManager::new(AppPaths::new(temp.path()));
     let connection = manager.create("p-b2-overflow", "B2 overflow", NOW).unwrap();
     let (volume_id, chapter_id) =
-        seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 5000);
+        seed_authority_with_large_world_rule(&connection, "p-b2-overflow", 10_000);
     let revision_before = connection
         .query_row::<i64, _, _>(
             "SELECT revision FROM project_meta WHERE project_id='p-b2-overflow'",
@@ -1059,8 +1059,9 @@ fn b2_selected_canon_scope_over_budget_reports_required_sources() {
             libsql_rusqlite::params![entity_id, project_id, NOW],
         ).unwrap();
         connection.execute(
-            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES (?1,?2,?3,'HARD_CONTEXT','true','A','chapter:b04:1','chapter:b04:1',?4,?4)",
-            libsql_rusqlite::params![format!("fact:derived:{index}"), project_id, entity_id, NOW],
+            "INSERT INTO canon_facts(fact_id,project_id,subject_id,predicate,object_json,authority_level,source_chapter_id,valid_from_chapter_id,created_at,updated_at) VALUES (?1,?2,?3,'HARD_CONTEXT',?5,'A','chapter:b04:1','chapter:b04:1',?4,?4)",
+            // Large enough that 100 selected facts exceed the hard budget.
+            libsql_rusqlite::params![format!("fact:derived:{index}"), project_id, entity_id, NOW, serde_json::json!({"detail":"线".repeat(60)}).to_string()],
         ).unwrap();
     }
     drop(connection);
@@ -1119,7 +1120,7 @@ fn b_r2_01_planning_blocks_before_model_and_persists_no_context_after_reopen() {
         .create(project_id, "Context completeness", NOW)
         .unwrap();
     let (volume_id, _) =
-        seed_authority_with_large_world_rule_and_r1_signing(&connection, project_id, 5000);
+        seed_authority_with_large_world_rule_and_r1_signing(&connection, project_id, 10_000);
     drop(connection);
 
     let gateway = Arc::new(PlanningGateway {

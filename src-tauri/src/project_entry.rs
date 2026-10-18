@@ -348,7 +348,8 @@ fn generate_story_directions(
         repair_round: 0,
     };
     let input = json!({
-        "prompt":format!("Generate exactly three substantially different long-form story direction candidates from this JSON input. Return only the required JSON object. Input: {}", prompt),
+        // The data follows the instruction once, as the `input` field.
+        "prompt":"Generate exactly three substantially different long-form story direction candidates from the JSON field input below. Return only the required JSON object.",
         "capability":GENERATE_STORY_DIRECTIONS,
         "input":prompt
     });

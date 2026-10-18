@@ -277,6 +277,126 @@ pub fn part_render_input(base: &Value, plan: &Value, part: usize, written: &str)
     input
 }
 
+/// Chinese typography for committed prose (owner rule: signing checks forbid
+/// mixed full/half-width punctuation and repeated punctuation): half-width
+/// punctuation becomes full-width, and a period touching ASCII letters or
+/// digits becomes `．` so labels, decimals and dates survive.
+pub fn normalize_typography(body: &str) -> String {
+    let chars = body.chars().collect::<Vec<_>>();
+    let ascii_alnum = |index: Option<usize>| {
+        index
+            .and_then(|index| chars.get(index))
+            .is_some_and(char::is_ascii_alphanumeric)
+    };
+    let mut converted = String::with_capacity(body.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '.' {
+            let run = chars[index..].iter().take_while(|c| **c == '.').count();
+            if run >= 2 {
+                converted.push_str("……");
+            } else if ascii_alnum(index.checked_sub(1)) || ascii_alnum(Some(index + 1)) {
+                converted.push('．');
+            } else {
+                converted.push('。');
+            }
+            index += run;
+            continue;
+        }
+        converted.push(match character {
+            ',' => '，',
+            '!' => '！',
+            '?' => '？',
+            ':' => '：',
+            ';' => '；',
+            other => other,
+        });
+        index += 1;
+    }
+    let mut normalized = String::with_capacity(converted.len());
+    let mut newlines = 0;
+    let mut previous = None;
+    for character in converted.chars() {
+        if character == '\n' {
+            newlines += 1;
+            if newlines > 2 {
+                continue;
+            }
+        } else {
+            newlines = 0;
+        }
+        if previous == Some(character) && "。，！？；：".contains(character) {
+            continue;
+        }
+        normalized.push(character);
+        previous = Some(character);
+    }
+    normalized
+}
+
+/// Characters in a phrase the signing check counts as a repetition.
+const PHRASE_CHARACTERS: usize = 12;
+
+/// Phrases of `PHRASE_CHARACTERS` or more characters that already occur at
+/// least twice in `texts`, so the writer can avoid a third use.
+pub fn repeated_phrases(texts: &[String]) -> Vec<String> {
+    phrases_used(texts, 0, 2)
+}
+
+/// Phrases of `text` whose third (or later) use, counting `history`, would
+/// fail the signing repetition check (F1-5).
+pub fn overused_phrases(history: &[String], text: &str) -> Vec<String> {
+    let texts = history
+        .iter()
+        .cloned()
+        .chain([text.to_string()])
+        .collect::<Vec<_>>();
+    phrases_used(&texts, history.len(), 3)
+}
+
+/// Maximal spans in `texts[from..]` covered by phrases used at least
+/// `times` times across all of `texts`.
+fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
+    let texts = texts
+        .iter()
+        .map(|text| text.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut counts = std::collections::HashMap::<&[char], usize>::new();
+    for text in &texts {
+        for window in text.windows(PHRASE_CHARACTERS) {
+            if !window.contains(&'\n') {
+                *counts.entry(window).or_default() += 1;
+            }
+        }
+    }
+    let mut phrases = Vec::new();
+    for text in &texts[from..] {
+        let mut covered = vec![false; text.len()];
+        for (start, window) in text.windows(PHRASE_CHARACTERS).enumerate() {
+            if counts.get(window).is_some_and(|count| *count >= times) {
+                covered[start..start + PHRASE_CHARACTERS].fill(true);
+            }
+        }
+        let mut start = None;
+        for (index, is_covered) in covered.iter().chain([&false]).enumerate() {
+            match (start, is_covered) {
+                (None, true) => start = Some(index),
+                (Some(from), false) => {
+                    let phrase = text[from..index].iter().collect::<String>();
+                    if !phrases.contains(&phrase) {
+                        phrases.push(phrase);
+                    }
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    phrases.truncate(30);
+    phrases
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +600,49 @@ mod tests {
         assert_eq!(second["previousText"], written);
         assert!(second["stopBefore"].is_null());
         assert_eq!(second["partLengthRange"], json!({"min":1120,"max":1820}));
+    }
+
+    #[test]
+    fn craft_typography_makes_punctuation_full_width_and_keeps_labels() {
+        assert_eq!(
+            normalize_typography("他说:走吧,别回头!真的?好...我知道了."),
+            "他说：走吧，别回头！真的？好……我知道了。"
+        );
+        assert_eq!(
+            normalize_typography("备注：S.Y. 已归档，倒计时00:07，峰值0.87。"),
+            "备注：S．Y． 已归档，倒计时00：07，峰值0．87。"
+        );
+        assert_eq!(
+            normalize_typography("什么？？！！不行。。"),
+            "什么？！不行。"
+        );
+        assert_eq!(
+            normalize_typography("第一段。\n\n\n\n第二段。"),
+            "第一段。\n\n第二段。"
+        );
+        assert_eq!(normalize_typography("——好吧……"), "——好吧……");
+    }
+
+    #[test]
+    fn craft_repeated_phrases_lists_twice_used_phrases_once() {
+        let texts = vec![
+            "【S_Y_042-RECORD-12.07】雨还在下。".to_string(),
+            "他翻到【S_Y_042-RECORD-12.08】。".to_string(),
+        ];
+        let phrases = repeated_phrases(&texts);
+        assert_eq!(phrases, vec!["【S_Y_042-RECORD-12.0".to_string()]);
+        assert!(repeated_phrases(&["各不相同的一句话。".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn craft_overused_phrases_lists_third_uses_in_the_new_text_only() {
+        let motif = "白裙下摆扬起，褶皱里藏着三颗蓝莓籽";
+        let history = vec![format!("第一章{motif}。"), format!("第二章{motif}。")];
+        assert_eq!(
+            overused_phrases(&history, &format!("他又看见{motif}。")),
+            vec![format!("{motif}。")]
+        );
+        assert!(overused_phrases(&history, "他什么也没看见。").is_empty());
+        assert!(overused_phrases(&history[..1], &format!("又是{motif}。")).is_empty());
     }
 }
