@@ -360,7 +360,13 @@ fn craft_a_new_fact_reusing_an_existing_fact_id_gets_its_own_id() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(seed, ("location".to_string(), "{\"place\":\"stone-door\"}".to_string()));
+    assert_eq!(
+        seed,
+        (
+            "location".to_string(),
+            "{\"place\":\"stone-door\"}".to_string()
+        )
+    );
     let opened: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM canon_facts WHERE predicate='opened' AND fact_id<>'fact:actual:seed'",

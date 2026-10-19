@@ -1372,6 +1372,8 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
             let filler = target.saturating_sub(opening.chars().count() + 1);
             json!({"body":format!("{opening}\n{}", (0..filler).map(|n| char::from_u32(0x4E00 + n as u32).unwrap()).collect::<String>())})
         }
+        "REVIEW_CHAPTER" => json!({"findings":[]}),
+        "REWRITE_PASSAGES" => json!({"edits":[]}),
         "AUDIT_EXTRACT" => json!({
             "qualityFindings":[],
             "canonCandidates":[{
@@ -2246,8 +2248,9 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
-    // The opening chapter is written in two parts, part 2 in two versions.
-    let expected_requests = 6;
+    // The opening chapter is written in two parts, part 2 in two versions,
+    // and its prose is reviewed once.
+    let expected_requests = 7;
     let R2LocalProviderServer {
         endpoint,
         stop,

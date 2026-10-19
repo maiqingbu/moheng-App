@@ -154,6 +154,50 @@ pub fn catalog() -> Result<&'static [Skill], String> {
         .map_err(Clone::clone)
 }
 
+/// Every scene type some skill is written for, so the planner can label
+/// scenes in words the skills know.
+pub fn scene_type_vocabulary() -> Result<&'static [String], String> {
+    static VOCABULARY: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
+    cached_vocabulary(&VOCABULARY, "scene_types")
+}
+
+/// Every review finding code some skill is written to fix, so a review
+/// reports problems in words the rewrite skills know.
+pub fn finding_vocabulary() -> Result<&'static [String], String> {
+    static VOCABULARY: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
+    cached_vocabulary(&VOCABULARY, "findings")
+}
+
+fn cached_vocabulary(
+    cell: &'static OnceLock<Result<Vec<String>, String>>,
+    key: &str,
+) -> Result<&'static [String], String> {
+    cell.get_or_init(|| {
+        let mut values = std::collections::BTreeSet::new();
+        for skill in catalog()? {
+            if let Some(listed) = skill.triggers.get(key) {
+                values.extend(listed.iter().cloned());
+            }
+        }
+        Ok(values.into_iter().collect())
+    })
+    .as_deref()
+    .map_err(Clone::clone)
+}
+
+/// The skill vocabulary's word for a scene label a planner may use instead.
+pub fn canonical_scene_type(label: &str) -> String {
+    match label.trim() {
+        "动作冲突" | "动作" | "打斗" | "冲突" => "战斗",
+        "过渡" | "场景过渡" => "转场",
+        "揭秘" | "真相揭示" => "信息揭示",
+        "悬疑" | "探查" | "搜查" => "调查",
+        "情感高潮" | "情绪爆发" => "情绪峰值",
+        other => other,
+    }
+    .to_string()
+}
+
 /// What is known about the step being performed.
 #[derive(Clone, Debug, Default)]
 pub struct StepSignals {

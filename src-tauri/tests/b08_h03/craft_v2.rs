@@ -13,6 +13,9 @@ struct CraftGateway {
     motifs: Vec<usize>,
     /// The first audit reports an unresolved hard problem.
     fail_first_audit: bool,
+    /// The review flags the last 12 characters of the chapter as wordy, and
+    /// the rewrite replaces them with this text.
+    rewrite_ending: Option<String>,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -24,6 +27,7 @@ impl CraftGateway {
             punctuation_sample: false,
             motifs: Vec::new(),
             fail_first_audit: false,
+            rewrite_ending: None,
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -85,6 +89,18 @@ impl ProductionModelGateway for CraftGateway {
         if capability == "AUDIT_EXTRACT" && self.fail_first_audit && audits == 1 {
             response.output["unresolvedHard"] = json!(true);
             response.output["auditCompleteness"] = json!("UNRESOLVED_HARD");
+        }
+        match (capability, &self.rewrite_ending) {
+            ("REVIEW_CHAPTER", Some(_)) => {
+                let body = input["body"].as_str().unwrap().chars().collect::<Vec<_>>();
+                let ending = body[body.len() - 12..].iter().collect::<String>();
+                response.output = json!({"findings":[{"code":"prose_wordy","severity":"HIGH",
+                    "quote":ending,"problem":"收尾拖沓","suggestion":"收紧"}]});
+            }
+            ("REWRITE_PASSAGES", Some(replacement)) => {
+                response.output = json!({"edits":[{"quote":input["findings"][0]["quote"],"replacement":replacement}]});
+            }
+            _ => {}
         }
         if capability == "PLAN_STRATEGY" {
             let plan = self
@@ -481,11 +497,11 @@ fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
         .create(project_id, "Craft limit", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
-    // Plan, part 1, two versions of part 2 and the audit: five runs (no
-    // v1.2 repair).
+    // Plan, part 1, two versions of part 2, the prose review and the audit:
+    // six runs (a clean review needs no rewrite; no v1.2 repair).
     connection
         .execute(
-            "UPDATE chapter_production_budgets SET hard_max_model_runs=5 WHERE project_id=?1",
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=6 WHERE project_id=?1",
             [project_id],
         )
         .unwrap();
@@ -676,4 +692,126 @@ fn craft_v2_long_form_plan_with_too_short_a_horizon_is_replanned() {
         plans[1]["planFeedback"]["rejectedFor"],
         "ROLLING_HORIZON_CAPACITY_INVALID"
     );
+}
+
+#[test]
+fn craft_v2_receipt_records_the_skills_each_step_received() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let project_id = "p-craft-skill-receipt";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let receipt = receipt_craft(&state, project_id);
+    let ids = |value: &Value| {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&receipt["chapterPlan"]),
+        skill_ids(&gateway.inputs("PLAN_STRATEGY")[0]["craftGuidance"])
+    );
+    assert_eq!(
+        ids(&receipt["render"]),
+        skill_ids(&gateway.inputs("RENDER_CHAPTER")[0]["craftGuidance"])
+    );
+    assert_eq!(receipt["skillsVersion"], "2.0.0");
+}
+
+fn committed_body(state: &KernelState, project_id: &str) -> String {
+    state
+        .manager
+        .open(project_id, "Craft v2", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.body') FROM chapters c JOIN artifact_payloads p ON p.artifact_id=c.final_artifact_id AND p.version=c.final_version WHERE c.project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn receipt_craft(state: &KernelState, project_id: &str) -> Value {
+    let raw: String = state
+        .manager
+        .open(project_id, "Craft v2", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.craftSkills') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[test]
+fn craft_v2_review_findings_are_rewritten_in_place_with_the_rewrite_skills() {
+    let gateway = Arc::new(CraftGateway {
+        rewrite_ending: Some("他收好钥匙，转身离开。".into()),
+        ..CraftGateway::new(vec![good_plan()], &[1200, 1300])
+    });
+    let project_id = "p-craft-review";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let reviews = gateway.inputs("REVIEW_CHAPTER");
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0]["craftGuidance"]["stage"], "review");
+    assert!(skill_ids(&reviews[0]["craftGuidance"]).contains(&"S37".to_string()));
+    assert!(reviews[0]["findingCodes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("prose_wordy")));
+    let rewrites = gateway.inputs("REWRITE_PASSAGES");
+    assert_eq!(rewrites.len(), 1);
+    let rewrite_skills = skill_ids(&rewrites[0]["craftGuidance"]);
+    for expected in ["S40", "S46", "S32"] {
+        assert!(
+            rewrite_skills.contains(&expected.to_string()),
+            "{rewrite_skills:?}"
+        );
+    }
+    // The audit reads the rewritten chapter, which is what commits.
+    let audited = gateway.inputs("AUDIT_EXTRACT")[0]["body"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(audited.ends_with("他收好钥匙，转身离开。"));
+    assert_eq!(committed_body(&state, project_id), audited);
+    let craft = receipt_craft(&state, project_id);
+    assert!(craft["review"].as_array().unwrap().contains(&json!("S37")));
+    assert!(craft["rewrite"].as_array().unwrap().contains(&json!("S32")));
+    assert_eq!(craft["proseReview"]["editsApplied"], 1);
+}
+
+#[test]
+fn craft_v2_a_chapter_without_review_findings_is_not_rewritten() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 1300]));
+    let project_id = "p-craft-review-clean";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert_eq!(gateway.inputs("REVIEW_CHAPTER").len(), 1);
+    assert!(gateway.inputs("REWRITE_PASSAGES").is_empty());
+    assert_eq!(
+        receipt_craft(&state, project_id)["proseReview"]["findings"],
+        0
+    );
+}
+
+#[test]
+fn craft_v2_a_rewrite_that_leaves_the_length_range_is_discarded() {
+    let gateway = Arc::new(CraftGateway {
+        rewrite_ending: Some("长".repeat(2000)),
+        ..CraftGateway::new(vec![good_plan()], &[1200, 1300])
+    });
+    let project_id = "p-craft-review-long";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert_eq!(gateway.inputs("REWRITE_PASSAGES").len(), 1);
+    assert!(!committed_body(&state, project_id).contains("长长长"));
+    let craft = receipt_craft(&state, project_id);
+    assert_eq!(craft["proseReview"]["editsApplied"], 0);
+    assert_eq!(craft["proseReview"]["discarded"], "LENGTH_OUT_OF_RANGE");
 }

@@ -33,6 +33,17 @@ pub fn guidance(stage: &str, signals: &StepSignals) -> Result<Value, String> {
     }))
 }
 
+/// The ids of the skills in a `guidance` value, in order.
+pub fn guidance_skill_ids(guidance: &Value) -> Vec<String> {
+    guidance["skills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|skill| skill.get("skillId").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Extra planner input: chapter position, what the recent chapters already
 /// did, the role options with their sub-ranges, and the selected skills.
 pub fn planning_inputs(
@@ -40,10 +51,7 @@ pub fn planning_inputs(
     recent_chapters: &[Value],
     range: ChapterLengthRange,
 ) -> Result<Value, String> {
-    let signals = StepSignals {
-        chapter_number,
-        ..StepSignals::default()
-    };
+    let signals = planning_signals(chapter_number, recent_chapters);
     let roles = CHAPTER_ROLES
         .iter()
         .map(|role| {
@@ -55,6 +63,7 @@ pub fn planning_inputs(
         "chapterNumber":chapter_number,
         "recentChapters":recent_chapters,
         "chapterRoleOptions":roles,
+        "sceneTypeOptions":crate::skills_v2::scene_type_vocabulary()?,
         "craftGuidance":guidance("chapter_plan", &signals)?
     }))
 }
@@ -135,7 +144,30 @@ pub fn plan_signals(plan: &Value, chapter_number: Option<u32>) -> StepSignals {
             .into_iter()
             .flatten()
             .filter_map(|scene| scene.get("sceneType").and_then(Value::as_str))
-            .map(ToOwned::to_owned)
+            .map(crate::skills_v2::canonical_scene_type)
+            .collect(),
+        ..StepSignals::default()
+    }
+}
+
+/// Signals for planning a chapter: its position, and the role and scene
+/// types of the previous chapter (`recent_chapters` is newest first), since
+/// this chapter's own are not chosen yet.
+pub fn planning_signals(chapter_number: Option<u32>, recent_chapters: &[Value]) -> StepSignals {
+    let previous = recent_chapters.first();
+    StepSignals {
+        chapter_number,
+        chapter_role: previous
+            .and_then(|chapter| chapter.get("chapterRole"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        scene_types: previous
+            .and_then(|chapter| chapter.get("sceneTypes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(crate::skills_v2::canonical_scene_type)
             .collect(),
         ..StepSignals::default()
     }
@@ -427,6 +459,47 @@ mod tests {
         assert_eq!(role_range("回报", RANGE), range(2500, 3000));
         assert_eq!(role_range("高潮", RANGE), range(2750, 3000));
         assert_eq!(role_range("未知", RANGE), RANGE);
+    }
+
+    #[test]
+    fn craft_planner_scene_labels_reach_the_skills_written_for_them() {
+        // Labels a real planner used (2026-10-19) that no skill listed.
+        let plan = json!({"chapterRole":"重要","sceneExecution":[
+            {"sceneType":"动作冲突"},{"sceneType":"过渡"}
+        ]});
+        let signals = plan_signals(&plan, Some(6));
+        assert_eq!(
+            signals.scene_types,
+            vec!["战斗".to_string(), "转场".to_string()]
+        );
+        let render = guidance_skill_ids(&guidance("render", &signals).unwrap());
+        assert!(render.contains(&"S30".to_string()), "{render:?}");
+        assert!(render.contains(&"S34".to_string()), "{render:?}");
+    }
+
+    #[test]
+    fn craft_planner_is_offered_the_scene_types_the_skills_know() {
+        let inputs = planning_inputs(Some(5), &[], RANGE).unwrap();
+        let options = inputs["sceneTypeOptions"].as_array().unwrap();
+        for known in ["战斗", "信息揭示", "情绪峰值", "转场", "调查", "日常"] {
+            assert!(options.contains(&json!(known)), "{known} missing");
+        }
+    }
+
+    #[test]
+    fn craft_chapter_planning_follows_the_previous_chapter_role_and_scenes() {
+        let recent = vec![
+            json!({"chapterNo":7,"chapterGoal":"潜入档案库","ending":"灯灭了。",
+            "chapterRole":"高潮前","sceneTypes":["调查","关系转折"]}),
+        ];
+        let inputs = planning_inputs(Some(8), &recent, RANGE).unwrap();
+        let plan = guidance_skill_ids(&inputs["craftGuidance"]);
+        for expected in ["S20", "S22", "S05"] {
+            assert!(
+                plan.contains(&expected.to_string()),
+                "{expected} not in {plan:?}"
+            );
+        }
     }
 
     #[test]

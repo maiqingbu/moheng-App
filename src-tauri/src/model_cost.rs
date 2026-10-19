@@ -273,6 +273,8 @@ fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
         "CLASSIFY_ASSISTANT_INTENT" => 200,
         "AUDIT_EXTRACT" => 1_200,
         "REPAIR_CANDIDATE" => 1_200,
+        "REVIEW_CHAPTER" => 800,
+        "REWRITE_PASSAGES" => 1_500,
         "GENERATE_STORY_DIRECTIONS" => 2_400,
         "OPENING_SIGNING_EVALUATION" => 3_000,
         "B14_S44_ENDGAME_ADVICE" | "B14_S45_COMPLETION_QUALITY" => 1_500,

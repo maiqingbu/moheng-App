@@ -251,6 +251,8 @@ impl ProductionModelGateway for RecordingGateway {
                 "confidence":0.5,
                 "nextSkillHints":[]
             }),
+            "REVIEW_CHAPTER" => json!({"findings":[]}),
+            "REWRITE_PASSAGES" => json!({"edits":[]}),
             "AUDIT_EXTRACT" => json!({
                 "qualityFindings":[],
                 "canonCandidates":[{
@@ -2763,7 +2765,12 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
     );
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT", "AUDIT_EXTRACT"]
+        [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "AUDIT_EXTRACT",
+            "AUDIT_EXTRACT"
+        ]
     );
 }
 
@@ -2862,7 +2869,12 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
     );
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT", "AUDIT_EXTRACT"]
+        [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "AUDIT_EXTRACT",
+            "AUDIT_EXTRACT"
+        ]
     );
     // The audit and its rerun ran once each; the retry reused them.
     assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 2);
@@ -5568,8 +5580,12 @@ fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks()
 #[test]
 fn b08_reconciliation_uses_actual_task_state() {
     {
-        let (suffix, variant, expected_error, expected_reconciliation) =
-            ("blocked", "blocked", None::<&str>, Some("REPLAN_VOLUME_ROUTE"));
+        let (suffix, variant, expected_error, expected_reconciliation) = (
+            "blocked",
+            "blocked",
+            None::<&str>,
+            Some("REPLAN_VOLUME_ROUTE"),
+        );
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-b08-audit-{suffix}");
         let state = KernelState::with_production_gateway(

@@ -1798,7 +1798,7 @@ pub fn chapter_history(
         });
     };
     let mut statement = connection.prepare(
-        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body') \
+        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body'), json_extract(p.payload_json,'$.chapterRole'), (SELECT json_group_array(json_extract(scene.value,'$.sceneType')) FROM json_each(p.payload_json,'$.sceneExecution') scene) \
          FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' ORDER BY c.chapter_no DESC LIMIT ?3",
@@ -1809,7 +1809,12 @@ pub fn chapter_history(
                 json!({
                     "chapterNo":row.get::<_, i64>(0)?,
                     "chapterGoal":row.get::<_, Option<String>>(2)?,
-                    "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default()
+                    "ending":row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    "chapterRole":row.get::<_, Option<String>>(4)?,
+                    "sceneTypes":row
+                        .get::<_, Option<String>>(5)?
+                        .and_then(|types| serde_json::from_str::<serde_json::Value>(&types).ok())
+                        .unwrap_or_else(|| json!([]))
                 }),
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             ))

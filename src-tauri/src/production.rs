@@ -117,6 +117,12 @@ pub trait ProductionModelGateway: Send + Sync {
         false
     }
 
+    /// Whether a written chapter is reviewed and rewritten with the craft
+    /// review and rewrite skills (the configured writer path).
+    fn reviews_chapter_prose(&self) -> bool {
+        self.enforces_chapter_length()
+    }
+
     /// FX-21: configured providers classify project assistant questions;
     /// deterministic gateways keep the keyword routing.
     fn classifies_assistant_intent(&self) -> bool {
@@ -458,8 +464,8 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
     fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
         let mut profile = self.resolve_profile()?;
         let setting = match capability {
-            "RENDER_CHAPTER" => "renderModelId",
-            "AUDIT_EXTRACT" => "auditModelId",
+            "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "renderModelId",
+            "AUDIT_EXTRACT" | "REVIEW_CHAPTER" => "auditModelId",
             _ => return Ok(profile),
         };
         if let Some(paths) = &self.settings_paths {
@@ -3232,42 +3238,63 @@ fn run_chapter_production_inner(
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
     }
-    render_input["craftGuidance"] = crate::chapter_craft::guidance(
-        "render",
-        &crate::chapter_craft::plan_signals(&plan_payload, chapter_number),
-    )?;
+    let mut craft_signals = crate::chapter_craft::plan_signals(&plan_payload, chapter_number);
+    render_input["craftGuidance"] = crate::chapter_craft::guidance("render", &craft_signals)?;
+    // The skills each step received, for the receipt. Chapter planning
+    // selects from the chapter position and the previous chapter, so the
+    // selection is reproducible for plans compiled by an earlier command.
+    use crate::chapter_craft::guidance_skill_ids as skill_ids;
+    let mut craft_skills = json!({
+        "skillsVersion":crate::skills_v2::SKILLS_V2_VERSION,
+        "chapterPlan":skill_ids(&crate::chapter_craft::guidance(
+            "chapter_plan",
+            &crate::chapter_craft::planning_signals(chapter_number, &chapter_history.recent),
+        )?),
+        "render":skill_ids(&render_input["craftGuidance"])
+    });
     let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
-    // One writer call; `suffix` names the call within this job.
+    // One model call of a craft step; `suffix` names the call within this
+    // job. Returns the run id and its outcome.
+    let craft_call = |suffix: &str,
+                      capability: &str,
+                      profile: &ResolvedProviderProfile,
+                      attempt_no: i64,
+                      input: Value|
+     -> Result<(String, ModelRunOutcome), String> {
+        let model_run_id = StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            &format!("{command_id}:{suffix}"),
+        )?;
+        let spec = ModelRunSpec {
+            model_run_id: model_run_id.clone(),
+            job_id: Some(job_id.clone()),
+            step_id: None,
+            provider: profile.provider.clone(),
+            model: profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:{suffix}"),
+            capability: capability.into(),
+            prompt_ref: None,
+            context_manifest_ref: Some(context_ref.artifact_id.clone()),
+            budget_id: Some(production_budget_id.clone()),
+            predicted_cost_cents: 0,
+            cost_snapshot: None,
+            attempt_no,
+            repair_round: 0,
+        };
+        let outcome = execute_production_model_with_profile(
+            connection, gateway, profile, &spec, capability, input, &now,
+        )?;
+        Ok((model_run_id, outcome))
+    };
+    // One writer call.
     let render_once =
         |suffix: &str, attempt_no: i64, input: Value| -> Result<(String, String), String> {
-            let model_run_id = StableIdentityFactory::from_command(
-                StableIdKind::ModelRun,
-                &format!("{command_id}:render{suffix}"),
-            )?;
-            let spec = ModelRunSpec {
-                model_run_id: model_run_id.clone(),
-                job_id: Some(job_id.clone()),
-                step_id: None,
-                provider: render_profile.provider.clone(),
-                model: render_profile.model.clone(),
-                idempotency_key: format!("{idempotency_key}:render{suffix}"),
-                capability: "RENDER_CHAPTER".into(),
-                prompt_ref: None,
-                context_manifest_ref: Some(context_ref.artifact_id.clone()),
-                budget_id: Some(production_budget_id.clone()),
-                predicted_cost_cents: 0,
-                cost_snapshot: None,
-                attempt_no,
-                repair_round: 0,
-            };
-            let result = execute_production_model_with_profile(
-                connection,
-                gateway,
-                &render_profile,
-                &spec,
+            let (model_run_id, result) = craft_call(
+                &format!("render{suffix}"),
                 "RENDER_CHAPTER",
+                &render_profile,
+                attempt_no,
                 input,
-                &now,
             )?;
             let body = result
                 .parsed
@@ -3416,6 +3443,90 @@ fn run_chapter_production_inner(
         };
         (run_id, body)
     };
+    // Craft v2 (owner decision 2026-10-19): the written chapter is read once
+    // with the review skills, and passages it flags are rewritten in place
+    // with the rewrite skills. Only edits whose passage occurs once apply,
+    // and a rewrite that leaves the length range is dropped whole.
+    let mut prose_run_ids = Vec::new();
+    if gateway.reviews_chapter_prose() {
+        let mut craft_step = |suffix: &str,
+                              capability: &str,
+                              profile: &ResolvedProviderProfile,
+                              input: Value|
+         -> Result<Value, String> {
+            let (run_id, outcome) = craft_call(suffix, capability, profile, 1, input)?;
+            prose_run_ids.push(run_id);
+            outcome
+                .parsed
+                .ok_or_else(|| format!("B08_{capability}_OUTPUT_INVALID"))
+        };
+        let codes = crate::skills_v2::finding_vocabulary()?;
+        let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
+        craft_skills["review"] = json!(skill_ids(&review_guidance));
+        let review = craft_step(
+            "review",
+            "REVIEW_CHAPTER",
+            &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
+            json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
+        )?;
+        let findings = review
+            .get("findings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|finding| {
+                finding
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| codes.iter().any(|known| known == code))
+                    && matches!(
+                        finding.get("severity").and_then(Value::as_str),
+                        Some("HIGH" | "MEDIUM" | "LOW")
+                    )
+                    && finding
+                        .get("quote")
+                        .and_then(Value::as_str)
+                        .is_some_and(|quote| locate_unique_quote(&body, quote).is_some())
+            })
+            .take(6)
+            .collect::<Vec<_>>();
+        let to_fix = findings
+            .iter()
+            .filter(|finding| finding["severity"] != "LOW")
+            .collect::<Vec<_>>();
+        let mut applied = 0;
+        let mut in_range = true;
+        if !to_fix.is_empty() {
+            craft_signals.findings = to_fix
+                .iter()
+                .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
+                .collect();
+            let rewrite_guidance = crate::chapter_craft::guidance("rewrite", &craft_signals)?;
+            craft_skills["rewrite"] = json!(skill_ids(&rewrite_guidance));
+            let rewrite_profile = gateway.resolve_step_profile("REWRITE_PASSAGES")?;
+            let rewrite = craft_step(
+                "rewrite",
+                "REWRITE_PASSAGES",
+                &rewrite_profile,
+                json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
+            )?;
+            let (revised, count) = apply_unique_edits(&body, &rewrite);
+            let revised = crate::chapter_craft::normalize_typography(revised.trim());
+            let length = character_count(&revised);
+            in_range = (length_range.min..=length_range.ceiling()).contains(&length);
+            applied = count;
+            if applied > 0 && in_range {
+                body = revised;
+            }
+        }
+        let kept = in_range || applied == 0;
+        craft_skills["proseReview"] = json!({
+            "findings":findings.len(),
+            "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
+            "editsApplied":if kept { applied } else { 0 },
+            "discarded":if kept { Value::Null } else { json!("LENGTH_OUT_OF_RANGE") }
+        });
+    }
     let method_injection_provenance = creative_enrichment
         .as_ref()
         .map(|enrichment| {
@@ -3903,7 +4014,10 @@ fn run_chapter_production_inner(
             crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
                 connection,
                 &project_id,
-                &claimed_fact_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+                &claimed_fact_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
             .map_err(|error| error.to_string())?;
         let renamed_fact_ids = fresh_audit_fact_ids(&mut raw, &existing_fact_ids, &chapter_id);
@@ -3991,7 +4105,8 @@ fn run_chapter_production_inner(
                     "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
                         | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
                         | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
-                ) || error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
+                ) || error
+                    .starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
         {
             let rerun_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
@@ -4625,7 +4740,8 @@ fn run_chapter_production_inner(
     }));
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
     model_run_refs.extend(repair_model_run_ids.iter().cloned());
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    model_run_refs.extend(prose_run_ids.iter().cloned());
+    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -5579,6 +5695,37 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
     Some((positions[offset], positions[offset + needle.len() - 1] + 1))
 }
 
+/// Applies the rewrite's `edits` whose passage occurs once in `body`, each
+/// spliced at its own span; returns the new body and how many applied.
+fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
+    let mut revised = body.to_string();
+    let mut applied = 0;
+    for edit in rewrite
+        .get("edits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        let (Some(quote), Some(replacement)) = (
+            edit.get("quote").and_then(Value::as_str),
+            edit.get("replacement").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if replacement.trim().is_empty() {
+            continue;
+        }
+        if let Some((start, end)) = locate_unique_quote(&revised, quote) {
+            let mut chars = revised.chars().collect::<Vec<_>>();
+            chars.splice(start..end, replacement.chars());
+            revised = chars.into_iter().collect();
+            applied += 1;
+        }
+    }
+    (revised, applied)
+}
+
 /// A new Canon fact must never reuse the id of a committed fact (the commit
 /// would overwrite it) or of another fact in the same audit. Such facts get
 /// an id of their own, and knowledge in the audit that names the reused id
@@ -5598,7 +5745,10 @@ fn fresh_audit_fact_ids(
     let mut next = 1_usize;
     if let Some(items) = raw.get_mut("canonCandidates").and_then(Value::as_array_mut) {
         for item in items {
-            let Some(fact_id) = item.get("factId").and_then(Value::as_str).map(ToOwned::to_owned)
+            let Some(fact_id) = item
+                .get("factId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
             else {
                 continue;
             };
@@ -5615,11 +5765,16 @@ fn fresh_audit_fact_ids(
             };
             taken.insert(fresh.clone());
             item["factId"] = json!(fresh);
-            mapping.entry(fact_id.clone()).or_insert_with(|| fresh.clone());
+            mapping
+                .entry(fact_id.clone())
+                .or_insert_with(|| fresh.clone());
             renamed.push(json!({"from":fact_id,"to":fresh}));
         }
     }
-    if let Some(items) = raw.get_mut("knowledgeCandidates").and_then(Value::as_array_mut) {
+    if let Some(items) = raw
+        .get_mut("knowledgeCandidates")
+        .and_then(Value::as_array_mut)
+    {
         for item in items {
             let target = item
                 .get("factId")
@@ -5995,14 +6150,19 @@ fn validate_actual_extraction(
         // The volume plan's predicate decides completion: an audit claim it
         // does not support only records progress (2026-10-19).
         if candidate.status == "SATISFIED" {
-            if let Err(error) =
-                validate_task_completion_claim(connection, project_id, chapter_id, candidate, &canon_view)
-            {
+            if let Err(error) = validate_task_completion_claim(
+                connection,
+                project_id,
+                chapter_id,
+                candidate,
+                &canon_view,
+            ) {
                 if error != "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED" {
                     return Err(error);
                 }
                 candidate.status = "ACTIVE".into();
-                downgraded.push(json!({"taskId":candidate.task_id,"claimed":"SATISFIED","reason":error}));
+                downgraded
+                    .push(json!({"taskId":candidate.task_id,"claimed":"SATISFIED","reason":error}));
             }
         }
     }

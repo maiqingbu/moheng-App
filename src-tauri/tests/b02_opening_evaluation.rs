@@ -3491,8 +3491,20 @@ fn f03_chapter_four_plan_without_scope_selection_is_not_stale() {
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
     let project_id = create_opening_project(&state);
     commit_three_opening_chapters_with_outputs(&state, &project_id);
-    command(&state, &project_id, "f03s:evaluate", "opening_evaluate", json!({}));
-    command(&state, &project_id, "f03s:book-plan", "book_plan_revise", json!({}));
+    command(
+        &state,
+        &project_id,
+        "f03s:evaluate",
+        "opening_evaluate",
+        json!({}),
+    );
+    command(
+        &state,
+        &project_id,
+        "f03s:book-plan",
+        "book_plan_revise",
+        json!({}),
+    );
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let volume_id: String = connection
         .query_row(
@@ -3515,7 +3527,10 @@ fn f03_chapter_four_plan_without_scope_selection_is_not_stale() {
         "planning_prepare_next_chapter",
         json!({"volumeId":volume_id}),
     );
-    let chapter_four = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    let chapter_four = prepared["chapter"]["chapterId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let compiled = command(
         &state,
         &project_id,
