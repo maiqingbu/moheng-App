@@ -442,6 +442,16 @@ fn simile_count(sentence: &str) -> usize {
         .sum()
 }
 
+/// Body tics the recent chapters used twice or more, for the writer to
+/// leave out of the next chapter.
+pub fn overused_tics(history: &[String]) -> Vec<String> {
+    BODY_TICS
+        .iter()
+        .filter(|tic| history.iter().map(|text| text.matches(*tic).count()).sum::<usize>() >= 2)
+        .map(|tic| tic.to_string())
+        .collect()
+}
+
 /// How many of the model prose habits the rule findings look for appear in
 /// `text`: similes, body tics, pseudo-precise measures and panel brackets.
 pub fn habit_count(text: &str) -> usize {
@@ -454,9 +464,9 @@ pub fn habit_count(text: &str) -> usize {
 /// Owner decision (2026-10-19): habits of model prose the review model keeps
 /// missing, found by rule and sent to the rewrite with the review findings:
 /// plan wording copied into the prose, pseudo-precise measures, simile
-/// overload, body tics the recent chapters (`history`) also lean on, and
-/// system-panel brackets. Each finding quotes one sentence that occurs once.
-pub fn rule_findings(plan: &Value, body: &str, history: &[String]) -> Vec<Value> {
+/// overload, body tics used more than once, and system-panel brackets.
+/// Each finding quotes one sentence that occurs once.
+pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
     let sentences = sentences(body)
         .into_iter()
         .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
@@ -525,11 +535,9 @@ pub fn rule_findings(plan: &Value, body: &str, history: &[String]) -> Vec<Value>
             flag(sentence, "prose_wordy", "MEDIUM", "比喻过密".into(), "删去这个比喻，或换成直接的动作或细节");
         }
     }
-    // Body tics: used three times here, or twice here and four times lately.
+    // Body tics: every use after the first in this chapter (2026-10-20).
     for tic in BODY_TICS {
-        let here = body.matches(tic).count();
-        let lately = history.iter().map(|text| text.matches(tic).count()).sum::<usize>();
-        if here >= 3 || (here >= 2 && lately >= 4) {
+        if body.matches(tic).count() >= 2 {
             for sentence in sentences.iter().filter(|sentence| sentence.contains(tic)).skip(1) {
                 flag(sentence, "word_repetition", "MEDIUM", format!("「{tic}」在本章和最近几章反复出现"), "换成这个人物此刻独有的反应");
             }
@@ -649,7 +657,7 @@ mod tests {
         let plan = json!({"chapterGoal":"沈砚决定追查姐姐的下落","sceneExecution":[
             {"beats":["沈砚眼神从迷茫转为坚定，决定反击"]}]});
         let body = "雨停了。沈砚眼神从迷茫转为坚定，决定反击。他推开门。";
-        let findings = rule_findings(&plan, body, &[]);
+        let findings = rule_findings(&plan, body);
         assert_eq!(codes(&findings), vec!["summary_where_scene_needed"]);
         assert_eq!(findings[0]["severity"], "HIGH");
         assert_eq!(findings[0]["quote"], "沈砚眼神从迷茫转为坚定，决定反击。");
@@ -659,7 +667,7 @@ mod tests {
     #[test]
     fn craft_rule_findings_flag_pseudo_precise_measures_beyond_two() {
         let body = "门开了三公分。他退后两步。灯闪了7秒。脚印六十八厘米。他停在两毫米外。";
-        let findings = rule_findings(&json!({}), body, &[]);
+        let findings = rule_findings(&json!({}), body);
         assert_eq!(codes(&findings), vec!["prose_wordy"; 3]);
         assert_eq!(findings[0]["quote"], "灯闪了7秒。");
     }
@@ -667,24 +675,33 @@ mod tests {
     #[test]
     fn craft_rule_findings_count_similes_but_not_words_that_contain_xiang() {
         let plain = "屏幕上的图像和录像都是像素。".repeat(10);
-        assert!(rule_findings(&json!({}), &plain, &[]).is_empty());
+        assert!(rule_findings(&json!({}), &plain).is_empty());
         let similes = ["他像风。", "雨像针。", "灯像眼。", "门像嘴。", "夜像墨。"]
             .iter()
             .enumerate()
             .map(|(n, s)| format!("{n}{s}"))
             .collect::<String>();
-        let findings = rule_findings(&json!({}), &similes, &[]);
+        let findings = rule_findings(&json!({}), &similes);
         assert_eq!(codes(&findings), vec!["prose_wordy"; 2]);
     }
 
     #[test]
-    fn craft_rule_findings_flag_a_body_tic_the_recent_chapters_also_repeat() {
-        let history = vec!["他喉结滚动。喉结一紧。喉结发干。喉结上下滑动。".to_string()];
+    fn craft_rule_findings_flag_a_body_tic_used_twice_in_a_chapter() {
         let body = "他喉结动了动。她笑了。喉结又滚了一下。";
-        let findings = rule_findings(&json!({}), body, &history);
+        let findings = rule_findings(&json!({}), body);
         assert_eq!(codes(&findings), vec!["word_repetition"]);
         assert_eq!(findings[0]["quote"], "喉结又滚了一下。");
-        assert!(rule_findings(&json!({}), body, &[]).is_empty());
+        assert!(rule_findings(&json!({}), "他喉结动了动。她笑了。").is_empty());
+    }
+
+    #[test]
+    fn craft_tics_the_recent_chapters_lean_on_are_listed_for_the_writer() {
+        let history = vec![
+            "他喉结滚动。她看着他。".to_string(),
+            "喉结一紧。指尖发凉。".to_string(),
+        ];
+        assert_eq!(overused_tics(&history), vec!["喉结".to_string()]);
+        assert!(overused_tics(&[]).is_empty());
     }
 
     #[test]

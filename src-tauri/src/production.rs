@@ -3238,6 +3238,10 @@ fn run_chapter_production_inner(
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
     }
+    let avoid_tics = crate::chapter_craft::overused_tics(&chapter_history.bodies);
+    if !avoid_tics.is_empty() {
+        render_input["avoidTics"] = json!(avoid_tics);
+    }
     let mut craft_signals = crate::chapter_craft::plan_signals(&plan_payload, chapter_number);
     render_input["craftGuidance"] = crate::chapter_craft::guidance("render", &craft_signals)?;
     // The skills each step received, for the receipt. Chapter planning
@@ -3492,7 +3496,7 @@ fn run_chapter_production_inner(
             .collect::<Vec<_>>();
         // Rule findings (plan wording, measures, similes, tics, panels)
         // join the review's, one per sentence.
-        let rules = crate::chapter_craft::rule_findings(&plan_payload, &body, &chapter_history.bodies);
+        let rules = crate::chapter_craft::rule_findings(&plan_payload, &body);
         let to_fix = findings
             .iter()
             .copied()
