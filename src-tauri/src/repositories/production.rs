@@ -170,7 +170,9 @@ fn b02_phase_steps_with_labels(phases: &[&str], current: Option<&str>, status: &
 }
 
 /// Model runs a chapter gets per allowance; also the size of a manual reset.
-pub const CHAPTER_RUN_ALLOWANCE: i64 = 12;
+/// Owner decision (2026-10-19): 16, since each chapter is now also reviewed
+/// and rewritten.
+pub const CHAPTER_RUN_ALLOWANCE: i64 = 16;
 
 impl ProductionRepository {
     /// Model runs the chapter has used against its limit: the larger of the

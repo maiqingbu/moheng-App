@@ -379,6 +379,161 @@ pub fn normalize_typography(body: &str) -> String {
     normalized
 }
 
+/// The body split into sentences, each with its closing mark.
+fn sentences(body: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for character in body.chars() {
+        if character == '\n' {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
+            }
+            current.clear();
+            continue;
+        }
+        current.push(character);
+        if matches!(character, '。' | '！' | '？' | '…') {
+            sentences.push(current.trim().to_string());
+            current.clear();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+    sentences
+}
+
+/// Words the writer leans on across chapters (2026-10-19 reading).
+const BODY_TICS: [&str; 8] = [
+    "喉结", "指尖", "指腹", "指节", "铁锈", "瞳孔", "攥紧", "深吸一口气",
+];
+const SIMILE_MARKERS: [&str; 6] = ["像", "仿佛", "如同", "宛如", "似的", "好似"];
+const NOT_SIMILES: [&str; 12] = [
+    "图像", "影像", "录像", "画像", "肖像", "偶像", "镜像", "头像", "像素", "好像", "不像", "想像",
+];
+const MEASURE_UNITS: [&str; 10] = [
+    "毫米", "厘米", "公分", "赫兹", "分钟", "公里", "秒", "步", "米", "度",
+];
+
+fn is_numeral(character: char) -> bool {
+    character.is_ascii_digit() || "零〇一二两三四五六七八九十百千万".contains(character)
+}
+
+/// Pseudo-precise measures in a sentence: a number right before a unit.
+fn measure_count(sentence: &str) -> usize {
+    let chars = sentence.chars().collect::<Vec<_>>();
+    (1..chars.len())
+        .filter(|&index| is_numeral(chars[index - 1]) && !is_numeral(chars[index]))
+        .filter(|&index| {
+            let rest = chars[index..].iter().collect::<String>();
+            MEASURE_UNITS.iter().any(|unit| rest.starts_with(unit))
+        })
+        .count()
+}
+
+fn simile_count(sentence: &str) -> usize {
+    let mut cleaned = sentence.to_string();
+    for word in NOT_SIMILES {
+        cleaned = cleaned.replace(word, "");
+    }
+    SIMILE_MARKERS
+        .iter()
+        .map(|marker| cleaned.matches(marker).count())
+        .sum()
+}
+
+/// Owner decision (2026-10-19): habits of model prose the review model keeps
+/// missing, found by rule and sent to the rewrite with the review findings:
+/// plan wording copied into the prose, pseudo-precise measures, simile
+/// overload, body tics the recent chapters (`history`) also lean on, and
+/// system-panel brackets. Each finding quotes one sentence that occurs once.
+pub fn rule_findings(plan: &Value, body: &str, history: &[String]) -> Vec<Value> {
+    let sentences = sentences(body)
+        .into_iter()
+        .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    let mut flagged = std::collections::BTreeSet::new();
+    let mut flag = |sentence: &str, code: &str, severity: &str, problem: String, suggestion: &str| {
+        if flagged.insert(sentence.to_string()) {
+            findings.push(json!({"code":code,"severity":severity,"quote":sentence,
+                "problem":problem,"suggestion":suggestion,"source":"rule"}));
+        }
+    };
+    // Plan wording: any clause of 8 or more characters taken over verbatim.
+    let mut plan_texts = vec![plan.get("chapterGoal").and_then(Value::as_str).unwrap_or("").to_string()];
+    for scene in plan
+        .get("sceneExecution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for key in ["goal", "conflict", "turn", "result"] {
+            plan_texts.extend(scene.get(key).and_then(Value::as_str).map(ToOwned::to_owned));
+        }
+        plan_texts.extend(
+            scene
+                .get("beats")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned),
+        );
+    }
+    for clause in plan_texts
+        .iter()
+        .flat_map(|text| text.split(['，', '。', '；', '！', '？', '、', '：']))
+        .map(str::trim)
+        .filter(|clause| clause.chars().count() >= 8)
+    {
+        if let Some(sentence) = sentences.iter().find(|sentence| sentence.contains(clause)) {
+            flag(
+                sentence,
+                "summary_where_scene_needed",
+                "HIGH",
+                format!("照搬了章节计划的表述「{clause}」"),
+                "用动作、细节和对话把这个变化演出来",
+            );
+        }
+    }
+    // Measures beyond the first two.
+    let mut measures = 0;
+    for sentence in &sentences {
+        let count = measure_count(sentence);
+        measures += count;
+        if count > 0 && measures > 2 {
+            flag(sentence, "prose_wordy", "MEDIUM", "精确到单位的数字过多，像在读仪器读数".into(), "去掉不必要的数字，只留对情节有用的");
+        }
+    }
+    // Similes beyond three per chapter, or three per thousand characters.
+    let allowed = (body.chars().count() * 3 / 1000).max(3);
+    let mut similes = 0;
+    for sentence in &sentences {
+        let count = simile_count(sentence);
+        similes += count;
+        if count > 0 && similes > allowed {
+            flag(sentence, "prose_wordy", "MEDIUM", "比喻过密".into(), "删去这个比喻，或换成直接的动作或细节");
+        }
+    }
+    // Body tics: used three times here, or twice here and four times lately.
+    for tic in BODY_TICS {
+        let here = body.matches(tic).count();
+        let lately = history.iter().map(|text| text.matches(tic).count()).sum::<usize>();
+        if here >= 3 || (here >= 2 && lately >= 4) {
+            for sentence in sentences.iter().filter(|sentence| sentence.contains(tic)).skip(1) {
+                flag(sentence, "word_repetition", "MEDIUM", format!("「{tic}」在本章和最近几章反复出现"), "换成这个人物此刻独有的反应");
+            }
+        }
+    }
+    // System-panel brackets beyond three.
+    for sentence in sentences.iter().filter(|sentence| sentence.contains('【')).skip(3) {
+        flag(sentence, "info_dump", "MEDIUM", "系统提示框式文字过多".into(), "把信息融进人物的观察或对话");
+    }
+    findings.truncate(8);
+    findings
+}
+
 /// Characters in a phrase the signing check counts as a repetition.
 const PHRASE_CHARACTERS: usize = 12;
 
@@ -471,6 +626,56 @@ mod tests {
         assert_eq!(role_range("回报", RANGE), range(2500, 3000));
         assert_eq!(role_range("高潮", RANGE), range(2750, 3000));
         assert_eq!(role_range("未知", RANGE), RANGE);
+    }
+
+    fn codes(findings: &[Value]) -> Vec<String> {
+        findings
+            .iter()
+            .map(|finding| finding["code"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn craft_rule_findings_flag_plan_wording_copied_into_the_prose() {
+        let plan = json!({"chapterGoal":"沈砚决定追查姐姐的下落","sceneExecution":[
+            {"beats":["沈砚眼神从迷茫转为坚定，决定反击"]}]});
+        let body = "雨停了。沈砚眼神从迷茫转为坚定，决定反击。他推开门。";
+        let findings = rule_findings(&plan, body, &[]);
+        assert_eq!(codes(&findings), vec!["summary_where_scene_needed"]);
+        assert_eq!(findings[0]["severity"], "HIGH");
+        assert_eq!(findings[0]["quote"], "沈砚眼神从迷茫转为坚定，决定反击。");
+        assert_eq!(findings[0]["source"], "rule");
+    }
+
+    #[test]
+    fn craft_rule_findings_flag_pseudo_precise_measures_beyond_two() {
+        let body = "门开了三公分。他退后两步。灯闪了7秒。脚印六十八厘米。他停在两毫米外。";
+        let findings = rule_findings(&json!({}), body, &[]);
+        assert_eq!(codes(&findings), vec!["prose_wordy"; 3]);
+        assert_eq!(findings[0]["quote"], "灯闪了7秒。");
+    }
+
+    #[test]
+    fn craft_rule_findings_count_similes_but_not_words_that_contain_xiang() {
+        let plain = "屏幕上的图像和录像都是像素。".repeat(10);
+        assert!(rule_findings(&json!({}), &plain, &[]).is_empty());
+        let similes = ["他像风。", "雨像针。", "灯像眼。", "门像嘴。", "夜像墨。"]
+            .iter()
+            .enumerate()
+            .map(|(n, s)| format!("{n}{s}"))
+            .collect::<String>();
+        let findings = rule_findings(&json!({}), &similes, &[]);
+        assert_eq!(codes(&findings), vec!["prose_wordy"; 2]);
+    }
+
+    #[test]
+    fn craft_rule_findings_flag_a_body_tic_the_recent_chapters_also_repeat() {
+        let history = vec!["他喉结滚动。喉结一紧。喉结发干。喉结上下滑动。".to_string()];
+        let body = "他喉结动了动。她笑了。喉结又滚了一下。";
+        let findings = rule_findings(&json!({}), body, &history);
+        assert_eq!(codes(&findings), vec!["word_repetition"]);
+        assert_eq!(findings[0]["quote"], "喉结又滚了一下。");
+        assert!(rule_findings(&json!({}), body, &[]).is_empty());
     }
 
     #[test]

@@ -1047,3 +1047,76 @@ fn configured_provider_compares_the_craft_skills_on_and_off() {
         println!("REAL_CRAFT_AB arm={arm} projectId={project_id} evaluation={}", evaluation["finalStatus"]);
     }
 }
+
+const PAIR_JUDGE_PROMPT: &str = "你是网文签约编辑。下面是同一章的两个版本 versionA 与 versionB，情节设定相同，作者匿名。请只比较写作质量，逐项判断哪一版更好：1 AI腔与套话更少（无模板化比喻堆砌、无伪精确数字、无反复的身体小动作）；2 展示而非交代；3 语言自然、不堆砌；4 人物与对话可信、有区分度；5 节奏与悬念；6 整体可读性与追读欲。只返回 JSON：{\"dimensions\":[{\"name\":string,\"winner\":\"A\"|\"B\"|\"TIE\",\"reason\":string}],\"overall\":\"A\"|\"B\"|\"TIE\",\"reason\":string}。reason 用中文短句，可引用原文。";
+
+/// Blind pairwise judgement of one chapter; returns the parsed verdict.
+fn judge_pair(
+    gateway: &ConfiguredProductionGateway,
+    version_a: &str,
+    version_b: &str,
+) -> serde_json::Value {
+    let profile = gateway.resolve_step_profile("AUDIT_EXTRACT").unwrap();
+    let response = gateway
+        .invoke_typed_with_profile(
+            "JUDGE_CHAPTER_PAIR",
+            &json!({"prompt":PAIR_JUDGE_PROMPT,"versionA":version_a,"versionB":version_b}),
+            &profile,
+        )
+        .unwrap_or_else(|failure| panic!("judge call failed: {failure:?}"));
+    // The configured provider returns the raw completion; its message
+    // content is the verdict JSON, possibly fenced.
+    let raw: serde_json::Value =
+        serde_json::from_str(response.raw_response.as_deref().unwrap_or("null")).unwrap();
+    let content = raw["choices"][0]["message"]["content"].as_str().unwrap_or("").trim();
+    let content = content
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str(content).unwrap_or_else(|_| json!({"unparsed":content}))
+}
+
+#[test]
+#[ignore = "real provider: blind pairwise judgement of the craft A/B chapters; a few paid calls"]
+fn configured_provider_judges_the_craft_ab_chapters() {
+    assert_eq!(
+        std::env::var("MOHENG_RUN_REAL_CRAFT_AB").as_deref(),
+        Ok("1"),
+        "set MOHENG_RUN_REAL_CRAFT_AB=1 to acknowledge real API use"
+    );
+    let out = PathBuf::from(std::env::var("MOHENG_CRAFT_AB_OUT").expect("MOHENG_CRAFT_AB_OUT"));
+    let (paths, _) = real_state();
+    let gateway = ConfiguredProductionGateway::for_desktop(paths);
+    let mut verdicts = Vec::new();
+    let mut tally = std::collections::BTreeMap::<String, i64>::new();
+    for chapter in 1..=3 {
+        let on = std::fs::read_to_string(out.join(format!("on-chapter-{chapter}.txt"))).unwrap();
+        let off = std::fs::read_to_string(out.join(format!("off-chapter-{chapter}.txt"))).unwrap();
+        // Both orders, so a preference for a position cancels out.
+        for (order, a, b, a_arm, b_arm) in [
+            ("on-first", &on, &off, "on", "off"),
+            ("off-first", &off, &on, "off", "on"),
+        ] {
+            let verdict = judge_pair(&gateway, a, b);
+            let arm = |winner: &serde_json::Value| match winner.as_str() {
+                Some("A") => a_arm,
+                Some("B") => b_arm,
+                _ => "tie",
+            };
+            for dimension in verdict["dimensions"].as_array().into_iter().flatten() {
+                *tally
+                    .entry(format!("{}:{}", dimension["name"].as_str().unwrap_or("?"), arm(&dimension["winner"])))
+                    .or_default() += 1;
+            }
+            *tally.entry(format!("overall:{}", arm(&verdict["overall"]))).or_default() += 1;
+            verdicts.push(json!({"chapter":chapter,"order":order,"verdict":verdict}));
+        }
+    }
+    std::fs::write(
+        out.join("judge.json"),
+        serde_json::to_string_pretty(&json!({"tally":tally,"verdicts":verdicts})).unwrap(),
+    )
+    .unwrap();
+    println!("REAL_CRAFT_JUDGE tally={}", json!(tally));
+}

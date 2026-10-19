@@ -16,6 +16,8 @@ struct CraftGateway {
     /// The review flags the last 12 characters of the chapter as wordy, and
     /// the rewrite replaces them with this text.
     rewrite_ending: Option<String>,
+    /// Text writer call N adds to its body (missing calls add none).
+    inject: Vec<&'static str>,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -28,6 +30,7 @@ impl CraftGateway {
             motifs: Vec::new(),
             fail_first_audit: false,
             rewrite_ending: None,
+            inject: Vec::new(),
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -130,7 +133,11 @@ impl ProductionModelGateway for CraftGateway {
                 .body_lengths
                 .get(renders)
                 .unwrap_or_else(|| self.body_lengths.last().unwrap());
-            let motif = MOTIF.repeat(self.motifs.get(renders).copied().unwrap_or(0));
+            let motif = format!(
+                "{}{}",
+                MOTIF.repeat(self.motifs.get(renders).copied().unwrap_or(0)),
+                self.inject.get(renders).copied().unwrap_or("")
+            );
             let body = format!("{}{motif}", response.output["body"].as_str().unwrap());
             let filler = length.saturating_sub(body.chars().count() + 1);
             response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
@@ -420,13 +427,13 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
     let connection = state.manager.open(project_id, "Craft quota", NOW).unwrap();
     assert_eq!(
         ProductionRepository::chapter_quota(&connection, project_id, &chapter_id).unwrap(),
-        Some(json!({"used":3,"limit":3,"allowance":12}))
+        Some(json!({"used":3,"limit":3,"allowance":16}))
     );
     let center = ProductionRepository::center_projection(&connection, project_id).unwrap();
     assert_eq!(center["nextChapter"]["id"], chapter_id.as_str());
     assert_eq!(
         center["nextChapter"]["quota"],
-        json!({"used":3,"limit":3,"allowance":12})
+        json!({"used":3,"limit":3,"allowance":16})
     );
     drop(connection);
 
@@ -439,7 +446,7 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
     let connection = state.manager.open(project_id, "Craft quota", NOW).unwrap();
     assert_eq!(
         ProductionRepository::chapter_quota(&connection, project_id, &chapter_id).unwrap(),
-        Some(json!({"used":3,"limit":15,"allowance":12}))
+        Some(json!({"used":3,"limit":19,"allowance":16}))
     );
     let decisions: i64 = connection
         .query_row(
@@ -837,4 +844,26 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
         .as_u64()
         .unwrap()
         > 0);
+}
+
+#[test]
+fn craft_v2_rule_findings_go_to_the_rewrite_with_the_review() {
+    let gateway = Arc::new(CraftGateway {
+        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],
+        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+    });
+    let project_id = "p-craft-rule-findings";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let rewrites = gateway.inputs("REWRITE_PASSAGES");
+    assert_eq!(rewrites.len(), 1);
+    let findings = rewrites[0]["findings"].as_array().unwrap();
+    assert!(findings
+        .iter()
+        .any(|finding| finding["code"] == "word_repetition" && finding["source"] == "rule"));
+    let review = &receipt_craft(&state, project_id)["proseReview"];
+    assert!(review["ruleCodes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("word_repetition")));
 }

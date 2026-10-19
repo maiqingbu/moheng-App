@@ -3490,9 +3490,20 @@ fn run_chapter_production_inner(
             })
             .take(6)
             .collect::<Vec<_>>();
+        // Rule findings (plan wording, measures, similes, tics, panels)
+        // join the review's, one per sentence.
+        let rules = crate::chapter_craft::rule_findings(&plan_payload, &body, &chapter_history.bodies);
         let to_fix = findings
             .iter()
+            .copied()
             .filter(|finding| finding["severity"] != "LOW")
+            .chain(rules.iter().filter(|rule| {
+                !findings
+                    .iter()
+                    .any(|finding| finding["quote"].as_str().is_some_and(|quote| {
+                        rule["quote"].as_str().is_some_and(|sentence| sentence.contains(quote))
+                    }))
+            }))
             .collect::<Vec<_>>();
         // Phrases this chapter uses a third time across the recent chapters
         // (signing check F1-5) go to the rewrite as well.
@@ -3540,6 +3551,7 @@ fn run_chapter_production_inner(
             "findings":findings.len(),
             "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
             "repeatedPhrases":repeated.len(),
+            "ruleCodes":rules.iter().map(|rule| rule["code"].clone()).collect::<Vec<_>>(),
             "editsApplied":if discarded.is_null() { applied } else { 0 },
             "discarded":discarded
         });
