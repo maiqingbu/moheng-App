@@ -636,3 +636,44 @@ fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 6);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 2);
 }
+
+#[test]
+fn craft_v2_long_form_plan_with_too_short_a_horizon_is_replanned() {
+    let temp = tempfile::tempdir().unwrap();
+    // A real chapter 7 plan (2026-10-19) previewed two chapters where the
+    // volume had room for 29.
+    let mut short_horizon = good_plan();
+    short_horizon["horizonPreview"] = json!([
+        {"objective":"潜入外围","tentative":true},
+        {"objective":"被迫交手","tentative":true}
+    ]);
+    let gateway = Arc::new(CraftGateway::new(vec![short_horizon, good_plan()], &[1250]));
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-craft-long-horizon";
+    let connection = state.manager.create(project_id, "Craft long", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate_long_form(&connection, project_id);
+    let volume_id =
+        StableIdentityFactory::from_command(StableIdKind::Volume, "b08-volume").unwrap();
+    connection
+        .execute(
+            "UPDATE volumes SET chapter_end=10 WHERE project_id=?1 AND volume_id=?2",
+            libsql_rusqlite::params![project_id, volume_id],
+        )
+        .unwrap();
+    drop(connection);
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"planning_compile_chapter_plan","commandId":"cmd:craft:long-horizon","idempotencyKey":"key:craft:long-horizon",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+        }),
+    );
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+    let plans = gateway.inputs("PLAN_STRATEGY");
+    assert_eq!(plans.len(), 2);
+    assert_eq!(
+        plans[1]["planFeedback"]["rejectedFor"],
+        "ROLLING_HORIZON_CAPACITY_INVALID"
+    );
+}

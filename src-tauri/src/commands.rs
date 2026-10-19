@@ -7131,6 +7131,12 @@ fn compile_current_chapter_plan(
             plan["activeTaskRefs"] = ready.clone();
             plan["hardScope"]["taskRefs"] = ready;
         }
+        // Checked here, not only at commit, so the planner gets the reason
+        // and one more try.
+        crate::planning::validate_chapter_plan_horizon(
+            &plan,
+            bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0),
+        )?;
         if enforces_length {
             crate::chapter_craft::check_plan(&plan, length_range, &history.recent)?;
         }

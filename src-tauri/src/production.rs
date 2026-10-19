@@ -3980,16 +3980,18 @@ fn run_chapter_production_inner(
     };
     // Craft rule (2026-10-18): an audit whose evidence cannot be located in
     // the body (for example quoting the plan) is run once more with the
-    // unlocatable quotes; a second failure still blocks the chapter.
+    // unlocatable quotes; a second failure still blocks the chapter. Owner
+    // decision (2026-10-19): so is an audit using an unregistered predicate,
+    // with the registered ones; the policy itself stays fail-closed.
     let (mut audit_payload, extraction) = match check_audit(raw_audit.clone()) {
         Err(error)
             if !audit_reused
-                && matches!(
+                && (matches!(
                     error.as_str(),
                     "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
                         | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
                         | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
-                ) =>
+                ) || error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
         {
             let rerun_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
@@ -4002,6 +4004,16 @@ fn run_chapter_production_inner(
                 "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
                 "instruction":"上次提取不完整：unlocatableQuotes 中的引文在正文 body 中找不到（可能引用了规划或改写了原文），incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
             });
+            if error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS") {
+                input["auditFeedback"]["registeredPredicates"] = json!(
+                    crate::canon_semantics::CanonSemanticPolicy::from_gate_policy(
+                        &gate_policy_payload
+                    )
+                    .map_err(str::to_owned)?
+                    .predicates()
+                );
+                input["auditFeedback"]["instruction"] = json!("上次提取的 canonCandidates 用了未登记的 predicate（见 rejectedFor）。请重新完整提取：每条事实的 predicate 只能取 registeredPredicates 中的一个，表达不了的变化不要写成事实。");
+            }
             let rerun_spec = ModelRunSpec {
                 model_run_id: rerun_id.clone(),
                 job_id: Some(job_id.clone()),

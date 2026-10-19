@@ -50,6 +50,10 @@ fn retryable_real_production_error(error: &str) -> bool {
         "B08_PLAN_",
         "B08_RENDER_LENGTH_OUT_OF_RANGE",
         "B08_AUDIT_INCOMPLETE",
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS",
+        // A declared reservation the audit says this chapter revealed early:
+        // the chapter is written again, as the user would.
+        "B08_RESERVATION_VIOLATION",
         "B08_AUDIT_TRUNCATED_OR_INVALID",
         "ROLLING_HORIZON_CAPACITY_INVALID",
     ]

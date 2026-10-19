@@ -370,3 +370,53 @@ fn craft_a_new_fact_reusing_an_existing_fact_id_gets_its_own_id() {
         .unwrap();
     assert_eq!(opened, 1);
 }
+
+/// The first audit states a fact with a predicate the canon semantics policy
+/// does not register, as a real audit did on 2026-10-19; later audits keep
+/// to registered predicates.
+#[derive(Default)]
+struct UnregisteredPredicateOnceGateway {
+    audit_inputs: std::sync::Mutex<Vec<Value>>,
+}
+
+impl ProductionModelGateway for UnregisteredPredicateOnceGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let mut inputs = self.audit_inputs.lock().unwrap();
+            if inputs.is_empty() {
+                response.output["canonCandidates"][0]["predicate"] = json!("lost_memory");
+            }
+            inputs.push(input.clone());
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_audit_with_an_unregistered_predicate_is_rerun_once_with_the_registered_ones() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(UnregisteredPredicateOnceGateway::default());
+    let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
+    let project_id = "p-craft-unregistered-predicate";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:predicate","idempotencyKey":"key:craft:predicate",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let inputs = gateway.audit_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs[1]["auditFeedback"]["rejectedFor"]
+        .as_str()
+        .unwrap()
+        .starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS"));
+    assert!(inputs[1]["auditFeedback"]["registeredPredicates"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("opened")));
+}

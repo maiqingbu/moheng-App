@@ -189,6 +189,11 @@ impl CanonSemanticPolicy {
         Ok(Self { version, rules })
     }
 
+    /// The predicates this policy registers, in order.
+    pub fn predicates(&self) -> Vec<String> {
+        self.rules.keys().cloned().collect()
+    }
+
     pub fn validate_predicate(&self, predicate: &str) -> Result<(), String> {
         self.rules
             .contains_key(predicate)

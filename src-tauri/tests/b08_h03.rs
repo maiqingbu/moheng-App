@@ -2758,11 +2758,12 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
                 |row| row.get(0)
             )
             .unwrap(),
-        3
+        // Plan, render, audit and its one rerun with the registered predicates.
+        4
     );
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT", "AUDIT_EXTRACT"]
     );
 }
 
@@ -2806,7 +2807,8 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
                 |row| row.get(0),
             )
             .unwrap(),
-        3
+        // Render, audit and its one rerun with the registered predicates.
+        4
     );
     drop(connection);
 
@@ -2845,7 +2847,7 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
                 |row| row.get(0),
             )
             .unwrap(),
-        3,
+        4,
         "retries after a Gate correction reuse completed model outputs"
     );
     assert_eq!(
@@ -2860,9 +2862,10 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
     );
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT", "AUDIT_EXTRACT"]
     );
-    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
+    // The audit and its rerun ran once each; the retry reused them.
+    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 2);
 }
 
 #[test]
