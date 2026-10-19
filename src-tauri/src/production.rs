@@ -3494,12 +3494,17 @@ fn run_chapter_production_inner(
             .iter()
             .filter(|finding| finding["severity"] != "LOW")
             .collect::<Vec<_>>();
+        // Phrases this chapter uses a third time across the recent chapters
+        // (signing check F1-5) go to the rewrite as well.
+        let repeated = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
         let mut applied = 0;
         let mut in_range = true;
-        if !to_fix.is_empty() {
+        let mut repeats_grew = false;
+        if !to_fix.is_empty() || !repeated.is_empty() {
             craft_signals.findings = to_fix
                 .iter()
                 .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
+                .chain((!repeated.is_empty()).then(|| "word_repetition".to_string()))
                 .collect();
             let rewrite_guidance = crate::chapter_craft::guidance("rewrite", &craft_signals)?;
             craft_skills["rewrite"] = json!(skill_ids(&rewrite_guidance));
@@ -3508,23 +3513,35 @@ fn run_chapter_production_inner(
                 "rewrite",
                 "REWRITE_PASSAGES",
                 &rewrite_profile,
-                json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
+                json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"repeatedPhrases":repeated,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
             )?;
             let (revised, count) = apply_unique_edits(&body, &rewrite);
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
             in_range = (length_range.min..=length_range.ceiling()).contains(&length);
+            repeats_grew = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &revised)
+                .len()
+                > repeated.len();
             applied = count;
-            if applied > 0 && in_range {
+            if applied > 0 && in_range && !repeats_grew {
                 body = revised;
             }
         }
-        let kept = in_range || applied == 0;
+        let discarded = if applied == 0 {
+            Value::Null
+        } else if !in_range {
+            json!("LENGTH_OUT_OF_RANGE")
+        } else if repeats_grew {
+            json!("MORE_REPEATED_PHRASES")
+        } else {
+            Value::Null
+        };
         craft_skills["proseReview"] = json!({
             "findings":findings.len(),
             "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
-            "editsApplied":if kept { applied } else { 0 },
-            "discarded":if kept { Value::Null } else { json!("LENGTH_OUT_OF_RANGE") }
+            "repeatedPhrases":repeated.len(),
+            "editsApplied":if discarded.is_null() { applied } else { 0 },
+            "discarded":discarded
         });
     }
     let method_injection_provenance = creative_enrichment

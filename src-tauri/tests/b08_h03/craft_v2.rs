@@ -815,3 +815,26 @@ fn craft_v2_a_rewrite_that_leaves_the_length_range_is_discarded() {
     assert_eq!(craft["proseReview"]["editsApplied"], 0);
     assert_eq!(craft["proseReview"]["discarded"], "LENGTH_OUT_OF_RANGE");
 }
+
+#[test]
+fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
+    // Part 1 uses the image twice and every version of part 2 once more,
+    // as a real code label did on 2026-10-19.
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![2, 1, 1, 1, 1],
+        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+    });
+    let project_id = "p-craft-review-repeat";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let rewrites = gateway.inputs("REWRITE_PASSAGES");
+    assert_eq!(rewrites.len(), 1);
+    assert!(rewrites[0]["repeatedPhrases"][0]
+        .as_str()
+        .unwrap()
+        .contains("蓝莓籽"));
+    assert!(receipt_craft(&state, project_id)["proseReview"]["repeatedPhrases"]
+        .as_u64()
+        .unwrap()
+        > 0);
+}

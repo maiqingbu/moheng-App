@@ -345,7 +345,7 @@ impl OpenAiCompatibleProvider {
                 "Every exactQuote must be copied verbatim from the body of that chapter in taskContext.chapters (a whole sentence that occurs once), never invented or paraphrased; rangeStart/rangeEnd are character offsets in that body."
             ),
             "REVIEW_CHAPTER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"findings\":[{\"code\":string,\"severity\":\"HIGH\"|\"MEDIUM\"|\"LOW\",\"quote\":string,\"problem\":string,\"suggestion\":string}]}. Read body as an editor using the methods in craftGuidance: find at most 6 concrete prose problems that would make a reader stop, such as stock phrases, telling instead of showing, stiff dialogue, wordy or flat sentences, repeated wording, dragging or rushed pacing. code must be one of findingCodes. quote is 10 to 60 characters copied verbatim from body, occurring once in body. problem and suggestion are short Chinese sentences. Report nothing a reader would not notice; return an empty findings array for clean prose.",
-            "REWRITE_PASSAGES" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"edits\":[{\"quote\":string,\"replacement\":string}]}. Fix each finding in findings by rewriting only its passage, using the methods in craftGuidance. quote is the exact passage being replaced, copied verbatim from body (it may extend the finding's quote to the whole sentence) and occurring once in body; replacement is the new Chinese text with Chinese full-width punctuation, keeping the same events, facts, names and point of view, and about the same length so the chapter stays within chapterLengthRange. Never rewrite text outside the edited passages.",
+            "REWRITE_PASSAGES" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"edits\":[{\"quote\":string,\"replacement\":string}]}. Fix each finding in findings by rewriting only its passage, using the methods in craftGuidance. quote is the exact passage being replaced, copied verbatim from body (it may extend the finding's quote to the whole sentence) and occurring once in body; replacement is the new Chinese text with Chinese full-width punctuation, keeping the same events, facts, names and point of view, and about the same length so the chapter stays within chapterLengthRange. When repeatedPhrases is supplied, each phrase was already used in earlier chapters: rephrase every occurrence of it in body, quoting enough of the sentence that each quote occurs once. Never rewrite text outside the edited passages.",
             "TEST_PROVIDER" => "Return JSON only, with no Markdown or explanation. Use exactly this object shape: {\"ok\":true}.",
             _ => "Return one valid JSON object only. Do not add Markdown, code fences, explanations, or text outside the JSON object.",
         }
@@ -1011,6 +1011,7 @@ mod tests {
         assert!(review.contains("findingCodes") && review.contains("craftGuidance"));
         let rewrite = OpenAiCompatibleProvider::structured_prompt("REWRITE_PASSAGES");
         assert!(rewrite.contains("\"edits\"") && rewrite.contains("occurring once in body"));
+        assert!(rewrite.contains("repeatedPhrases"));
         assert!(render.contains("at most 6 characters"));
     }
 
