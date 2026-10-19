@@ -1093,8 +1093,11 @@ fn configured_provider_judges_the_craft_ab_chapters() {
     for chapter in 1..=3 {
         let on = std::fs::read_to_string(out.join(format!("on-chapter-{chapter}.txt"))).unwrap();
         let off = std::fs::read_to_string(out.join(format!("off-chapter-{chapter}.txt"))).unwrap();
-        // Both orders, so a preference for a position cancels out.
+        // Both orders, twice each, so a preference for a position and the
+        // judge's own variance even out.
         for (order, a, b, a_arm, b_arm) in [
+            ("on-first", &on, &off, "on", "off"),
+            ("off-first", &off, &on, "off", "on"),
             ("on-first", &on, &off, "on", "off"),
             ("off-first", &off, &on, "off", "on"),
         ] {

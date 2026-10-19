@@ -5724,8 +5724,9 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
     Some((positions[offset], positions[offset + needle.len() - 1] + 1))
 }
 
-/// Applies the rewrite's `edits` whose passage occurs once in `body`, each
-/// spliced at its own span; returns the new body and how many applied.
+/// Applies the rewrite's `edits` whose passage occurs once in `body` and
+/// whose replacement adds no model habit, each spliced at its own span;
+/// returns the new body and how many applied.
 fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
     let mut revised = body.to_string();
     let mut applied = 0;
@@ -5742,7 +5743,11 @@ fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
         ) else {
             continue;
         };
-        if replacement.trim().is_empty() {
+        // A rewrite must not trade one model habit for another.
+        if replacement.trim().is_empty()
+            || crate::chapter_craft::habit_count(replacement)
+                > crate::chapter_craft::habit_count(quote)
+        {
             continue;
         }
         if let Some((start, end)) = locate_unique_quote(&revised, quote) {
@@ -7935,6 +7940,18 @@ mod tests {
             dropped,
             json!([{"field":"canonCandidates","id":"fact:plan","quote":"确立对抗的决心。"}])
         );
+    }
+
+    #[test]
+    fn rewrite_edits_that_add_model_habits_are_not_applied() {
+        let body = "他没点保存键。门开了。";
+        let rewrite = json!({"edits":[
+            {"quote":"他没点保存键。","replacement":"指尖悬在保存键上方，像被磁石吸住。"},
+            {"quote":"门开了。","replacement":"门轴吱呀一声，冷风灌进来。"}
+        ]});
+        let (revised, applied) = apply_unique_edits(body, &rewrite);
+        assert_eq!(applied, 1);
+        assert_eq!(revised, "他没点保存键。门轴吱呀一声，冷风灌进来。");
     }
 
     #[test]

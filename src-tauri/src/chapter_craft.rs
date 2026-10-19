@@ -442,6 +442,15 @@ fn simile_count(sentence: &str) -> usize {
         .sum()
 }
 
+/// How many of the model prose habits the rule findings look for appear in
+/// `text`: similes, body tics, pseudo-precise measures and panel brackets.
+pub fn habit_count(text: &str) -> usize {
+    simile_count(text)
+        + BODY_TICS.iter().map(|tic| text.matches(tic).count()).sum::<usize>()
+        + measure_count(text)
+        + text.matches('【').count()
+}
+
 /// Owner decision (2026-10-19): habits of model prose the review model keeps
 /// missing, found by rule and sent to the rewrite with the review findings:
 /// plan wording copied into the prose, pseudo-precise measures, simile
@@ -676,6 +685,13 @@ mod tests {
         assert_eq!(codes(&findings), vec!["word_repetition"]);
         assert_eq!(findings[0]["quote"], "喉结又滚了一下。");
         assert!(rule_findings(&json!({}), body, &[]).is_empty());
+    }
+
+    #[test]
+    fn craft_habit_count_sums_similes_tics_measures_and_panels() {
+        assert_eq!(habit_count("他推开门。"), 0);
+        assert_eq!(habit_count("指尖停在键上，像被磁石吸住，三毫米外是【警告】。"), 4);
+        assert_eq!(habit_count("屏幕上的图像全是像素。"), 0);
     }
 
     #[test]
