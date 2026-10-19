@@ -1,7 +1,11 @@
 use ai_novel_production_system_core::commands::{
     execute_command_impl, query_story_directions_impl, KernelState,
 };
-use ai_novel_production_system_core::production::ConfiguredProductionGateway;
+use ai_novel_production_system_core::production::{
+    ConfiguredProductionGateway, ProductionModelGateway, ProductionModelResponse,
+    ResolvedProviderProfile,
+};
+use ai_novel_production_system_core::repositories::runtime::TransportFailure;
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::project_db::ProjectManager;
 use ai_novel_production_system_core::repositories::provider::ProviderSettingsRepository;
@@ -16,6 +20,11 @@ const NOW: &str = "2026-09-12T06:00:00Z";
 const EXPECTED_ENDPOINT: &str =
     "https://ws-a4ht0p7fdc83x4x4.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
 const EXPECTED_MODEL: &str = "qwen3.8-flash";
+const OPENING_GOALS: [&str; 3] = [
+    "完成首次记忆修复委托，并让沈砚亲眼确认修复会抹去自己的现实痕迹。",
+    "让沈砚在停止调查与继续追查之间作出主动选择，并找到篡改并非事故的证据。",
+    "让沈砚追踪第一条幕后线索，兑现前三章的局部谜题回报，同时保留姐姐去向悬念。",
+];
 
 fn required_app_data_root() -> PathBuf {
     let raw = std::env::var("MOHENG_REAL_APP_DATA_DIR")
@@ -705,11 +714,7 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
     let prefix = format!("real-ten-chapters:{run}");
     let title = format!("Harness 真实十章验收 {run}");
     let (project_id, opening) = create_real_project(&state, &prefix, &title);
-    let opening_goals = [
-        "完成首次记忆修复委托，并让沈砚亲眼确认修复会抹去自己的现实痕迹。",
-        "让沈砚在停止调查与继续追查之间作出主动选择，并找到篡改并非事故的证据。",
-        "让沈砚追踪第一条幕后线索，兑现前三章的局部谜题回报，同时保留姐姐去向悬念。",
-    ];
+    let opening_goals = OPENING_GOALS;
     for (index, chapter_id) in opening.iter().enumerate() {
         execute_real_production(
             &state,
@@ -864,4 +869,181 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
     println!(
         "REAL_TEN_CHAPTER_RESULT projectId={project_id} wordCounts={word_counts:?} modelRuns={runs} status=PASS"
     );
+}
+
+/// The configured writer without the v2 craft skills: no skill guidance in
+/// any request and no prose review or rewrite. Everything else is the same.
+struct NoCraftGateway(ConfiguredProductionGateway);
+
+fn without_craft(input: &serde_json::Value) -> serde_json::Value {
+    let mut input = input.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("craftGuidance");
+    }
+    input
+}
+
+impl ProductionModelGateway for NoCraftGateway {
+    fn provider(&self) -> &str {
+        self.0.provider()
+    }
+    fn model(&self, capability: &str) -> String {
+        self.0.model(capability)
+    }
+    fn model_pricing_catalog(
+        &self,
+        now: &str,
+    ) -> Result<ai_novel_production_system_core::model_cost::ModelPricingCatalog, String> {
+        self.0.model_pricing_catalog(now)
+    }
+    fn transport_diagnostics_enabled(&self) -> bool {
+        self.0.transport_diagnostics_enabled()
+    }
+    fn enforces_chapter_length(&self) -> bool {
+        self.0.enforces_chapter_length()
+    }
+    fn reviews_chapter_prose(&self) -> bool {
+        false
+    }
+    fn classifies_assistant_intent(&self) -> bool {
+        self.0.classifies_assistant_intent()
+    }
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.0.resolve_profile()
+    }
+    fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
+        self.0.resolve_step_profile(capability)
+    }
+    fn invoke_typed_with_profile(
+        &self,
+        capability: &str,
+        input: &serde_json::Value,
+        profile: &ResolvedProviderProfile,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        self.0
+            .invoke_typed_with_profile(capability, &without_craft(input), profile)
+    }
+    fn invoke_typed_with_diagnostic(
+        &self,
+        capability: &str,
+        input: &serde_json::Value,
+        profile: Option<&ResolvedProviderProfile>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ai_novel_production_system_core::provider::ProviderAttemptDiagnostic>,
+    ) {
+        self.0
+            .invoke_typed_with_diagnostic(capability, &without_craft(input), profile)
+    }
+    fn invoke(
+        &self,
+        capability: &str,
+        input: &serde_json::Value,
+    ) -> Result<ProductionModelResponse, String> {
+        self.0.invoke(capability, &without_craft(input))
+    }
+    fn invoke_typed(
+        &self,
+        capability: &str,
+        input: &serde_json::Value,
+    ) -> Result<ProductionModelResponse, TransportFailure> {
+        self.0.invoke_typed(capability, &without_craft(input))
+    }
+}
+
+fn opening_chapter_ids(state: &KernelState, project_id: &str) -> Vec<String> {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let mut statement = connection
+        .prepare("SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no<=3 ORDER BY chapter_no")
+        .unwrap();
+    let ids = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    ids
+}
+
+fn committed_bodies(state: &KernelState, project_id: &str) -> Vec<String> {
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let mut statement = connection
+        .prepare("SELECT json_extract(p.payload_json,'$.body') FROM chapters c JOIN artifact_payloads p ON p.artifact_id=c.final_artifact_id AND p.version=c.final_version WHERE c.project_id=?1 ORDER BY c.chapter_no")
+        .unwrap();
+    let bodies = statement
+        .query_map([project_id], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    bodies
+}
+
+#[test]
+#[ignore = "real provider A/B: the golden three chapters with and without the v2 craft skills; spends configured API budget"]
+fn configured_provider_compares_the_craft_skills_on_and_off() {
+    assert_eq!(
+        std::env::var("MOHENG_RUN_REAL_CRAFT_AB").as_deref(),
+        Ok("1"),
+        "set MOHENG_RUN_REAL_CRAFT_AB=1 to acknowledge real API use"
+    );
+    let out = PathBuf::from(std::env::var("MOHENG_CRAFT_AB_OUT").expect("MOHENG_CRAFT_AB_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let (paths, with_craft) = real_state();
+    let without_craft_state = KernelState::with_production_gateway(
+        paths.clone(),
+        Arc::new(NoCraftGateway(ConfiguredProductionGateway::for_desktop(paths))),
+    );
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let prefix = format!("real-craft-ab:{run}");
+    // One setup, copied, so both arms write from the same story.
+    let (on_project, _) = create_real_project(&with_craft, &prefix, &format!("Harness 技能对照 {run}"));
+    let copy = execute(
+        &with_craft,
+        json!({
+            "type":"project_duplicate","commandId":format!("{prefix}:copy"),
+            "idempotencyKey":format!("{prefix}:copy:key"),"projectId":on_project,
+            "expectedRevision":current_revision(&with_craft, &on_project),"requestedAt":NOW
+        }),
+    );
+    let off_project = copy["resultProjectId"].as_str().unwrap().to_owned();
+    for (arm, state, project_id) in [
+        ("on", &with_craft, &on_project),
+        ("off", &without_craft_state, &off_project),
+    ] {
+        for (index, chapter_id) in opening_chapter_ids(state, project_id).iter().enumerate() {
+            execute_real_production(
+                state,
+                project_id,
+                chapter_id,
+                None,
+                "OPENING_BOOTSTRAP",
+                &format!("{prefix}:{arm}:produce:{}", index + 1),
+                OPENING_GOALS[index],
+            );
+        }
+        let evaluation = execute(
+            state,
+            json!({
+                "type":"opening_evaluate","commandId":format!("{prefix}:{arm}:evaluate"),
+                "idempotencyKey":format!("{prefix}:{arm}:evaluate:key"),"projectId":project_id,
+                "expectedRevision":current_revision(state, project_id),"requestedAt":NOW,"payload":{}
+            }),
+        );
+        let signing = {
+            let connection = state.manager.open(project_id, "", NOW).unwrap();
+            ai_novel_production_system_core::repositories::production::ProductionRepository::center_projection(
+                &connection,
+                project_id,
+            )
+            .unwrap()["signing"]
+                .clone()
+        };
+        std::fs::write(out.join(format!("{arm}-signing.json")), signing.to_string()).unwrap();
+        for (index, body) in committed_bodies(state, project_id).iter().enumerate() {
+            std::fs::write(out.join(format!("{arm}-chapter-{}.txt", index + 1)), body).unwrap();
+        }
+        println!("REAL_CRAFT_AB arm={arm} projectId={project_id} evaluation={}", evaluation["finalStatus"]);
+    }
 }

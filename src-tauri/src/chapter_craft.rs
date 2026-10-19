@@ -324,6 +324,18 @@ pub fn normalize_typography(body: &str) -> String {
     let mut index = 0;
     while index < chars.len() {
         let character = chars[index];
+        let digit = |index: Option<usize>| {
+            index
+                .and_then(|index| chars.get(index))
+                .is_some_and(char::is_ascii_digit)
+        };
+        // A decimal point or clock colon between digits is not punctuation.
+        if matches!(character, '.' | ':') && digit(index.checked_sub(1)) && digit(Some(index + 1))
+        {
+            converted.push(character);
+            index += 1;
+            continue;
+        }
         if character == '.' {
             let run = chars[index..].iter().take_while(|c| **c == '.').count();
             if run >= 2 {
@@ -682,8 +694,9 @@ mod tests {
             "他说：走吧，别回头！真的？好……我知道了。"
         );
         assert_eq!(
-            normalize_typography("备注：S.Y. 已归档，倒计时00:07，峰值0.87。"),
-            "备注：S．Y． 已归档，倒计时00：07，峰值0．87。"
+            normalize_typography("备注：S.Y. 已归档，倒计时00:07，峰值0.87，日期2013.08.17。"),
+            // Decimal points and clock colons stay as they are written.
+            "备注：S．Y． 已归档，倒计时00:07，峰值0.87，日期2013.08.17。"
         );
         assert_eq!(
             normalize_typography("什么？？！！不行。。"),

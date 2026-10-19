@@ -588,6 +588,17 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
     }) {
         findings.push("连续重复标点".to_string());
     }
+    // A decimal point or clock colon between digits is a number separator,
+    // not punctuation.
+    let punctuation_use = |half: char| {
+        chars.iter().enumerate().any(|(index, character)| {
+            *character == half
+                && !(matches!(half, '.' | ':')
+                    && index > 0
+                    && chars[index - 1].is_ascii_digit()
+                    && chars.get(index + 1).is_some_and(char::is_ascii_digit))
+        })
+    };
     for (full, half) in [
         ('，', ','),
         ('。', '.'),
@@ -596,7 +607,7 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
         ('：', ':'),
         ('；', ';'),
     ] {
-        if body.contains(full) && body.contains(half) {
+        if body.contains(full) && punctuation_use(half) {
             findings.push(format!("全半角标点混用:{full}{half}"));
         }
     }
@@ -2068,6 +2079,13 @@ pub fn confirm_signing_platform(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn f1_2_number_separators_are_not_mixed_punctuation() {
+        assert!(punctuation_or_layout_findings("峰值0.87，时间00:07，日期2013.08.17。").is_empty());
+        assert!(!punctuation_or_layout_findings("他走了.她留下。").is_empty());
+    }
+
     use super::*;
 
     fn fixture_chapter(chapter_no: i64, body: &str) -> ChapterInput {
