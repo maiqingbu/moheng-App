@@ -2,8 +2,9 @@ use super::*;
 use std::sync::Mutex;
 
 /// A configured-provider stand-in for the v2 craft rules. Plan N (0-based)
-/// is `plans[N]` (the last repeats); writer call N returns `body_lengths[N]`
-/// characters (the last repeats). Chapters are written in two parts.
+/// is `plans[N]` (the last repeats); writer call N — the chapter, then its
+/// length adjustment — returns `body_lengths[N]` characters (the last
+/// repeats). Chapters are written whole (owner decision 2026-10-23).
 struct CraftGateway {
     plans: Vec<Value>,
     body_lengths: Vec<usize>,
@@ -82,13 +83,17 @@ impl ProductionModelGateway for CraftGateway {
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let plans = self.inputs("PLAN_STRATEGY").len();
-        let renders = self.inputs("RENDER_CHAPTER").len();
+        let renders =
+            self.inputs("RENDER_CHAPTER").len() + self.inputs("ADJUST_CHAPTER_LENGTH").len();
         self.inputs
             .lock()
             .unwrap()
             .push((capability.to_string(), input.clone()));
         let audits = self.inputs("AUDIT_EXTRACT").len();
-        let mut response = RecordingGateway.invoke(capability, input)?;
+        // A length adjustment returns a whole chapter, like the writer.
+        let writes = matches!(capability, "RENDER_CHAPTER" | "ADJUST_CHAPTER_LENGTH");
+        let mut response =
+            RecordingGateway.invoke(if writes { "RENDER_CHAPTER" } else { capability }, input)?;
         if capability == "AUDIT_EXTRACT" && self.fail_first_audit && audits == 1 {
             response.output["unresolvedHard"] = json!(true);
             response.output["auditCompleteness"] = json!("UNRESOLVED_HARD");
@@ -114,7 +119,7 @@ impl ProductionModelGateway for CraftGateway {
                 response.output[key] = value.clone();
             }
         }
-        if capability == "RENDER_CHAPTER" && self.punctuation_sample {
+        if writes && self.punctuation_sample {
             // Half-width punctuation the writer is known to produce.
             let mut length = *self
                 .body_lengths
@@ -128,7 +133,7 @@ impl ProductionModelGateway for CraftGateway {
             ));
             return Ok(response);
         }
-        if capability == "RENDER_CHAPTER" {
+        if writes {
             let length = *self
                 .body_lengths
                 .get(renders)
@@ -183,7 +188,7 @@ fn skill_ids(guidance: &Value) -> Vec<String> {
 
 #[test]
 fn craft_v2_guidance_reaches_the_planner_and_the_writer() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
     let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-guidance");
     result.unwrap();
     let plan_input = &gateway.inputs("PLAN_STRATEGY")[0];
@@ -199,10 +204,7 @@ fn craft_v2_guidance_reaches_the_planner_and_the_writer() {
     let render_input = &gateway.inputs("RENDER_CHAPTER")[0];
     assert!(render_input.get("creativeEnrichment").is_none());
     assert_eq!(render_input["craftGuidance"]["stage"], "render");
-    assert_eq!(
-        render_input["beatTargets"][0]["beats"][0]["targetCharacters"],
-        300
-    );
+    assert!(render_input.get("beatTargets").is_none());
     let render_skills = skill_ids(&render_input["craftGuidance"]);
     assert!(
         render_skills.contains(&"S27".to_string()),
@@ -219,11 +221,9 @@ fn craft_v2_guidance_reaches_the_planner_and_the_writer() {
 }
 
 #[test]
-fn craft_v2_plan_without_beats_is_replanned_once_with_the_reason() {
-    let thin = json!({"chapterRole":"普通","sceneExecution":[
-        {"objective":"推进","estimatedCharacters":900},{"objective":"推进","estimatedCharacters":900},{"objective":"推进","estimatedCharacters":700}
-    ]});
-    let gateway = Arc::new(CraftGateway::new(vec![thin, good_plan()], &[1250]));
+fn craft_v2_plan_without_a_role_is_replanned_once_with_the_reason() {
+    let no_role = json!({"sceneExecution":good_plan()["sceneExecution"].clone()});
+    let gateway = Arc::new(CraftGateway::new(vec![no_role, good_plan()], &[2500]));
     let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-replan");
     result.unwrap();
     let plans = gateway.inputs("PLAN_STRATEGY");
@@ -231,68 +231,41 @@ fn craft_v2_plan_without_beats_is_replanned_once_with_the_reason() {
     assert!(plans[0].get("planFeedback").is_none());
     assert_eq!(
         plans[1]["planFeedback"]["rejectedFor"],
-        "B08_PLAN_BEATS_INVALID"
-    );
-    assert!(plans[1]["planFeedback"]["instruction"]
-        .as_str()
-        .unwrap()
-        .contains("节拍"));
-}
-
-#[test]
-fn craft_v2_second_part_is_written_twice_and_the_fitting_version_is_kept() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 500, 1300]));
-    let project_id = "p-craft-parts";
-    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
-    let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 3);
-    // Part 1 holds the first scene and stops where the second begins.
-    assert_eq!(renders[0]["part"], json!({"index":1,"count":2}));
-    assert_eq!(
-        renders[0]["chapterPlan"]["sceneExecution"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(renders[0]["stopBefore"], "节拍0");
-    // Two versions of part 2, both continuing from the whole first part.
-    for second in &renders[1..] {
-        assert_eq!(second["part"], json!({"index":2,"count":2}));
-        assert_eq!(
-            second["previousText"].as_str().unwrap().chars().count(),
-            1200
-        );
-        assert!(second.get("partFeedback").is_none());
-    }
-    // The 500-character version leaves the chapter short; the other is kept.
-    assert_eq!(
-        committed_word_count(&state, project_id, &chapter_id),
-        1200 + 2 + 1300
+        "B08_PLAN_ROLE_INVALID"
     );
 }
 
 #[test]
-fn craft_v2_two_more_second_parts_follow_the_gap_when_neither_fits() {
-    let gateway = Arc::new(CraftGateway::new(
-        vec![good_plan()],
-        &[1200, 500, 600, 1300, 900],
-    ));
-    let project_id = "p-craft-parts-gap";
+fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 2500]));
+    let project_id = "p-craft-adjust";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
     let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 5);
-    // The gap is taken from the version nearest the range (600 characters).
-    for retry in &renders[3..] {
-        assert_eq!(retry["partFeedback"]["previousCharacterCount"], 600);
-        assert_eq!(retry["partFeedback"]["shortBy"], 2000 - 1802);
-    }
-    // Of 1300 and 900, 1300 lands nearest the middle of the range.
+    assert_eq!(renders.len(), 1);
+    assert!(renders[0].get("part").is_none() && renders[0].get("beatTargets").is_none());
+    let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
+    assert_eq!(adjust.len(), 1);
+    assert_eq!(adjust[0]["direction"], "EXPAND");
+    assert_eq!(adjust[0]["shortBy"], 2000 - 1200);
+    assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
+}
+
+#[test]
+fn craft_v2_a_chapter_in_range_needs_no_adjustment_and_one_still_outside_is_not_committed() {
+    let in_range = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
+    let (_temp, _state, _chapter_id, result) = produce(in_range.clone(), "p-craft-in-range");
+    result.unwrap();
+    assert!(in_range.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
+
+    let too_long = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3400]));
+    let (_temp, _state, _chapter_id, result) = produce(too_long.clone(), "p-craft-too-long");
+    assert!(result
+        .unwrap_err()
+        .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"));
     assert_eq!(
-        committed_word_count(&state, project_id, &chapter_id),
-        1200 + 2 + 1300
+        too_long.inputs("ADJUST_CHAPTER_LENGTH")[0]["direction"],
+        "COMPRESS"
     );
 }
 
@@ -310,11 +283,8 @@ fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str)
 }
 
 #[test]
-fn craft_v2_retry_writes_both_parts_again() {
-    let gateway = Arc::new(CraftGateway::new(
-        vec![good_plan()],
-        &[600, 600, 600, 600, 600, 1200, 1300],
-    ));
+fn craft_v2_retry_writes_the_chapter_again() {
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[600, 600, 2500]));
     let project_id = "p-craft-retry";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
     assert!(result
@@ -328,8 +298,6 @@ fn craft_v2_retry_writes_both_parts_again() {
             |row| row.get(0),
         )
         .unwrap();
-    // Two attempts with two versions of part 2 each exceed the fixture's
-    // ten-run budget.
     connection
         .execute(
             "UPDATE chapter_production_budgets SET hard_max_model_runs=20 WHERE project_id=?1",
@@ -344,10 +312,8 @@ fn craft_v2_retry_writes_both_parts_again() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 8);
-    assert_eq!(renders[5]["part"]["index"], 1);
-    assert!(renders[5].get("partFeedback").is_none());
+    // The configured writer never reuses sized prose: the retry writes anew.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
 }
 
 #[test]
@@ -355,7 +321,7 @@ fn craft_v2_long_form_plan_compile_gets_guidance_and_replans_a_rejected_plan() {
     let temp = tempfile::tempdir().unwrap();
     let no_role =
         json!({"chapterRole":null,"sceneExecution":good_plan()["sceneExecution"].clone()});
-    let gateway = Arc::new(CraftGateway::new(vec![no_role, good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![no_role, good_plan()], &[2500]));
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-craft-long";
     let connection = state.manager.create(project_id, "Craft long", NOW).unwrap();
@@ -391,10 +357,7 @@ fn craft_v2_long_form_plan_compile_gets_guidance_and_replans_a_rejected_plan() {
 #[test]
 fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
     use ai_novel_production_system_core::repositories::production::ProductionRepository;
-    let gateway = Arc::new(CraftGateway::new(
-        vec![good_plan()],
-        &[900, 900, 1200, 1300],
-    ));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[900, 900, 2500]));
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-craft-quota";
@@ -472,7 +435,7 @@ fn craft_v2_manual_quota_reset_lets_an_exhausted_chapter_be_retried() {
 
 #[test]
 fn craft_v2_writing_and_audit_use_their_step_models() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
     let project_id = "p-craft-writer-model";
     let (_temp, state, _chapter_id, result) = produce(gateway, project_id);
     result.unwrap();
@@ -495,7 +458,7 @@ fn craft_v2_writing_and_audit_use_their_step_models() {
 
 #[test]
 fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway);
     let project_id = "p-craft-exact-limit";
@@ -504,11 +467,11 @@ fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
         .create(project_id, "Craft limit", NOW)
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
-    // Plan, part 1, two versions of part 2, the prose review and the audit:
-    // six runs (a clean review needs no rewrite; no v1.2 repair).
+    // Plan, the chapter, the prose review and the audit: four runs (a
+    // chapter in range needs no adjustment, a clean review no rewrite).
     connection
         .execute(
-            "UPDATE chapter_production_budgets SET hard_max_model_runs=6 WHERE project_id=?1",
+            "UPDATE chapter_production_budgets SET hard_max_model_runs=4 WHERE project_id=?1",
             [project_id],
         )
         .unwrap();
@@ -528,7 +491,7 @@ fn craft_v2_a_chapter_that_uses_exactly_its_run_limit_still_commits() {
 fn craft_v2_committed_prose_uses_chinese_punctuation() {
     let gateway = Arc::new(CraftGateway {
         punctuation_sample: true,
-        ..CraftGateway::new(vec![good_plan()], &[1250])
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-typography";
     let (_temp, state, chapter_id, result) = produce(gateway, project_id);
@@ -546,89 +509,10 @@ fn craft_v2_committed_prose_uses_chinese_punctuation() {
 }
 
 #[test]
-fn craft_v2_a_first_part_with_a_third_use_of_a_phrase_is_rewritten_once() {
-    let gateway = Arc::new(CraftGateway {
-        motifs: vec![3],
-        ..CraftGateway::new(vec![good_plan()], &[1000, 1000, 1300])
-    });
-    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), "p-craft-overused-1");
-    result.unwrap();
-    let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 4);
-    assert!(renders[0].get("repeatedPhrases").is_none());
-    assert_eq!(renders[1]["part"], json!({"index":1,"count":2}));
-    assert!(renders[1]["repeatedPhrases"][0]
-        .as_str()
-        .unwrap()
-        .contains("蓝莓籽"));
-    // Part 2 continues from the rewritten first part.
-    assert!(!renders[2]["previousText"]
-        .as_str()
-        .unwrap()
-        .contains("蓝莓籽"));
-}
-
-#[test]
-fn craft_v2_a_second_part_with_a_third_use_of_a_phrase_is_not_kept() {
-    // Part 1 uses the image twice; version 2a, nearer the middle, a third time.
-    let gateway = Arc::new(CraftGateway {
-        motifs: vec![2, 1, 0],
-        ..CraftGateway::new(vec![good_plan()], &[1200, 1300, 1600])
-    });
-    let project_id = "p-craft-overused-2";
-    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 3);
-    assert_eq!(
-        committed_word_count(&state, project_id, &chapter_id),
-        1200 + 2 + 1600
-    );
-}
-
-#[test]
-fn craft_v2_two_more_second_parts_avoid_the_phrase_when_both_reuse_it() {
-    let gateway = Arc::new(CraftGateway {
-        motifs: vec![2, 1, 1, 1, 0],
-        ..CraftGateway::new(vec![good_plan()], &[1200, 1300, 1300, 1300, 1600])
-    });
-    let project_id = "p-craft-overused-3";
-    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
-    let renders = gateway.inputs("RENDER_CHAPTER");
-    assert_eq!(renders.len(), 5);
-    for retry in &renders[3..] {
-        assert!(retry["repeatedPhrases"][0]
-            .as_str()
-            .unwrap()
-            .contains("蓝莓籽"));
-    }
-    assert_eq!(
-        committed_word_count(&state, project_id, &chapter_id),
-        1200 + 2 + 1600
-    );
-}
-
-#[test]
-fn craft_v2_a_rewritten_first_part_outside_its_length_range_is_not_kept() {
-    let gateway = Arc::new(CraftGateway {
-        motifs: vec![3],
-        ..CraftGateway::new(vec![good_plan()], &[1000, 100, 1300])
-    });
-    let project_id = "p-craft-overused-short";
-    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), project_id);
-    result.unwrap();
-    let renders = gateway.inputs("RENDER_CHAPTER");
-    assert!(renders[2]["previousText"]
-        .as_str()
-        .unwrap()
-        .contains("蓝莓籽"));
-}
-
-#[test]
 fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
     let gateway = Arc::new(CraftGateway {
         fail_first_audit: true,
-        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-retry-audit";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
@@ -655,8 +539,8 @@ fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    // The retry wrote both parts again, so its prose gets its own audit.
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 6);
+    // The retry wrote the chapter again, so its prose gets its own audit.
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 2);
 }
 
@@ -670,7 +554,7 @@ fn craft_v2_long_form_plan_with_too_short_a_horizon_is_replanned() {
         {"objective":"潜入外围","tentative":true},
         {"objective":"被迫交手","tentative":true}
     ]);
-    let gateway = Arc::new(CraftGateway::new(vec![short_horizon, good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![short_horizon, good_plan()], &[2500]));
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     let project_id = "p-craft-long-horizon";
     let connection = state.manager.create(project_id, "Craft long", NOW).unwrap();
@@ -703,7 +587,7 @@ fn craft_v2_long_form_plan_with_too_short_a_horizon_is_replanned() {
 
 #[test]
 fn craft_v2_receipt_records_the_skills_each_step_received() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1250]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
     let project_id = "p-craft-skill-receipt";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
@@ -758,7 +642,7 @@ fn receipt_craft(state: &KernelState, project_id: &str) -> Value {
 fn craft_v2_review_findings_are_rewritten_in_place_with_the_rewrite_skills() {
     let gateway = Arc::new(CraftGateway {
         rewrite_ending: Some("他收好钥匙，转身离开。".into()),
-        ..CraftGateway::new(vec![good_plan()], &[1200, 1300])
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-review";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
@@ -795,7 +679,7 @@ fn craft_v2_review_findings_are_rewritten_in_place_with_the_rewrite_skills() {
 
 #[test]
 fn craft_v2_a_chapter_without_review_findings_is_not_rewritten() {
-    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 1300]));
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
     let project_id = "p-craft-review-clean";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
@@ -811,7 +695,7 @@ fn craft_v2_a_chapter_without_review_findings_is_not_rewritten() {
 fn craft_v2_a_rewrite_that_leaves_the_length_range_is_discarded() {
     let gateway = Arc::new(CraftGateway {
         rewrite_ending: Some("长".repeat(2000)),
-        ..CraftGateway::new(vec![good_plan()], &[1200, 1300])
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-review-long";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
@@ -825,11 +709,11 @@ fn craft_v2_a_rewrite_that_leaves_the_length_range_is_discarded() {
 
 #[test]
 fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
-    // Part 1 uses the image twice and every version of part 2 once more,
-    // as a real code label did on 2026-10-19.
+    // The chapter uses the image three times, as a real code label did
+    // on 2026-10-19.
     let gateway = Arc::new(CraftGateway {
-        motifs: vec![2, 1, 1, 1, 1],
-        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+        motifs: vec![3],
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-review-repeat";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
@@ -852,7 +736,7 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
 fn craft_v2_rule_findings_go_to_the_rewrite_with_the_review() {
     let gateway = Arc::new(CraftGateway {
         inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],
-        ..CraftGateway::new(vec![good_plan()], &[1000, 1300])
+        ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-rule-findings";
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);

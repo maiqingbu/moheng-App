@@ -2248,9 +2248,9 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let canary = r2_runtime_canary();
-    // The opening chapter is written in two parts, part 2 in two versions,
-    // and its prose is reviewed once.
-    let expected_requests = 7;
+    // The opening chapter is planned, written whole (owner decision
+    // 2026-10-23), reviewed and audited; then the next chapter is planned.
+    let expected_requests = 5;
     let R2LocalProviderServer {
         endpoint,
         stop,

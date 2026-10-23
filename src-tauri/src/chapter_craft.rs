@@ -78,41 +78,15 @@ fn normalized_goal(goal: &str) -> String {
         .collect()
 }
 
-/// Each beat carries roughly this many characters at most.
-const MAX_CHARACTERS_PER_BEAT: i64 = 400;
-
-/// Rejects a plan that cannot be written well: a missing role, scenes
-/// without 2–4 beats, too few beats for the range, or a repeated goal.
-pub fn validate_plan_craft(
-    plan: &Value,
-    range: ChapterLengthRange,
-    recent_chapters: &[Value],
-) -> Result<(), String> {
+/// Rejects a plan that cannot be written well: a missing role or a goal
+/// that repeats a recent chapter's.
+pub fn validate_plan_craft(plan: &Value, recent_chapters: &[Value]) -> Result<(), String> {
     if !plan
         .get("chapterRole")
         .and_then(Value::as_str)
         .is_some_and(|role| CHAPTER_ROLES.contains(&role))
     {
         return Err("B08_PLAN_ROLE_INVALID".into());
-    }
-    let scenes = plan
-        .get("sceneExecution")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let mut beats = 0;
-    for scene in scenes {
-        let count = scene
-            .get("beats")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        if !(2..=4).contains(&count) {
-            return Err("B08_PLAN_BEATS_INVALID".into());
-        }
-        beats += count as i64;
-    }
-    if beats * MAX_CHARACTERS_PER_BEAT < range.min {
-        return Err("B08_PLAN_BEATS_INSUFFICIENT".into());
     }
     let goal = normalized_goal(
         plan.get("chapterGoal")
@@ -174,15 +148,13 @@ pub fn planning_signals(chapter_number: Option<u32>, recent_chapters: &[Value]) 
 }
 
 /// Plan rejections the planner can fix itself, with what to tell it.
-const REPLANNABLE: [(&str, &str); 6] = [
+const REPLANNABLE: [(&str, &str); 4] = [
     (
         "ROLLING_HORIZON_CAPACITY_INVALID",
         "horizonPreview 条数不符合 horizonPreviewCapacity：容量为 0～2 时返回不超过容量的条数，否则返回 3 到 min(8, 容量) 条，每条都是 {\"objective\":string,\"tentative\":true}。",
     ),
     ("B08_PLAN_LENGTH_OUT_OF_RANGE", "每个场景都必须给出整数 estimatedCharacters，且所有场景之和要落在 chapterLengthRange 内：按区间调整场景和节拍数量，让内容自然撑起篇幅。"),
     ("B08_PLAN_ROLE_INVALID", "chapterRole 缺失或不在 chapterRoleOptions 中：从中选择一个本章角色，并让场景篇幅总和落在该角色的区间内。"),
-    ("B08_PLAN_BEATS_INVALID", "每个场景都必须写出 sceneType、goal、conflict、turn、result，以及 2～4 个节拍（beats），每个节拍说明这一步发生了什么。"),
-    ("B08_PLAN_BEATS_INSUFFICIENT", "节拍总数撑不起本章篇幅：增加真正的情节节拍（新的受挫、发现或选择）或增加场景，每个节拍约 250～400 字，不要靠描写凑字数。"),
     ("B08_PLAN_GOAL_REPEATED", "本章目标与 recentChapters 中已写章节的目标重复：从最近一章的结尾继续，给本章一个带来新推进的目标。"),
 ];
 
@@ -235,95 +207,7 @@ pub fn check_plan(
     recent_chapters: &[Value],
 ) -> Result<(), String> {
     crate::chapter_length::validate_plan_length(plan, range)?;
-    validate_plan_craft(plan, range, recent_chapters)
-}
-
-/// Every planned beat with the length it should reach: each scene's
-/// estimate split evenly over its beats.
-pub fn beat_targets(plan: &Value) -> Value {
-    plan.get("sceneExecution")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|scene| {
-            let beats = scene
-                .get("beats")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let estimate = scene
-                .get("estimatedCharacters")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let per_beat = estimate / (beats.len().max(1) as i64);
-            json!({
-                "sceneType":scene.get("sceneType"),
-                "estimatedCharacters":estimate,
-                "beats":beats.iter().map(|beat| json!({"beat":beat,"targetCharacters":per_beat})).collect::<Vec<_>>()
-            })
-        })
-        .collect()
-}
-
-fn scene_estimates(plan: &Value) -> Vec<i64> {
-    plan.get("sceneExecution")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|scene| {
-            scene
-                .get("estimatedCharacters")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-/// Where a two-part chapter is split: the first scene of the second part,
-/// chosen so both parts carry about half of the estimated length. `None`
-/// when the plan has fewer than two scenes.
-pub fn part_split(plan: &Value) -> Option<usize> {
-    let estimates = scene_estimates(plan);
-    let total: i64 = estimates.iter().sum();
-    (1..estimates.len()).min_by_key(|&split| {
-        let first: i64 = estimates[..split].iter().sum();
-        (2 * first - total).abs()
-    })
-}
-
-/// The writer input for one part of a two-part chapter (owner decision
-/// 2026-10-18): the plan narrowed to that part's scenes, where the first
-/// part stops, and the whole first part for the second to continue from.
-pub fn part_render_input(base: &Value, plan: &Value, part: usize, written: &str) -> Value {
-    let split = part_split(plan).unwrap_or(0);
-    let scenes = plan
-        .get("sceneExecution")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let range = if part == 0 {
-        0..split
-    } else {
-        split..scenes.len()
-    };
-    let estimate: i64 = scene_estimates(plan)[range.clone()].iter().sum();
-    let mut input = base.clone();
-    input["chapterPlan"]["sceneExecution"] = json!(scenes[range.clone()]);
-    if let Some(targets) = base.get("beatTargets").and_then(Value::as_array) {
-        input["beatTargets"] = json!(targets[range].to_vec());
-    }
-    input["part"] = json!({"index":part + 1,"count":2});
-    input["partLengthRange"] = json!({"min":estimate * 4 / 5,"max":estimate * 13 / 10});
-    if part == 0 {
-        input["stopBefore"] = scenes[split]
-            .pointer("/beats/0")
-            .cloned()
-            .unwrap_or(Value::Null);
-    } else {
-        input["stopBefore"] = Value::Null;
-        input["previousText"] = json!(written);
-    }
-    input
+    validate_plan_craft(plan, recent_chapters)
 }
 
 /// Chinese typography for committed prose (owner rule: signing checks forbid
@@ -1049,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn craft_accepts_a_plan_with_role_and_enough_beats() {
+    fn craft_accepts_a_plan_with_a_role_and_a_new_goal() {
         let ok = plan(
             "普通",
             "查明委托人的记忆为何被覆盖",
@@ -1059,30 +943,20 @@ mod tests {
                 scene("揭示", 2, 700),
             ],
         );
-        assert_eq!(validate_plan_craft(&ok, RANGE, &[]), Ok(()));
+        assert_eq!(validate_plan_craft(&ok, &[]), Ok(()));
     }
 
     #[test]
-    fn craft_rejects_missing_role_bad_beat_counts_and_too_few_beats() {
+    fn craft_rejects_a_missing_role_but_not_a_scene_without_beats() {
         let no_role = json!({"chapterGoal":"目标","sceneExecution":[scene("调查", 3, 2500)]});
         assert_eq!(
-            validate_plan_craft(&no_role, RANGE, &[]),
+            validate_plan_craft(&no_role, &[]),
             Err("B08_PLAN_ROLE_INVALID".into())
         );
-        let one_beat = plan(
-            "普通",
-            "目标",
-            vec![scene("调查", 1, 1200), scene("对峙", 4, 1300)],
-        );
-        assert_eq!(
-            validate_plan_craft(&one_beat, RANGE, &[]),
-            Err("B08_PLAN_BEATS_INVALID".into())
-        );
-        let thin = plan("普通", "目标", vec![scene("调查", 2, 2500)]);
-        assert_eq!(
-            validate_plan_craft(&thin, RANGE, &[]),
-            Err("B08_PLAN_BEATS_INSUFFICIENT".into())
-        );
+        // Owner decision (2026-10-23): beat counts and per-beat lengths are
+        // retired; a chapter is written whole and sized afterwards.
+        let one_beat = plan("普通", "目标", vec![scene("调查", 1, 2500)]);
+        assert_eq!(validate_plan_craft(&one_beat, &[]), Ok(()));
     }
 
     #[test]
@@ -1098,7 +972,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            validate_plan_craft(&repeated, RANGE, &recent),
+            validate_plan_craft(&repeated, &recent),
             Err("B08_PLAN_GOAL_REPEATED".into())
         );
     }
@@ -1114,93 +988,6 @@ mod tests {
         assert_eq!(signals.chapter_number, Some(5));
         assert_eq!(signals.chapter_role.as_deref(), Some("回报"));
         assert_eq!(signals.scene_types, vec!["战斗", "对话为主"]);
-    }
-
-    #[test]
-    fn craft_beat_targets_split_each_scene_estimate_over_its_beats() {
-        let committed = plan(
-            "普通",
-            "目标",
-            vec![scene("调查", 3, 900), scene("对峙", 2, 1000)],
-        );
-        let targets = beat_targets(&committed);
-        assert_eq!(targets[0]["sceneType"], "调查");
-        assert_eq!(
-            targets[0]["beats"][2],
-            json!({"beat":"节拍2","targetCharacters":300})
-        );
-        assert_eq!(targets[1]["beats"][0]["targetCharacters"], 500);
-        assert!(
-            plan_feedback("ROLLING_HORIZON_CAPACITY_INVALID").unwrap()["instruction"]
-                .as_str()
-                .unwrap()
-                .contains("horizonPreviewCapacity")
-        );
-        assert!(plan_feedback("CHAPTER_NOT_FOUND").is_none());
-        assert!(
-            plan_feedback("B08_PLAN_LENGTH_OUT_OF_RANGE").unwrap()["instruction"]
-                .as_str()
-                .unwrap()
-                .contains("estimatedCharacters")
-        );
-    }
-
-    #[test]
-    fn craft_parts_split_the_estimate_in_half() {
-        let four = plan(
-            "普通",
-            "目标",
-            vec![
-                scene("调查", 3, 600),
-                scene("对峙", 3, 700),
-                scene("揭示", 3, 800),
-                scene("日常", 3, 600),
-            ],
-        );
-        assert_eq!(part_split(&four), Some(2));
-        let two = plan(
-            "普通",
-            "目标",
-            vec![scene("调查", 3, 1200), scene("对峙", 3, 1300)],
-        );
-        assert_eq!(part_split(&two), Some(1));
-        let one = plan("普通", "目标", vec![scene("调查", 3, 2500)]);
-        assert_eq!(part_split(&one), None);
-    }
-
-    #[test]
-    fn craft_part_inputs_narrow_the_plan_and_join_at_the_seam() {
-        let committed = plan(
-            "普通",
-            "目标",
-            vec![
-                scene("调查", 3, 600),
-                scene("对峙", 3, 700),
-                scene("揭示", 3, 800),
-                scene("日常", 3, 600),
-            ],
-        );
-        let base = json!({"chapterId":"c","chapterPlan":committed.clone(),"beatTargets":beat_targets(&committed)});
-        let first = part_render_input(&base, &committed, 0, "");
-        assert_eq!(first["part"], json!({"index":1,"count":2}));
-        let scenes = first["chapterPlan"]["sceneExecution"].as_array().unwrap();
-        assert_eq!(scenes.len(), 2);
-        assert_eq!(scenes[1]["sceneType"], "对峙");
-        assert_eq!(first["chapterPlan"]["chapterGoal"], "目标");
-        assert_eq!(first["beatTargets"].as_array().unwrap().len(), 2);
-        assert_eq!(first["stopBefore"], "节拍0");
-        assert_eq!(first["partLengthRange"], json!({"min":1040,"max":1690}));
-        assert!(first.get("previousText").is_none());
-        let written = "第一段正文。".repeat(300);
-        let second = part_render_input(&base, &committed, 1, &written);
-        assert_eq!(second["part"], json!({"index":2,"count":2}));
-        assert_eq!(
-            second["chapterPlan"]["sceneExecution"][0]["sceneType"],
-            "揭示"
-        );
-        assert_eq!(second["previousText"], written);
-        assert!(second["stopBefore"].is_null());
-        assert_eq!(second["partLengthRange"], json!({"min":1120,"max":1820}));
     }
 
     #[test]

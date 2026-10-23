@@ -386,11 +386,8 @@ impl WritingContext {
         })
     }
 
-    /// Replaces the r1 beat targets with what the craft writer reads.
+    /// Adds what the craft writer reads to a render request.
     pub fn extend_render_input(&self, input: &mut Value, recent_chapters: &[Value]) {
-        if let Some(object) = input.as_object_mut() {
-            object.remove("beatTargets");
-        }
         input["storyBible"] = self.bible.clone();
         if let Some(card) = &self.style_card {
             input["styleCard"] = card.clone();

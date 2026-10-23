@@ -3257,9 +3257,6 @@ fn run_chapter_production_inner(
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
     let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
-    // Craft v2: the writer gets only the selected skills' render guidance;
-    // the v1.2 enrichment stays in the receipts.
-    render_input["beatTargets"] = crate::chapter_craft::beat_targets(&plan_payload);
     let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
@@ -3347,25 +3344,6 @@ fn run_chapter_production_inner(
         )?;
         Ok((model_run_id, outcome))
     };
-    // One writer call.
-    let render_once =
-        |suffix: &str, attempt_no: i64, input: Value| -> Result<(String, String), String> {
-            let (model_run_id, result) = craft_call(
-                &format!("render{suffix}"),
-                render_capability,
-                &render_profile,
-                attempt_no,
-                input,
-            )?;
-            let body = result
-                .parsed
-                .as_ref()
-                .and_then(|payload| payload.get("body"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-            Ok((model_run_id, body))
-        };
     use crate::chapter_length::character_count;
     let length_error = |body: &str| {
         format!(
@@ -3375,144 +3353,59 @@ fn run_chapter_production_inner(
             length_range.max
         )
     };
-    // Where length is enforced every accepted plan has several scenes (2–4
-    // beats each, enough beats for the range), so it is written in two parts.
-    let two_parts = gateway.enforces_chapter_length()
-        && craft_writing.is_none()
-        && crate::chapter_craft::part_split(&plan_payload).is_some();
-    // An earlier audit only fits a retry that reuses that attempt's prose.
-    let mut render_reused = false;
-    let (render_run_id, mut body) = if two_parts {
-        // Owner decision (2026-10-18): a writer call yields a steady length
-        // about half a chapter, so a chapter is written in two parts; the
-        // second continues from the whole first part. Only the second part is
-        // rewritten (at most twice) so the seam stays intact; a chapter still
-        // outside the range is never committed.
-        // A phrase used a third time across the recent chapters fails the
-        // signing check (F1-5), so a first part that does so is rewritten
-        // once with those phrases, keeping the version with fewer.
-        let overused =
-            |history: &[String], text: &str| crate::chapter_craft::overused_phrases(history, text);
-        let first_input =
-            crate::chapter_craft::part_render_input(&render_input, &plan_payload, 0, "");
-        let (_, first) = render_once(":part-1", 1, first_input.clone())?;
-        let mut first = crate::chapter_craft::normalize_typography(first.trim());
-        let first_overused = overused(&chapter_history.bodies, &first);
-        if !first_overused.is_empty() {
-            let part_range = first_input["partLengthRange"].clone();
-            let mut input = first_input;
-            input["repeatedPhrases"] = json!(first_overused);
-            let (_, rewrite) = render_once(":part-1r", 2, input)?;
-            let rewrite = crate::chapter_craft::normalize_typography(rewrite.trim());
-            let length = character_count(&rewrite);
-            let in_range = part_range["min"].as_i64().is_some_and(|min| length >= min)
-                && part_range["max"].as_i64().is_some_and(|max| length <= max);
-            if in_range && overused(&chapter_history.bodies, &rewrite).len() <= first_overused.len()
-            {
-                first = rewrite;
-            }
-        }
-        let first_history = chapter_history
-            .bodies
-            .iter()
-            .cloned()
-            .chain([first.clone()])
-            .collect::<Vec<_>>();
-        let second_input =
-            crate::chapter_craft::part_render_input(&render_input, &plan_payload, 1, &first);
-        // Owner decision (2026-10-18): part 2 is written twice and the
-        // version that brings the chapter into the range, closest to its
-        // middle, is kept; when neither does, two more are written with the
-        // gap of the nearest one.
-        let joined = |second: &str| {
-            format!(
-                "{first}\n\n{}",
-                crate::chapter_craft::normalize_typography(second.trim())
+    // CRAFT v3 (owner decision 2026-10-23): a chapter is written in one
+    // call. A retry reuses the earlier prose only where it is committed as
+    // written; where the prose is sized and rewritten afterwards, a retry
+    // writes it again so the audit always reads what is committed.
+    let reusable_render = retry_of_job_id
+        .as_deref()
+        .filter(|_| !gateway.enforces_chapter_length())
+        .map(|previous_job_id| {
+            DurableModelRunner::completed_result_for_job(
+                connection,
+                &project_id,
+                previous_job_id,
+                render_capability,
             )
-        };
-        let target = (length_range.min + length_range.max) / 2;
-        // Ranked by distance outside the range, then phrases used a third
-        // time, then distance from the middle.
-        let distance = |second: &str| {
-            let total = character_count(&joined(second));
-            let outside = (length_range.min - total)
-                .max(total - length_range.ceiling())
-                .max(0);
-            let normalized = crate::chapter_craft::normalize_typography(second.trim());
-            let repeated = overused(&first_history, &normalized).len() as i64;
-            (outside, repeated, (total - target).abs())
-        };
-        let mut drafts = vec![
-            render_once(":part-2a", 1, second_input.clone())?,
-            render_once(":part-2b", 2, second_input.clone())?,
-        ];
-        let nearest = |drafts: &[(String, String)]| {
-            drafts
-                .iter()
-                .min_by_key(|(_, second)| distance(second))
-                .cloned()
-                .expect("two drafts")
-        };
-        let (outside, repeated, _) = distance(&nearest(&drafts).1);
-        if outside > 0 || repeated > 0 {
-            let (_, closest) = nearest(&drafts);
-            let total = character_count(&joined(&closest));
-            let mut input = second_input;
-            input["partFeedback"] = json!({
-                "previousCharacterCount":character_count(&closest),
-                "shortBy":(length_range.min - total).max(0),
-                "overBy":(total - length_range.ceiling()).max(0)
-            });
-            if repeated > 0 {
-                input["repeatedPhrases"] = json!(overused(
-                    &first_history,
-                    &crate::chapter_craft::normalize_typography(closest.trim())
-                ));
-            }
-            drafts.push(render_once(":part-2c", 3, input.clone())?);
-            drafts.push(render_once(":part-2d", 4, input)?);
-        }
-        let (run_id, second) = nearest(&drafts);
-        if distance(&second).0 > 0 {
-            return Err(length_error(&joined(&second)));
-        }
-        (run_id, joined(&second))
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .flatten();
+    // An earlier audit only fits a retry that reuses that attempt's prose.
+    let render_reused = reusable_render.is_some();
+    let (render_run_id, mut body) = if let Some((model_run_id, parsed)) = reusable_render {
+        let payload = parse_provider_model_payload_for_capability(parsed, render_capability)?;
+        let body = payload
+            .get("body")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+        (model_run_id, body)
     } else {
-        let reusable_render = retry_of_job_id
-            .as_deref()
-            .map(|previous_job_id| {
-                DurableModelRunner::completed_result_for_job(
-                    connection,
-                    &project_id,
-                    previous_job_id,
-                    render_capability,
-                )
-            })
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .flatten();
-        render_reused = reusable_render.is_some();
-        let (run_id, body) = if let Some((model_run_id, parsed)) = reusable_render {
-            let payload = parse_provider_model_payload_for_capability(parsed, render_capability)?;
-            let body = payload
-                .get("body")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-            (model_run_id, body)
-        } else {
-            render_once("", 1, render_input)?
-        };
-        (run_id, body)
+        let (model_run_id, result) = craft_call(
+            "render",
+            render_capability,
+            &render_profile,
+            1,
+            render_input,
+        )?;
+        let body = result
+            .parsed
+            .as_ref()
+            .and_then(|payload| payload.get("body"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+        (model_run_id, body)
     };
     // Craft v2 (owner decision 2026-10-19): the written chapter is read once
     // with the review skills, and passages it flags are rewritten in place
     // with the rewrite skills. Only edits whose passage occurs once apply,
     // and a rewrite that leaves the length range is dropped whole.
     let mut prose_run_ids = Vec::new();
-    // An r2 chapter outside the length range gets one expand or compress
-    // call; it is never committed outside the range.
-    if craft_writing.is_some() && gateway.enforces_chapter_length() {
+    // A chapter outside the length range gets one expand or compress call;
+    // it is never committed outside the range.
+    if gateway.enforces_chapter_length() {
         let in_range = |text: &str| {
             (length_range.min..=length_range.ceiling()).contains(&character_count(text))
         };
