@@ -769,8 +769,8 @@ fn repeated_open_does_not_repeat_migration_or_backup_storm() {
             })
             .unwrap();
         assert_eq!(
-            max_version, 16,
-            "schema version must settle at FX-11 v16 and not grow"
+            max_version, 17,
+            "schema version must settle at CRAFT v3 v17 and not grow"
         );
         drop(conn);
     }

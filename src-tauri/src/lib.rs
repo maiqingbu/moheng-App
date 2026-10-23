@@ -6,6 +6,7 @@ pub mod chapter_craft;
 pub mod chapter_length;
 pub mod commands;
 pub mod commit;
+pub mod craft_setup;
 pub mod creative_skills;
 pub mod endgame;
 pub mod export;

@@ -654,6 +654,18 @@ pub fn query_story_setup_impl(state: &KernelState, request: Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+pub fn query_craft_setup_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::craft_setup::query_craft_setup(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let request = request.get("request").cloned().unwrap_or(request);
     let project_id = required_string(&request, "projectId")?;
@@ -8462,6 +8474,19 @@ fn execute_b11_command(
         response["startCreating"] = start;
         return Ok(response);
     }
+    if command_type == "style_sample_save" {
+        // Local-only: the sample is not an artifact and has no revision.
+        let handle = state
+            .manager
+            .open(project_id, "", requested_at)
+            .map_err(|error| error.to_string())?;
+        let digest =
+            crate::craft_setup::save_style_sample(&handle, project_id, requested_at, request)?;
+        return Ok(json!({
+            "commandId":command_id,"projectId":project_id,"resultProjectId":project_id,
+            "finalStatus":"committed","message":"范文已保存在本机，只用于测量写法指标。","sampleDigest":digest
+        }));
+    }
     let expected_revision = expected_revision
         .ok_or_else(|| "IPC_INVALID:expectedRevision required for B11 command".to_string())?;
     let handle = state
@@ -8507,6 +8532,43 @@ fn execute_b11_command(
             requested_at,
             request,
         ),
+        "story_bible_generate" => crate::craft_setup::commit_story_bible_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+            state.production_gateway.as_ref(),
+        ),
+        "story_bible_confirm" => crate::craft_setup::commit_story_bible_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_generate" => crate::craft_setup::commit_style_card_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_confirm" => crate::craft_setup::commit_style_card_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
         "opening_ready" => crate::project_entry::commit_opening_ready(
             &handle,
             project_id,
@@ -8525,7 +8587,7 @@ fn execute_b11_command(
         "projectId":project_id,
         "resultProjectId":project_id,
         "finalStatus":"committed",
-        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
+        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "story_bible_generate" => "已生成 3 版故事底稿，请选择并编辑。", "story_bible_confirm" => "故事底稿已由你确认。", "style_card_generate" => "已生成 3 版风格卡，请选择并编辑。", "style_card_confirm" => "风格卡已由你确认。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
         "receiptId":receipt["receiptId"],
         "beforeRevision":receipt["beforeRevision"],
         "afterRevision":receipt["afterRevision"],
@@ -8683,6 +8745,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         | "pitch_regenerate"
         | "pitch_select"
         | "story_setup_save"
+        | "story_bible_generate"
+        | "story_bible_confirm"
+        | "style_card_generate"
+        | "style_card_confirm"
+        | "style_sample_save"
         | "opening_ready"
         | "opening_start_creating" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -9469,6 +9536,11 @@ pub fn query_story_setup(state: State<'_, KernelState>, request: Value) -> Resul
 }
 
 #[tauri::command]
+pub fn query_craft_setup(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_craft_setup_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_opening_ready_impl(&state, request)
 }
@@ -10041,6 +10113,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_market_strategy,
         query_story_directions,
         query_story_setup,
+        query_craft_setup,
         query_opening_ready,
         query_assistant_repair_plan,
         query_production_center,

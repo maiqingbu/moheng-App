@@ -276,6 +276,7 @@ fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
         "REVIEW_CHAPTER" => 800,
         "REWRITE_PASSAGES" => 1_500,
         "GENERATE_STORY_DIRECTIONS" => 2_400,
+        "GENERATE_STORY_BIBLE" => 4_000,
         "OPENING_SIGNING_EVALUATION" => 3_000,
         "B14_S44_ENDGAME_ADVICE" | "B14_S45_COMPLETION_QUALITY" => 1_500,
         _ => 1_000,

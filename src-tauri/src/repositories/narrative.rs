@@ -39,6 +39,8 @@ pub(crate) fn formal_payload_schema(artifact_type: &str) -> Option<&'static str>
         "ContextManifest" => Some("context-manifest.r1"),
         "ChapterExitState" => Some("chapter-exit-state.r1"),
         "VolumeExitState" => Some("volume-exit-state.r1"),
+        "StoryBible" => Some("story-bible.r1"),
+        "StyleCard" => Some("style-card.r1"),
         _ => None,
     }
 }
