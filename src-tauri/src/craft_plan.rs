@@ -48,16 +48,6 @@ fn scene_people(craft: &Value) -> impl Iterator<Item = &Value> {
         .flat_map(|scene| scene["people"].as_array().into_iter().flatten())
 }
 
-/// Every string in the plan's craft decisions, for the wording checks.
-fn strings(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::String(text) => out.push(text.clone()),
-        Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
-        Value::Object(map) => map.values().for_each(|item| strings(item, out)),
-        _ => {}
-    }
-}
-
 /// The creation ledger (CRAFT_V3_DESIGN §4.3): what the committed chapters
 /// already used, rebuilt from their r2 plans in chapter order.
 /// `prior` holds `(chapter_no, craft)` pairs; r1 chapters have no craft and
@@ -200,7 +190,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         ));
     }
     let mut all = Vec::new();
-    strings(craft, &mut all);
+    crate::chapter_craft::collect_strings(craft, &mut all);
     if chapter == 3 {
         let antagonist = text(&bible["antagonist"]["name"]);
         if !antagonist.is_empty() && !all.iter().any(|item| item.contains(antagonist)) {
@@ -316,6 +306,77 @@ pub struct ChapterPlanner {
     chapter: u32,
 }
 
+/// The content fields of a confirmed project-level head, or `None` before one
+/// is confirmed.
+fn confirmed_content(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    artifact_type: &str,
+    fields: &[&str],
+) -> Result<Option<Value>, String> {
+    Ok(
+        crate::repositories::project_entry::canonical_head(connection, project_id, artifact_type)
+            .map_err(|error| error.to_string())?
+            .map(|head| {
+                Value::Object(
+                    fields
+                        .iter()
+                        .map(|field| (field.to_string(), head.payload[*field].clone()))
+                        .collect(),
+                )
+            }),
+    )
+}
+
+/// The style-card fields the writer follows; the rest is metadata.
+const STYLE_CARD_CONTENT: &[&str] = &[
+    "narration",
+    "targets",
+    "openingStructure",
+    "rules",
+    "forbidden",
+    "examples",
+];
+
+/// What a CRAFT v3 chapter is written with: the confirmed story bible and,
+/// when confirmed, the style card (CRAFT_V3_DESIGN §4.4).
+pub struct WritingContext {
+    pub bible: Value,
+    pub style_card: Option<Value>,
+    chapter: u32,
+}
+
+impl WritingContext {
+    pub fn for_chapter(
+        connection: &libsql_rusqlite::Connection,
+        project_id: &str,
+        chapter_number: Option<u32>,
+    ) -> Result<Self, String> {
+        let bible = confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)?
+            .ok_or_else(|| "B08_STORY_BIBLE_REQUIRED".to_string())?;
+        let style_card =
+            confirmed_content(connection, project_id, "StyleCard", STYLE_CARD_CONTENT)?;
+        Ok(Self {
+            bible,
+            style_card,
+            chapter: chapter_number.unwrap_or(1),
+        })
+    }
+
+    /// Replaces the r1 beat targets with what the craft writer reads.
+    pub fn extend_render_input(&self, input: &mut Value, recent_chapters: &[Value]) {
+        if let Some(object) = input.as_object_mut() {
+            object.remove("beatTargets");
+        }
+        input["storyBible"] = self.bible.clone();
+        if let Some(card) = &self.style_card {
+            input["styleCard"] = card.clone();
+        }
+        input["chapterNumber"] = json!(self.chapter);
+        input["recentChapters"] = json!(recent_chapters);
+    }
+}
+
 impl ChapterPlanner {
     pub fn for_chapter(
         connection: &libsql_rusqlite::Connection,
@@ -324,12 +385,7 @@ impl ChapterPlanner {
         chapter_number: Option<u32>,
     ) -> Result<Self, String> {
         let chapter = chapter_number.unwrap_or(1);
-        let Some(bible) = crate::repositories::project_entry::canonical_head(
-            connection,
-            project_id,
-            "StoryBible",
-        )
-        .map_err(|error| error.to_string())?
+        let Some(bible) = confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)?
         else {
             return Ok(Self {
                 craft: None,
@@ -339,13 +395,9 @@ impl ChapterPlanner {
         let prior =
             crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
                 .map_err(|error| error.to_string())?;
-        let content = BIBLE_CONTENT
-            .iter()
-            .map(|field| (field.to_string(), bible.payload[*field].clone()))
-            .collect::<serde_json::Map<_, _>>();
         Ok(Self {
             craft: Some(CraftPlanning {
-                bible: Value::Object(content),
+                bible,
                 ledger: creation_ledger(&prior),
             }),
             chapter,

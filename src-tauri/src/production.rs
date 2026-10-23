@@ -821,7 +821,12 @@ pub(crate) fn parse_provider_model_payload_for_capability(
 ) -> Result<Value, String> {
     match parse_provider_model_payload(value.clone()) {
         Ok(payload) => Ok(payload),
-        Err(error) if capability == "RENDER_CHAPTER" => {
+        Err(error)
+            if matches!(
+                capability,
+                "RENDER_CHAPTER" | "RENDER_CHAPTER_CRAFT" | "ADJUST_CHAPTER_LENGTH"
+            ) =>
+        {
             recover_truncated_renderer_payload(&value).ok_or(error)
         }
         Err(error) if capability == "AUDIT_EXTRACT" => {
@@ -3288,6 +3293,21 @@ fn run_chapter_production_inner(
         craft_skills["chapterPlanDecisions"] =
             crate::craft_plan::skill_decisions(&plan_payload, &planned);
     }
+    // CRAFT v3: an r2 chapter is written whole from its craft decisions with
+    // the story bible and the style card (CRAFT_V3_DESIGN §4.4).
+    let craft_writing = crate::chapter_craft::is_craft_plan(&plan_payload)
+        .then(|| {
+            crate::craft_plan::WritingContext::for_chapter(connection, &project_id, chapter_number)
+        })
+        .transpose()?;
+    if let Some(writing) = &craft_writing {
+        writing.extend_render_input(&mut render_input, &chapter_history.recent);
+    }
+    let render_capability = if craft_writing.is_some() {
+        "RENDER_CHAPTER_CRAFT"
+    } else {
+        "RENDER_CHAPTER"
+    };
     let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
     // One model call of a craft step; `suffix` names the call within this
     // job. Returns the run id and its outcome.
@@ -3327,7 +3347,7 @@ fn run_chapter_production_inner(
         |suffix: &str, attempt_no: i64, input: Value| -> Result<(String, String), String> {
             let (model_run_id, result) = craft_call(
                 &format!("render{suffix}"),
-                "RENDER_CHAPTER",
+                render_capability,
                 &render_profile,
                 attempt_no,
                 input,
@@ -3353,6 +3373,7 @@ fn run_chapter_production_inner(
     // Where length is enforced every accepted plan has several scenes (2–4
     // beats each, enough beats for the range), so it is written in two parts.
     let two_parts = gateway.enforces_chapter_length()
+        && craft_writing.is_none()
         && crate::chapter_craft::part_split(&plan_payload).is_some();
     // An earlier audit only fits a retry that reuses that attempt's prose.
     let mut render_reused = false;
@@ -3459,7 +3480,7 @@ fn run_chapter_production_inner(
                     connection,
                     &project_id,
                     previous_job_id,
-                    "RENDER_CHAPTER",
+                    render_capability,
                 )
             })
             .transpose()
@@ -3467,7 +3488,7 @@ fn run_chapter_production_inner(
             .flatten();
         render_reused = reusable_render.is_some();
         let (run_id, body) = if let Some((model_run_id, parsed)) = reusable_render {
-            let payload = parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?;
+            let payload = parse_provider_model_payload_for_capability(parsed, render_capability)?;
             let body = payload
                 .get("body")
                 .and_then(Value::as_str)
@@ -3484,6 +3505,41 @@ fn run_chapter_production_inner(
     // with the rewrite skills. Only edits whose passage occurs once apply,
     // and a rewrite that leaves the length range is dropped whole.
     let mut prose_run_ids = Vec::new();
+    // An r2 chapter outside the length range gets one expand or compress
+    // call; it is never committed outside the range.
+    if craft_writing.is_some() && gateway.enforces_chapter_length() {
+        let in_range = |text: &str| {
+            (length_range.min..=length_range.ceiling()).contains(&character_count(text))
+        };
+        body = crate::chapter_craft::normalize_typography(body.trim());
+        if !in_range(&body) {
+            let length = character_count(&body);
+            let (run_id, outcome) = craft_call(
+                "adjust-length",
+                "ADJUST_CHAPTER_LENGTH",
+                &render_profile,
+                2,
+                json!({
+                    "chapterId":chapter_id,"chapterPlan":plan_payload,"body":body,
+                    "direction":if length < length_range.min { "EXPAND" } else { "COMPRESS" },
+                    "shortBy":(length_range.min - length).max(0),
+                    "overBy":(length - length_range.ceiling()).max(0),
+                    "chapterLengthRange":length_range.to_json()
+                }),
+            )?;
+            prose_run_ids.push(run_id);
+            body = outcome
+                .parsed
+                .as_ref()
+                .and_then(|payload| payload.get("body"))
+                .and_then(Value::as_str)
+                .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
+                .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
+        }
+        if !in_range(&body) {
+            return Err(length_error(&body));
+        }
+    }
     if gateway.reviews_chapter_prose() {
         let mut craft_step = |suffix: &str,
                               capability: &str,
@@ -3497,14 +3553,20 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| format!("B08_{capability}_OUTPUT_INVALID"))
         };
         let codes = crate::skills_v2::finding_vocabulary()?;
-        let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
-        craft_skills["review"] = json!(skill_ids(&review_guidance));
-        let review = craft_step(
-            "review",
-            "REVIEW_CHAPTER",
-            &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
-            json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
-        )?;
+        // CRAFT v3 chapters are checked by rule only (CRAFT_V3_DESIGN §4.4);
+        // model editing belongs to the prose optimizer.
+        let review = if craft_writing.is_some() {
+            json!({})
+        } else {
+            let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
+            craft_skills["review"] = json!(skill_ids(&review_guidance));
+            craft_step(
+                "review",
+                "REVIEW_CHAPTER",
+                &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
+                json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
+            )?
+        };
         let findings = review
             .get("findings")
             .and_then(Value::as_array)
@@ -3528,7 +3590,15 @@ fn run_chapter_production_inner(
             .collect::<Vec<_>>();
         // Rule findings (plan wording, measures, similes, tics, panels)
         // join the review's, one per sentence.
-        let rules = crate::chapter_craft::rule_findings(&plan_payload, &body);
+        let rules = match &craft_writing {
+            Some(writing) => crate::chapter_craft::craft_rule_findings(
+                &plan_payload,
+                &body,
+                &writing.bible,
+                writing.style_card.as_ref(),
+            ),
+            None => crate::chapter_craft::rule_findings(&plan_payload, &body),
+        };
         let to_fix = findings
             .iter()
             .copied()
@@ -3593,6 +3663,13 @@ fn run_chapter_production_inner(
             "editsApplied":if discarded.is_null() { applied } else { 0 },
             "discarded":discarded
         });
+        if let Some(writing) = &craft_writing {
+            craft_skills["proseReview"]["rhythmNotes"] = json!(writing
+                .style_card
+                .as_ref()
+                .map(|card| crate::chapter_craft::rhythm_notes(&body, card))
+                .unwrap_or_default());
+        }
     }
     let method_injection_provenance = creative_enrichment
         .as_ref()
@@ -3612,7 +3689,7 @@ fn run_chapter_production_inner(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":render_profile.provider.clone(),"model":render_profile.model.clone()},
+        "renderer":{"modelRunId":render_run_id,"capability":render_capability,"provider":render_profile.provider.clone(),"model":render_profile.model.clone()},
         "creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null)
     });
     let mut candidate = artifact(

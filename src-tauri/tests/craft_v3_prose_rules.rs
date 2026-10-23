@@ -111,3 +111,10 @@ fn rhythm_notes_compare_the_chapter_with_the_style_card() {
         "{lively_notes:?}"
     );
 }
+
+#[test]
+fn a_stock_trope_counts_as_a_habit_so_a_rewrite_cannot_introduce_one() {
+    use ai_novel_production_system_core::chapter_craft::habit_count;
+    assert_eq!(habit_count("林满没吭声，转身进了面馆。"), 0);
+    assert_eq!(habit_count("林满倒吸一口凉气，转身进了面馆。"), 1);
+}

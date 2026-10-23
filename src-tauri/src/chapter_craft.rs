@@ -491,6 +491,40 @@ pub fn habit_count(text: &str) -> usize {
             .sum::<usize>()
         + measure_count(text)
         + text.matches('【').count()
+        + STOCK_TROPES
+            .iter()
+            .map(|trope| text.matches(trope).count())
+            .sum::<usize>()
+}
+
+/// Sentences that occur once in the body, so an edit can quote them.
+fn unique_sentences(body: &str) -> Vec<String> {
+    sentences(body)
+        .into_iter()
+        .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
+        .collect()
+}
+
+/// One rule finding, in the shape the review findings use.
+fn rule_finding(
+    code: &str,
+    severity: &str,
+    quote: &str,
+    problem: String,
+    suggestion: &str,
+) -> Value {
+    json!({"code":code,"severity":severity,"quote":quote,"problem":problem,"suggestion":suggestion,"source":"rule"})
+}
+
+const CLAUSE_SEPARATORS: [char; 7] = ['，', '。', '；', '！', '？', '、', '：'];
+
+/// The clauses of `texts` with at least `min_chars` characters.
+fn long_clauses(texts: &[String], min_chars: usize) -> impl Iterator<Item = &str> {
+    texts
+        .iter()
+        .flat_map(|text| text.split(CLAUSE_SEPARATORS))
+        .map(str::trim)
+        .filter(move |clause| clause.chars().count() >= min_chars)
 }
 
 /// Owner decision (2026-10-19): habits of model prose the review model keeps
@@ -499,17 +533,13 @@ pub fn habit_count(text: &str) -> usize {
 /// overload, body tics used more than once, and system-panel brackets.
 /// Each finding quotes one sentence that occurs once.
 pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
-    let sentences = sentences(body)
-        .into_iter()
-        .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
-        .collect::<Vec<_>>();
+    let sentences = unique_sentences(body);
     let mut findings = Vec::new();
     let mut flagged = std::collections::BTreeSet::new();
     let mut flag =
         |sentence: &str, code: &str, severity: &str, problem: String, suggestion: &str| {
             if flagged.insert(sentence.to_string()) {
-                findings.push(json!({"code":code,"severity":severity,"quote":sentence,
-                "problem":problem,"suggestion":suggestion,"source":"rule"}));
+                findings.push(rule_finding(code, severity, sentence, problem, suggestion));
             }
         };
     // Plan wording: any clause of 8 or more characters taken over verbatim.
@@ -544,12 +574,7 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
     }
     // CRAFT v3 plans carry their decisions under `craft`.
     collect_strings(&plan["craft"], &mut plan_texts);
-    for clause in plan_texts
-        .iter()
-        .flat_map(|text| text.split(['，', '。', '；', '！', '？', '、', '：']))
-        .map(str::trim)
-        .filter(|clause| clause.chars().count() >= 8)
-    {
+    for clause in long_clauses(&plan_texts, 8) {
         if let Some(sentence) = sentences.iter().find(|sentence| sentence.contains(clause)) {
             flag(
                 sentence,
@@ -628,7 +653,7 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
 }
 
 /// Every string in a JSON value, depth first.
-fn collect_strings(value: &Value, out: &mut Vec<String>) {
+pub(crate) fn collect_strings(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::String(text) => out.push(text.clone()),
         Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
@@ -677,14 +702,10 @@ pub fn craft_rule_findings(
     style_card: Option<&Value>,
 ) -> Vec<Value> {
     let mut findings = rule_findings(plan, body);
-    let unique = sentences(body)
-        .into_iter()
-        .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
-        .collect::<Vec<_>>();
+    let unique = unique_sentences(body);
     let mut flag = |sentence: &str, code: &str, problem: String, suggestion: &str| {
         if !findings.iter().any(|finding| finding["quote"] == sentence) {
-            findings.push(json!({"code":code,"severity":"MEDIUM","quote":sentence,
-                "problem":problem,"suggestion":suggestion,"source":"rule"}));
+            findings.push(rule_finding(code, "MEDIUM", sentence, problem, suggestion));
         }
     };
     for trope in STOCK_TROPES {
@@ -710,28 +731,12 @@ pub fn craft_rule_findings(
             }
         }
     }
-    let characters = body.chars().collect::<Vec<_>>();
-    let mut looped = std::collections::BTreeSet::new();
-    for window in characters.windows(LOOP_CHARACTERS) {
-        if window
-            .iter()
-            .any(|character| "，。！？、；：…“”\n ".contains(*character))
-        {
-            continue;
-        }
-        let phrase = window.iter().collect::<String>();
-        let positions = body
-            .match_indices(&phrase)
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        if positions.len() < 3 || !looped.insert(phrase.clone()) {
-            continue;
-        }
+    for (phrase, second_use) in looped_phrases(body) {
         if let Some(sentence) = unique.iter().find(|sentence| {
             sentence.contains(&phrase)
                 && body
                     .find(sentence.as_str())
-                    .is_some_and(|start| start > positions[1])
+                    .is_some_and(|start| start > second_use)
         }) {
             flag(
                 sentence,
@@ -743,12 +748,7 @@ pub fn craft_rule_findings(
     }
     let mut bible_texts = Vec::new();
     collect_strings(bible, &mut bible_texts);
-    for clause in bible_texts
-        .iter()
-        .flat_map(|text| text.split(['，', '。', '；', '！', '？', '、', '：']))
-        .map(str::trim)
-        .filter(|clause| clause.chars().count() >= BIBLE_CLAUSE_CHARACTERS)
-    {
+    for clause in long_clauses(&bible_texts, BIBLE_CLAUSE_CHARACTERS) {
         if let Some(sentence) = unique.iter().find(|sentence| sentence.contains(clause)) {
             flag(
                 sentence,
@@ -760,6 +760,39 @@ pub fn craft_rule_findings(
     }
     findings.truncate(8);
     findings
+}
+
+/// Phrases of `LOOP_CHARACTERS` characters (no punctuation) used three or
+/// more times in the body, in first-use order, with the byte offset of the
+/// second use; one pass over the body.
+fn looped_phrases(body: &str) -> Vec<(String, usize)> {
+    let characters = body.char_indices().collect::<Vec<_>>();
+    let mut uses: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    let mut order = Vec::new();
+    for window in characters.windows(LOOP_CHARACTERS) {
+        if window
+            .iter()
+            .any(|(_, character)| "，。！？、；：…“”\n ".contains(*character))
+        {
+            continue;
+        }
+        let phrase = window
+            .iter()
+            .map(|(_, character)| character)
+            .collect::<String>();
+        let positions = uses.entry(phrase.clone()).or_default();
+        if positions.is_empty() {
+            order.push(phrase);
+        }
+        positions.push(window[0].0);
+    }
+    order
+        .into_iter()
+        .filter_map(|phrase| {
+            let positions = &uses[&phrase];
+            (positions.len() >= 3).then(|| (phrase.clone(), positions[1]))
+        })
+        .collect()
 }
 
 /// Chapter-level rhythm compared with the style card's targets. These are
