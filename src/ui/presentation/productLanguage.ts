@@ -68,6 +68,16 @@ const statusLabels: Record<string, string> = {
 }
 
 const errorLabels: Record<string, string> = {
+  STORY_BIBLE_READY_SENTENCE: '故事底稿的风格描述里写了带引号的台词，这类句子会被原样抄进正文。请改成对说话方式的描述后重试。',
+  STORY_BIBLE_CONTRACT: '故事底稿内容不完整：开篇走向需要正好 3 章，规则 2 到 5 条，配角 2 到 8 人。',
+  STORY_BIBLE_COUNT_INVALID: '这次没有得到完整的 3 版故事底稿，请重新生成。',
+  STYLE_CARD_CONTRACT: '风格卡内容不完整：写法规则需要 4 到 10 条，禁用写法至少 1 条。',
+  STYLE_SAMPLE_TOO_SHORT: '范文太短，至少需要 800 字才能测量写法。',
+  STYLE_SAMPLE_MISSING: '还没有保存范文，请先粘贴并保存范文。',
+  STYLE_SAMPLE_TOO_LARGE: '范文过长，请控制在 2 万字以内。',
+  STYLE_SAMPLE_REQUIRED: '请先粘贴范文再保存。',
+  CRAFT_CANDIDATE_NOT_SELECTABLE: '这一版候选已不可选，请刷新后重新选择。',
+  B11_STORY_SETUP_REQUIRED: '请先保存故事核心，再生成故事底稿。',
   COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
   PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',

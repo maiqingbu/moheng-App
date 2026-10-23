@@ -166,6 +166,18 @@ export interface StorySetupProjection {
   provenance?: Record<string, unknown>
 }
 
+/** CRAFT v3 opening craft setup: story bible and style card candidates. */
+export interface CraftStageProjection {
+  candidates: Array<Record<string, any> & { id: string }>
+  confirmed: (Record<string, any> & { id: string }) | null
+}
+export interface CraftSetupProjection {
+  storyBible: CraftStageProjection
+  styleCard: CraftStageProjection
+  sample: { text: string; digest: string; savedAt: string; metrics: Record<string, number>; minChars: number } | null
+  archetypes: Array<{ id: string; name: string; genres: string[] }>
+}
+
 export interface OpeningReadyProjection {
   projectId: string
   ready: boolean
@@ -1055,6 +1067,11 @@ export type CommandType =
   | 'pitch_regenerate'
   | 'pitch_select'
   | 'story_setup_save'
+  | 'story_bible_generate'
+  | 'story_bible_confirm'
+  | 'style_card_generate'
+  | 'style_card_confirm'
+  | 'style_sample_save'
   | 'opening_ready'
   | 'opening_start_creating'
   | 'book_plan_create'
@@ -1124,6 +1141,7 @@ export interface FrontendPort {
   queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection>
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
+  queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
   queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>

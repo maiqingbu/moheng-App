@@ -34,6 +34,7 @@ import type {
   SettingsProjection,
   StoryDirectionProjection,
   StorySetupProjection,
+  CraftSetupProjection,
   SupportSessionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -428,6 +429,13 @@ export class BrowserDemoPort implements FrontendPort {
         lengthBudget: '120–180 万字', currentBookPlanVersion:'全书战略 v1', currentMainContractVersion:'全书约束 v1'
       }
     })
+  }
+
+  async queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection> {
+    await wait(35)
+    this.record(request.projectId)
+    // The browser demo has no model: it shows an empty craft setup.
+    return { storyBible: { candidates: [], confirmed: null }, styleCard: { candidates: [], confirmed: null }, sample: null, archetypes: [] }
   }
 
   async queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection> {

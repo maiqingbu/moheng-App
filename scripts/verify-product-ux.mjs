@@ -25,6 +25,7 @@ export const ACTIVE_USER_SURFACE = [
   'src/ui/pages/ProjectOverview.vue',
   'src/ui/pages/SettingsPage.vue',
   'src/ui/pages/StorySetup.vue',
+  'src/ui/pages/CraftSetup.vue',
   'src/ui/pages/UnavailableFeature.vue',
   'src/ui/pages/VolumeManager.vue',
   'src/ui/pages/VolumeWorkspace.vue',
