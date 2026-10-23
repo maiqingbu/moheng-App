@@ -330,8 +330,7 @@ pub fn normalize_typography(body: &str) -> String {
                 .is_some_and(char::is_ascii_digit)
         };
         // A decimal point or clock colon between digits is not punctuation.
-        if matches!(character, '.' | ':') && digit(index.checked_sub(1)) && digit(Some(index + 1))
-        {
+        if matches!(character, '.' | ':') && digit(index.checked_sub(1)) && digit(Some(index + 1)) {
             converted.push(character);
             index += 1;
             continue;
@@ -405,7 +404,14 @@ fn sentences(body: &str) -> Vec<String> {
 
 /// Words the writer leans on across chapters (2026-10-19 reading).
 const BODY_TICS: [&str; 8] = [
-    "喉结", "指尖", "指腹", "指节", "铁锈", "瞳孔", "攥紧", "深吸一口气",
+    "喉结",
+    "指尖",
+    "指腹",
+    "指节",
+    "铁锈",
+    "瞳孔",
+    "攥紧",
+    "深吸一口气",
 ];
 const SIMILE_MARKERS: [&str; 6] = ["像", "仿佛", "如同", "宛如", "似的", "好似"];
 const NOT_SIMILES: [&str; 12] = [
@@ -447,7 +453,13 @@ fn simile_count(sentence: &str) -> usize {
 pub fn overused_tics(history: &[String]) -> Vec<String> {
     BODY_TICS
         .iter()
-        .filter(|tic| history.iter().map(|text| text.matches(*tic).count()).sum::<usize>() >= 2)
+        .filter(|tic| {
+            history
+                .iter()
+                .map(|text| text.matches(*tic).count())
+                .sum::<usize>()
+                >= 2
+        })
         .map(|tic| tic.to_string())
         .collect()
 }
@@ -456,7 +468,10 @@ pub fn overused_tics(history: &[String]) -> Vec<String> {
 /// `text`: similes, body tics, pseudo-precise measures and panel brackets.
 pub fn habit_count(text: &str) -> usize {
     simile_count(text)
-        + BODY_TICS.iter().map(|tic| text.matches(tic).count()).sum::<usize>()
+        + BODY_TICS
+            .iter()
+            .map(|tic| text.matches(tic).count())
+            .sum::<usize>()
         + measure_count(text)
         + text.matches('【').count()
 }
@@ -473,14 +488,19 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
         .collect::<Vec<_>>();
     let mut findings = Vec::new();
     let mut flagged = std::collections::BTreeSet::new();
-    let mut flag = |sentence: &str, code: &str, severity: &str, problem: String, suggestion: &str| {
-        if flagged.insert(sentence.to_string()) {
-            findings.push(json!({"code":code,"severity":severity,"quote":sentence,
+    let mut flag =
+        |sentence: &str, code: &str, severity: &str, problem: String, suggestion: &str| {
+            if flagged.insert(sentence.to_string()) {
+                findings.push(json!({"code":code,"severity":severity,"quote":sentence,
                 "problem":problem,"suggestion":suggestion,"source":"rule"}));
-        }
-    };
+            }
+        };
     // Plan wording: any clause of 8 or more characters taken over verbatim.
-    let mut plan_texts = vec![plan.get("chapterGoal").and_then(Value::as_str).unwrap_or("").to_string()];
+    let mut plan_texts = vec![plan
+        .get("chapterGoal")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()];
     for scene in plan
         .get("sceneExecution")
         .and_then(Value::as_array)
@@ -488,7 +508,12 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
         .flatten()
     {
         for key in ["goal", "conflict", "turn", "result"] {
-            plan_texts.extend(scene.get(key).and_then(Value::as_str).map(ToOwned::to_owned));
+            plan_texts.extend(
+                scene
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            );
         }
         plan_texts.extend(
             scene
@@ -522,7 +547,13 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
         let count = measure_count(sentence);
         measures += count;
         if count > 0 && measures > 2 {
-            flag(sentence, "prose_wordy", "MEDIUM", "精确到单位的数字过多，像在读仪器读数".into(), "去掉不必要的数字，只留对情节有用的");
+            flag(
+                sentence,
+                "prose_wordy",
+                "MEDIUM",
+                "精确到单位的数字过多，像在读仪器读数".into(),
+                "去掉不必要的数字，只留对情节有用的",
+            );
         }
     }
     // Similes beyond three per chapter, or three per thousand characters.
@@ -532,20 +563,46 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
         let count = simile_count(sentence);
         similes += count;
         if count > 0 && similes > allowed {
-            flag(sentence, "prose_wordy", "MEDIUM", "比喻过密".into(), "删去这个比喻，或换成直接的动作或细节");
+            flag(
+                sentence,
+                "prose_wordy",
+                "MEDIUM",
+                "比喻过密".into(),
+                "删去这个比喻，或换成直接的动作或细节",
+            );
         }
     }
     // Body tics: every use after the first in this chapter (2026-10-20).
     for tic in BODY_TICS {
         if body.matches(tic).count() >= 2 {
-            for sentence in sentences.iter().filter(|sentence| sentence.contains(tic)).skip(1) {
-                flag(sentence, "word_repetition", "MEDIUM", format!("「{tic}」在本章和最近几章反复出现"), "换成这个人物此刻独有的反应");
+            for sentence in sentences
+                .iter()
+                .filter(|sentence| sentence.contains(tic))
+                .skip(1)
+            {
+                flag(
+                    sentence,
+                    "word_repetition",
+                    "MEDIUM",
+                    format!("「{tic}」在本章和最近几章反复出现"),
+                    "换成这个人物此刻独有的反应",
+                );
             }
         }
     }
     // System-panel brackets beyond three.
-    for sentence in sentences.iter().filter(|sentence| sentence.contains('【')).skip(3) {
-        flag(sentence, "info_dump", "MEDIUM", "系统提示框式文字过多".into(), "把信息融进人物的观察或对话");
+    for sentence in sentences
+        .iter()
+        .filter(|sentence| sentence.contains('【'))
+        .skip(3)
+    {
+        flag(
+            sentence,
+            "info_dump",
+            "MEDIUM",
+            "系统提示框式文字过多".into(),
+            "把信息融进人物的观察或对话",
+        );
     }
     findings.truncate(8);
     findings
@@ -707,7 +764,10 @@ mod tests {
     #[test]
     fn craft_habit_count_sums_similes_tics_measures_and_panels() {
         assert_eq!(habit_count("他推开门。"), 0);
-        assert_eq!(habit_count("指尖停在键上，像被磁石吸住，三毫米外是【警告】。"), 4);
+        assert_eq!(
+            habit_count("指尖停在键上，像被磁石吸住，三毫米外是【警告】。"),
+            4
+        );
         assert_eq!(habit_count("屏幕上的图像全是像素。"), 0);
     }
 

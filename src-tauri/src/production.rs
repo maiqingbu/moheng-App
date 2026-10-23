@@ -3502,11 +3502,13 @@ fn run_chapter_production_inner(
             .copied()
             .filter(|finding| finding["severity"] != "LOW")
             .chain(rules.iter().filter(|rule| {
-                !findings
-                    .iter()
-                    .any(|finding| finding["quote"].as_str().is_some_and(|quote| {
-                        rule["quote"].as_str().is_some_and(|sentence| sentence.contains(quote))
-                    }))
+                !findings.iter().any(|finding| {
+                    finding["quote"].as_str().is_some_and(|quote| {
+                        rule["quote"]
+                            .as_str()
+                            .is_some_and(|sentence| sentence.contains(quote))
+                    })
+                })
             }))
             .collect::<Vec<_>>();
         // Phrases this chapter uses a third time across the recent chapters
@@ -3534,9 +3536,9 @@ fn run_chapter_production_inner(
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
             in_range = (length_range.min..=length_range.ceiling()).contains(&length);
-            repeats_grew = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &revised)
-                .len()
-                > repeated.len();
+            repeats_grew =
+                crate::chapter_craft::overused_phrases(&chapter_history.bodies, &revised).len()
+                    > repeated.len();
             applied = count;
             if applied > 0 && in_range && !repeats_grew {
                 body = revised;

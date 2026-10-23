@@ -840,10 +840,12 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
         .as_str()
         .unwrap()
         .contains("蓝莓籽"));
-    assert!(receipt_craft(&state, project_id)["proseReview"]["repeatedPhrases"]
-        .as_u64()
-        .unwrap()
-        > 0);
+    assert!(
+        receipt_craft(&state, project_id)["proseReview"]["repeatedPhrases"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 }
 
 #[test]
