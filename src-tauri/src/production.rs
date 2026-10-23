@@ -3297,7 +3297,12 @@ fn run_chapter_production_inner(
     // the story bible and the style card (CRAFT_V3_DESIGN §4.4).
     let craft_writing = crate::chapter_craft::is_craft_plan(&plan_payload)
         .then(|| {
-            crate::craft_plan::WritingContext::for_chapter(connection, &project_id, chapter_number)
+            crate::craft_plan::WritingContext::for_chapter(
+                connection,
+                &project_id,
+                &chapter_id,
+                chapter_number,
+            )
         })
         .transpose()?;
     if let Some(writing) = &craft_writing {
@@ -4087,7 +4092,12 @@ fn run_chapter_production_inner(
             (None, None, None, None)
         };
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
-    let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
+    let mut audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
+    // CRAFT v3 (CRAFT_V3_DESIGN §4.3): the same audit call also records the
+    // habits, looks and objects later chapters must keep consistent.
+    if craft_writing.is_some() {
+        audit_input["continuityDetailsWanted"] = json!(true);
+    }
     let reusable_audit = if candidate_repaired || !render_reused {
         None
     } else {
@@ -4885,7 +4895,13 @@ fn run_chapter_production_inner(
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
     model_run_refs.extend(repair_model_run_ids.iter().cloned());
     model_run_refs.extend(prose_run_ids.iter().cloned());
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
+    let mut receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
+    if craft_writing.is_some() {
+        receipt_payload["continuityDetails"] = json!(crate::craft_plan::continuity_details(
+            &audit.payload["audit"],
+            &body
+        ));
+    }
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,

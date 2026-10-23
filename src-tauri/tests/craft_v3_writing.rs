@@ -14,19 +14,31 @@ use ai_novel_production_system_core::production::{
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use craft_v3_support::*;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct CraftGateway {
     calls: Mutex<Vec<(String, Value)>>,
+    /// Chapters written so far, so each chapter's text differs.
+    chapters_written: AtomicUsize,
+}
+
+/// The inputs of every call to `capability`, in call order.
+fn inputs(calls: &[(String, Value)], capability: &str) -> Vec<Value> {
+    calls
+        .iter()
+        .filter(|(name, _)| name == capability)
+        .map(|(_, input)| input.clone())
+        .collect()
 }
 
 const TROPE_SENTENCE: &str = "林满倒吸一口凉气，转身进了面馆。";
 
 /// A chapter in the default 2000–3000 range with one stock phrasing.
-fn long_body() -> String {
+fn long_body(chapter: usize) -> String {
     let mut lines = (1..=110)
-        .map(|index| format!("货单第{index}页写着{index}箱桐油，老董按了手印。"))
+        .map(|index| format!("货单第{index}页写着{index}箱桐油，老董按了第{chapter}个手印。"))
         .collect::<Vec<_>>();
     lines.insert(40, TROPE_SENTENCE.to_string());
     lines.join("\n")
@@ -47,10 +59,8 @@ impl ProductionModelGateway for CraftGateway {
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((capability.to_string(), input.clone()));
+        let mut calls = self.calls.lock().unwrap();
+        calls.push((capability.to_string(), input.clone()));
         let output = match capability {
             "GENERATE_STORY_DIRECTIONS" => {
                 let pitches = (0..3)
@@ -81,30 +91,44 @@ impl ProductionModelGateway for CraftGateway {
                 craft_plan(input, input["chapterNumber"].as_i64().unwrap_or(1), false)
             }
             "RENDER_CHAPTER_CRAFT" => json!({"body":"林满推开面馆的门，把账本放在了灶台边。"}),
-            "ADJUST_CHAPTER_LENGTH" => json!({"body":long_body()}),
+            "ADJUST_CHAPTER_LENGTH" => {
+                let chapter = self.chapters_written.fetch_add(1, Ordering::SeqCst) + 1;
+                json!({"body":long_body(chapter)})
+            }
             "REWRITE_PASSAGES" => {
                 json!({"edits":[{"quote":TROPE_SENTENCE,"replacement":"林满没吭声，转身进了面馆。"}]})
             }
-            "AUDIT_EXTRACT" => audit_no_change(),
+            "AUDIT_EXTRACT" => {
+                let mut audit = audit_no_change();
+                if input["continuityDetailsWanted"] == true {
+                    audit["continuityDetails"] = json!([
+                        {"subject":"林满","kind":"PREFERENCE","detail":"喝豆浆不加糖","quote":"货单第1页写着1箱桐油"},
+                        {"subject":"林满","kind":"HABIT","detail":"编出来的习惯","quote":"正文里没有这句"}
+                    ]);
+                }
+                audit
+            }
             other => return Err(format!("unexpected capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
     }
 }
 
-#[test]
-fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edited() {
+/// A project with a confirmed story bible and style card, opening started.
+fn project_ready_to_write(
+    prefix: &str,
+) -> (tempfile::TempDir, KernelState, Arc<CraftGateway>, String) {
     let temp = tempfile::tempdir().unwrap();
     let gateway = Arc::new(CraftGateway::default());
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path().to_path_buf()),
         gateway.clone(),
     );
-    let project_id = project_with_confirmed_bible(&state, "w3");
+    let project_id = project_with_confirmed_bible(&state, prefix);
     command(
         &state,
         &project_id,
-        "w3:style",
+        &format!("{prefix}:style"),
         "style_card_generate",
         json!({"source":"MARKET_ARCHETYPE","primary":"A2","secondary":"A1"}),
     );
@@ -114,33 +138,38 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
     command(
         &state,
         &project_id,
-        "w3:style-confirm",
+        &format!("{prefix}:style-confirm"),
         "style_card_confirm",
         json!({"candidateId":card["id"],"card":card}),
     );
     command(
         &state,
         &project_id,
-        "w3:opening",
+        &format!("{prefix}:opening"),
         "opening_ready",
         json!({"approved":true}),
     );
     command(
         &state,
         &project_id,
-        "w3:start",
+        &format!("{prefix}:start"),
         "opening_start_creating",
         json!({}),
     );
+    (temp, state, gateway, project_id)
+}
+
+/// Writes the next opening chapter.
+fn write_next_chapter(state: &KernelState, project_id: &str, id: &str) {
     let center = query_production_center_impl(
-        &state,
+        state,
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
     )
     .unwrap();
     let result = command(
-        &state,
-        &project_id,
-        "w3:production:1",
+        state,
+        project_id,
+        id,
         "production_start",
         json!({
             "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
@@ -148,14 +177,15 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         }),
     );
     assert_eq!(result["finalStatus"], "committed");
+}
+
+#[test]
+fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edited() {
+    let (_temp, state, gateway, project_id) = project_ready_to_write("w3");
+    write_next_chapter(&state, &project_id, "w3:production:1");
 
     let calls = gateway.calls.lock().unwrap();
-    let call = |capability: &str| {
-        calls
-            .iter()
-            .find(|(name, _)| name == capability)
-            .map(|(_, input)| input.clone())
-    };
+    let call = |capability: &str| inputs(&calls, capability).into_iter().next();
     assert!(
         call("REVIEW_CHAPTER").is_none(),
         "r2 chapters are not reviewed by a model"
@@ -209,4 +239,28 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         receipt["craftSkills"]
     );
     assert_eq!(receipt["craftSkills"]["proseReview"]["editsApplied"], 1);
+}
+
+#[test]
+fn habits_and_looks_from_the_audit_reach_the_next_chapter_as_established_facts() {
+    let (_temp, state, gateway, project_id) = project_ready_to_write("f4");
+    write_next_chapter(&state, &project_id, "f4:production:1");
+    write_next_chapter(&state, &project_id, "f4:production:2");
+
+    let calls = gateway.calls.lock().unwrap();
+    let inputs = |capability: &str| inputs(&calls, capability);
+    let audits = inputs("AUDIT_EXTRACT");
+    assert!(audits
+        .iter()
+        .all(|audit| audit["continuityDetailsWanted"] == true));
+    let plans = inputs("PLAN_CHAPTER_CRAFT");
+    assert_eq!(plans[0]["establishedFacts"], json!([]));
+    let second_plan = plans.last().unwrap();
+    assert_eq!(
+        second_plan["establishedFacts"],
+        json!([{"chapter":1,"subject":"林满","kind":"PREFERENCE","detail":"喝豆浆不加糖"}]),
+        "only the quoted detail survives"
+    );
+    let renders = inputs("RENDER_CHAPTER_CRAFT");
+    assert_eq!(renders[1]["establishedFacts"][0]["detail"], "喝豆浆不加糖");
 }

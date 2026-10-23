@@ -56,6 +56,45 @@ pub fn prior_plan_crafts(
         .collect())
 }
 
+/// The continuity details recorded in the current production receipt of each
+/// committed chapter before `chapter_id`, in chapter order. Each receipt is
+/// read through its chapter's canonical head, so retried runs are skipped.
+pub fn prior_continuity_details(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Vec<(i64, serde_json::Value)>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT chapter_id, chapter_no FROM chapters WHERE project_id=?1 AND status='COMMITTED' \
+             AND chapter_no < (SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2) \
+             ORDER BY chapter_no",
+        )
+        .map_err(|error| error.to_string())?;
+    let chapters = statement
+        .query_map(libsql_rusqlite::params![project_id, chapter_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|error| error.to_string())?;
+    let mut details = Vec::new();
+    for (earlier, number) in chapters {
+        let receipt = crate::repositories::project_entry::canonical_chapter_head(
+            connection,
+            project_id,
+            "ProductionReceipt",
+            &earlier,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(found) = receipt.map(|row| row.payload["continuityDetails"].clone()) {
+            if found.is_array() {
+                details.push((number, found));
+            }
+        }
+    }
+    Ok(details)
+}
+
 pub fn style_sample(
     connection: &Connection,
     project_id: &str,

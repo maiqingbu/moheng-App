@@ -297,6 +297,26 @@ const BIBLE_CONTENT: &[&str] = &[
 struct CraftPlanning {
     bible: Value,
     ledger: Value,
+    established_facts: Vec<Value>,
+}
+
+/// The continuity details of the committed chapters before `chapter_id`.
+fn prior_facts(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Vec<(i64, Value)>, String> {
+    crate::repositories::craft::prior_continuity_details(connection, project_id, chapter_id)
+}
+
+/// The names of the people and places a plan puts on stage.
+fn plan_focus(plan: &Value) -> Vec<String> {
+    let craft = &plan["craft"];
+    scenes(craft)
+        .iter()
+        .map(|scene| text(&scene["place"]).to_string())
+        .chain(scene_people(craft).map(|person| text(&person["name"]).to_string()))
+        .collect()
 }
 
 /// How one chapter is planned: as r2 once the project has a confirmed story
@@ -343,6 +363,7 @@ const STYLE_CARD_CONTENT: &[&str] = &[
 pub struct WritingContext {
     pub bible: Value,
     pub style_card: Option<Value>,
+    facts: Vec<(i64, Value)>,
     chapter: u32,
 }
 
@@ -350,6 +371,7 @@ impl WritingContext {
     pub fn for_chapter(
         connection: &libsql_rusqlite::Connection,
         project_id: &str,
+        chapter_id: &str,
         chapter_number: Option<u32>,
     ) -> Result<Self, String> {
         let bible = confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)?
@@ -359,6 +381,7 @@ impl WritingContext {
         Ok(Self {
             bible,
             style_card,
+            facts: prior_facts(connection, project_id, chapter_id)?,
             chapter: chapter_number.unwrap_or(1),
         })
     }
@@ -374,6 +397,10 @@ impl WritingContext {
         }
         input["chapterNumber"] = json!(self.chapter);
         input["recentChapters"] = json!(recent_chapters);
+        input["establishedFacts"] = json!(established_facts(
+            &self.facts,
+            &plan_focus(&input["chapterPlan"])
+        ));
     }
 }
 
@@ -399,6 +426,10 @@ impl ChapterPlanner {
             craft: Some(CraftPlanning {
                 bible,
                 ledger: creation_ledger(&prior),
+                established_facts: established_facts(
+                    &prior_facts(connection, project_id, chapter_id)?,
+                    &[],
+                ),
             }),
             chapter,
         })
@@ -418,6 +449,7 @@ impl ChapterPlanner {
         if let Some(craft) = &self.craft {
             input["storyBible"] = craft.bible.clone();
             input["creationLedger"] = prompt_ledger(&craft.ledger);
+            input["establishedFacts"] = json!(craft.established_facts);
             input["chapterNumber"] = json!(self.chapter);
         }
     }
@@ -439,4 +471,73 @@ impl ChapterPlanner {
         }
         check_craft_plan(plan, i64::from(self.chapter), &craft.bible, &craft.ledger)
     }
+}
+
+/// Kinds of continuity detail the audit records for CRAFT v3 chapters
+/// (CRAFT_V3_DESIGN §4.3): what later chapters must keep the same.
+pub const CONTINUITY_KINDS: &[&str] = &[
+    "HABIT",
+    "PREFERENCE",
+    "APPEARANCE",
+    "OBJECT",
+    "PLACE",
+    "RELATION",
+];
+const MAX_DETAILS_PER_CHAPTER: usize = 15;
+/// How many established facts the planner and the writer are given.
+pub const MAX_ESTABLISHED_FACTS: usize = 40;
+
+/// The continuity details of an audit reply that are complete, of a known
+/// kind and quoted from the chapter body (whitespace ignored).
+pub fn continuity_details(audit: &Value, body: &str) -> Vec<Value> {
+    let squeeze = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let body = squeeze(body);
+    audit["continuityDetails"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| CONTINUITY_KINDS.contains(&text(&item["kind"])))
+        .filter(|item| !text(&item["subject"]).is_empty() && !text(&item["detail"]).is_empty())
+        .filter(|item| {
+            let quote = squeeze(text(&item["quote"]));
+            !quote.is_empty() && body.contains(&quote)
+        })
+        .take(MAX_DETAILS_PER_CHAPTER)
+        .map(|item| json!({"subject":text(&item["subject"]),"kind":text(&item["kind"]),"detail":text(&item["detail"])}))
+        .collect()
+}
+
+/// The established facts for the next chapter: the earlier chapters' details,
+/// newest first and without duplicates, those about `focus` (the people and
+/// places of this chapter) ahead of the rest, at most `MAX_ESTABLISHED_FACTS`.
+pub fn established_facts(prior: &[(i64, Value)], focus: &[String]) -> Vec<Value> {
+    let mut seen = BTreeSet::new();
+    let mut facts = prior
+        .iter()
+        .rev()
+        .flat_map(|(chapter, details)| {
+            details
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |detail| (chapter, detail))
+        })
+        .filter(|(_, detail)| {
+            seen.insert((
+                text(&detail["subject"]).to_string(),
+                text(&detail["kind"]).to_string(),
+                text(&detail["detail"]).to_string(),
+            ))
+        })
+        .map(|(chapter, detail)| {
+            json!({"chapter":chapter,"subject":detail["subject"],"kind":detail["kind"],"detail":detail["detail"]})
+        })
+        .collect::<Vec<_>>();
+    facts.sort_by_key(|fact| !focus.iter().any(|name| name == text(&fact["subject"])));
+    facts.truncate(MAX_ESTABLISHED_FACTS);
+    facts
 }
