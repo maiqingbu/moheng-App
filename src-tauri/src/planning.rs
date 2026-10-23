@@ -29,9 +29,10 @@ pub fn normalize_legacy_book_plan_payload(payload: &Value) -> (Value, Vec<String
 /// Validates a chapter plan against its own revision: CRAFT v3 plans are
 /// `chapter-plan.r2`, earlier chapters stay readable as `chapter-plan.r1`.
 pub fn validate_chapter_plan(plan: &Value) -> Result<(), String> {
-    match plan.get("payloadSchema").and_then(Value::as_str) {
-        Some("chapter-plan.r2") => validate_chapter_plan_r2(plan),
-        _ => validate_chapter_plan_r1(plan),
+    if crate::chapter_craft::is_craft_plan(plan) {
+        validate_chapter_plan_r2(plan)
+    } else {
+        validate_chapter_plan_r1(plan)
     }
     .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))
 }

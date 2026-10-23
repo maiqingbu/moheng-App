@@ -270,6 +270,7 @@ fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
             .unwrap_or(1_800)
             .max(1),
         "PLAN_STRATEGY" => 1_500,
+        "PLAN_CHAPTER_CRAFT" => 1_800,
         "CLASSIFY_ASSISTANT_INTENT" => 200,
         "AUDIT_EXTRACT" => 1_200,
         "REPAIR_CANDIDATE" => 1_200,

@@ -190,3 +190,32 @@ fn skill_decisions_name_the_plan_fields_each_selected_skill_decided() {
         json!(["少的两箱去了哪里", "少的两箱去了哪里"])
     );
 }
+
+#[test]
+fn the_planner_sees_a_bounded_ledger_while_checks_use_the_whole_history() {
+    use ai_novel_production_system_core::craft_plan::prompt_ledger;
+    let prior = (1..=15)
+        .map(|chapter| {
+            let mut craft = plan()["craft"].clone();
+            craft["device"]["howUsed"] = json!(format!("第{chapter}次的用法"));
+            craft["situationChange"]["after"] = json!(format!("第{chapter}章的局面"));
+            (chapter, craft)
+        })
+        .collect::<Vec<_>>();
+    let ledger = creation_ledger(&prior);
+    let view = prompt_ledger(&ledger);
+    assert_eq!(
+        view["devices"],
+        json!([{"chapter":15,"name":"听旧物","howUsed":"第15次的用法"}])
+    );
+    assert_eq!(view["endings"].as_array().unwrap().len(), 10);
+    assert_eq!(view["endings"][0]["chapter"], 6);
+    assert_eq!(view["losses"].as_array().unwrap().len(), 10);
+    let mut early = plan();
+    early["craft"]["device"] =
+        json!({"name":"听旧物","status":"ESCALATED","howUsed":"第2次的用法"});
+    assert!(has(
+        &plan_problems(&early, 16, &bible(), &ledger),
+        "用法和之前一模一样"
+    ));
+}

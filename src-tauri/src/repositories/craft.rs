@@ -25,6 +25,37 @@ pub fn save_style_sample(
     Ok(())
 }
 
+/// The craft decisions of the committed chapters before `chapter_id`, in
+/// chapter order: `(chapter_no, craft)` from each final chapter's r2 plan.
+/// Chapters planned as r1 carry no craft and are skipped.
+pub fn prior_plan_crafts(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, json_extract(p.payload_json,'$.craft') FROM chapters c \
+         JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+         JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+         WHERE c.project_id=?1 AND c.status='COMMITTED' AND json_extract(p.payload_json,'$.craft') IS NOT NULL \
+         AND c.chapter_no < (SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2) \
+         ORDER BY c.chapter_no",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, chapter_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(chapter, craft)| {
+            serde_json::from_str(&craft)
+                .ok()
+                .map(|craft| (chapter, craft))
+        })
+        .collect())
+}
+
 pub fn style_sample(
     connection: &Connection,
     project_id: &str,

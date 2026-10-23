@@ -2,15 +2,21 @@
 //! deterministic plan checks, the creation ledger rebuilt from earlier
 //! chapters' plans, and which skill bound which plan decision.
 
+use crate::chapter_craft::simile_count;
+use crate::craft_setup::QUOTE_MARKS;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+
+/// The planner capability of CRAFT v3 chapters (`chapter-plan.r2`).
+pub const PLAN_CHAPTER_CRAFT: &str = "PLAN_CHAPTER_CRAFT";
 
 /// The error prefix of a plan rejected by these checks; the planner gets the
 /// problems and one more try (see `chapter_craft::plan_feedback`).
 pub const PLAN_CRAFT_ERROR: &str = "B08_PLAN_CRAFT";
 const MIN_DECISION_CHARS: usize = 6;
-const SIMILE_MARKERS: &[&str] = &["像是", "仿佛", "如同", "宛如", "好似", "犹如", "似的"];
-const QUOTE_MARKS: &[char] = &['“', '”', '「', '」', '"'];
+/// How many recent endings and losses the planner is shown; the checks
+/// still compare against the whole ledger.
+const PROMPT_LEDGER_RECENT: usize = 10;
 /// Plan decisions each planning skill is bound to (CRAFT_V3_DESIGN §4.2).
 const SKILL_FIELDS: &[(&str, &[&str])] = &[
     ("S10", &["endHook", "readerQuestions"]),
@@ -132,11 +138,13 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
     }
     let device = text(&craft["device"]["name"]);
-    let used_before = ledger["devices"]
+    let earlier_uses = ledger["devices"]
         .as_array()
         .into_iter()
         .flatten()
-        .any(|item| text(&item["name"]) == device);
+        .filter(|item| text(&item["name"]) == device)
+        .collect::<Vec<_>>();
+    let used_before = !earlier_uses.is_empty();
     match text(&craft["device"]["status"]) {
         "NEW" if used_before => problems.push(format!(
             "异常手法「{device}」之前已经用过，标为新手法不对；要么换新手法，要么写清楚怎么升级"
@@ -146,14 +154,9 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         }
         _ => {}
     }
-    if ledger["devices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|item| {
-            text(&item["name"]) == device
-                && text(&item["howUsed"]) == text(&craft["device"]["howUsed"])
-        })
+    if earlier_uses
+        .iter()
+        .any(|item| text(&item["howUsed"]) == text(&craft["device"]["howUsed"]))
     {
         problems.push(format!(
             "异常手法「{device}」的用法和之前一模一样，需要新的变化"
@@ -196,25 +199,20 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             unplanned.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
+    let mut all = Vec::new();
+    strings(craft, &mut all);
     if chapter == 3 {
         let antagonist = text(&bible["antagonist"]["name"]);
-        let mut all = Vec::new();
-        strings(craft, &mut all);
         if !antagonist.is_empty() && !all.iter().any(|item| item.contains(antagonist)) {
             problems.push(format!(
                 "第 3 章要写明主角的具体行动以及他和对手「{antagonist}」的关系怎么变了"
             ));
         }
     }
-    let mut all = Vec::new();
-    strings(craft, &mut all);
     if all.iter().any(|item| item.contains(QUOTE_MARKS)) {
         problems.push("计划里写了带引号的台词；计划只写发生什么，台词留给正文".into());
     }
-    if all
-        .iter()
-        .any(|item| SIMILE_MARKERS.iter().any(|marker| item.contains(marker)))
-    {
+    if all.iter().any(|item| simile_count(item) > 0) {
         problems.push("计划里用了比喻；计划只写发生什么，不写修辞".into());
     }
     problems
@@ -269,4 +267,124 @@ pub fn skill_decisions(plan: &Value, skill_ids: &[String]) -> Value {
                 })
         })
         .collect::<Vec<_>>())
+}
+
+/// The ledger as the planner sees it: each device once with its latest use,
+/// the recent endings and losses, everyone introduced and the last places.
+/// It stays bounded however long the book gets.
+pub fn prompt_ledger(ledger: &Value) -> Value {
+    let recent = |key: &str| {
+        let items = ledger[key].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        json!(items[items.len().saturating_sub(PROMPT_LEDGER_RECENT)..])
+    };
+    let mut devices: Vec<Value> = Vec::new();
+    for item in ledger["devices"].as_array().into_iter().flatten() {
+        devices.retain(|kept| kept["name"] != item["name"]);
+        devices.push(item.clone());
+    }
+    json!({
+        "devices":devices,
+        "endings":recent("endings"),
+        "introducedPeople":ledger["introducedPeople"],
+        "losses":recent("losses"),
+        "lastChapterPlaces":ledger["lastChapterPlaces"]
+    })
+}
+
+/// The story-bible fields the planner reads; the rest is metadata.
+const BIBLE_CONTENT: &[&str] = &[
+    "normalWorld",
+    "mechanism",
+    "protagonist",
+    "emotionalAnchor",
+    "antagonist",
+    "cast",
+    "openingArc",
+];
+
+/// What a CRAFT v3 chapter is planned against: the confirmed story bible and
+/// the ledger of the chapters before it.
+struct CraftPlanning {
+    bible: Value,
+    ledger: Value,
+}
+
+/// How one chapter is planned: as r2 once the project has a confirmed story
+/// bible, otherwise as r1. Both planning entry points use it the same way.
+pub struct ChapterPlanner {
+    craft: Option<CraftPlanning>,
+    chapter: u32,
+}
+
+impl ChapterPlanner {
+    pub fn for_chapter(
+        connection: &libsql_rusqlite::Connection,
+        project_id: &str,
+        chapter_id: &str,
+        chapter_number: Option<u32>,
+    ) -> Result<Self, String> {
+        let chapter = chapter_number.unwrap_or(1);
+        let Some(bible) = crate::repositories::project_entry::canonical_head(
+            connection,
+            project_id,
+            "StoryBible",
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            return Ok(Self {
+                craft: None,
+                chapter,
+            });
+        };
+        let prior =
+            crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
+                .map_err(|error| error.to_string())?;
+        let content = BIBLE_CONTENT
+            .iter()
+            .map(|field| (field.to_string(), bible.payload[*field].clone()))
+            .collect::<serde_json::Map<_, _>>();
+        Ok(Self {
+            craft: Some(CraftPlanning {
+                bible: Value::Object(content),
+                ledger: creation_ledger(&prior),
+            }),
+            chapter,
+        })
+    }
+
+    pub fn capability(&self) -> &'static str {
+        if self.craft.is_some() {
+            PLAN_CHAPTER_CRAFT
+        } else {
+            "PLAN_STRATEGY"
+        }
+    }
+
+    /// Adds the story bible, the planner's view of the ledger and the chapter
+    /// number to an r2 planning request.
+    pub fn extend_input(&self, input: &mut Value) {
+        if let Some(craft) = &self.craft {
+            input["storyBible"] = craft.bible.clone();
+            input["creationLedger"] = prompt_ledger(&craft.ledger);
+            input["chapterNumber"] = json!(self.chapter);
+        }
+    }
+
+    /// The r2 checks against the whole ledger (a plan without craft decisions
+    /// is sent back too); r1 plans run `r1_check`.
+    pub fn check(
+        &self,
+        plan: &Value,
+        r1_check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(craft) = &self.craft else {
+            return r1_check();
+        };
+        if !crate::chapter_craft::is_craft_plan(plan) {
+            return Err(format!(
+                "{PLAN_CRAFT_ERROR}:计划缺少 craft 写作决定，请按 chapter-plan.r2 返回"
+            ));
+        }
+        check_craft_plan(plan, i64::from(self.chapter), &craft.bible, &craft.ledger)
+    }
 }

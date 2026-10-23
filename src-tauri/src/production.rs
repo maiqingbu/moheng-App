@@ -1416,7 +1416,7 @@ pub fn plan_chapter_with_feedback(
             gateway,
             profile,
             spec,
-            "PLAN_STRATEGY",
+            &spec.capability,
             input,
             now,
         )?
@@ -2005,13 +2005,19 @@ fn reusable_opening_plan_for_retry(
     now: &str,
     current_revision: &mut i64,
 ) -> Result<Option<(ArtifactRef, Value, ArtifactRef, Value)>, String> {
-    let completed_plan = DurableModelRunner::completed_result_for_job(
-        connection,
-        project_id,
-        previous_job_id,
-        "PLAN_STRATEGY",
-    )
-    .map_err(|error| error.to_string())?;
+    let mut completed_plan = None;
+    for capability in [crate::craft_plan::PLAN_CHAPTER_CRAFT, "PLAN_STRATEGY"] {
+        completed_plan = DurableModelRunner::completed_result_for_job(
+            connection,
+            project_id,
+            previous_job_id,
+            capability,
+        )
+        .map_err(|error| error.to_string())?;
+        if completed_plan.is_some() {
+            break;
+        }
+    }
     let Some((planning_model_run_id, _)) = completed_plan else {
         return Ok(None);
     };
@@ -2971,6 +2977,12 @@ fn run_chapter_production_inner(
             current_revision = context_receipt.after_revision;
 
             update_stage(manager, connection, &project_id, &job_id, "PLAN", &now)?;
+            let planner = crate::craft_plan::ChapterPlanner::for_chapter(
+                connection,
+                &project_id,
+                &chapter_id,
+                chapter_number,
+            )?;
             let planning_run_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
                 &format!("{command_id}:plan"),
@@ -2982,7 +2994,7 @@ fn run_chapter_production_inner(
                 provider: provider_profile.provider.clone(),
                 model: provider_profile.model.clone(),
                 idempotency_key: format!("{idempotency_key}:plan"),
-                capability: "PLAN_STRATEGY".into(),
+                capability: planner.capability().into(),
                 prompt_ref: None,
                 context_manifest_ref: Some(context_ref.artifact_id.clone()),
                 budget_id: Some(production_budget_id.clone()),
@@ -3016,6 +3028,7 @@ fn run_chapter_production_inner(
                 &chapter_history.recent,
                 length_range,
             )?;
+            planner.extend_input(&mut planning_input);
             let triggered_threads = compiler_input
                 .continuity_threads
                 .iter()
@@ -3042,10 +3055,17 @@ fn run_chapter_production_inner(
                     &triggered_threads,
                     horizon_capacity,
                 )?;
-                if gateway.enforces_chapter_length() && !crate::chapter_craft::is_craft_plan(&plan)
-                {
-                    crate::chapter_craft::check_plan(&plan, length_range, &chapter_history.recent)?;
-                }
+                planner.check(&plan, || {
+                    if gateway.enforces_chapter_length() {
+                        crate::chapter_craft::check_plan(
+                            &plan,
+                            length_range,
+                            &chapter_history.recent,
+                        )
+                    } else {
+                        Ok(())
+                    }
+                })?;
                 Ok(plan)
             };
             let (plan_payload, planning_run_id) = plan_chapter_with_feedback(
@@ -3257,6 +3277,17 @@ fn run_chapter_production_inner(
         )?),
         "render":skill_ids(&render_input["craftGuidance"])
     });
+    if crate::chapter_craft::is_craft_plan(&plan_payload) {
+        let planned = craft_skills["chapterPlan"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        craft_skills["chapterPlanDecisions"] =
+            crate::craft_plan::skill_decisions(&plan_payload, &planned);
+    }
     let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
     // One model call of a craft step; `suffix` names the call within this
     // job. Returns the run id and its outcome.

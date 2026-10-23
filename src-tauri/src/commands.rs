@@ -6998,6 +6998,14 @@ fn compile_current_chapter_plan(
     let planning_run_id =
         StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("{command_id}:plan"))?;
     let state_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let history = crate::repositories::ops::chapter_history(&handle, project_id, chapter_id, 3)
+        .map_err(|error| error.to_string())?;
+    let planner = crate::craft_plan::ChapterPlanner::for_chapter(
+        &handle,
+        project_id,
+        chapter_id,
+        history.number(),
+    )?;
     let planning_spec = crate::repositories::runtime::ModelRunSpec {
         model_run_id: planning_run_id.clone(),
         job_id: None,
@@ -7005,7 +7013,7 @@ fn compile_current_chapter_plan(
         provider: profile.provider.clone(),
         model: profile.model.clone(),
         idempotency_key: format!("{idempotency_key}:plan"),
-        capability: "PLAN_STRATEGY".into(),
+        capability: planner.capability().into(),
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
         budget_id: Some(budget_id),
@@ -7073,8 +7081,6 @@ fn compile_current_chapter_plan(
     });
     // Craft v2: the planner sees what the recent chapters did and the
     // selected planning skills.
-    let history = crate::repositories::ops::chapter_history(&handle, project_id, chapter_id, 3)
-        .map_err(|error| error.to_string())?;
     let mut planning_input = planning_input;
     crate::chapter_craft::extend_planning_input(
         &mut planning_input,
@@ -7082,6 +7088,7 @@ fn compile_current_chapter_plan(
         &history.recent,
         length_range,
     )?;
+    planner.extend_input(&mut planning_input);
     let bindings = json!({
         "chapterId":chapter_id,
         "compiledFromProjectRevision":planning_revision,
@@ -7149,9 +7156,13 @@ fn compile_current_chapter_plan(
             &plan,
             bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0),
         )?;
-        if enforces_length && !crate::chapter_craft::is_craft_plan(&plan) {
-            crate::chapter_craft::check_plan(&plan, length_range, &history.recent)?;
-        }
+        planner.check(&plan, || {
+            if enforces_length {
+                crate::chapter_craft::check_plan(&plan, length_range, &history.recent)
+            } else {
+                Ok(())
+            }
+        })?;
         Ok(plan)
     };
     let (plan, planning_run_id) = crate::production::plan_chapter_with_feedback(

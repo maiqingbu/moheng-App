@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 pub const GENERATE_STORY_BIBLE: &str = "GENERATE_STORY_BIBLE";
 const CANDIDATE_COUNT: usize = 3;
 const MAX_SAMPLE_CHARS: usize = 20_000;
-const QUOTE_MARKS: &[char] = &['“', '”', '「', '」', '"'];
+pub(crate) const QUOTE_MARKS: &[char] = &['“', '”', '「', '」', '"'];
 
 /// What differs between confirming a story bible and a style card.
 struct Stage {

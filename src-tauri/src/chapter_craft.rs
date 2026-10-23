@@ -222,13 +222,13 @@ pub fn extend_planning_input(
     Ok(())
 }
 
-/// The length and craft checks a plan must pass before it is written.
 /// CRAFT v3 plans (`chapter-plan.r2`) carry writing decisions instead of
 /// scene/beat length estimates, so the r1 length and beat checks skip them.
 pub fn is_craft_plan(plan: &Value) -> bool {
     plan.get("payloadSchema").and_then(Value::as_str) == Some("chapter-plan.r2")
 }
 
+/// The length and craft checks a plan must pass before it is written.
 pub fn check_plan(
     plan: &Value,
     range: ChapterLengthRange,
@@ -454,7 +454,7 @@ fn measure_count(sentence: &str) -> usize {
         .count()
 }
 
-fn simile_count(sentence: &str) -> usize {
+pub(crate) fn simile_count(sentence: &str) -> usize {
     let mut cleaned = sentence.to_string();
     for word in NOT_SIMILES {
         cleaned = cleaned.replace(word, "");
