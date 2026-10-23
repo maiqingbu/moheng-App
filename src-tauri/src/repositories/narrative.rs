@@ -50,9 +50,12 @@ pub(crate) fn parse_formal_payload(
     raw_payload: &str,
 ) -> Result<Value, NarrativeRepositoryError> {
     let payload = serde_json::from_str(raw_payload).unwrap_or(Value::Null);
-    if formal_payload_schema(artifact_type).is_some_and(|expected| {
-        payload.get("payloadSchema").and_then(Value::as_str) != Some(expected)
-    }) {
+    let actual = payload.get("payloadSchema").and_then(Value::as_str);
+    // CRAFT v3 chapters are planned as r2; earlier chapters stay r1.
+    let accepted = artifact_type == "ChapterPlan" && actual == Some("chapter-plan.r2");
+    if !accepted
+        && formal_payload_schema(artifact_type).is_some_and(|expected| actual != Some(expected))
+    {
         return Err(NarrativeRepositoryError::LegacyUntyped);
     }
     Ok(payload)

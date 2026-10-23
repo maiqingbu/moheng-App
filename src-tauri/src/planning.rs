@@ -5,7 +5,8 @@ use crate::commit::CommitService;
 use crate::generated::types::ArtifactRef;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt, HeadChange};
 use crate::generated::validators::{
-    validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
+    validate_book_plan_r1, validate_chapter_plan_r1, validate_chapter_plan_r2,
+    validate_volume_plan_r1,
 };
 use crate::hash::sha256_canonical;
 use crate::repositories::narrative::OpeningActualState;
@@ -23,6 +24,16 @@ pub fn normalize_legacy_book_plan_payload(payload: &Value) -> (Value, Vec<String
         .map(|_| vec!["createdAt".to_owned()])
         .unwrap_or_default();
     (normalized, ignored_fields)
+}
+
+/// Validates a chapter plan against its own revision: CRAFT v3 plans are
+/// `chapter-plan.r2`, earlier chapters stay readable as `chapter-plan.r1`.
+pub fn validate_chapter_plan(plan: &Value) -> Result<(), String> {
+    match plan.get("payloadSchema").and_then(Value::as_str) {
+        Some("chapter-plan.r2") => validate_chapter_plan_r2(plan),
+        _ => validate_chapter_plan_r1(plan),
+    }
+    .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))
 }
 
 pub fn normalize_chapter_plan_model_output(
@@ -48,6 +59,7 @@ pub fn normalize_chapter_plan_model_output(
                     | "knowledgeBoundaries"
                     | "reservationRefs"
                     | "sceneExecution"
+                    | "craft"
                     | "horizonPreview"
             )
         });
@@ -61,7 +73,19 @@ pub fn normalize_chapter_plan_model_output(
             object.remove("chapterRole");
         }
     }
-    plan["payloadSchema"] = json!("chapter-plan.r1");
+    // A plan carrying the CRAFT v3 decisions is r2, which replaces the
+    // scene/beat execution list.
+    if plan.get("craft").is_some_and(Value::is_object) {
+        plan["payloadSchema"] = json!("chapter-plan.r2");
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("sceneExecution");
+        }
+    } else {
+        plan["payloadSchema"] = json!("chapter-plan.r1");
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("craft");
+        }
+    }
     for field in [
         "chapterId",
         "compiledFromProjectRevision",
@@ -1490,8 +1514,7 @@ pub fn validate_change_target_owner(
             }
         }
         "ChapterPlan" => {
-            validate_chapter_plan_r1(candidate)
-                .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+            validate_chapter_plan(candidate)?;
             let scope_chapter = scope
                 .get("chapterId")
                 .and_then(Value::as_str)
@@ -2417,7 +2440,7 @@ pub fn validate_current_chapter_plan(
     triggered_threads: &[String],
     remaining_chapter_capacity: i64,
 ) -> Result<(), String> {
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(current_chapter_id) {
         return Err("CHAPTER_PLAN_CURRENT_ONLY".into());
     }
@@ -2669,7 +2692,7 @@ pub fn recompile_chapter_plan_owner(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
     }

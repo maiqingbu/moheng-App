@@ -3033,7 +3033,7 @@ fn run_chapter_production_inner(
                 plan["entityRefs"] = hard_scope["entityRefs"].clone();
                 plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
                 plan["hardScope"] = hard_scope.clone();
-                crate::generated::validators::validate_chapter_plan_r1(&plan)
+                crate::planning::validate_chapter_plan(&plan)
                     .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
                 crate::planning::validate_current_chapter_plan(
                     &plan,
@@ -3042,7 +3042,8 @@ fn run_chapter_production_inner(
                     &triggered_threads,
                     horizon_capacity,
                 )?;
-                if gateway.enforces_chapter_length() {
+                if gateway.enforces_chapter_length() && !crate::chapter_craft::is_craft_plan(&plan)
+                {
                     crate::chapter_craft::check_plan(&plan, length_range, &chapter_history.recent)?;
                 }
                 Ok(plan)
@@ -3132,7 +3133,7 @@ fn run_chapter_production_inner(
                 audit_contract,
             )
         };
-    if gateway.enforces_chapter_length() {
+    if gateway.enforces_chapter_length() && !crate::chapter_craft::is_craft_plan(&plan_payload) {
         crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
     }
     if let Err(error) = validate_plan_is_current(
