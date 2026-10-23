@@ -189,6 +189,17 @@ const REPLANNABLE: [(&str, &str); 6] = [
 /// The feedback for a plan rejection the planner can fix, or `None` when
 /// planning again would not help.
 pub fn plan_feedback(code: &str) -> Option<Value> {
+    // CRAFT v3: the r2 plan checks list every problem for one corrected plan.
+    if let Some(problems) = code
+        .strip_prefix(crate::craft_plan::PLAN_CRAFT_ERROR)
+        .and_then(|rest| rest.strip_prefix(':'))
+    {
+        return Some(json!({
+            "rejectedFor":crate::craft_plan::PLAN_CRAFT_ERROR,
+            "instruction":"上一版计划没有通过写作决定检查：逐条修正 problems 里的问题，返回完整的新计划。",
+            "problems":problems.split('；').collect::<Vec<_>>()
+        }));
+    }
     REPLANNABLE
         .iter()
         .find(|(known, _)| *known == code)
