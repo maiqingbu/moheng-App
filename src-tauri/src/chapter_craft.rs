@@ -542,6 +542,8 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
                 .map(ToOwned::to_owned),
         );
     }
+    // CRAFT v3 plans carry their decisions under `craft`.
+    collect_strings(&plan["craft"], &mut plan_texts);
     for clause in plan_texts
         .iter()
         .flat_map(|text| text.split(['，', '。', '；', '！', '？', '、', '：']))
@@ -623,6 +625,172 @@ pub fn rule_findings(plan: &Value, body: &str) -> Vec<Value> {
     }
     findings.truncate(8);
     findings
+}
+
+/// Every string in a JSON value, depth first.
+fn collect_strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        Value::Object(map) => map.values().for_each(|item| collect_strings(item, out)),
+        _ => {}
+    }
+}
+
+/// Stock devices and stock phrasings readers recognise at once
+/// (CRAFT_V3_DESIGN §4.4 trope blacklist).
+const STOCK_TROPES: &[&str] = &[
+    "灰衣人",
+    "灰色外套的男人跟",
+    "如果你看到这张纸条",
+    "如果你看到这个",
+    "警笛声由远及近",
+    "匿名短信",
+    "不要相信任何人",
+    "别相信任何人",
+    "倒吸一口凉气",
+    "嘴角勾起一抹",
+    "空气仿佛凝固",
+    "眼中闪过一丝",
+    "心中一凛",
+];
+/// Narrator asides that tell what the point-of-view character cannot know.
+const AUTHOR_ASIDES: &[&str] = &[
+    "他不知道的是",
+    "她不知道的是",
+    "殊不知",
+    "他并不知道",
+    "她并不知道",
+];
+/// A phrase of this many characters used a third time in one chapter is a loop.
+const LOOP_CHARACTERS: usize = 8;
+/// Clauses of this many characters copied from the story bible.
+const BIBLE_CLAUSE_CHARACTERS: usize = 10;
+
+/// The post-write rule checks of a CRAFT v3 chapter: the r1 rules (with the
+/// plan's craft wording), stock tropes, author asides under a strict point of
+/// view, in-chapter loops and wording copied from the story bible.
+pub fn craft_rule_findings(
+    plan: &Value,
+    body: &str,
+    bible: &Value,
+    style_card: Option<&Value>,
+) -> Vec<Value> {
+    let mut findings = rule_findings(plan, body);
+    let unique = sentences(body)
+        .into_iter()
+        .filter(|sentence| body.matches(sentence.as_str()).count() == 1)
+        .collect::<Vec<_>>();
+    let mut flag = |sentence: &str, code: &str, problem: String, suggestion: &str| {
+        if !findings.iter().any(|finding| finding["quote"] == sentence) {
+            findings.push(json!({"code":code,"severity":"MEDIUM","quote":sentence,
+                "problem":problem,"suggestion":suggestion,"source":"rule"}));
+        }
+    };
+    for trope in STOCK_TROPES {
+        if let Some(sentence) = unique.iter().find(|sentence| sentence.contains(trope)) {
+            flag(
+                sentence,
+                "repeated_pattern",
+                format!("「{trope}」是读者一眼认得出的套路"),
+                "换成这个故事独有的事件或反应",
+            );
+        }
+    }
+    let strict = style_card.is_some_and(|card| card["narration"]["povPolicy"] == "STRICT");
+    if strict {
+        for aside in AUTHOR_ASIDES {
+            for sentence in unique.iter().filter(|sentence| sentence.contains(aside)) {
+                flag(
+                    sentence,
+                    "pov_info_leak",
+                    format!("「{aside}」写了主角不知道的事"),
+                    "删掉，或改成主角此刻能看到、听到的线索",
+                );
+            }
+        }
+    }
+    let characters = body.chars().collect::<Vec<_>>();
+    let mut looped = std::collections::BTreeSet::new();
+    for window in characters.windows(LOOP_CHARACTERS) {
+        if window
+            .iter()
+            .any(|character| "，。！？、；：…“”\n ".contains(*character))
+        {
+            continue;
+        }
+        let phrase = window.iter().collect::<String>();
+        let positions = body
+            .match_indices(&phrase)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if positions.len() < 3 || !looped.insert(phrase.clone()) {
+            continue;
+        }
+        if let Some(sentence) = unique.iter().find(|sentence| {
+            sentence.contains(&phrase)
+                && body
+                    .find(sentence.as_str())
+                    .is_some_and(|start| start > positions[1])
+        }) {
+            flag(
+                sentence,
+                "redundancy",
+                format!("「{phrase}」在本章第三次出现"),
+                "删去或换一种说法，不要反复确认同一件事",
+            );
+        }
+    }
+    let mut bible_texts = Vec::new();
+    collect_strings(bible, &mut bible_texts);
+    for clause in bible_texts
+        .iter()
+        .flat_map(|text| text.split(['，', '。', '；', '！', '？', '、', '：']))
+        .map(str::trim)
+        .filter(|clause| clause.chars().count() >= BIBLE_CLAUSE_CHARACTERS)
+    {
+        if let Some(sentence) = unique.iter().find(|sentence| sentence.contains(clause)) {
+            flag(
+                sentence,
+                "summary_where_scene_needed",
+                format!("照搬了故事底稿的表述「{clause}」"),
+                "用这一刻的具体动作和对话来写",
+            );
+        }
+    }
+    findings.truncate(8);
+    findings
+}
+
+/// Chapter-level rhythm compared with the style card's targets. These are
+/// notes for the receipt and the prose optimizer, not quote edits.
+pub fn rhythm_notes(body: &str, style_card: &Value) -> Vec<String> {
+    let metrics = crate::style_card::measure(body);
+    let target = |key: &str, bound: &str| style_card["targets"][key][bound].as_f64();
+    let mut notes = Vec::new();
+    if let Some(max) = target("avgParagraphChars", "max") {
+        if metrics.avg_paragraph_chars > max + 6.0 {
+            notes.push(format!(
+                "段落偏长：平均每段 {} 字，风格卡上限 {max} 字",
+                metrics.avg_paragraph_chars
+            ));
+        }
+    }
+    if let Some(min) = target("shortParagraphPct", "min") {
+        if metrics.short_paragraph_pct < min {
+            notes.push(format!(
+                "短段太少：只占 {}%，风格卡至少 {min}%",
+                metrics.short_paragraph_pct
+            ));
+        }
+    }
+    if metrics.exclaim_per_1k == 0.0
+        && metrics.question_per_1k == 0.0
+        && metrics.ellipsis_per_1k == 0.0
+    {
+        notes.push("语气平：全章没有感叹、问句和省略".into());
+    }
+    notes
 }
 
 /// Characters in a phrase the signing check counts as a repetition.
