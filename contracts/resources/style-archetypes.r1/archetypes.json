@@ -1,0 +1,623 @@
+{
+ "resourceSchema": "style-archetypes.r1",
+ "source": "docs/development/STYLE_ARCHETYPES_R1.md",
+ "fallbackIds": [
+  "A1",
+  "A2"
+ ],
+ "archetypes": [
+  {
+   "id": "A1",
+   "name": "吐槽轻喜",
+   "genres": [
+    "都市脑洞",
+    "轻松修仙",
+    "系统流",
+    "玄幻脑洞",
+    "历史脑洞"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 28,
+     "max": 34
+    },
+    "shortParagraphPct": {
+     "min": 30,
+     "max": 45
+    },
+    "dialogueParagraphPct": {
+     "min": 40,
+     "max": 55
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 1.5
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "exclaimPer1k": {
+     "min": 3,
+     "max": 6
+    },
+    "questionPer1k": {
+     "min": 4,
+     "max": 8
+    },
+    "ellipsisPer1k": {
+     "min": 1,
+     "max": 6
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "SHORT_CUTS_ALLOWED",
+    "voice": "主角对荒诞或危险处境平静较真、答非所问，笑点来自反差"
+   },
+   "openingStructure": [
+    "问答或旁人议论开场",
+    "处境揭示",
+    "主角反差回应",
+    "异常出现",
+    "章末反转"
+   ],
+   "rules": [
+    "主角用平静或较真的方式回应荒诞处境，不讲笑话",
+    "单行反应段（一个字或一个问号）每章3到6处",
+    "至少一个配角言行与处境完全不合拍",
+    "系统或面板说明可带吐槽式备注",
+    "让读者知道主角不知道的事（亲属或对手密谋），每章最多一场"
+   ],
+   "forbidden": [
+    "主角内心长篇解释笑点",
+    "网络流行语堆砌"
+   ],
+   "examples": [
+    {
+     "technique": "反差回应",
+     "lines": [
+      "前台小姐把表格推过来：\"死因那一栏，请自己填。\"",
+      "沈渡想了想：\"能写'暂无'吗？\""
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A2",
+   "name": "冷峻市井",
+   "genres": [
+    "高武",
+    "年代",
+    "历史古代",
+    "底层奋斗",
+    "都市种田",
+    "抗战谍战"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 23,
+     "max": 30
+    },
+    "shortParagraphPct": {
+     "min": 35,
+     "max": 50
+    },
+    "dialogueParagraphPct": {
+     "min": 35,
+     "max": 65
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 1
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 1.5
+    },
+    "exclaimPer1k": {
+     "min": 0,
+     "max": 3
+    },
+    "questionPer1k": {
+     "min": 2,
+     "max": 6
+    },
+    "ellipsisPer1k": {
+     "min": 2,
+     "max": 10
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "STRICT",
+    "voice": "话少，算得多"
+   },
+   "openingStructure": [
+    "地点三连",
+    "一笔交易或对话",
+    "主角的账本或目标",
+    "世界的规矩",
+    "能力出现"
+   ],
+   "rules": [
+    "用钱、价格、工钱、欠账标出处境和目标，数目算得清",
+    "每场至少一个地名、店名或行话",
+    "内心盘算用短句列出选项和代价",
+    "暴力来得突然、写得短，结果一两句交代"
+   ],
+   "forbidden": [
+    "抒情式环境描写",
+    "主角心理独白超过3句"
+   ],
+   "examples": [
+    {
+     "technique": "用数字标处境",
+     "lines": [
+      "老周把三张票子压在秤盘下：\"这个月就这些，下月涨租。\"",
+      "林满数了两遍，数目没变。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A3",
+   "name": "悬疑惊悚",
+   "genres": [
+    "悬疑灵异",
+    "悬疑脑洞",
+    "规则怪谈",
+    "民俗"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 21,
+     "max": 25
+    },
+    "shortParagraphPct": {
+     "min": 50,
+     "max": 60
+    },
+    "dialogueParagraphPct": {
+     "min": 18,
+     "max": 30
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 1
+    },
+    "exclaimPer1k": {
+     "min": 8,
+     "max": 16
+    },
+    "questionPer1k": {
+     "min": 4,
+     "max": 8
+    },
+    "ellipsisPer1k": {
+     "min": 5,
+     "max": 8
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "STRICT",
+    "voice": "紧贴主角感官，用短问句推断"
+   },
+   "openingStructure": [
+    "醒来或被困",
+    "听见他人对话得知处境",
+    "身体与环境异常",
+    "第一个不对劲",
+    "外力逼近、被迫选择"
+   ],
+   "rules": [
+    "开篇即危险，先感官后信息",
+    "记忆或线索以碎片短段闪回",
+    "内心用连续短问句推断",
+    "每场有倒计时或逼近的威胁",
+    "规则与禁忌由角色说出，读者与主角一起推理"
+   ],
+   "forbidden": [
+    "鬼怪外形长篇描写",
+    "寒意从脊背升起之类固定说法"
+   ],
+   "examples": [
+    {
+     "technique": "信息反转",
+     "lines": [
+      "第三声敲门之后，门外的人报出了他的名字。",
+      "可他从没告诉过谁，他今晚住这儿。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A4",
+   "name": "宏大史诗",
+   "genres": [
+    "东方玄幻",
+    "东方仙侠",
+    "修真文明",
+    "洪荒",
+    "西方奇幻",
+    "科幻末世"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 30,
+     "max": 40
+    },
+    "shortParagraphPct": {
+     "min": 20,
+     "max": 35
+    },
+    "dialogueParagraphPct": {
+     "min": 25,
+     "max": 35
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 2.5
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "exclaimPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "questionPer1k": {
+     "min": 1,
+     "max": 5
+    },
+    "ellipsisPer1k": {
+     "min": 0,
+     "max": 4
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "SHORT_CUTS_ALLOWED",
+    "voice": "先世界尺度，后落到小人物"
+   },
+   "openingStructure": [
+    "楔子式短句",
+    "世界状态",
+    "小人物的日常与困境",
+    "异象接触",
+    "命运转向"
+   ],
+   "rules": [
+    "先给一个世界尺度的异变或设定，立刻落到小人物的具体处境",
+    "每段只用一个宏大意象",
+    "历史和传说借器物、地名、口述带出",
+    "章末须有新的异象或抉择"
+   ],
+   "forbidden": [
+    "连续三段以上纯设定",
+    "排比句堆砌"
+   ],
+   "examples": [
+    {
+     "technique": "大小对照",
+     "lines": [
+      "第九年，河水开始往山上流。",
+      "村里人照旧在下游洗衣裳，只是要多走半里路。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A5",
+   "name": "直给爽文",
+   "genres": [
+    "战神赘婿",
+    "都市高武",
+    "都市修真",
+    "神医",
+    "退婚"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 20,
+     "max": 27
+    },
+    "shortParagraphPct": {
+     "min": 45,
+     "max": 60
+    },
+    "dialogueParagraphPct": {
+     "min": 30,
+     "max": 45
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 1.5
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 2.5
+    },
+    "exclaimPer1k": {
+     "min": 5,
+     "max": 15
+    },
+    "questionPer1k": {
+     "min": 3,
+     "max": 8
+    },
+    "ellipsisPer1k": {
+     "min": 5,
+     "max": 15
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "SHORT_CUTS_ALLOWED",
+    "voice": "冷笑隐忍，出手干脆"
+   },
+   "openingStructure": [
+    "出狱、归来或被退婚",
+    "亲属或对手嫌弃",
+    "主角隐忍或冷笑",
+    "背景速交代",
+    "冲突升级、主角出手"
+   ],
+   "rules": [
+    "第1章完成受辱、身份或能力揭示、第一次打脸的铺垫",
+    "反派的嫌弃和算计说出口",
+    "背景可短段直接交代，每次不超过5段，交代后立刻回到冲突",
+    "每章至少一次众人反应段放大爽点",
+    "章节名直接点出爽点"
+   ],
+   "forbidden": [
+    "主角长时间被动",
+    "对爽点的事后解释"
+   ],
+   "examples": [
+    {
+     "technique": "亮底牌",
+     "lines": [
+      "\"一个开车的，也配坐主桌？\"",
+      "陈默没说话，把车钥匙放在了桌上，钥匙扣上刻着一个\"军\"字。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A6",
+   "name": "言情氛围",
+   "genres": [
+    "现代言情",
+    "校园",
+    "都市情感",
+    "豪门总裁"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 23,
+     "max": 30
+    },
+    "shortParagraphPct": {
+     "min": 40,
+     "max": 58
+    },
+    "dialogueParagraphPct": {
+     "min": 25,
+     "max": 55
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "exclaimPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "questionPer1k": {
+     "min": 5,
+     "max": 10
+    },
+    "ellipsisPer1k": {
+     "min": 1,
+     "max": 10
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "STRICT",
+    "voice": "女主视角，带态度的短评"
+   },
+   "openingStructure": [
+    "女主的日常小困扰",
+    "远处看见男主",
+    "一句态度短评",
+    "往事一次交集",
+    "现实困境的电话或消息",
+    "两人再次交汇"
+   ],
+   "rules": [
+    "女主视角观察男主：先外在和他人如何对待他，再一句带态度的短评单独成段",
+    "第1章安排一次过去的交集，不超过6段",
+    "情绪落在具体小事和身体状态上",
+    "女主有自己的生活困境，不只围着男主转",
+    "对白留话外音"
+   ],
+   "forbidden": [
+    "外貌形容词堆叠超过3个",
+    "直接写心动、心跳漏了一拍"
+   ],
+   "examples": [
+    {
+     "technique": "态度短评",
+     "lines": [
+      "他替那女生把伞往外偏了偏，自己半边肩膀湿透。",
+      "挺会的。许棠低头继续剥橘子。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A7",
+   "name": "逆境求生",
+   "genres": [
+    "星际",
+    "废土",
+    "穿书",
+    "宅斗",
+    "古代言情",
+    "幻想言情"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 25,
+     "max": 37
+    },
+    "shortParagraphPct": {
+     "min": 25,
+     "max": 45
+    },
+    "dialogueParagraphPct": {
+     "min": 6,
+     "max": 45
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 1
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "exclaimPer1k": {
+     "min": 0,
+     "max": 3
+    },
+    "questionPer1k": {
+     "min": 1,
+     "max": 6
+    },
+    "ellipsisPer1k": {
+     "min": 1,
+     "max": 6
+    }
+   },
+   "narration": {
+    "person": "THIRD",
+    "povPolicy": "STRICT",
+    "voice": "冷静能干，冷幽默"
+   },
+   "openingStructure": [
+    "恶劣环境中醒来或已适应",
+    "一个小麻烦被利落解决",
+    "生存规则",
+    "意外机会",
+    "机会背后的危险或大人物"
+   ],
+   "rules": [
+    "用生存逻辑展示世界规则，写成主角的行动安排",
+    "能力用动手解决小问题展示",
+    "原主记忆简短交代",
+    "冷幽默一章2到3处",
+    "意外资源出现时先评估风险再取用"
+   ],
+   "forbidden": [
+    "自怨自艾超过两句",
+    "大段原主生平"
+   ],
+   "examples": [
+    {
+     "technique": "动手解决",
+     "lines": [
+      "水壶的盖子裂了，阿檀用胶布缠了三圈，又在外面套了个塑料袋。",
+      "能装水就行，漏的是明天的事。"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "A8",
+   "name": "第一人称都市",
+   "genres": [
+    "官场",
+    "职场",
+    "乡土",
+    "成长"
+   ],
+   "targets": {
+    "avgParagraphChars": {
+     "min": 25,
+     "max": 30
+    },
+    "shortParagraphPct": {
+     "min": 50,
+     "max": 60
+    },
+    "dialogueParagraphPct": {
+     "min": 40,
+     "max": 50
+    },
+    "similePer1k": {
+     "min": 0,
+     "max": 1
+    },
+    "explainPer1k": {
+     "min": 0,
+     "max": 4
+    },
+    "exclaimPer1k": {
+     "min": 0,
+     "max": 2
+    },
+    "questionPer1k": {
+     "min": 3,
+     "max": 8
+    },
+    "ellipsisPer1k": {
+     "min": 0,
+     "max": 3
+    }
+   },
+   "narration": {
+    "person": "FIRST",
+    "povPolicy": "STRICT",
+    "voice": "涉世未深的口述，看得到但看不全"
+   },
+   "openingStructure": [
+    "不明就里的对话",
+    "叙述者自报处境",
+    "旁人的暗示",
+    "一个比他懂的人出现",
+    "新环境的第一条规矩"
+   ],
+   "rules": [
+    "叙述者看得到但看不全，读者比他先懂",
+    "口述感，允许自我纠正",
+    "社会关系与潜规则通过旁人言行暗示，不点破",
+    "每章一个让叙述者开窍一点的时刻"
+   ],
+   "forbidden": [
+    "叙述者事后全知式总结",
+    "说教"
+   ],
+   "examples": [
+    {
+     "technique": "不点破",
+     "lines": [
+      "王哥让我把茶倒到七分满，我倒到八分，他也没说什么，只是把杯子往局长那边又推了推。"
+     ]
+    }
+   ]
+  }
+ ]
+}
