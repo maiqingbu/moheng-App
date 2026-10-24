@@ -692,16 +692,14 @@ fn max_recap_overlap(current: &str, previous: &str) -> usize {
 }
 
 fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for chapter in chapters {
-        let chars = chapter.body.chars().collect::<Vec<_>>();
-        for window in chars.windows(crate::chapter_craft::PHRASE_CHARACTERS) {
-            if !crate::chapter_craft::is_identifier_window(window) {
-                *counts.entry(window.iter().collect()).or_default() += 1;
-            }
-        }
-    }
-    counts.values().filter(|count| **count >= 3).count()
+    let texts = chapters
+        .iter()
+        .map(|chapter| chapter.body.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    crate::chapter_craft::phrase_window_counts(&texts)
+        .values()
+        .filter(|count| **count >= crate::chapter_craft::REPEATED_PHRASE_TIMES)
+        .count()
 }
 
 fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) -> Vec<Value> {

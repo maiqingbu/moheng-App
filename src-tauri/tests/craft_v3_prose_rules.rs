@@ -152,3 +152,18 @@ fn camera_and_thermal_imager_words_are_not_similes() {
     use ai_novel_production_system_core::chapter_craft::habit_count;
     assert_eq!(habit_count("他打开摄像头，林薇举起热成像仪。"), 0);
 }
+
+#[test]
+fn a_short_line_repeated_as_its_own_paragraph_is_a_finding_the_rewrite_must_fix() {
+    // Real run 2026-10-25: “他也在看。” stood alone four times in chapter 2;
+    // signing F1-5 counts windows across paragraphs, the rewrite did not.
+    use ai_novel_production_system_core::chapter_craft::{overused_phrases, repetition_findings};
+    let body = "他展开便签。\n\n“他也在看。”\n\n沈砚把便签翻过来。\n\n他走到通风口。\n\n“他也在看。”\n\n沈砚抬头。\n\n他走出面馆。\n\n“他也在看。”\n\n沈砚抬头。";
+    let findings = repetition_findings(&overused_phrases(&[], body), body);
+    assert!(findings.len() >= 2, "{findings:?}");
+    for finding in &findings {
+        let quote = finding["quote"].as_str().unwrap();
+        assert!(quote.contains("他也在看"), "{quote}");
+        assert_eq!(body.matches(quote).count(), 1, "a rewrite can locate {quote}");
+    }
+}

@@ -281,26 +281,35 @@ pub fn normalize_typography(body: &str) -> String {
 
 /// The body split into sentences, each with its closing mark.
 fn sentences(body: &str) -> Vec<String> {
-    let mut sentences = Vec::new();
-    let mut current = String::new();
-    for character in body.chars() {
+    sentence_spans(body)
+        .into_iter()
+        .map(|(start, end)| body[start..end].to_string())
+        .collect()
+}
+
+/// The byte spans of `sentences`, trimmed, in order.
+fn sentence_spans(body: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut push = |start: usize, end: usize| {
+        let text = &body[start..end];
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            let from = start + (text.len() - text.trim_start().len());
+            spans.push((from, from + trimmed.len()));
+        }
+    };
+    let mut start = 0;
+    for (index, character) in body.char_indices() {
         if character == '\n' {
-            if !current.trim().is_empty() {
-                sentences.push(current.trim().to_string());
-            }
-            current.clear();
-            continue;
-        }
-        current.push(character);
-        if matches!(character, '。' | '！' | '？' | '…') {
-            sentences.push(current.trim().to_string());
-            current.clear();
+            push(start, index);
+            start = index + 1;
+        } else if matches!(character, '。' | '！' | '？' | '…') {
+            push(start, index + character.len_utf8());
+            start = index + character.len_utf8();
         }
     }
-    if !current.trim().is_empty() {
-        sentences.push(current.trim().to_string());
-    }
-    sentences
+    push(start, body.len());
+    spans
 }
 
 /// Words the writer leans on across chapters (2026-10-19 reading).
@@ -727,6 +736,8 @@ pub fn rhythm_notes(body: &str, style_card: &Value) -> Vec<String> {
 
 /// Characters in a phrase the signing check counts as a repetition.
 pub(crate) const PHRASE_CHARACTERS: usize = 12;
+/// The use of a phrase window that fails signing F1-5.
+pub(crate) const REPEATED_PHRASE_TIMES: usize = 3;
 
 /// A window mostly of ASCII letters, digits and hyphens is an identifier
 /// (an archive number, an account name), not a repeated phrase (owner
@@ -754,39 +765,69 @@ pub fn overused_phrases(history: &[String], text: &str) -> Vec<String> {
         .cloned()
         .chain([text.to_string()])
         .collect::<Vec<_>>();
-    phrases_used(&texts, history.len(), 3)
+    phrases_used(&texts, history.len(), REPEATED_PHRASE_TIMES)
 }
 
-/// The sentences of `body` that use one of `phrases` (from
-/// `overused_phrases`), as rule findings the rewrite must fix: given only
-/// the phrases, a real rewrite left them alone (2026-10-24).
+/// Rule findings the rewrite must fix, one for each sentence of `body` that
+/// uses one of `phrases` (from `overused_phrases`): given only the phrases,
+/// a real rewrite left them alone (2026-10-24). A sentence used more than
+/// once in the chapter is quoted with the sentences before it until the
+/// quote is unique (2026-10-25), so the rewrite can find each use.
 pub fn repetition_findings(phrases: &[String], body: &str) -> Vec<Value> {
     if phrases.is_empty() {
         return Vec::new();
     }
-    unique_sentences(body)
-        .into_iter()
-        .filter_map(|sentence| {
-            let windows = sentence
-                .chars()
-                .collect::<Vec<_>>()
-                .windows(PHRASE_CHARACTERS)
-                .map(|window| window.iter().collect::<String>())
-                .collect::<Vec<_>>();
-            let phrase = phrases.iter().find(|phrase| {
-                windows
-                    .iter()
-                    .any(|window| phrase.contains(window.as_str()))
-            })?;
+    let spans = sentence_spans(body);
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(start, end))| {
+            let sentence = &body[start..end];
+            let phrase = phrases
+                .iter()
+                .find(|phrase| uses_phrase(sentence, phrase))?;
+            let quote = (0..=index)
+                .rev()
+                .map(|from| &body[spans[from].0..end])
+                .find(|quote| body.matches(quote).nth(1).is_none())?;
             Some(rule_finding(
                 "word_repetition",
                 "MEDIUM",
-                &sentence,
+                quote,
                 format!("「{phrase}」在最近几章已经出现两次，这是第三次"),
                 "换一种说法写这句，意思和信息不变",
             ))
         })
         .collect()
+}
+
+/// Whether `sentence` is part of `phrase`: one of its windows is in it, or,
+/// for a sentence shorter than a window, all of it.
+fn uses_phrase(sentence: &str, phrase: &str) -> bool {
+    let chars = sentence.chars().collect::<Vec<_>>();
+    if chars.len() < PHRASE_CHARACTERS {
+        return phrase.contains(sentence);
+    }
+    chars
+        .windows(PHRASE_CHARACTERS)
+        .any(|window| phrase.contains(&window.iter().collect::<String>()))
+}
+
+/// How often each phrase window occurs across `texts`, the one count both
+/// the writing checks and signing F1-5 use (2026-10-25): windows across
+/// paragraphs and punctuation count, identifier windows do not.
+pub(crate) fn phrase_window_counts(
+    texts: &[Vec<char>],
+) -> std::collections::HashMap<&[char], usize> {
+    let mut counts = std::collections::HashMap::<&[char], usize>::new();
+    for text in texts {
+        for window in text.windows(PHRASE_CHARACTERS) {
+            if !is_identifier_window(window) {
+                *counts.entry(window).or_default() += 1;
+            }
+        }
+    }
+    counts
 }
 
 /// Maximal spans in `texts[from..]` covered by phrases used at least
@@ -796,14 +837,7 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
         .iter()
         .map(|text| text.chars().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let mut counts = std::collections::HashMap::<&[char], usize>::new();
-    for text in &texts {
-        for window in text.windows(PHRASE_CHARACTERS) {
-            if !window.contains(&'\n') && !is_identifier_window(window) {
-                *counts.entry(window).or_default() += 1;
-            }
-        }
-    }
+    let counts = phrase_window_counts(&texts);
     let mut phrases = Vec::new();
     for text in &texts[from..] {
         let mut covered = vec![false; text.len()];
