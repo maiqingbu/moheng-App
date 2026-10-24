@@ -354,11 +354,14 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
             "desire_state",
             "repetition",
             "signing_recommendation",
-            "repair_scope",
             "signingEvaluationItems",
         ]
         .iter()
         .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
+        // Signing does not read the repair scope, so a left-out one is empty.
+        && value
+            .pointer("/payload/repair_scope")
+            .is_none_or(Value::is_array)
 }
 
 fn model_results(
@@ -2170,6 +2173,13 @@ mod tests {
             "runtimeCheckRequests":[],"confidence":0.9,"nextSkillHints":[],"payload":payload
         });
         assert!(valid_s35_signing_envelope(&envelope, &expected));
+        // Seen on 2026-10-24: the payload's repair_scope was left out.
+        let mut no_repair_scope = envelope.clone();
+        no_repair_scope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repair_scope");
+        assert!(valid_s35_signing_envelope(&no_repair_scope, &expected));
         let mut wrong_identity = envelope.clone();
         wrong_identity["bundleDigest"] = json!("sha256:other");
         assert!(!valid_s35_signing_envelope(&wrong_identity, &expected));
