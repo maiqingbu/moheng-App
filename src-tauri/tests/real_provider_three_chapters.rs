@@ -248,22 +248,35 @@ fn real_state() -> (AppPaths, KernelState) {
     (paths, state)
 }
 
-/// Writes `renderModelId` into the global provider settings for one run and
-/// restores the previous settings when dropped, even when the run fails.
-/// The settings file is secret-free; the API key stays in the keychain.
-struct RenderModelOverride {
+/// Writes the writer model (`MOHENG_REAL_RENDER_MODEL`) and the default
+/// model (`MOHENG_REAL_MAIN_MODEL`) into the global provider settings for one
+/// run and restores the previous settings when dropped, even when the run
+/// fails. The settings file is secret-free; the API key stays in the keychain.
+struct ModelOverride {
     paths: AppPaths,
     original: serde_json::Value,
 }
 
-impl RenderModelOverride {
+impl ModelOverride {
     fn from_env(paths: &AppPaths) -> Option<Self> {
-        let model = std::env::var("MOHENG_REAL_RENDER_MODEL").ok()?;
+        let render = std::env::var("MOHENG_REAL_RENDER_MODEL").ok();
+        // Owner decision (2026-10-24): acceptance may run its default steps on
+        // another model while the configured one keeps cutting output short.
+        let main = std::env::var("MOHENG_REAL_MAIN_MODEL").ok();
+        if render.is_none() && main.is_none() {
+            return None;
+        }
         let original = ProviderSettingsRepository::read_global(paths).unwrap();
         let mut settings = original.clone();
-        settings["renderModelId"] = json!(model);
+        if let Some(model) = &render {
+            settings["renderModelId"] = json!(model);
+        }
+        if let Some(model) = &main {
+            settings["modelId"] = json!(model);
+            settings["model"] = json!(model);
+        }
         ProviderSettingsRepository::write_global(paths, &settings).unwrap();
-        println!("REAL_RENDER_MODEL_OVERRIDE renderModelId={model}");
+        println!("REAL_MODEL_OVERRIDE renderModelId={render:?} modelId={main:?}");
         Some(Self {
             paths: paths.clone(),
             original,
@@ -271,7 +284,7 @@ impl RenderModelOverride {
     }
 }
 
-impl Drop for RenderModelOverride {
+impl Drop for ModelOverride {
     fn drop(&mut self) {
         ProviderSettingsRepository::write_global(&self.paths, &self.original).unwrap();
     }
@@ -812,7 +825,7 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
         "set MOHENG_RUN_REAL_TEN_CHAPTERS=1 to acknowledge real API use"
     );
     let (paths, state) = real_state();
-    let _render_model = RenderModelOverride::from_env(&paths);
+    let _models = ModelOverride::from_env(&paths);
     let run = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
