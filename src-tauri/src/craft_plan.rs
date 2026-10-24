@@ -2,7 +2,6 @@
 //! deterministic plan checks, the creation ledger rebuilt from earlier
 //! chapters' plans, and which skill bound which plan decision.
 
-use crate::chapter_craft::simile_count;
 use crate::craft_setup::QUOTE_MARKS;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -11,7 +10,7 @@ use std::collections::BTreeSet;
 pub const PLAN_CHAPTER_CRAFT: &str = "PLAN_CHAPTER_CRAFT";
 
 /// The error prefix of a plan rejected by these checks; the planner gets the
-/// problems and one more try (see `chapter_craft::plan_feedback`).
+/// problems and up to two more tries (see `chapter_craft::plan_feedback`).
 pub const PLAN_CRAFT_ERROR: &str = "B08_PLAN_CRAFT";
 const MIN_DECISION_CHARS: usize = 6;
 /// How many recent endings and losses the planner is shown; the checks
@@ -185,16 +184,16 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
         .flatten()
         .map(text)
         .collect::<BTreeSet<_>>();
-    let shared = scenes(craft)
+    // Owner decision (2026-10-25): earlier places may come back as long as
+    // the chapter goes somewhere new.
+    let places = scenes(craft)
         .iter()
         .map(|scene| text(&scene["place"]))
-        .filter(|place| last_places.contains(place))
         .collect::<BTreeSet<_>>();
-    if shared.len() > 1 {
+    if !last_places.is_empty() && places.is_subset(&last_places) {
         problems.push(format!(
-            "与上一章共用了 {} 个地点（{}），最多共用 1 个",
-            shared.len(),
-            shared.into_iter().collect::<Vec<_>>().join("、")
+            "本章的地点（{}）上一章都去过，至少换一个新地点",
+            places.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
     for ending in ledger["endings"].as_array().into_iter().flatten() {
@@ -219,18 +218,15 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             ));
         }
     }
-    let mut all = Vec::new();
-    crate::chapter_craft::collect_strings(craft, &mut all);
     if chapter == 3 {
+        let mut all = Vec::new();
+        crate::chapter_craft::collect_strings(craft, &mut all);
         let antagonist = text(&bible["antagonist"]["name"]);
         if !antagonist.is_empty() && !all.iter().any(|item| item.contains(antagonist)) {
             problems.push(format!(
                 "第 3 章要写明主角的具体行动以及他和对手「{antagonist}」的关系怎么变了"
             ));
         }
-    }
-    if all.iter().any(|item| simile_count(item) > 0) {
-        problems.push("计划里用了比喻；计划只写发生什么，不写修辞".into());
     }
     problems
 }

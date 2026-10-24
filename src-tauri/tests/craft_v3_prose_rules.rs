@@ -145,3 +145,10 @@ fn a_stock_trope_counts_as_a_habit_so_a_rewrite_cannot_introduce_one() {
     assert_eq!(habit_count("林满没吭声，转身进了面馆。"), 0);
     assert_eq!(habit_count("林满倒吸一口凉气，转身进了面馆。"), 1);
 }
+
+#[test]
+fn camera_and_thermal_imager_words_are_not_similes() {
+    // Real run 2026-10-25: 摄像头 and 热成像仪 were counted as similes.
+    use ai_novel_production_system_core::chapter_craft::habit_count;
+    assert_eq!(habit_count("他打开摄像头，林薇举起热成像仪。"), 0);
+}

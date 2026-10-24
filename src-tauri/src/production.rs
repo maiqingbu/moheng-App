@@ -932,25 +932,33 @@ pub fn resend_once_on_invalid_json(
 ) -> Result<ModelRunOutcome, String> {
     match run(spec) {
         Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
-            let resend = ModelRunSpec {
-                model_run_id: StableIdentityFactory::from_command(
-                    StableIdKind::ModelRun,
-                    &format!("{}:truncated-resend", spec.model_run_id),
-                )?,
-                idempotency_key: format!("{}:truncated-resend", spec.idempotency_key),
-                attempt_no: spec.attempt_no + 1,
-                ..spec.clone()
-            };
-            run(&resend)
+            run(&follow_up_spec(spec, ":truncated-resend", 1)?)
         }
         result => result,
     }
 }
 
+/// A new model run following `spec`: its ids carry `suffix` and its attempt
+/// number is `later` attempts after the original.
+fn follow_up_spec(spec: &ModelRunSpec, suffix: &str, later: i64) -> Result<ModelRunSpec, String> {
+    Ok(ModelRunSpec {
+        model_run_id: StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            &format!("{}{suffix}", spec.model_run_id),
+        )?,
+        idempotency_key: format!("{}{suffix}", spec.idempotency_key),
+        attempt_no: spec.attempt_no + later,
+        ..spec.clone()
+    })
+}
+
+/// How many times a rejected plan is planned again within one job.
+const PLAN_FEEDBACK_ROUNDS: i64 = 2;
+
 /// Craft rule (2026-10-17): a plan rejected for a reason the planner can fix
-/// (see `chapter_craft::plan_feedback`) is planned once more with the reason;
-/// the rejected run stays recorded. Returns the accepted plan and the run
-/// that produced it.
+/// (see `chapter_craft::plan_feedback`) is planned again with the reason, up
+/// to `PLAN_FEEDBACK_ROUNDS` times (owner decision 2026-10-25); the rejected
+/// runs stay recorded. Returns the accepted plan and the run that produced it.
 pub fn plan_chapter_with_feedback(
     connection: &libsql_rusqlite::Connection,
     gateway: &dyn ProductionModelGateway,
@@ -973,24 +981,28 @@ pub fn plan_chapter_with_feedback(
         .parsed
         .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())
     };
-    match accept(plan(spec, input.clone())?) {
-        Err(error) if crate::chapter_craft::plan_feedback(&error).is_some() => {
-            let replan = ModelRunSpec {
-                model_run_id: StableIdentityFactory::from_command(
-                    StableIdKind::ModelRun,
-                    &format!("{}:plan-feedback", spec.model_run_id),
-                )?,
-                idempotency_key: format!("{}:plan-feedback", spec.idempotency_key),
-                attempt_no: spec.attempt_no + 1,
-                ..spec.clone()
-            };
-            let mut input = input;
-            input["planFeedback"] = json!(crate::chapter_craft::plan_feedback(&error));
-            let accepted = accept(plan(&replan, input)?)?;
-            Ok((accepted, replan.model_run_id))
-        }
-        result => result.map(|accepted| (accepted, spec.model_run_id.clone())),
+    let mut input = input;
+    let mut run_id = spec.model_run_id.clone();
+    let mut result = accept(plan(spec, input.clone())?);
+    for round in 1..=PLAN_FEEDBACK_ROUNDS {
+        let Some(feedback) = result
+            .as_ref()
+            .err()
+            .and_then(|error| crate::chapter_craft::plan_feedback(error))
+        else {
+            break;
+        };
+        // The first replan keeps its original id so earlier runs replay.
+        let suffix = match round {
+            1 => ":plan-feedback".to_string(),
+            round => format!(":plan-feedback-{round}"),
+        };
+        let replan = follow_up_spec(spec, &suffix, round)?;
+        input["planFeedback"] = feedback;
+        result = accept(plan(&replan, input.clone())?);
+        run_id = replan.model_run_id;
     }
+    result.map(|accepted| (accepted, run_id))
 }
 
 fn execute_production_model_with_profile_once(
@@ -2133,9 +2145,12 @@ pub fn run_chapter_production(
         if let (Some(project_id), Some(command_id), Some(now)) = (project_id, command_id, now) {
             if let Ok(job_id) = StableIdentityFactory::from_command(StableIdKind::Job, command_id) {
                 if let Ok(connection) = manager.open(project_id, "", now) {
+                    // These keep their detail: the plan problems say why
+                    // the job's last plan was rejected.
                     let failure_code = if error.starts_with(
                         "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=",
-                    ) {
+                    ) || error.starts_with(crate::craft_plan::PLAN_CRAFT_ERROR)
+                    {
                         error.as_str()
                     } else {
                         error

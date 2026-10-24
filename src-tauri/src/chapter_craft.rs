@@ -315,10 +315,12 @@ const BODY_TICS: [&str; 8] = [
     "深吸一口气",
 ];
 const SIMILE_MARKERS: [&str; 6] = ["像", "仿佛", "如同", "宛如", "似的", "好似"];
-const NOT_SIMILES: [&str; 14] = [
+const NOT_SIMILES: [&str; 16] = [
     "图像",
     "影像",
     "录像",
+    "摄像",
+    "成像",
     "画像",
     "肖像",
     "偶像",
@@ -351,7 +353,7 @@ fn measure_count(sentence: &str) -> usize {
         .count()
 }
 
-pub(crate) fn simile_count(sentence: &str) -> usize {
+fn simile_count(sentence: &str) -> usize {
     let mut cleaned = sentence.to_string();
     for word in NOT_SIMILES {
         cleaned = cleaned.replace(word, "");

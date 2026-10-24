@@ -144,7 +144,11 @@ fn execute_real_production(
             "requestedAt":NOW,
             "payload":payload
         });
-        match execute_command_impl(state, request) {
+        let result = execute_command_impl(state, request);
+        if let Err(error) = &result {
+            println!("REAL_PRODUCTION_ERROR attempt={attempt} error={error}");
+        }
+        match result {
             Ok(response) => {
                 assert_eq!(response["finalStatus"], "committed");
                 assert_eq!(response["stage"], "COMPLETED");

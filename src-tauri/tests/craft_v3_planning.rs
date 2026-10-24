@@ -203,7 +203,7 @@ fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_plac
     // that opening preparation had committed.
     let temp = tempfile::tempdir().unwrap();
     let gateway = Arc::new(CraftGateway {
-        vague_plans: AtomicUsize::new(2),
+        vague_plans: AtomicUsize::new(3),
         ..CraftGateway::default()
     });
     let state = KernelState::with_production_gateway(
@@ -247,13 +247,17 @@ fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_plac
     let error = start("retry:production:1", payload.clone()).unwrap_err();
     assert!(error.starts_with("B08_PLAN_CRAFT"), "{error}");
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let failed_job: String = connection
+    let (failed_job, failure): (String, String) = connection
         .query_row(
-            "SELECT job_id FROM jobs WHERE project_id=?1 AND status='FAILED' ORDER BY created_at DESC, job_id DESC LIMIT 1",
+            "SELECT job_id, error_code FROM jobs WHERE project_id=?1 AND status='FAILED' ORDER BY created_at DESC, job_id DESC LIMIT 1",
             [&project_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    assert!(
+        failure.starts_with("B08_PLAN_CRAFT:") && failure.contains("温度或幽默"),
+        "the failed job keeps why its plans were rejected: {failure}"
+    );
     drop(connection);
     let mut retry = payload;
     retry["retryOfJobId"] = json!(failed_job);
@@ -262,11 +266,12 @@ fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_plac
         "committed"
     );
 
-    // Two rejected plans, then the retry plans again (its first try of chapter
-    // one is vague in this fixture, so it replans once).
+    // Three rejected plans (a plan and two replans), then the retry plans
+    // again (its first try of chapter one is vague in this fixture, so it
+    // replans once).
     assert_eq!(
         gateway.plan_inputs.lock().unwrap().len(),
-        4,
+        5,
         "the retry plans again"
     );
     let connection = state.manager.open(&project_id, "", NOW).unwrap();

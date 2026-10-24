@@ -87,18 +87,29 @@ fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
 }
 
 #[test]
-fn reusing_two_places_or_an_ending_of_an_earlier_chapter_is_reported() {
+fn reusing_every_place_or_an_ending_of_an_earlier_chapter_is_reported() {
     let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
     let mut next = plan();
     next["craft"]["device"] =
         json!({"name":"读账本","status":"NEW","howUsed":"翻到旧账本时看见记账人当时的手"});
     let problems = plan_problems(&next, 2, &bible(), &ledger);
-    assert!(has(&problems, "与上一章共用了 2 个地点"), "{problems:?}");
+    assert!(has(&problems, "上一章都去过"), "{problems:?}");
     assert!(
         has(&problems, "结束的局面和之前某章完全相同"),
         "{problems:?}"
     );
     assert!(has(&problems, "章末钩子和之前某章完全相同"), "{problems:?}");
+}
+
+#[test]
+fn a_chapter_may_return_to_earlier_places_when_one_place_is_new() {
+    // Owner decision (2026-10-25): a story set in one building keeps going
+    // back to the same rooms; one new place per chapter is enough.
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
+    let mut next = plan();
+    next["craft"]["scenes"] = json!([scene("江边码头"), scene("姑妈的面馆"), scene("当铺后院")]);
+    let problems = plan_problems(&next, 2, &bible(), &ledger);
+    assert!(!has(&problems, "地点"), "{problems:?}");
 }
 
 #[test]
@@ -164,17 +175,13 @@ fn chapter_three_must_name_what_changes_with_the_antagonist() {
 }
 
 #[test]
-fn similes_do_not_belong_in_a_plan() {
+fn similes_in_a_plan_are_not_a_problem() {
+    // Owner decision (2026-10-25): a plan is not prose; similes are checked
+    // and rewritten in the chapter body only.
     let mut wordy = plan();
     wordy["craft"]["emotionalBeat"] = json!("他记下这笔账，心像被攥紧了似的");
     let problems = plan_problems(&wordy, 1, &bible(), &creation_ledger(&[], &bible()));
-    assert!(has(&problems, "用了比喻"), "{problems:?}");
-    // Real run 2026-10-24: neither of these is a simile.
-    let mut plain = plan();
-    plain["craft"]["warmth"] = json!("姑妈像往常一样在灶上给他留了一碗面");
-    plain["craft"]["smallDiscovery"] = json!("老董问他见没见过类似的货单");
-    let problems = plan_problems(&plain, 1, &bible(), &creation_ledger(&[], &bible()));
-    assert!(!has(&problems, "用了比喻"), "{problems:?}");
+    assert!(problems.is_empty(), "{problems:?}");
 }
 
 #[test]
