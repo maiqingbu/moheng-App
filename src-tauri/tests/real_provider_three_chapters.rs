@@ -47,6 +47,34 @@ fn execute(state: &KernelState, request: serde_json::Value) -> serde_json::Value
     response
 }
 
+/// A setup step that calls the model, generated again (as the user would
+/// press regenerate) when the model's JSON comes back cut off. Seen on
+/// 2026-10-24: qwen3.8-flash stopped mid-object with finish_reason stop.
+fn execute_model_step(state: &KernelState, request: serde_json::Value) -> serde_json::Value {
+    const ATTEMPTS: usize = 3;
+    for attempt in 1..=ATTEMPTS {
+        let mut request = request.clone();
+        if attempt > 1 {
+            for key in ["commandId", "idempotencyKey"] {
+                request[key] = json!(format!("{}:try{attempt}", request[key].as_str().unwrap()));
+            }
+            let project_id = request["projectId"].as_str().unwrap().to_owned();
+            request["expectedRevision"] = json!(current_revision(state, &project_id));
+        }
+        match execute_command_impl(state, request) {
+            Ok(response) => {
+                assert_eq!(response["finalStatus"], "committed");
+                return response;
+            }
+            Err(error) if error.contains("P01_MODEL_JSON_INVALID") && attempt < ATTEMPTS => {
+                println!("REAL_SETUP_REGENERATE attempt={attempt} error={error}");
+            }
+            Err(error) => panic!("real setup failed: {error}"),
+        }
+    }
+    unreachable!("the last attempt returns or panics")
+}
+
 fn retryable_real_production_error(error: &str) -> bool {
     [
         "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
@@ -250,7 +278,7 @@ impl Drop for RenderModelOverride {
 /// genre-recommended style card, so the project's chapters plan as r2.
 fn confirm_craft_setup(state: &KernelState, prefix: &str, project_id: &str) {
     let command = |kind: &str, suffix: &str, payload: serde_json::Value| {
-        execute(
+        execute_model_step(
             state,
             json!({
                 "type":kind,"commandId":format!("{prefix}:{suffix}"),
@@ -313,7 +341,7 @@ fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (Strin
     );
     let project_id = created["projectId"].as_str().unwrap().to_owned();
 
-    execute(
+    execute_model_step(
         state,
         json!({
             "type":"story_directions_generate",
