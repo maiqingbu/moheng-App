@@ -680,8 +680,10 @@ fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
     let mut counts = BTreeMap::<String, usize>::new();
     for chapter in chapters {
         let chars = chapter.body.chars().collect::<Vec<_>>();
-        for window in chars.windows(12) {
-            *counts.entry(window.iter().collect()).or_default() += 1;
+        for window in chars.windows(crate::chapter_craft::PHRASE_CHARACTERS) {
+            if !crate::chapter_craft::is_identifier_window(window) {
+                *counts.entry(window.iter().collect()).or_default() += 1;
+            }
         }
     }
     counts.values().filter(|count| **count >= 3).count()
@@ -2161,6 +2163,19 @@ mod tests {
         assert_eq!(result["evidence"][0]["rangeStart"], 4);
         assert_eq!(result["evidence"][0]["rangeEnd"], 12);
         assert_eq!(result["evidence"][0]["exactQuote"], "林舟找到一页旧账");
+    }
+
+    #[test]
+    fn repeated_identifiers_are_not_repeated_phrases() {
+        // Real run 2026-10-24: an archive number and an account name came
+        // back three times each, as the plot needed them.
+        let coded = fixture_chapter(
+            1,
+            &"他调出档案B-4-1998-07-22，登录账号ZhouYQ-0724。".repeat(3),
+        );
+        assert_eq!(repeated_phrase_count(&[coded]), 0);
+        let prose = fixture_chapter(1, &"他把那张泛黄的旧照片翻过来看了很久。".repeat(3));
+        assert!(repeated_phrase_count(&[prose]) > 0);
     }
 
     #[test]

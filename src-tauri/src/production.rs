@@ -3298,6 +3298,17 @@ fn run_chapter_production_inner(
             match check_audit(rerun_raw.clone()) {
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
                     let (kept, dropped) = drop_unlocatable_audit_candidates(&rerun_raw, &body);
+                    // Real run 2026-10-24: every fact was dropped and the
+                    // chapter committed with no canon. A chapter is not
+                    // committed without the facts its audit reported.
+                    let has_canon = |value: &Value| {
+                        value["canonCandidates"]
+                            .as_array()
+                            .is_some_and(|items| !items.is_empty())
+                    };
+                    if has_canon(&rerun_raw) && !has_canon(&kept) {
+                        return Err(error);
+                    }
                     let (mut payload, extraction) = check_audit(kept)?;
                     payload["normalization"]["droppedUnlocatable"] = dropped;
                     (payload, extraction)

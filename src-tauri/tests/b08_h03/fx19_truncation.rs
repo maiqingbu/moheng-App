@@ -276,6 +276,55 @@ fn craft_audit_still_unlocatable_after_the_rerun_drops_and_records_the_candidate
     assert!(dropped.contains("fact:plan-quote"));
 }
 
+/// Every canon candidate quotes a passage the body does not have, on both
+/// audit runs (real run 2026-10-24: four paraphrased quotes on chapter 2).
+struct AllCanonUnlocatableGateway;
+
+impl ProductionModelGateway for AllCanonUnlocatableGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            for (index, item) in response.output["canonCandidates"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                item["evidence"]["quote"] = json!(format!("正文里没有的第{index}句改写"));
+            }
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn a_chapter_whose_every_fact_stays_unlocatable_is_not_committed_without_canon() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AllCanonUnlocatableGateway),
+    );
+    let project_id = "p-craft-audit-empty";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let error = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:audit-empty","idempotencyKey":"key:craft:audit-empty",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap_err();
+    assert!(
+        error.starts_with("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"),
+        "{error}"
+    );
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    assert_eq!(
+        b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
+        0
+    );
+}
+
 /// The audit reports the reveal of a reservation the project never had, as
 /// a real audit did on 2026-10-19.
 struct InventedReservationGateway;

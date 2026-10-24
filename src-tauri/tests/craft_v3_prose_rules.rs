@@ -113,6 +113,15 @@ fn rhythm_notes_compare_the_chapter_with_the_style_card() {
 }
 
 #[test]
+fn a_repeated_archive_number_is_not_an_overused_phrase() {
+    use ai_novel_production_system_core::chapter_craft::overused_phrases;
+    let line = "他调出档案B-4-1998-07-22，登录账号ZhouYQ-0724。".to_string();
+    assert!(overused_phrases(&[line.clone(), line.clone()], &line).is_empty());
+    let prose = "他把那张泛黄的旧照片翻过来看了很久。".to_string();
+    assert!(!overused_phrases(&[prose.clone(), prose.clone()], &prose).is_empty());
+}
+
+#[test]
 fn a_stock_trope_counts_as_a_habit_so_a_rewrite_cannot_introduce_one() {
     use ai_novel_production_system_core::chapter_craft::habit_count;
     assert_eq!(habit_count("林满没吭声，转身进了面馆。"), 0);

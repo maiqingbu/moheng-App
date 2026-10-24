@@ -724,7 +724,19 @@ pub fn rhythm_notes(body: &str, style_card: &Value) -> Vec<String> {
 }
 
 /// Characters in a phrase the signing check counts as a repetition.
-const PHRASE_CHARACTERS: usize = 12;
+pub(crate) const PHRASE_CHARACTERS: usize = 12;
+
+/// A window mostly of ASCII letters, digits and hyphens is an identifier
+/// (an archive number, an account name), not a repeated phrase (owner
+/// decision 2026-10-24).
+pub(crate) fn is_identifier_window(window: &[char]) -> bool {
+    window
+        .iter()
+        .filter(|c| c.is_ascii_alphanumeric() || **c == '-')
+        .count()
+        * 2
+        >= window.len()
+}
 
 /// Phrases of `PHRASE_CHARACTERS` or more characters that already occur at
 /// least twice in `texts`, so the writer can avoid a third use.
@@ -753,7 +765,7 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
     let mut counts = std::collections::HashMap::<&[char], usize>::new();
     for text in &texts {
         for window in text.windows(PHRASE_CHARACTERS) {
-            if !window.contains(&'\n') {
+            if !window.contains(&'\n') && !is_identifier_window(window) {
                 *counts.entry(window).or_default() += 1;
             }
         }
@@ -1028,11 +1040,11 @@ mod tests {
     #[test]
     fn craft_repeated_phrases_lists_twice_used_phrases_once() {
         let texts = vec![
-            "【S_Y_042-RECORD-12.07】雨还在下。".to_string(),
-            "他翻到【S_Y_042-RECORD-12.08】。".to_string(),
+            "他把那张泛黄的旧照片翻过来看。雨还在下。".to_string(),
+            "她又提起那张泛黄的旧照片翻过来看的事。".to_string(),
         ];
         let phrases = repeated_phrases(&texts);
-        assert_eq!(phrases, vec!["【S_Y_042-RECORD-12.0".to_string()]);
+        assert_eq!(phrases, vec!["那张泛黄的旧照片翻过来看".to_string()]);
         assert!(repeated_phrases(&["各不相同的一句话。".to_string()]).is_empty());
     }
 
