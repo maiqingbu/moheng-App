@@ -124,6 +124,34 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             ));
         }
     }
+    // The plan shape, checked here rather than only by the contract so the
+    // planner gets these back with the other problems.
+    let scene_list = scenes(craft);
+    if !(2..=3).contains(&scene_list.len()) {
+        problems.push(format!(
+            "需要 2 到 3 个场景，现在有 {} 个",
+            scene_list.len()
+        ));
+    }
+    for (index, scene) in scene_list.iter().enumerate() {
+        let people = scene["people"].as_array().map_or(0, Vec::len);
+        if people < 2 {
+            problems.push(format!(
+                "第 {} 场只有 {people} 个人物，每场至少两人在场且有冲突",
+                index + 1
+            ));
+        }
+        let events = scene["events"].as_array().map_or(0, Vec::len);
+        if !(3..=5).contains(&events) {
+            problems.push(format!(
+                "第 {} 场有 {events} 条事件，每场写 3 到 5 条",
+                index + 1
+            ));
+        }
+    }
+    if !matches!(text(&craft["device"]["status"]), "NEW" | "ESCALATED") {
+        problems.push("异常手法的 status 只能是 NEW 或 ESCALATED".into());
+    }
     if text(&craft["situationChange"]["before"]) == text(&craft["situationChange"]["after"]) {
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
     }
@@ -452,14 +480,11 @@ impl ChapterPlanner {
     }
 
     /// The r2 checks against the whole ledger (a plan without craft decisions
-    /// is sent back too); r1 plans run `r1_check`.
-    pub fn check(
-        &self,
-        plan: &Value,
-        r1_check: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
+    /// is sent back too); nothing for r1 planning. Run before the contract so
+    /// shape problems reach the planner for a replan.
+    pub fn check_craft(&self, plan: &Value) -> Result<(), String> {
         let Some(craft) = &self.craft else {
-            return r1_check();
+            return Ok(());
         };
         if !crate::chapter_craft::is_craft_plan(plan) {
             return Err(format!(
@@ -467,6 +492,15 @@ impl ChapterPlanner {
             ));
         }
         check_craft_plan(plan, i64::from(self.chapter), &craft.bible, &craft.ledger)
+    }
+
+    /// Runs `r1_check` for r1 planning only.
+    pub fn check_r1(&self, r1_check: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        if self.craft.is_some() {
+            Ok(())
+        } else {
+            r1_check()
+        }
     }
 }
 

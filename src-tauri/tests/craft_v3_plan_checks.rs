@@ -219,3 +219,24 @@ fn the_planner_sees_a_bounded_ledger_while_checks_use_the_whole_history() {
         "用法和之前一模一样"
     ));
 }
+
+#[test]
+fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_replan() {
+    // Real run 2026-10-24: a scene with seven events and one with a single
+    // person failed the contract with no chance to replan.
+    let mut crowded = plan();
+    crowded["craft"]["scenes"][0]["events"] = json!(["一", "二", "三", "四", "五", "六", "七"]);
+    crowded["craft"]["scenes"][1]["people"] = json!([person("林满")]);
+    let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[]));
+    assert!(has(&problems, "第 1 场有 7 条事件"), "{problems:?}");
+    assert!(has(&problems, "第 2 场只有 1 个人物"), "{problems:?}");
+    let mut single = plan();
+    single["craft"]["scenes"] = json!([scene("江边码头")]);
+    single["craft"]["device"]["status"] = json!("OLD");
+    let problems = plan_problems(&single, 1, &bible(), &creation_ledger(&[]));
+    assert!(has(&problems, "需要 2 到 3 个场景"), "{problems:?}");
+    assert!(
+        has(&problems, "status 只能是 NEW 或 ESCALATED"),
+        "{problems:?}"
+    );
+}

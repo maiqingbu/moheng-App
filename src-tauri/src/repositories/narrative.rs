@@ -1970,6 +1970,23 @@ impl NarrativeRepository {
         ).optional().map_err(Into::into)
     }
 
+    /// The model run recorded as the source of an artifact, if any.
+    pub fn artifact_model_run_id(
+        connection: &Connection,
+        project_id: &str,
+        reference: &ArtifactRef,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT json_extract(provenance_json,'$.modelRunId') FROM artifacts WHERE project_id=?1 AND artifact_id=?2 AND version=?3",
+                libsql_rusqlite::params![project_id, reference.artifact_id, reference.version],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
     pub fn chapter_volume_id(
         connection: &Connection,
         project_id: &str,

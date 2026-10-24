@@ -7156,7 +7156,8 @@ fn compile_current_chapter_plan(
             &plan,
             bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0),
         )?;
-        planner.check(&plan, || {
+        planner.check_craft(&plan)?;
+        planner.check_r1(|| {
             if enforces_length {
                 crate::chapter_craft::check_plan(&plan, length_range, &history.recent)
             } else {

@@ -1578,6 +1578,16 @@ fn reusable_opening_plan_for_retry(
     else {
         return Ok(None);
     };
+    // A completed planner run proves nothing about the head: its plan may
+    // have been rejected, leaving an earlier plan (such as the opening
+    // placeholder) in place. Only a plan that run produced is reused.
+    let produced_by = crate::repositories::narrative::NarrativeRepository::artifact_model_run_id(
+        connection, project_id, &plan_ref,
+    )
+    .map_err(|error| error.to_string())?;
+    if produced_by.as_deref() != Some(planning_model_run_id.as_str()) {
+        return Ok(None);
+    }
     let mut plan_payload = load_artifact_payload(connection, project_id, &plan_ref)?;
     if plan_payload.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Ok(None);
@@ -2583,6 +2593,7 @@ fn run_chapter_production_inner(
                 plan["entityRefs"] = hard_scope["entityRefs"].clone();
                 plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
                 plan["hardScope"] = hard_scope.clone();
+                planner.check_craft(&plan)?;
                 crate::planning::validate_chapter_plan(&plan)
                     .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
                 crate::planning::validate_current_chapter_plan(
@@ -2592,7 +2603,7 @@ fn run_chapter_production_inner(
                     &triggered_threads,
                     horizon_capacity,
                 )?;
-                planner.check(&plan, || {
+                planner.check_r1(|| {
                     if gateway.enforces_chapter_length() {
                         crate::chapter_craft::check_plan(
                             &plan,

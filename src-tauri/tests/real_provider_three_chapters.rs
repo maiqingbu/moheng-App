@@ -1010,8 +1010,10 @@ fn write_ten_chapter_evidence(
         .unwrap();
     std::fs::write(
         out.join("summary.json"),
-        serde_json::to_string_pretty(&json!({"projectId":project_id,"chapters":summary,"usage":usage}))
-            .unwrap(),
+        serde_json::to_string_pretty(
+            &json!({"projectId":project_id,"chapters":summary,"usage":usage}),
+        )
+        .unwrap(),
     )
     .unwrap();
 }
