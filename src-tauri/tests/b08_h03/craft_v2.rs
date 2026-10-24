@@ -753,3 +753,27 @@ fn craft_v2_rule_findings_go_to_the_rewrite_with_the_review() {
         .unwrap()
         .contains(&json!("word_repetition")));
 }
+
+#[test]
+fn craft_v2_production_no_longer_runs_the_v12_enrichment_quality_report_or_s40_repair() {
+    // Owner decision (2026-10-24): v1.2 is retired from chapter writing.
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[2500]));
+    let project_id = "p-craft-no-v12";
+    let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    assert!(gateway.inputs("REPAIR_CANDIDATE").is_empty());
+    let connection = state.manager.open(project_id, "Craft v2", NOW).unwrap();
+    let count = |sql: &str| -> i64 {
+        connection
+            .query_row(sql, [project_id], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type IN ('NarrativeQualityReport','NarrativeTasteProfile')"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.creativeEnrichment') IS NOT NULL"),
+        0
+    );
+}

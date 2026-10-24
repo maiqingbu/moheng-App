@@ -17,9 +17,6 @@ use ai_novel_production_system_core::repair::{
     operation_digest_with_postconditions, OwnerExecution, RepairAuthorization, RepairOperation,
     RepairPlan, TypedRepairOwner,
 };
-use ai_novel_production_system_core::runtime::{
-    DurableModelRunner, FakeModelTransport, ModelRunSpec,
-};
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::json;
@@ -72,105 +69,6 @@ impl ProductionModelGateway for CapturingAuditPolicyGateway {
             }
         }
         Ok(response)
-    }
-}
-
-struct GoodQualityGateway;
-
-#[derive(Clone, Default)]
-struct S40RepairGateway {
-    capabilities: Arc<Mutex<Vec<String>>>,
-    repair_inputs: Arc<Mutex<Vec<Value>>>,
-    audit_inputs: Arc<Mutex<Vec<Value>>>,
-}
-
-impl ProductionModelGateway for S40RepairGateway {
-    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        self.capabilities
-            .lock()
-            .map_err(|error| error.to_string())?
-            .push(capability.to_string());
-        match capability {
-            "PLAN_STRATEGY" => RecordingGateway.invoke(capability, input),
-            "RENDER_CHAPTER" => Ok(ProductionModelResponse::deterministic(json!({
-                "body":"林舟被迫等待。门后传来脚步声。"
-            }))),
-            "REPAIR_CANDIDATE" => {
-                self.repair_inputs
-                    .lock()
-                    .map_err(|error| error.to_string())?
-                    .push(input.clone());
-                let body = input
-                    .pointer("/candidate/body")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "repair candidate body missing".to_string())?;
-                let target = "被迫等待。";
-                let start = body
-                    .find(target)
-                    .ok_or_else(|| "repair finding span missing".to_string())?;
-                let end = start + target.len();
-                let start = body[..start].chars().count();
-                let end = body[..end].chars().count();
-                let body_len = body.chars().count();
-                let mut protected_spans = Vec::new();
-                if start > 0 {
-                    protected_spans.push(json!({"start":0,"end":start}));
-                }
-                if end < body_len {
-                    protected_spans.push(json!({"start":end,"end":body_len}));
-                }
-                let context_refs = input["skillTaskContext"]["boundedRefs"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|reference| reference["reference"].clone())
-                    .collect::<Vec<_>>();
-                Ok(ProductionModelResponse::deterministic(json!({
-                    "skillId":input["skill"]["skillId"],
-                    "skillVersion":input["skill"]["skillVersion"],
-                    "bundleDigest":input["skill"]["bundleDigest"],
-                    "taskId":input["skillTaskContext"]["taskId"],
-                    "status":"OK",
-                    "sourceRefs":[],
-                    "assumptions":[],
-                    "payload":{
-                        "repair_plan":"只修复当前 agency、pacing、dialogue 证据对应的局部段落。",
-                        "target_spans":[{"start":start,"end":end}],
-                        "protected_spans":protected_spans,
-                        "changes":[{
-                            "start":start,
-                            "end":end,
-                            "replacement":"决定推开石门。“我必须找到出口。”“石门后有人。”"
-                        }],
-                        "recheck_dimensions":input["affectedDimensions"],
-                        "escalation_if_failed":"ADVISORY_ESCALATION"
-                    },
-                    "findings":[],
-                    "contextRefs":context_refs,
-                    "runtimeCheckRequests":[],
-                    "confidence":0.9,
-                    "nextSkillHints":[]
-                })))
-            }
-            "AUDIT_EXTRACT" => {
-                self.audit_inputs
-                    .lock()
-                    .map_err(|error| error.to_string())?
-                    .push(input.clone());
-                Ok(ProductionModelResponse::deterministic(json!({
-                    "qualityFindings":[],
-                    "canonCandidates":[],
-                    "knowledgeCandidates":[],
-                    "continuityCandidates":[],
-                    "taskProgressCandidates":[],
-                    "revealedReservationRefs":[],
-                    "evidenceRanges":[],
-                    "auditCompleteness":"COMPLETE_NO_CHANGE",
-                    "unresolvedHard":false
-                })))
-            }
-            other => Err(format!("unexpected capability: {other}")),
-        }
     }
 }
 
@@ -379,24 +277,6 @@ impl ProductionModelGateway for TaskSatisfiedGateway {
             {
                 candidate["status"] = json!("SATISFIED");
             }
-        }
-        Ok(response)
-    }
-}
-
-impl ProductionModelGateway for GoodQualityGateway {
-    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        let mut response = RecordingGateway.invoke(capability, input)?;
-        if capability == "RENDER_CHAPTER" {
-            response.output["body"] = json!("林舟终于决定推门，必须亲自面对门后的秘密。“你来了。”他说。“我一直在等你。”对方回答。门后传来一声轻响，谁在那里？");
-        }
-        if capability == "AUDIT_EXTRACT" {
-            response.output = json!({
-                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
-                "continuityCandidates":[],"taskProgressCandidates":[],
-                "revealedReservationRefs":[],"evidenceRanges":[],
-                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
-            });
         }
         Ok(response)
     }
@@ -3677,7 +3557,9 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
                 |row| row.get(0)
             )
             .unwrap(),
-        4
+        // Plan, render and audit; S40 repair is retired from production
+        // (owner decision 2026-10-24).
+        3
     );
     assert_eq!(
         connection
@@ -3706,12 +3588,7 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        [
-            "PLAN_STRATEGY",
-            "RENDER_CHAPTER",
-            "REPAIR_CANDIDATE",
-            "AUDIT_EXTRACT"
-        ]
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
     );
     drop(connection);
     let replay = execute_command_impl(&state, json!({
@@ -3745,7 +3622,7 @@ fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["RENDER_CHAPTER", "REPAIR_CANDIDATE", "AUDIT_EXTRACT"]
+        ["RENDER_CHAPTER", "AUDIT_EXTRACT"]
     );
 }
 
@@ -4260,7 +4137,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
                 |row| row.get(0)
             )
             .unwrap(),
-        3
+        2
     );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08-long' AND h.artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), context_id);
     let volume_head_after: (String,i64,String) = connection.query_row(
@@ -4586,173 +4463,6 @@ fn rv23_command_receipt_read_uses_project_and_original_idempotency_key() {
 }
 
 #[test]
-fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(RecordingGateway),
-    );
-    let connection = state.manager.create("p-b10-root", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-root");
-    drop(connection);
-
-    let result = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
-            "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillResourcePaths":["resources/operating_method.md"]}
-        }),
-    )
-    .unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-root", "B10", NOW).unwrap();
-    let expected_render_body = "林舟推开石门，实际只推进了任务，没有完成它。";
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.creativeEnrichment.packageVersion') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate'",
-        [], |row| row.get(0)
-    ).unwrap(), "1.2.0");
-    let quality_payload: Value = serde_json::from_str(&connection.query_row::<String, _, _>(
-        "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap()).unwrap();
-    let candidate_payload: Value = serde_json::from_str(&connection.query_row::<String, _, _>(
-        "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",
-        [], |row| row.get(0)
-    ).unwrap()).unwrap();
-    assert_eq!(quality_payload["invocationProvenance"], json!([]));
-    let injections = quality_payload["methodInjectionProvenance"]
-        .as_array()
-        .expect("quality report must record method text injected into RENDER");
-    assert_eq!(injections.len(), 2);
-    assert_eq!(
-        candidate_payload["creativeEnrichment"]["methodInjectionProvenance"],
-        quality_payload["methodInjectionProvenance"]
-    );
-    let render_model_run_id = candidate_payload
-        .pointer("/renderer/modelRunId")
-        .and_then(Value::as_str)
-        .expect("candidate must reference the successful RENDER ModelRun");
-    for injection in injections {
-        assert!(injection["skillId"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        assert!(injection["version"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        assert!(injection["bundleDigest"]
-            .as_str()
-            .and_then(|digest| digest.strip_prefix("sha256:"))
-            .is_some_and(|digest| digest.len() == 64));
-        assert_eq!(injection["renderModelRunId"], render_model_run_id);
-        assert!(injection["loadedResources"]
-            .as_array()
-            .is_some_and(|resources| {
-                resources.iter().any(|resource| {
-                    resource["reference"]
-                        .as_str()
-                        .is_some_and(|value| value.ends_with("/SKILL.md"))
-                        && resource["digest"]
-                            .as_str()
-                            .is_some_and(|value| value.len() == 64)
-                })
-            }));
-    }
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",
-        [], |row| row.get(0)
-    ).unwrap(), expected_render_body);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='FinalChapter'",
-        [], |row| row.get(0)
-    ).unwrap(), expected_render_body);
-    let projection =
-        query_production_center_impl(&state, json!({"projectId":"p-b10-root"})).unwrap();
-    assert_eq!(projection["creativeSkills"]["packageVersion"], "1.2.0");
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["selectedFullTextLoads"],
-        2
-    );
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["unselectedFullTextLoads"],
-        0
-    );
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["selectedResourceLoads"],
-        2
-    );
-    assert_eq!(projection["creativeSkills"]["invocations"], json!([]));
-    assert_eq!(
-        projection["creativeSkills"]["methodInjectionProvenance"],
-        quality_payload["methodInjectionProvenance"]
-    );
-    assert_eq!(projection["quality"]["softOnly"], true);
-    assert_eq!(
-        projection["quality"]["modelProvenance"]["evaluatorCalls"],
-        0
-    );
-    assert_eq!(projection["quality"]["evaluatorKind"], "HEURISTIC_KEYWORD");
-    assert_eq!(
-        projection["quality"]["repair"]["status"],
-        "ADVISORY_ESCALATION"
-    );
-    assert_eq!(projection["quality"]["repair"]["transportCalls"], 1);
-    assert_eq!(projection["quality"]["recheckedDimensions"], json!([]));
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch.status')='CANDIDATE'",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT json_extract(p.payload_json,'$.candidateRef.version') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ReviewReport'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT CASE WHEN json_extract(qp.payload_json,'$.repair.candidateAfter.artifactId') = json_extract(ap.payload_json,'$.candidateRef.artifactId') THEN 'BOUND' ELSE 'MISMATCH' END FROM artifacts q JOIN artifact_payloads qp ON qp.artifact_id=q.artifact_id AND qp.version=q.version JOIN artifacts a ON a.project_id=q.project_id AND a.artifact_type='ReviewReport' JOIN artifact_payloads ap ON ap.artifact_id=a.artifact_id AND ap.version=a.version WHERE q.project_id='p-b10-root' AND q.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "BOUND");
-}
-
-#[test]
-fn b10_formal_selected_method_content_changes_b08_enrichment_semantics() {
-    let run = |project_id: &str, primary: &str, support: &[&str]| {
-        let temp = tempfile::tempdir().unwrap();
-        let state = KernelState::with_production_gateway(
-            AppPaths::new(temp.path()),
-            Arc::new(RecordingGateway),
-        );
-        let connection = state.manager.create(project_id, "B10", NOW).unwrap();
-        let chapter_id = seed_chapter_and_gate(&connection, project_id);
-        drop(connection);
-        execute_command_impl(
-            &state,
-            json!({
-                "type":"production_start","commandId":format!("cmd:{project_id}:method"),"idempotencyKey":format!("key:{project_id}:method"),
-                "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
-                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","primarySkillId":primary,"supportSkillIds":support}
-            }),
-        )
-        .unwrap();
-        let connection = state.manager.open(project_id, "B10", NOW).unwrap();
-        connection
-            .query_row::<String, _, _>(
-                "SELECT json_extract(p.payload_json,'$.creativeEnrichment.methodGuidance') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id LIMIT 1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    let ending = run("p-b10-method-ending", "S14", &["S10"]);
-    let pacing = run("p-b10-method-pacing", "S21", &["S23"]);
-    assert_ne!(ending, pacing);
-    assert!(ending.contains("methodDigest=") && ending.contains("/SKILL.md"));
-    assert!(pacing.contains("methodDigest=") && pacing.contains("/SKILL.md"));
-}
-
-#[test]
 fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
@@ -4786,360 +4496,6 @@ fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
         "SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b10-no-skill' AND artifact_type='FinalChapter'",
         [], |row| row.get(0)
     ).unwrap(), 1);
-}
-
-#[test]
-fn b10_production_no_repair_path_is_explicit_and_does_not_create_a_patch() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(GoodQualityGateway),
-    );
-    let connection = state.manager.create("p-b10-no-repair", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-no-repair");
-    drop(connection);
-
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b10:no-repair","idempotencyKey":"key:b10:no-repair",
-        "projectId":"p-b10-no-repair","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
-    })).unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-no-repair", "B10", NOW).unwrap();
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "NO_REPAIR");
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-no-repair' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-}
-
-#[test]
-fn b10_production_repair_limit_marks_advisory_and_keeps_rendered_body() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(RecordingGateway),
-    );
-    let connection = state.manager.create("p-b10-limit", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-limit");
-    drop(connection);
-
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b10:limit","idempotencyKey":"key:b10:limit",
-        "projectId":"p-b10-limit","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":1}
-    })).unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-limit", "B10", NOW).unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-limit' AND artifact_type='FinalChapter'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "ADVISORY_ESCALATION");
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT status FROM jobs WHERE project_id='p-b10-limit'",
-                [],
-                |row| row.get(0)
-            )
-            .unwrap(),
-        "COMPLETED"
-    );
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b10-limit' AND capability='RENDER_CHAPTER'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-}
-
-#[test]
-fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_new_candidate() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_id = "p-b5b-s40-repair";
-    let gateway = S40RepairGateway::default();
-    let state =
-        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
-    let connection = state
-        .manager
-        .create(project_id, "B5-B S40 repair", NOW)
-        .unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
-    let prior_job_id =
-        StableIdentityFactory::from_command(StableIdKind::Job, "cmd:b5b:prior-audit").unwrap();
-    connection
-        .execute(
-            "INSERT INTO jobs(job_id,project_id,job_type,chapter_id,status,current_stage,attempt_no,repair_round,created_at,updated_at) VALUES (?1,?2,'CHAPTER',?3,'FAILED','AUDIT',1,0,?4,?4)",
-            libsql_rusqlite::params![prior_job_id, project_id, chapter_id, NOW],
-        )
-        .unwrap();
-    let prior_audit_id =
-        StableIdentityFactory::from_command(StableIdKind::ModelRun, "cmd:b5b:prior-audit:model")
-            .unwrap();
-    let mut prior_audit = FakeModelTransport::success(json!({
-        "qualityFindings":[],
-        "canonCandidates":[],
-        "knowledgeCandidates":[],
-        "continuityCandidates":[],
-        "taskProgressCandidates":[],
-        "revealedReservationRefs":[],
-        "evidenceRanges":[],
-        "auditCompleteness":"COMPLETE_NO_CHANGE",
-        "unresolvedHard":false
-    }));
-    DurableModelRunner::execute(
-        &connection,
-        &mut prior_audit,
-        &ModelRunSpec {
-            model_run_id: prior_audit_id.clone(),
-            job_id: Some(prior_job_id.clone()),
-            step_id: None,
-            provider: "prior-audit-provider".into(),
-            model: "prior-audit-model".into(),
-            idempotency_key: "key:b5b:prior-audit:model".into(),
-            capability: "AUDIT_EXTRACT".into(),
-            prompt_ref: None,
-            context_manifest_ref: None,
-            budget_id: Some(format!("budget:b08:{project_id}")),
-            predicted_cost_cents: 0,
-            cost_snapshot: None,
-            attempt_no: 1,
-            repair_round: 0,
-        },
-        NOW,
-    )
-    .unwrap();
-    assert_eq!(prior_audit.send_calls(), 1);
-    assert!(DurableModelRunner::completed_result_for_job(
-        &connection,
-        project_id,
-        &prior_job_id,
-        "AUDIT_EXTRACT"
-    )
-    .unwrap()
-    .is_some());
-    drop(connection);
-
-    let result = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b5b:s40-repair",
-            "idempotencyKey":"key:b5b:s40-repair","projectId":project_id,
-            "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":2,"retryOfJobId":prior_job_id}
-        }),
-    )
-    .unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    assert_eq!(
-        gateway.capabilities.lock().unwrap().as_slice(),
-        [
-            "PLAN_STRATEGY",
-            "RENDER_CHAPTER",
-            "REPAIR_CANDIDATE",
-            "AUDIT_EXTRACT"
-        ]
-    );
-    assert_eq!(gateway.repair_inputs.lock().unwrap().len(), 1);
-    assert_eq!(
-        gateway.repair_inputs.lock().unwrap()[0]["candidate"]["body"],
-        "林舟被迫等待。门后传来脚步声。"
-    );
-    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
-    let connection = state
-        .manager
-        .open(project_id, "B5-B S40 repair", NOW)
-        .unwrap();
-    assert_ne!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT model_run_id FROM model_runs WHERE project_id=?1 AND capability='AUDIT_EXTRACT' AND model_run_id!=?2 ORDER BY created_at DESC LIMIT 1",
-                libsql_rusqlite::params![project_id, prior_audit_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        prior_audit_id,
-        "repaired candidate requires a fresh audit ModelRun"
-    );
-    assert_eq!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT status FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
-                libsql_rusqlite::params![project_id, prior_audit_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        "COMPLETED",
-        "the historical audit remains intact"
-    );
-    let repaired_body = "林舟决定推开石门。“我必须找到出口。”“石门后有人。”门后传来脚步声。";
-    assert_eq!(
-        gateway.audit_inputs.lock().unwrap()[0]["body"],
-        repaired_body
-    );
-
-    let candidates = {
-        let mut statement = connection
-            .prepare("SELECT a.artifact_id,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
-            .unwrap();
-        statement
-            .query_map([project_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .map(|row| {
-                let (artifact_id, payload) = row.unwrap();
-                let mut payload = serde_json::from_str::<Value>(&payload).unwrap();
-                payload["artifactId"] = json!(artifact_id);
-                payload
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        candidates.len(),
-        2,
-        "the source and repaired candidates remain traceable"
-    );
-    let original = candidates
-        .iter()
-        .find(|candidate| candidate["candidatePatch"].is_null())
-        .unwrap();
-    let repaired = candidates
-        .iter()
-        .find(|candidate| !candidate["candidatePatch"].is_null())
-        .unwrap();
-    assert_eq!(original["body"], "林舟被迫等待。门后传来脚步声。");
-    assert_eq!(repaired["body"], repaired_body);
-    assert_eq!(repaired["candidatePatch"]["start"], 2);
-    assert_eq!(repaired["candidatePatch"]["end"], 7);
-    assert!(repaired_body.ends_with("门后传来脚步声。"));
-    assert_eq!(repaired["candidatePatch"]["kind"], "CandidatePatch");
-    assert_eq!(repaired["candidatePatch"]["status"], "CANDIDATE");
-    assert_eq!(repaired["candidatePatch"]["repairRun"], 1);
-
-    let quality_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='NarrativeQualityReport'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(quality_payload["repair"]["status"], "REPAIRED");
-    assert_eq!(quality_payload["repair"]["run"], 1);
-    assert_eq!(
-        quality_payload["repair"]["candidateBefore"]["artifactId"],
-        original["artifactId"]
-    );
-    assert_eq!(
-        quality_payload["repair"]["candidateAfter"]["artifactId"],
-        repaired["artifactId"]
-    );
-    assert!(quality_payload["recheckedDimensions"]
-        .as_array()
-        .is_some_and(|dimensions| dimensions.iter().any(|dimension| dimension == "agency")));
-
-    let audit_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ReviewReport'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        audit_payload["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-    assert_eq!(
-        gateway.audit_inputs.lock().unwrap()[0]["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-    let final_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        final_payload["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-
-    let repair_run: (String, String, String) = connection
-        .query_row(
-            "SELECT m.model_run_id,r.budget_ref,m.status FROM model_runs m JOIN budget_reservations r ON r.reservation_id=m.budget_reservation_id WHERE m.project_id=?1 AND m.capability='REPAIR_CANDIDATE'",
-            [project_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(repair_run.2, "COMPLETED");
-    assert_eq!(repair_run.1, format!("budget:b08:{project_id}"));
-    assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
-
-    let receipt_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(receipt_payload["modelRunRefs"]
-        .as_array()
-        .is_some_and(|runs| runs.iter().any(|run| run == &repair_run.0)));
-    let certificate_evidence: String = connection
-        .query_row(
-            "SELECT evidence_refs_json FROM gate_certificates WHERE project_id=?1 ORDER BY passed_at DESC LIMIT 1",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let evidence: Value = serde_json::from_str(&certificate_evidence).unwrap();
-    let audit_artifact_id: String = connection
-        .query_row(
-            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='ReviewReport'",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let quality_artifact_id: String = connection
-        .query_row(
-            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='NarrativeQualityReport'",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(evidence.as_array().is_some_and(|refs| {
-        refs.iter()
-            .any(|reference| reference["artifactId"] == audit_artifact_id)
-            && refs
-                .iter()
-                .any(|reference| reference["artifactId"] == quality_artifact_id)
-    }));
 }
 
 #[test]
@@ -5221,7 +4577,7 @@ fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_r
                 |row| row.get(0),
             )
             .unwrap(),
-        4,
+        3,
         "post-Gate retry must not make additional model calls"
     );
     assert_eq!(

@@ -8918,7 +8918,6 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 return crate::production::run_chapter_production(
                     &state.manager,
                     state.production_gateway.as_ref(),
-                    &state.skill_bundle_loader,
                     &request,
                 );
             }
