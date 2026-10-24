@@ -92,6 +92,9 @@ fn retryable_real_production_error(error: &str) -> bool {
         // the chapter is written again, as the user would.
         "B08_RESERVATION_VIOLATION",
         "B08_AUDIT_TRUNCATED_OR_INVALID",
+        // 2026-10-24: the audit named a new thread "thread-1" although the
+        // prompt asks for "thread:<id>"; written again like other variance.
+        "B08_THREAD_DISPOSITION_INVALID",
         "ROLLING_HORIZON_CAPACITY_INVALID",
     ]
     .iter()
