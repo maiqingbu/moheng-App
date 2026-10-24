@@ -60,7 +60,7 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
             {"slotNo":3,"objective":"准备下一冲突","tentative":true}],
         "craft":{
             "bigTurn":format!("第{chapter}章林满发现彭三的人动过货单"),
-            "smallDiscovery":format!("第{chapter}章老董也欠着彭三一笔钱"),
+            "smallDiscovery":format!("第{chapter}章老董的账本上写着“欠彭三”"),
             "protagonistWin":format!("第{chapter}章林满当众把假账揪了出来"),
             "device":{"name":"听旧物","status":if chapter == 1 {"NEW"} else {"ESCALATED"},"howUsed":format!("第{chapter}次摸到旧物，听见的声音比上次更清楚")},
             "warmth":if vague {"温暖".to_string()} else {format!("第{chapter}章姑妈在灶上给他留了一碗面")},

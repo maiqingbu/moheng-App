@@ -78,6 +78,7 @@ pub fn normalize_chapter_plan_model_output(
     // scene/beat execution list.
     if plan.get("craft").is_some_and(Value::is_object) {
         plan["payloadSchema"] = json!("chapter-plan.r2");
+        crate::craft_plan::strip_plan_quotes(&mut plan);
         if let Some(object) = plan.as_object_mut() {
             object.remove("sceneExecution");
         }

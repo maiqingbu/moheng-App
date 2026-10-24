@@ -358,10 +358,14 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
         ]
         .iter()
         .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
-        // Signing does not read the repair scope, so a left-out one is empty.
-        && value
-            .pointer("/payload/repair_scope")
-            .is_none_or(Value::is_array)
+        // Payload lists signing never reads: a left-out one is empty.
+        && ["repair_scope"]
+            .iter()
+            .all(|field| {
+                value
+                    .pointer(&format!("/payload/{field}"))
+                    .is_none_or(Value::is_array)
+            })
 }
 
 fn model_results(

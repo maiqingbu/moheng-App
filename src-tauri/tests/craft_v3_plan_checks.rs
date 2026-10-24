@@ -46,7 +46,7 @@ fn has(problems: &[String], needle: &str) -> bool {
 
 #[test]
 fn a_concrete_first_chapter_plan_passes() {
-    let problems = plan_problems(&plan(), 1, &bible(), &creation_ledger(&[]));
+    let problems = plan_problems(&plan(), 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(problems.is_empty(), "{problems:?}");
 }
 
@@ -56,7 +56,7 @@ fn vague_decisions_and_an_unchanged_situation_are_reported() {
     plan["craft"]["warmth"] = json!("温暖");
     plan["craft"]["situationChange"] =
         json!({"before":"被彭三盯上的账房","after":"被彭三盯上的账房"});
-    let problems = plan_problems(&plan, 1, &bible(), &creation_ledger(&[]));
+    let problems = plan_problems(&plan, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "温度或幽默写得太空"), "{problems:?}");
     assert!(has(&problems, "处境变化前后相同"), "{problems:?}");
 }
@@ -64,7 +64,7 @@ fn vague_decisions_and_an_unchanged_situation_are_reported() {
 #[test]
 fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
     let prior = [(1, plan()["craft"].clone())];
-    let ledger = creation_ledger(&prior);
+    let ledger = creation_ledger(&prior, &bible());
     let repeated = plan_problems(&plan(), 2, &bible(), &ledger);
     assert!(has(&repeated, "之前已经用过"), "{repeated:?}");
     assert!(has(&repeated, "用法和之前一模一样"), "{repeated:?}");
@@ -81,14 +81,14 @@ fn devices_must_be_new_or_a_real_escalation_of_an_earlier_one() {
     let mut fake = plan();
     fake["craft"]["device"]["status"] = json!("ESCALATED");
     assert!(has(
-        &plan_problems(&fake, 1, &bible(), &creation_ledger(&[])),
+        &plan_problems(&fake, 1, &bible(), &creation_ledger(&[], &bible())),
         "之前没用过"
     ));
 }
 
 #[test]
 fn reusing_two_places_or_an_ending_of_an_earlier_chapter_is_reported() {
-    let ledger = creation_ledger(&[(1, plan()["craft"].clone())]);
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone())], &bible());
     let mut next = plan();
     next["craft"]["device"] =
         json!({"name":"读账本","status":"NEW","howUsed":"翻到旧账本时看见记账人当时的手"});
@@ -102,27 +102,51 @@ fn reusing_two_places_or_an_ending_of_an_earlier_chapter_is_reported() {
 }
 
 #[test]
-fn people_must_be_scheduled_by_the_story_bible() {
+fn story_bible_cast_never_appears_before_its_chapter() {
     let mut early = plan();
     early["craft"]["scenes"][0]["people"][1] = person("阿秋");
-    early["craft"]["scenes"][1]["people"][1] = person("陌生人");
     let mut bible = bible();
     bible["cast"][0]["firstAppears"] = json!(2);
-    let problems = plan_problems(&early, 1, &bible, &creation_ledger(&[]));
+    let problems = plan_problems(&early, 1, &bible, &creation_ledger(&[], &bible));
     assert!(
-        has(
-            &problems,
-            "人物「阿秋、陌生人」没有在故事底稿里安排到本章出场"
-        ),
+        has(&problems, "人物「阿秋」在故事底稿里安排到第 2 章才出场"),
         "{problems:?}"
     );
-    assert!(plan_problems(
-        &early,
-        2,
-        &bible,
-        &creation_ledger(&[(1, json!({"scenes":[{"people":[person("陌生人")]}]}))])
-    )
-    .is_empty());
+    assert!(plan_problems(&early, 2, &bible, &creation_ledger(&[], &bible)).is_empty());
+}
+
+#[test]
+fn a_walk_on_outside_the_story_bible_may_appear_and_counts_toward_the_scene() {
+    // Real run 2026-10-24: twelve chapter-1 plans were rejected, seven of
+    // them for a colleague, a guard or a neighbour the bible never names.
+    let mut crowded = plan();
+    crowded["craft"]["scenes"][1]["people"] = json!([person("林满"), person("保安乙")]);
+    assert!(plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible())).is_empty());
+    let ledger = creation_ledger(&[(1, crowded["craft"].clone())], &bible());
+    assert_eq!(ledger["introducedPeople"], json!(["林满", "老董"]));
+}
+
+#[test]
+fn quote_marks_are_taken_out_of_a_plan_instead_of_rejecting_it() {
+    use ai_novel_production_system_core::craft_plan::strip_plan_quotes;
+    let mut quoted = plan();
+    quoted["craft"]["smallDiscovery"] = json!("老董的账本上写着“查无此人”");
+    quoted["craft"]["scenes"][0]["events"][0] = json!("老董把写着「作废」的货单递过来");
+    quoted["chapterGoal"] = json!("林满查清“作废”货单");
+    strip_plan_quotes(&mut quoted);
+    assert_eq!(
+        quoted["craft"]["smallDiscovery"],
+        "老董的账本上写着查无此人"
+    );
+    assert_eq!(
+        quoted["craft"]["scenes"][0]["events"][0],
+        "老董把写着作废的货单递过来"
+    );
+    assert_eq!(
+        quoted["chapterGoal"], "林满查清“作废”货单",
+        "only craft is the writer's plan"
+    );
+    assert!(plan_problems(&quoted, 1, &bible(), &creation_ledger(&[], &bible())).is_empty());
 }
 
 #[test]
@@ -131,20 +155,19 @@ fn chapter_three_must_name_what_changes_with_the_antagonist() {
     third["craft"]["bigTurn"] = json!("林满发现货单被人连夜调包了");
     third["craft"]["situationChange"]["after"] = json!("被人盯上的账房");
     third["craft"]["smallDiscovery"] = json!("老董自己也欠着别人一笔钱");
-    let problems = plan_problems(&third, 3, &bible(), &creation_ledger(&[]));
+    let problems = plan_problems(&third, 3, &bible(), &creation_ledger(&[], &bible()));
     assert!(
         has(&problems, "和对手「彭三」的关系怎么变了"),
         "{problems:?}"
     );
-    assert!(plan_problems(&plan(), 3, &bible(), &creation_ledger(&[])).is_empty());
+    assert!(plan_problems(&plan(), 3, &bible(), &creation_ledger(&[], &bible())).is_empty());
 }
 
 #[test]
-fn quoted_lines_and_similes_do_not_belong_in_a_plan() {
+fn similes_do_not_belong_in_a_plan() {
     let mut wordy = plan();
-    wordy["craft"]["emotionalBeat"] = json!("他说“这笔账我记下了”，心像被攥紧了似的");
-    let problems = plan_problems(&wordy, 1, &bible(), &creation_ledger(&[]));
-    assert!(has(&problems, "带引号的台词"), "{problems:?}");
+    wordy["craft"]["emotionalBeat"] = json!("他记下这笔账，心像被攥紧了似的");
+    let problems = plan_problems(&wordy, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "用了比喻"), "{problems:?}");
 }
 
@@ -152,7 +175,7 @@ fn quoted_lines_and_similes_do_not_belong_in_a_plan() {
 fn the_ledger_collects_devices_endings_people_losses_and_last_places() {
     let mut second = plan()["craft"].clone();
     second["scenes"] = json!([scene("当铺后院"), scene("渡口")]);
-    let ledger = creation_ledger(&[(1, plan()["craft"].clone()), (2, second)]);
+    let ledger = creation_ledger(&[(1, plan()["craft"].clone()), (2, second)], &bible());
     assert_eq!(ledger["devices"].as_array().unwrap().len(), 2);
     assert_eq!(ledger["endings"][0]["chapter"], 1);
     assert_eq!(ledger["introducedPeople"], json!(["林满", "老董"]));
@@ -164,7 +187,7 @@ fn the_ledger_collects_devices_endings_people_losses_and_last_places() {
 fn a_rejected_plan_returns_every_problem_to_the_planner() {
     let mut bad = plan();
     bad["craft"]["warmth"] = json!("温暖");
-    let error = check_craft_plan(&bad, 1, &bible(), &creation_ledger(&[])).unwrap_err();
+    let error = check_craft_plan(&bad, 1, &bible(), &creation_ledger(&[], &bible())).unwrap_err();
     assert!(error.starts_with("B08_PLAN_CRAFT:"), "{error}");
     let feedback = plan_feedback(&error).unwrap();
     assert_eq!(feedback["rejectedFor"], "B08_PLAN_CRAFT");
@@ -172,7 +195,7 @@ fn a_rejected_plan_returns_every_problem_to_the_planner() {
         .as_str()
         .unwrap()
         .contains("温度或幽默"));
-    check_craft_plan(&plan(), 1, &bible(), &creation_ledger(&[])).unwrap();
+    check_craft_plan(&plan(), 1, &bible(), &creation_ledger(&[], &bible())).unwrap();
 }
 
 #[test]
@@ -202,7 +225,7 @@ fn the_planner_sees_a_bounded_ledger_while_checks_use_the_whole_history() {
             (chapter, craft)
         })
         .collect::<Vec<_>>();
-    let ledger = creation_ledger(&prior);
+    let ledger = creation_ledger(&prior, &bible());
     let view = prompt_ledger(&ledger);
     assert_eq!(
         view["devices"],
@@ -227,13 +250,13 @@ fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_repl
     let mut crowded = plan();
     crowded["craft"]["scenes"][0]["events"] = json!(["一", "二", "三", "四", "五", "六", "七"]);
     crowded["craft"]["scenes"][1]["people"] = json!([person("林满")]);
-    let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[]));
+    let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "第 1 场有 7 条事件"), "{problems:?}");
     assert!(has(&problems, "第 2 场只有 1 个人物"), "{problems:?}");
     let mut single = plan();
     single["craft"]["scenes"] = json!([scene("江边码头")]);
     single["craft"]["device"]["status"] = json!("OLD");
-    let problems = plan_problems(&single, 1, &bible(), &creation_ledger(&[]));
+    let problems = plan_problems(&single, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "需要 2 到 3 个场景"), "{problems:?}");
     assert!(
         has(&problems, "status 只能是 NEW 或 ESCALATED"),

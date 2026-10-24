@@ -132,20 +132,24 @@ fn a_project_with_a_confirmed_story_bible_plans_r2_chapters_with_bible_and_ledge
     drop(inputs);
 
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let plan_schemas: Vec<String> = connection
-        .prepare("SELECT json_extract(p.payload_json,'$.payloadSchema') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER'")
+    let plans: Vec<(String, Option<String>)> = connection
+        .prepare("SELECT json_extract(p.payload_json,'$.payloadSchema'), json_extract(p.payload_json,'$.craft.smallDiscovery') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER'")
         .unwrap()
-        .query_map([&project_id], |row| row.get(0))
+        .query_map([&project_id], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
+    let r2_discoveries = plans
+        .iter()
+        .filter(|(schema, _)| schema == "chapter-plan.r2")
+        .filter_map(|(_, discovery)| discovery.as_deref())
+        .collect::<Vec<_>>();
+    assert!(r2_discoveries.len() >= 2, "{plans:?}");
     assert!(
-        plan_schemas
+        r2_discoveries
             .iter()
-            .filter(|schema| *schema == "chapter-plan.r2")
-            .count()
-            >= 2,
-        "{plan_schemas:?}"
+            .all(|text| text.contains("欠彭三") && !text.contains('“')),
+        "the committed plan has its quote marks taken out: {r2_discoveries:?}"
     );
     let receipt: String = connection
         .query_row(

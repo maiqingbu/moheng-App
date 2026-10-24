@@ -51,8 +51,10 @@ fn scene_people(craft: &Value) -> impl Iterator<Item = &Value> {
 /// The creation ledger (CRAFT_V3_DESIGN §4.3): what the committed chapters
 /// already used, rebuilt from their r2 plans in chapter order.
 /// `prior` holds `(chapter_no, craft)` pairs; r1 chapters have no craft and
-/// are simply absent.
-pub fn creation_ledger(prior: &[(i64, Value)]) -> Value {
+/// are simply absent. Only story-bible people count as introduced: walk-ons
+/// stay in their scene.
+pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
+    let bible_people = bible_people(bible);
     let mut devices = Vec::new();
     let mut endings = Vec::new();
     let mut people = BTreeSet::new();
@@ -77,29 +79,26 @@ pub fn creation_ledger(prior: &[(i64, Value)]) -> Value {
     json!({
         "devices":devices,
         "endings":endings,
-        "introducedPeople":people.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>(),
+        "introducedPeople":people.into_iter().filter(|name| bible_people.contains(name.as_str())).collect::<Vec<_>>(),
         "losses":losses,
         "lastChapterPlaces":last_places
     })
 }
 
-/// People the story bible allows on stage by this chapter.
-fn allowed_people(bible: &Value, chapter: i64, ledger: &Value) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for path in ["/protagonist/name", "/antagonist/name"] {
-        if let Some(name) = bible.pointer(path).and_then(Value::as_str) {
-            names.insert(name.trim().to_string());
-        }
-    }
-    for member in bible["cast"].as_array().into_iter().flatten() {
-        if member["firstAppears"].as_i64().unwrap_or(1) <= chapter {
-            names.insert(text(&member["name"]).to_string());
-        }
-    }
-    for name in ledger["introducedPeople"].as_array().into_iter().flatten() {
-        names.insert(text(name).to_string());
-    }
-    names
+/// Everyone the story bible names: protagonist, antagonist and cast.
+fn bible_people(bible: &Value) -> BTreeSet<&str> {
+    [&bible["protagonist"]["name"], &bible["antagonist"]["name"]]
+        .into_iter()
+        .chain(
+            bible["cast"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|member| &member["name"]),
+        )
+        .map(text)
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
@@ -206,16 +205,19 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             problems.push("章末钩子和之前某章完全相同".into());
         }
     }
-    let allowed = allowed_people(bible, chapter, ledger);
-    let unplanned = scene_people(craft)
+    // Owner decision (2026-10-24): walk-ons outside the bible may appear;
+    // bible cast still waits for the chapter it is scheduled to appear in.
+    let on_stage = scene_people(craft)
         .map(|person| text(&person["name"]))
-        .filter(|name| !name.is_empty() && !allowed.contains(*name))
         .collect::<BTreeSet<_>>();
-    if !allowed.is_empty() && !unplanned.is_empty() {
-        problems.push(format!(
-            "人物「{}」没有在故事底稿里安排到本章出场，请改用已安排的人物，或先在底稿里加上",
-            unplanned.into_iter().collect::<Vec<_>>().join("、")
-        ));
+    for member in bible["cast"].as_array().into_iter().flatten() {
+        let first = member["firstAppears"].as_i64().unwrap_or(1);
+        let name = text(&member["name"]);
+        if first > chapter && on_stage.contains(name) {
+            problems.push(format!(
+                "人物「{name}」在故事底稿里安排到第 {first} 章才出场，本章不能提前出现；路人可以不在底稿里"
+            ));
+        }
     }
     let mut all = Vec::new();
     crate::chapter_craft::collect_strings(craft, &mut all);
@@ -227,13 +229,26 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             ));
         }
     }
-    if all.iter().any(|item| item.contains(QUOTE_MARKS)) {
-        problems.push("计划里写了带引号的台词；计划只写发生什么，台词留给正文".into());
-    }
     if all.iter().any(|item| simile_count(item) > 0) {
         problems.push("计划里用了比喻；计划只写发生什么，不写修辞".into());
     }
     problems
+}
+
+/// Takes the quote marks out of every craft value (owner decision
+/// 2026-10-24): a planner quoting a word is not a reason to plan again.
+pub fn strip_plan_quotes(plan: &mut Value) {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::String(text) if text.contains(QUOTE_MARKS) => {
+                *text = text.replace(QUOTE_MARKS, "");
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            Value::Object(map) => map.values_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut plan["craft"]);
 }
 
 /// `Err(B08_PLAN_CRAFT:…)` listing every problem, or `Ok`.
@@ -447,10 +462,11 @@ impl ChapterPlanner {
         let prior =
             crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
                 .map_err(|error| error.to_string())?;
+        let ledger = creation_ledger(&prior, &bible);
         Ok(Self {
             craft: Some(CraftPlanning {
                 bible,
-                ledger: creation_ledger(&prior),
+                ledger,
                 established_facts: established_facts(
                     &prior_facts(connection, project_id, chapter_id)?,
                     &[],
