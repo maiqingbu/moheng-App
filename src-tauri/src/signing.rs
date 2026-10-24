@@ -303,11 +303,26 @@ fn model_item_result(
             )
             .is_ok();
         // A verbatim quote found exactly once in its chapter is bound to where
-        // it actually is, as audit evidence is; anything else is unverified.
-        let Some((range_start, range_end)) = offsets_match
-            .then_some((range_start, range_end))
-            .or_else(|| crate::production::locate_unique_quote(&chapter.body, exact_quote))
-        else {
+        // it actually is, as audit evidence is; one found in exactly one other
+        // chapter of the three is bound to that chapter (owner decision
+        // 2026-10-25); anything else is unverified.
+        let located = offsets_match
+            .then_some((chapter, (range_start, range_end)))
+            .or_else(|| {
+                crate::production::locate_unique_quote(&chapter.body, exact_quote)
+                    .map(|span| (chapter, span))
+            })
+            .or_else(|| {
+                let mut found = chapters
+                    .iter()
+                    .filter(|other| other.chapter_no != chapter_no)
+                    .filter_map(|other| {
+                        crate::production::locate_unique_quote(&other.body, exact_quote)
+                            .map(|span| (other, span))
+                    });
+                found.next().filter(|_| found.next().is_none())
+            });
+        let Some((chapter, (range_start, range_end))) = located else {
             return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
         };
         let exact_quote = chapter
@@ -317,7 +332,7 @@ fn model_item_result(
             .take(range_end - range_start)
             .collect::<String>();
         checked_evidence.push(json!({
-            "chapterNo":chapter_no,
+            "chapterNo":chapter.chapter_no,
             "chapterId":chapter.chapter_id,
             "finalChapterRef":ref_value(&chapter.final_ref),
             "rangeStart":range_start,
@@ -1207,7 +1222,7 @@ fn signing_model_input(
         "commonCoreRules":core,
         "platformProfiles":profiles,
         "outputSchema":output_schema,
-        "prompt":"执行 S35 黄金三章 SigningReview。确定性规则已由 Runtime 完成；逐项评估 C0-2、R2-1 至 R2-6、E3-1 至 E3-9、E3-11，以及五个平台各自的 E3-10。按 outputSchema 返回完整 S35 SkillResultEnvelope，并将评估项放入 payload.signingEvaluationItems。每个项目都必须提供正文中的 exactQuote、chapterNo、rangeStart、rangeEnd；引用必须逐字复制，不得改写、纠正或推测位置。不得评估或生成规避 AI 检测的内容。不得把 C0-4 计入分数，只提示投稿前如实声明。"
+        "prompt":"执行 S35 黄金三章 SigningReview。确定性规则已由 Runtime 完成；逐项评估 C0-2、R2-1 至 R2-6、E3-1 至 E3-9、E3-11，以及五个平台各自的 E3-10。C0-2 是通用内容禁区：正文是否含违法犯罪教唆、色情、血腥暴力细节、歧视或对真实人物的诽谤等各平台通用的禁止内容，没有则 PASS，并引用一段最能代表全文尺度的正文；它与 AI 声明无关（AI 声明是 C0-4）。按 outputSchema 返回完整 S35 SkillResultEnvelope，并将评估项放入 payload.signingEvaluationItems。每个项目都必须提供正文中的 exactQuote、chapterNo、rangeStart、rangeEnd；引用必须逐字复制，不得改写、纠正或推测位置。不得评估或生成规避 AI 检测的内容。不得把 C0-4 计入分数，只提示投稿前如实声明。"
     });
     let context_digest =
         sha256_canonical(&skill_task_context).map_err(|error| error.to_string())?;
@@ -2163,6 +2178,34 @@ mod tests {
         assert_eq!(result["evidence"][0]["rangeStart"], 4);
         assert_eq!(result["evidence"][0]["rangeEnd"], 12);
         assert_eq!(result["evidence"][0]["exactQuote"], "林舟找到一页旧账");
+    }
+
+    #[test]
+    fn signing_verbatim_quote_under_the_wrong_chapter_is_bound_to_its_chapter() {
+        // Real run 2026-10-25: verbatim chapter-2 quotes were labelled 1 and 3.
+        let chapters = [
+            fixture_chapter(1, "雨夜里，林舟找到一页旧账。"),
+            fixture_chapter(2, "他走进地铁站，闸机亮着绿灯。"),
+            fixture_chapter(3, "楼门口也亮着绿灯。"),
+        ];
+        let item = |quote: &str| {
+            model_item_result(
+                Some(&json!({
+                    "itemId":"R2-6","result":"PASS","reason":"语体稳定",
+                    "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":quote}]
+                })),
+                "R2-6",
+                &chapters,
+                None,
+            )
+        };
+        let bound = item("闸机亮着绿灯");
+        assert_eq!(bound["result"], "PASS");
+        assert_eq!(bound["evidence"][0]["chapterNo"], 2);
+        assert_eq!(bound["evidence"][0]["chapterId"], "chapter:2");
+        assert_eq!(bound["evidence"][0]["rangeStart"], 7);
+        // A quote found in more than one other chapter cannot be bound.
+        assert_eq!(item("亮着绿灯")["result"], "NOT_VERIFIED");
     }
 
     #[test]
