@@ -206,7 +206,10 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
     assert!(render.get("beatTargets").is_none() && render.get("partLengthRange").is_none());
     let adjust = call("ADJUST_CHAPTER_LENGTH").expect("length adjustment");
     assert_eq!(adjust["direction"], "EXPAND");
-    assert!(adjust["shortBy"].as_i64().unwrap() > 0);
+    // Real run 2026-10-24: told only how far over, the model cut about a
+    // tenth; it now gets the count it has and the count to reach.
+    assert!(adjust["currentChars"].as_i64() < adjust["targetChars"].as_i64());
+    assert!(adjust.get("shortBy").is_none() && adjust.get("overBy").is_none());
     let rewrite = call("REWRITE_PASSAGES").expect("rule edits");
     assert!(rewrite["findings"]
         .as_array()

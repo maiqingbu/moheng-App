@@ -138,7 +138,8 @@ fn fx18_a_chapter_brought_into_the_range_by_its_adjustment_is_kept() {
     );
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
-    assert_eq!(adjust[0]["shortBy"], 2000 - 900);
+    assert_eq!(adjust[0]["currentChars"], 900);
+    assert_eq!(adjust[0]["targetChars"], 2500);
     assert_eq!(
         final_word_count(&state, "p-fx18-adjusted", &chapter_id),
         Some(2500)

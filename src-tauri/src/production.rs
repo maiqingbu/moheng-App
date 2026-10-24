@@ -465,7 +465,10 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         let mut profile = self.resolve_profile()?;
         let setting = match capability {
             "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "renderModelId",
-            "AUDIT_EXTRACT" | "REVIEW_CHAPTER" => "auditModelId",
+            // Owner decision (2026-10-24): r2 plans use the audit model.
+            "AUDIT_EXTRACT" | "REVIEW_CHAPTER" | crate::craft_plan::PLAN_CHAPTER_CRAFT => {
+                "auditModelId"
+            }
             _ => return Ok(profile),
         };
         if let Some(paths) = &self.settings_paths {
@@ -2297,7 +2300,8 @@ fn run_chapter_production_inner(
         return Err("B08_GATE_POLICY_STALE".into());
     }
     let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
-    let provider_profile = gateway.resolve_profile()?;
+    // A missing or invalid provider fails the attempt before anything runs.
+    gateway.resolve_profile()?;
     if let Some(previous_job_id) = &retry_of_job_id {
         DurableJobService::validate_retry_source(
             connection,
@@ -2534,12 +2538,13 @@ fn run_chapter_production_inner(
                 StableIdKind::ModelRun,
                 &format!("{command_id}:plan"),
             )?;
+            let planning_profile = gateway.resolve_step_profile(planner.capability())?;
             let planning_spec = ModelRunSpec {
                 model_run_id: planning_run_id.clone(),
                 job_id: Some(job_id.clone()),
                 step_id: None,
-                provider: provider_profile.provider.clone(),
-                model: provider_profile.model.clone(),
+                provider: planning_profile.provider.clone(),
+                model: planning_profile.model.clone(),
                 idempotency_key: format!("{idempotency_key}:plan"),
                 capability: planner.capability().into(),
                 prompt_ref: None,
@@ -2619,7 +2624,7 @@ fn run_chapter_production_inner(
             let (plan_payload, planning_run_id) = plan_chapter_with_feedback(
                 connection,
                 gateway,
-                &provider_profile,
+                &planning_profile,
                 &planning_spec,
                 planning_input.clone(),
                 &now,
@@ -2883,9 +2888,7 @@ fn run_chapter_production_inner(
     // A chapter outside the length range gets one expand or compress call;
     // it is never committed outside the range.
     if gateway.enforces_chapter_length() {
-        let in_range = |text: &str| {
-            (length_range.min..=length_range.ceiling()).contains(&character_count(text))
-        };
+        let in_range = |text: &str| length_range.accepts(character_count(text));
         body = crate::chapter_craft::normalize_typography(body.trim());
         if !in_range(&body) {
             let length = character_count(&body);
@@ -2897,8 +2900,8 @@ fn run_chapter_production_inner(
                 json!({
                     "chapterId":chapter_id,"chapterPlan":plan_payload,"body":body,
                     "direction":if length < length_range.min { "EXPAND" } else { "COMPRESS" },
-                    "shortBy":(length_range.min - length).max(0),
-                    "overBy":(length - length_range.ceiling()).max(0),
+                    "currentChars":length,
+                    "targetChars":length_range.target(),
                     "chapterLengthRange":length_range.to_json()
                 }),
             )?;

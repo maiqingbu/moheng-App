@@ -1506,6 +1506,8 @@ fn craft_step_model_settings_are_saved_and_used_only_for_their_step() {
     assert_eq!(model("PLAN_STRATEGY"), "plan-model");
     assert_eq!(model("RENDER_CHAPTER"), "writer-model");
     assert_eq!(model("AUDIT_EXTRACT"), "audit-model");
+    // Owner decision (2026-10-24): r2 chapter plans use the audit model.
+    assert_eq!(model("PLAN_CHAPTER_CRAFT"), "audit-model");
     assert_eq!(
         gateway
             .resolve_step_profile("RENDER_CHAPTER")
@@ -1517,4 +1519,5 @@ fn craft_step_model_settings_are_saved_and_used_only_for_their_step() {
     ProviderSettingsRepository::write_global(&paths, &settings("  ", "")).unwrap();
     assert_eq!(model("RENDER_CHAPTER"), "plan-model");
     assert_eq!(model("AUDIT_EXTRACT"), "plan-model");
+    assert_eq!(model("PLAN_CHAPTER_CRAFT"), "plan-model");
 }

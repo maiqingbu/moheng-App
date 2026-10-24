@@ -6994,7 +6994,6 @@ fn compile_current_chapter_plan(
         requested_at,
     )?;
     let planning_revision = context_receipt.after_revision;
-    let profile = state.production_gateway.resolve_profile()?;
     let planning_run_id =
         StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("{command_id}:plan"))?;
     let state_digest = crate::narrative::relevant_state_digest(&context_input)?;
@@ -7006,6 +7005,9 @@ fn compile_current_chapter_plan(
         chapter_id,
         history.number(),
     )?;
+    let profile = state
+        .production_gateway
+        .resolve_step_profile(planner.capability())?;
     let planning_spec = crate::repositories::runtime::ModelRunSpec {
         model_run_id: planning_run_id.clone(),
         job_id: None,

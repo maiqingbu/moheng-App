@@ -169,6 +169,12 @@ fn similes_do_not_belong_in_a_plan() {
     wordy["craft"]["emotionalBeat"] = json!("他记下这笔账，心像被攥紧了似的");
     let problems = plan_problems(&wordy, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "用了比喻"), "{problems:?}");
+    // Real run 2026-10-24: neither of these is a simile.
+    let mut plain = plan();
+    plain["craft"]["warmth"] = json!("姑妈像往常一样在灶上给他留了一碗面");
+    plain["craft"]["smallDiscovery"] = json!("老董问他见没见过类似的货单");
+    let problems = plan_problems(&plain, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(!has(&problems, "用了比喻"), "{problems:?}");
 }
 
 #[test]

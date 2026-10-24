@@ -247,7 +247,8 @@ fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
     assert_eq!(adjust[0]["direction"], "EXPAND");
-    assert_eq!(adjust[0]["shortBy"], 2000 - 1200);
+    assert_eq!(adjust[0]["currentChars"], 1200);
+    assert_eq!(adjust[0]["targetChars"], 2500);
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
 }
 

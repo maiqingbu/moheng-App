@@ -32,6 +32,14 @@ impl ProductionModelGateway for CraftGateway {
         })
     }
 
+    fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
+        let mut profile = self.resolve_profile()?;
+        if capability == "PLAN_CHAPTER_CRAFT" {
+            profile.model = "craft-plan-model".into();
+        }
+        Ok(profile)
+    }
+
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let output = match capability {
             "GENERATE_STORY_DIRECTIONS" => directions_output(),
@@ -132,6 +140,18 @@ fn a_project_with_a_confirmed_story_bible_plans_r2_chapters_with_bible_and_ledge
     drop(inputs);
 
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let plan_models: Vec<String> = connection
+        .prepare("SELECT DISTINCT model FROM model_runs WHERE project_id=?1 AND capability='PLAN_CHAPTER_CRAFT'")
+        .unwrap()
+        .query_map([&project_id], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        plan_models,
+        vec!["craft-plan-model"],
+        "r2 plans use the planning step model"
+    );
     let plans: Vec<(String, Option<String>)> = connection
         .prepare("SELECT json_extract(p.payload_json,'$.payloadSchema'), json_extract(p.payload_json,'$.craft.smallDiscovery') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_level='CHAPTER'")
         .unwrap()

@@ -71,6 +71,11 @@ impl ChapterLengthRange {
         self.max + self.max / 10
     }
 
+    /// The length a chapter aims for: the middle of the range.
+    pub fn target(&self) -> i64 {
+        (self.min + self.max) / 2
+    }
+
     pub fn accepts(&self, characters: i64) -> bool {
         self.min <= characters && characters <= self.ceiling()
     }
