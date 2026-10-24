@@ -522,11 +522,11 @@ pub fn context_hard_scope(input: &ContextCompilerInput) -> Value {
     })
 }
 
-pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 4096;
-pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 32768;
+pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 8192;
+pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 65536;
 pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r7";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
-pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r2";
+pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r3";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
 pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r3";
 pub const OPENING_HARD_CONTRACT_FIELDS: &[&str] = &[
@@ -1351,11 +1351,20 @@ mod b2_context_tests {
     }
 
     #[test]
+    fn craft_hard_context_budget_r3_allows_8192_tokens() {
+        // Owner decision (2026-10-18): facts accumulate across chapters, so
+        // the hard budget doubles until relevance selection (FX-13) lands.
+        assert_eq!(CONTEXT_HARD_TOKEN_LIMIT, 8192);
+        assert_eq!(CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, 65536);
+        assert_eq!(CONTEXT_HARD_BUDGET_POLICY_VERSION, "b06-hard-budget.r3");
+    }
+
+    #[test]
     fn rv14_digest_changes_when_hard_budget_policy_version_changes() {
         let input = empty_input();
         let original = relevant_state_digest(&input).unwrap();
         let next_policy = ContextDigestConfig {
-            hard_budget_policy_version: "b06-hard-budget.r3",
+            hard_budget_policy_version: "b06-hard-budget.r4",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let updated = relevant_state_digest_with_config(&input, next_policy).unwrap();

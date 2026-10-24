@@ -18,13 +18,13 @@ use crate::project_db::{
     ProjectManager,
 };
 use crate::provider::{
-    OpenAiCompatibleProvider, ProviderAdapter, ProviderConfig, ProviderError, ProviderErrorKind,
-    ProviderRequest, ProviderResponse,
+    OpenAiCompatibleProvider, ProviderAdapter, ProviderAttemptDiagnostic, ProviderConfig,
+    ProviderError, ProviderErrorKind, ProviderRequest, ProviderResponse,
 };
 use crate::repositories::runtime::{
     DurableJobService, DurableModelRunner, JobSpec, ModelRunOutcome, ModelRunSpec, ModelTransport,
-    OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure, TransportResponse,
-    TransportUsage,
+    ModelTransportDiagnostic, OsKeychainSecretStore, RuntimeError, SecretStore, TransportFailure,
+    TransportResponse, TransportUsage,
 };
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use serde_json::{json, Value};
@@ -69,6 +69,23 @@ impl ProductionModelResponse {
     }
 }
 
+impl From<ProviderAttemptDiagnostic> for ModelTransportDiagnostic {
+    fn from(diagnostic: ProviderAttemptDiagnostic) -> Self {
+        Self {
+            provider_send_started_at_unix_ms: Some(diagnostic.started_at_unix_ms),
+            elapsed_ms: Some(diagnostic.elapsed_ms),
+            timeout_ms: Some(diagnostic.timeout_ms),
+            client_timeout_ms: Some(diagnostic.client_timeout_ms),
+            phase: diagnostic.phase.as_str().into(),
+            provider_error_code: diagnostic.provider_error_code,
+            http_status: diagnostic.http_status,
+            response_read: diagnostic.response_read.as_str().into(),
+            response_bytes: diagnostic.response_bytes,
+            provider_request_id: diagnostic.provider_request_id,
+        }
+    }
+}
+
 pub trait ProductionModelGateway: Send + Sync {
     fn provider(&self) -> &str {
         "configured-production-gateway"
@@ -87,6 +104,29 @@ pub trait ProductionModelGateway: Send + Sync {
 
     fn fault_injection(&self) -> Option<&str> {
         None
+    }
+
+    fn transport_diagnostics_enabled(&self) -> bool {
+        false
+    }
+
+    /// FX-18: configured providers must plan and write each chapter within
+    /// its length range. Deterministic gateways return fixed short fixtures
+    /// and skip the length rules.
+    fn enforces_chapter_length(&self) -> bool {
+        false
+    }
+
+    /// Whether a written chapter is reviewed and rewritten with the craft
+    /// review and rewrite skills (the configured writer path).
+    fn reviews_chapter_prose(&self) -> bool {
+        self.enforces_chapter_length()
+    }
+
+    /// FX-21: configured providers classify project assistant questions;
+    /// deterministic gateways keep the keyword routing.
+    fn classifies_assistant_intent(&self) -> bool {
+        false
     }
 
     /// Deterministic gateways can model a concurrent writer after the gate
@@ -115,6 +155,13 @@ pub trait ProductionModelGateway: Send + Sync {
     /// changing production behavior.
     fn on_chapter_gate_revalidation(&self, _attempt: usize) {}
 
+    /// The profile for one production step (owner decisions 2026-10-17/18:
+    /// writing and audit may use their own models); by default the
+    /// production profile.
+    fn resolve_step_profile(&self, _capability: &str) -> Result<ResolvedProviderProfile, String> {
+        self.resolve_profile()
+    }
+
     /// Resolve the provider once at the beginning of a production attempt.
     /// The returned profile is the non-secret snapshot used for every new
     /// ModelRun in that attempt.  Test/deterministic gateways retain their
@@ -132,7 +179,7 @@ pub trait ProductionModelGateway: Send + Sync {
             provider,
             model,
             endpoint: String::new(),
-            timeout_ms: 30_000,
+            timeout_ms: crate::provider::DEFAULT_PROVIDER_TIMEOUT_MS,
         })
     }
 
@@ -143,6 +190,22 @@ pub trait ProductionModelGateway: Send + Sync {
         _profile: &ResolvedProviderProfile,
     ) -> Result<ProductionModelResponse, TransportFailure> {
         self.invoke_typed(capability, input)
+    }
+
+    fn invoke_typed_with_diagnostic(
+        &self,
+        capability: &str,
+        input: &Value,
+        profile: Option<&ResolvedProviderProfile>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        let result = match profile {
+            Some(profile) => self.invoke_typed_with_profile(capability, input, profile),
+            None => self.invoke_typed(capability, input),
+        };
+        (result, None)
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String>;
@@ -184,6 +247,22 @@ pub struct ConfiguredProductionGateway {
     settings_paths: Option<crate::project_db::paths::AppPaths>,
 }
 
+/// The user message for a provider: an input's `prompt` instruction comes
+/// first, followed by every other field as JSON so no data is dropped.
+fn serialize_provider_input(input: &Value) -> String {
+    let Some(prompt) = input.get("prompt").and_then(Value::as_str) else {
+        return input.to_string();
+    };
+    let mut data = input.clone();
+    if let Some(object) = data.as_object_mut() {
+        object.remove("prompt");
+        if object.is_empty() {
+            return prompt.to_owned();
+        }
+    }
+    format!("{prompt}\n\n{data}")
+}
+
 impl ConfiguredProductionGateway {
     pub fn new(
         config: ProviderConfig,
@@ -209,7 +288,7 @@ impl ConfiguredProductionGateway {
                 model_id,
                 endpoint: endpoint.clone(),
                 enabled: !endpoint.is_empty(),
-                timeout_ms: 30_000,
+                timeout_ms: crate::provider::DEFAULT_PROVIDER_TIMEOUT_MS,
             },
             std::sync::Arc::new(OpenAiCompatibleProvider::new(endpoint)),
             std::sync::Arc::new(OsKeychainSecretStore::new(
@@ -272,15 +351,10 @@ impl ConfiguredProductionGateway {
                 "provider secret unavailable",
             )
         })?;
-        let prompt = input
-            .get("prompt")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| input.to_string());
         let request = ProviderRequest {
             capability: capability.into(),
             model_id: config.model_id.clone(),
-            prompt,
+            prompt: serialize_provider_input(input),
             timeout_ms: config.timeout_ms,
         };
         if self.settings_paths.is_some() {
@@ -316,6 +390,33 @@ impl ConfiguredProductionGateway {
             },
         }
     }
+
+    fn transport_failure(error: &ProviderError) -> TransportFailure {
+        match error.kind {
+            ProviderErrorKind::Timeout => TransportFailure::Timeout,
+            ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
+            _ => TransportFailure::Unavailable,
+        }
+    }
+
+    fn typed_provider_result(
+        result: Result<ProviderResponse, ProviderError>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        match result {
+            Ok(response) => {
+                let diagnostic = response.diagnostic.clone();
+                (Ok(Self::response_from_provider(response)), diagnostic)
+            }
+            Err(error) => {
+                let failure = Self::transport_failure(&error);
+                let diagnostic = error.diagnostic.map(|diagnostic| *diagnostic);
+                (Err(failure), diagnostic)
+            }
+        }
+    }
 }
 
 impl ProductionModelGateway for ConfiguredProductionGateway {
@@ -325,6 +426,18 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
 
     fn model(&self, _capability: &str) -> String {
         self.config.model_id.clone()
+    }
+
+    fn transport_diagnostics_enabled(&self) -> bool {
+        true
+    }
+
+    fn enforces_chapter_length(&self) -> bool {
+        true
+    }
+
+    fn classifies_assistant_intent(&self) -> bool {
+        true
     }
 
     fn model_pricing_catalog(
@@ -348,26 +461,67 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         })
     }
 
+    fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
+        let mut profile = self.resolve_profile()?;
+        let setting = match capability {
+            "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "renderModelId",
+            // Owner decision (2026-10-24): r2 plans use the audit model.
+            "AUDIT_EXTRACT" | "REVIEW_CHAPTER" | crate::craft_plan::PLAN_CHAPTER_CRAFT => {
+                "auditModelId"
+            }
+            _ => return Ok(profile),
+        };
+        if let Some(paths) = &self.settings_paths {
+            let settings =
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths)
+                    .map_err(|error| format!("provider settings unavailable: {error}"))?;
+            if let Some(model) = settings
+                .get(setting)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+            {
+                profile.model = model.to_owned();
+            }
+        }
+        Ok(profile)
+    }
+
     fn invoke_typed_with_profile(
         &self,
         capability: &str,
         input: &Value,
         profile: &ResolvedProviderProfile,
     ) -> Result<ProductionModelResponse, TransportFailure> {
-        let config = ProviderConfig {
-            provider_id: profile.provider.clone(),
-            model_id: profile.model.clone(),
-            endpoint: profile.endpoint.clone(),
-            enabled: true,
-            timeout_ms: profile.timeout_ms,
+        self.invoke_typed_with_diagnostic(capability, input, Some(profile))
+            .0
+    }
+
+    fn invoke_typed_with_diagnostic(
+        &self,
+        capability: &str,
+        input: &Value,
+        profile: Option<&ResolvedProviderProfile>,
+    ) -> (
+        Result<ProductionModelResponse, TransportFailure>,
+        Option<ProviderAttemptDiagnostic>,
+    ) {
+        let config = match profile {
+            Some(profile) => Ok(ProviderConfig {
+                provider_id: profile.provider.clone(),
+                model_id: profile.model.clone(),
+                endpoint: profile.endpoint.clone(),
+                enabled: true,
+                timeout_ms: profile.timeout_ms,
+            }),
+            None => self.current_config(),
         };
-        self.invoke_provider_with_config(&config, capability, input)
-            .map(Self::response_from_provider)
-            .map_err(|error| match error.kind {
-                ProviderErrorKind::Timeout => TransportFailure::Timeout,
-                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
-                _ => TransportFailure::Unavailable,
-            })
+        match config {
+            Ok(config) => Self::typed_provider_result(
+                self.invoke_provider_with_config(&config, capability, input),
+            ),
+            Err(error) => Self::typed_provider_result(Err(error)),
+        }
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
@@ -381,13 +535,7 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
         capability: &str,
         input: &Value,
     ) -> Result<ProductionModelResponse, TransportFailure> {
-        self.invoke_provider(capability, input)
-            .map(Self::response_from_provider)
-            .map_err(|error| match error.kind {
-                ProviderErrorKind::Timeout => TransportFailure::Timeout,
-                ProviderErrorKind::UnknownRemoteOutcome => TransportFailure::UnknownRemoteOutcome,
-                _ => TransportFailure::Unavailable,
-            })
+        self.invoke_typed_with_diagnostic(capability, input, None).0
     }
 }
 
@@ -397,6 +545,7 @@ pub struct GatewayTransport<'a> {
     capability: &'a str,
     input: Value,
     raw_persist_failure: bool,
+    diagnostic: Option<ModelTransportDiagnostic>,
 }
 
 impl<'a> GatewayTransport<'a> {
@@ -407,6 +556,7 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: false,
+            diagnostic: None,
         }
     }
 
@@ -422,6 +572,7 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: false,
+            diagnostic: None,
         }
     }
 
@@ -437,11 +588,24 @@ impl<'a> GatewayTransport<'a> {
             capability,
             input,
             raw_persist_failure: true,
+            diagnostic: None,
         }
     }
 }
 
 impl ModelTransport for GatewayTransport<'_> {
+    fn diagnostics_enabled(&self) -> bool {
+        self.gateway.transport_diagnostics_enabled()
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        self.profile.map(|profile| profile.timeout_ms)
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.diagnostic.take()
+    }
+
     fn defer_usage_until_raw_persist(&self) -> bool {
         true
     }
@@ -502,13 +666,11 @@ impl ModelTransport for GatewayTransport<'_> {
         _spec: &ModelRunSpec,
         _credential: &str,
     ) -> Result<TransportResponse, TransportFailure> {
-        let response = match self.profile {
-            Some(profile) => {
-                self.gateway
-                    .invoke_typed_with_profile(self.capability, &self.input, profile)?
-            }
-            None => self.gateway.invoke_typed(self.capability, &self.input)?,
-        };
+        let (response, diagnostic) =
+            self.gateway
+                .invoke_typed_with_diagnostic(self.capability, &self.input, self.profile);
+        self.diagnostic = diagnostic.map(Into::into);
+        let response = response?;
         Ok(TransportResponse {
             raw_response: response
                 .raw_response
@@ -562,13 +724,62 @@ fn recover_truncated_renderer_payload(value: &Value) -> Option<Value> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|content| content.starts_with("{\"body\":\""))?;
-    let repaired = format!("{content}\"}}");
-    let payload = serde_json::from_str::<Value>(&repaired).ok()?;
+    // Writers at a creative temperature also put raw line breaks inside the
+    // body string; escaping them changes no characters of the prose.
+    let content = escape_raw_control_characters(content);
+    let payload = serde_json::from_str::<Value>(&content)
+        .or_else(|_| serde_json::from_str::<Value>(&format!("{content}\"}}")))
+        .ok()?;
     payload
         .get("body")
         .and_then(Value::as_str)
         .filter(|body| !body.trim().is_empty())?;
     Some(payload)
+}
+
+/// Escapes control characters that appear unescaped inside JSON strings.
+fn escape_raw_control_characters(json_text: &str) -> String {
+    let mut escaped = String::with_capacity(json_text.len());
+    let (mut in_string, mut after_backslash) = (false, false);
+    for character in json_text.chars() {
+        if in_string && !after_backslash && character.is_control() && (character as u32) < 0x20 {
+            match character {
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                other => escaped.push_str(&format!("\\u{:04x}", other as u32)),
+            }
+            continue;
+        }
+        if in_string && character == '\\' && !after_backslash {
+            after_backslash = true;
+        } else {
+            if character == '"' && !after_backslash {
+                in_string = !in_string;
+            }
+            after_backslash = false;
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// FX-19 (owner decision 2026-10-17): a quote joining passages with an
+/// ellipsis binds to the full body passage when every part occurs exactly
+/// once in the body, in order, and at most 300 characters are omitted.
+fn bounded_ellipsis_span(body: &str, quote: &str) -> Option<(usize, usize)> {
+    let normalized = quote.replace("……", "...").replace('…', "...");
+    let parts = normalized
+        .split("...")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2 || parts.iter().any(|part| body.matches(part).count() != 1) {
+        return None;
+    }
+    let (start, end) = ellipsis_quote_span(body, quote)?;
+    let quoted = parts.iter().map(|part| part.chars().count()).sum::<usize>();
+    (end - start <= quoted + 300).then_some((start, end))
 }
 
 fn ellipsis_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
@@ -613,7 +824,12 @@ pub(crate) fn parse_provider_model_payload_for_capability(
 ) -> Result<Value, String> {
     match parse_provider_model_payload(value.clone()) {
         Ok(payload) => Ok(payload),
-        Err(error) if capability == "RENDER_CHAPTER" => {
+        Err(error)
+            if matches!(
+                capability,
+                "RENDER_CHAPTER" | "RENDER_CHAPTER_CRAFT" | "ADJUST_CHAPTER_LENGTH"
+            ) =>
+        {
             recover_truncated_renderer_payload(&value).ok_or(error)
         }
         Err(error) if capability == "AUDIT_EXTRACT" => {
@@ -621,281 +837,6 @@ pub(crate) fn parse_provider_model_payload_for_capability(
         }
         Err(error) => Err(error),
     }
-}
-
-struct S40CandidatePatch {
-    start: usize,
-    end: usize,
-    replacement: String,
-    protected_spans: Vec<Value>,
-}
-
-struct ParsedS40RepairOutput {
-    status: String,
-    skill_output: Value,
-    patch: Option<S40CandidatePatch>,
-}
-
-fn parse_s40_repair_output(
-    output: Value,
-    skill: &crate::creative_skills::SkillMetadata,
-    task_id: &str,
-    body: &str,
-    affected_dimensions: &[String],
-    allowed_context_refs: &BTreeSet<String>,
-) -> Result<ParsedS40RepairOutput, String> {
-    let object = output
-        .as_object()
-        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-    let required_top_level = [
-        "skillId",
-        "skillVersion",
-        "bundleDigest",
-        "taskId",
-        "status",
-        "sourceRefs",
-        "assumptions",
-        "payload",
-        "findings",
-        "contextRefs",
-        "runtimeCheckRequests",
-        "confidence",
-        "nextSkillHints",
-    ];
-    if object.len() != required_top_level.len()
-        || object
-            .keys()
-            .any(|key| !required_top_level.contains(&key.as_str()))
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let string_field = |field: &str| {
-        output
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
-    };
-    if string_field("skillId")? != "S40"
-        || string_field("skillVersion")? != skill.version
-        || string_field("bundleDigest")? != skill.bundle_digest
-        || string_field("taskId")? != task_id
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let status = string_field("status")?.to_string();
-    if !["OK", "NEEDS_INPUT", "NOT_APPLICABLE", "ADVISORY_ESCALATION"].contains(&status.as_str()) {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    for field in [
-        "sourceRefs",
-        "assumptions",
-        "findings",
-        "contextRefs",
-        "runtimeCheckRequests",
-        "nextSkillHints",
-    ] {
-        if !output.get(field).and_then(Value::as_array).is_some() {
-            return Err("B10_REPAIR_OUTPUT_INVALID".into());
-        }
-    }
-    for field in ["sourceRefs", "assumptions", "contextRefs", "nextSkillHints"] {
-        if output
-            .get(field)
-            .and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(|item| !item.is_string()))
-        {
-            return Err("B10_REPAIR_OUTPUT_INVALID".into());
-        }
-    }
-    if output
-        .get("findings")
-        .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(|item| !item.is_object()))
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let runtime_check_requests = output
-        .get("runtimeCheckRequests")
-        .and_then(Value::as_array)
-        .unwrap();
-    for request in runtime_check_requests {
-        let request_object = request
-            .as_object()
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-        let kind = request
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-        let reason_present = request
-            .get("reason")
-            .and_then(Value::as_str)
-            .is_some_and(|reason| !reason.trim().is_empty());
-        let refs = request
-            .get("refs")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-        if request_object.len() != 3
-            || !crate::creative_skills::runtime_check_kind_allowed(kind)
-            || !reason_present
-            || refs.len() > 64
-            || refs.iter().any(|reference| !reference.is_string())
-        {
-            return Err("B10_REPAIR_OUTPUT_INVALID".into());
-        }
-    }
-    if output
-        .get("contextRefs")
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|reference| !allowed_context_refs.contains(reference))
-        })
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let confidence = output
-        .get("confidence")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-    if !(0.0..=1.0).contains(&confidence) {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let payload = output
-        .get("payload")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-    for field in [
-        "repair_plan",
-        "target_spans",
-        "protected_spans",
-        "changes",
-        "recheck_dimensions",
-        "escalation_if_failed",
-    ] {
-        if !payload.contains_key(field) {
-            return Err("B10_REPAIR_OUTPUT_INVALID".into());
-        }
-    }
-    if payload
-        .get("escalation_if_failed")
-        .and_then(Value::as_str)
-        .is_none_or(|escalation| escalation.trim().is_empty())
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    if !payload
-        .get("target_spans")
-        .and_then(Value::as_array)
-        .is_some()
-        || !payload
-            .get("protected_spans")
-            .and_then(Value::as_array)
-            .is_some()
-        || !payload.get("changes").and_then(Value::as_array).is_some()
-        || !payload
-            .get("recheck_dimensions")
-            .and_then(Value::as_array)
-            .is_some()
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    if status != "OK" {
-        return Ok(ParsedS40RepairOutput {
-            status,
-            skill_output: output,
-            patch: None,
-        });
-    }
-    if payload
-        .get("repair_plan")
-        .and_then(Value::as_str)
-        .is_none_or(|plan| plan.trim().is_empty())
-    {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let dimensions = payload
-        .get("recheck_dimensions")
-        .and_then(Value::as_array)
-        .unwrap();
-    let mut supplied_dimensions = dimensions
-        .iter()
-        .map(|dimension| {
-            dimension
-                .as_str()
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut expected_dimensions = affected_dimensions.to_vec();
-    supplied_dimensions.sort();
-    supplied_dimensions.dedup();
-    expected_dimensions.sort();
-    expected_dimensions.dedup();
-    if supplied_dimensions != expected_dimensions {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let target_spans = payload
-        .get("target_spans")
-        .and_then(Value::as_array)
-        .unwrap();
-    let protected_spans = payload
-        .get("protected_spans")
-        .and_then(Value::as_array)
-        .unwrap();
-    let changes = payload.get("changes").and_then(Value::as_array).unwrap();
-    if target_spans.len() != 1 || changes.len() != 1 {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let read_span = |span: &Value| -> Result<(usize, usize), String> {
-        let start = span
-            .get("start")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-        let end = span
-            .get("end")
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-        Ok((start, end))
-    };
-    let (start, end) = read_span(&target_spans[0])?;
-    let (change_start, change_end) = read_span(&changes[0])?;
-    let body_len = body.chars().count();
-    if start != change_start || end != change_end || start > end || end > body_len {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let mut expected_protected_spans = Vec::new();
-    if start > 0 {
-        expected_protected_spans.push((0, start));
-    }
-    if end < body_len {
-        expected_protected_spans.push((end, body_len));
-    }
-    let supplied_protected_spans = protected_spans
-        .iter()
-        .map(read_span)
-        .collect::<Result<Vec<_>, _>>()?;
-    if supplied_protected_spans != expected_protected_spans {
-        return Err("B10_REPAIR_OUTPUT_INVALID".into());
-    }
-    let replacement = changes[0]
-        .get("replacement")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?
-        .to_string();
-    Ok(ParsedS40RepairOutput {
-        status,
-        skill_output: output.clone(),
-        patch: Some(S40CandidatePatch {
-            start,
-            end,
-            replacement,
-            protected_spans: protected_spans.clone(),
-        }),
-    })
 }
 
 fn classify_provider_body(raw: &str) -> Option<&'static str> {
@@ -957,7 +898,102 @@ pub fn execute_production_model(
     Ok(outcome)
 }
 
+/// FX-19 (owner decision 2026-10-17): a reply the provider cut off in the
+/// middle of the JSON (reported as a normal stop), or one that is not JSON at
+/// all, is resent once as a new model run; the bad run stays recorded as
+/// failed.
 pub fn execute_production_model_with_profile(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    capability: &str,
+    input: Value,
+    now: &str,
+) -> Result<ModelRunOutcome, String> {
+    resend_once_on_invalid_json(spec, |spec| {
+        execute_production_model_with_profile_once(
+            connection,
+            gateway,
+            profile,
+            spec,
+            capability,
+            input.clone(),
+            now,
+        )
+    })
+}
+
+/// Runs `run` with `spec`; a reply that is not valid JSON is resent once as
+/// a new model run (FX-19), and the bad run stays recorded as failed.
+pub fn resend_once_on_invalid_json(
+    spec: &ModelRunSpec,
+    run: impl Fn(&ModelRunSpec) -> Result<ModelRunOutcome, String>,
+) -> Result<ModelRunOutcome, String> {
+    match run(spec) {
+        Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
+            let resend = ModelRunSpec {
+                model_run_id: StableIdentityFactory::from_command(
+                    StableIdKind::ModelRun,
+                    &format!("{}:truncated-resend", spec.model_run_id),
+                )?,
+                idempotency_key: format!("{}:truncated-resend", spec.idempotency_key),
+                attempt_no: spec.attempt_no + 1,
+                ..spec.clone()
+            };
+            run(&resend)
+        }
+        result => result,
+    }
+}
+
+/// Craft rule (2026-10-17): a plan rejected for a reason the planner can fix
+/// (see `chapter_craft::plan_feedback`) is planned once more with the reason;
+/// the rejected run stays recorded. Returns the accepted plan and the run
+/// that produced it.
+pub fn plan_chapter_with_feedback(
+    connection: &libsql_rusqlite::Connection,
+    gateway: &dyn ProductionModelGateway,
+    profile: &ResolvedProviderProfile,
+    spec: &ModelRunSpec,
+    input: Value,
+    now: &str,
+    accept: &dyn Fn(Value) -> Result<Value, String>,
+) -> Result<(Value, String), String> {
+    let plan = |spec: &ModelRunSpec, input: Value| {
+        execute_production_model_with_profile(
+            connection,
+            gateway,
+            profile,
+            spec,
+            &spec.capability,
+            input,
+            now,
+        )?
+        .parsed
+        .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())
+    };
+    match accept(plan(spec, input.clone())?) {
+        Err(error) if crate::chapter_craft::plan_feedback(&error).is_some() => {
+            let replan = ModelRunSpec {
+                model_run_id: StableIdentityFactory::from_command(
+                    StableIdKind::ModelRun,
+                    &format!("{}:plan-feedback", spec.model_run_id),
+                )?,
+                idempotency_key: format!("{}:plan-feedback", spec.idempotency_key),
+                attempt_no: spec.attempt_no + 1,
+                ..spec.clone()
+            };
+            let mut input = input;
+            input["planFeedback"] = json!(crate::chapter_craft::plan_feedback(&error));
+            let accepted = accept(plan(&replan, input)?)?;
+            Ok((accepted, replan.model_run_id))
+        }
+        result => result.map(|accepted| (accepted, spec.model_run_id.clone())),
+    }
+}
+
+fn execute_production_model_with_profile_once(
     connection: &libsql_rusqlite::Connection,
     gateway: &dyn ProductionModelGateway,
     profile: &ResolvedProviderProfile,
@@ -1519,13 +1555,19 @@ fn reusable_opening_plan_for_retry(
     now: &str,
     current_revision: &mut i64,
 ) -> Result<Option<(ArtifactRef, Value, ArtifactRef, Value)>, String> {
-    let completed_plan = DurableModelRunner::completed_result_for_job(
-        connection,
-        project_id,
-        previous_job_id,
-        "PLAN_STRATEGY",
-    )
-    .map_err(|error| error.to_string())?;
+    let mut completed_plan = None;
+    for capability in [crate::craft_plan::PLAN_CHAPTER_CRAFT, "PLAN_STRATEGY"] {
+        completed_plan = DurableModelRunner::completed_result_for_job(
+            connection,
+            project_id,
+            previous_job_id,
+            capability,
+        )
+        .map_err(|error| error.to_string())?;
+        if completed_plan.is_some() {
+            break;
+        }
+    }
     let Some((planning_model_run_id, _)) = completed_plan else {
         return Ok(None);
     };
@@ -1539,6 +1581,16 @@ fn reusable_opening_plan_for_retry(
     else {
         return Ok(None);
     };
+    // A completed planner run proves nothing about the head: its plan may
+    // have been rejected, leaving an earlier plan (such as the opening
+    // placeholder) in place. Only a plan that run produced is reused.
+    let produced_by = crate::repositories::narrative::NarrativeRepository::artifact_model_run_id(
+        connection, project_id, &plan_ref,
+    )
+    .map_err(|error| error.to_string())?;
+    if produced_by.as_deref() != Some(planning_model_run_id.as_str()) {
+        return Ok(None);
+    }
     let mut plan_payload = load_artifact_payload(connection, project_id, &plan_ref)?;
     if plan_payload.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Ok(None);
@@ -2016,7 +2068,6 @@ fn control_result_for_production_start(
 pub fn run_chapter_production(
     manager: &ProjectManager,
     gateway: &dyn ProductionModelGateway,
-    skill_bundle_loader: &crate::creative_skills::SkillBundleLoader,
     request: &Value,
 ) -> Result<Value, String> {
     if let (Some(project_id), Some(command_id)) = (
@@ -2038,7 +2089,7 @@ pub fn run_chapter_production(
             }
         }
     }
-    let result = run_chapter_production_inner(manager, gateway, skill_bundle_loader, request);
+    let result = run_chapter_production_inner(manager, gateway, request);
     let finalization = match request.pointer("/projectId").and_then(Value::as_str) {
         Some(project_id) => match finalize_pending_production_control(manager, project_id) {
             Ok(finalization) => finalization,
@@ -2110,7 +2161,6 @@ pub fn run_chapter_production(
 fn run_chapter_production_inner(
     manager: &ProjectManager,
     gateway: &dyn ProductionModelGateway,
-    skill_bundle_loader: &crate::creative_skills::SkillBundleLoader,
     request: &Value,
 ) -> Result<Value, String> {
     let project_id = require(request, "/projectId")?;
@@ -2250,7 +2300,8 @@ fn run_chapter_production_inner(
         return Err("B08_GATE_POLICY_STALE".into());
     }
     let gate_policy_payload = load_artifact_payload(connection, &project_id, &policy_ref)?;
-    let provider_profile = gateway.resolve_profile()?;
+    // A missing or invalid provider fails the attempt before anything runs.
+    gateway.resolve_profile()?;
     if let Some(previous_job_id) = &retry_of_job_id {
         DurableJobService::validate_retry_source(
             connection,
@@ -2326,14 +2377,6 @@ fn run_chapter_production_inner(
         StableIdKind::Artifact,
         &format!("{command_id}:audit"),
     )?;
-    let taste_profile_id = StableIdentityFactory::from_command(
-        StableIdKind::Artifact,
-        &format!("{command_id}:taste-profile"),
-    )?;
-    let quality_report_id = StableIdentityFactory::from_command(
-        StableIdKind::Artifact,
-        &format!("{command_id}:quality-report"),
-    )?;
     let final_id = StableIdentityFactory::from_command(
         StableIdKind::Artifact,
         &format!("{command_id}:final"),
@@ -2343,10 +2386,6 @@ fn run_chapter_production_inner(
     let receipt_artifact_id = StableIdentityFactory::from_command(
         StableIdKind::Artifact,
         &format!("{command_id}:receipt"),
-    )?;
-    let new_render_run_id = StableIdentityFactory::from_command(
-        StableIdKind::ModelRun,
-        &format!("{command_id}:render"),
     )?;
     let new_audit_run_id = StableIdentityFactory::from_command(
         StableIdKind::ModelRun,
@@ -2378,6 +2417,46 @@ fn run_chapter_production_inner(
     } else {
         None
     };
+    // FX-18: the length range this chapter is planned and written for.
+    let project_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        connection,
+        &project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    // A long-form chapter's range was fixed when its plan was compiled.
+    let chosen_range = if execution_mode == "LONG_FORM" {
+        None
+    } else {
+        crate::chapter_length::ChapterLengthRange::from_payload(
+            request.get("payload").unwrap_or(&Value::Null),
+        )?
+    };
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        chosen_range,
+        crate::repositories::provider::ProviderSettingsRepository::chapter_length_range(
+            connection,
+            &project_id,
+            &chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_ref(),
+        project_settings.get("chapterLengthRange"),
+    )?;
+    if let Some(range) = chosen_range {
+        crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(
+            connection,
+            &project_id,
+            &chapter_id,
+            &range.to_json(),
+            &now,
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    // Craft v2: what the chapters before this one already did.
+    let chapter_history =
+        crate::repositories::ops::chapter_history(connection, &project_id, &chapter_id, 3)
+            .map_err(|error| error.to_string())?;
+    let chapter_number = chapter_history.number();
     let (context_ref, context_payload, plan_ref, plan_payload, authority_context, audit_contract) =
         if let Some((context_ref, context_payload, plan_ref, plan_payload)) = reusable_opening_plan
         {
@@ -2449,18 +2528,25 @@ fn run_chapter_production_inner(
             current_revision = context_receipt.after_revision;
 
             update_stage(manager, connection, &project_id, &job_id, "PLAN", &now)?;
+            let planner = crate::craft_plan::ChapterPlanner::for_chapter(
+                connection,
+                &project_id,
+                &chapter_id,
+                chapter_number,
+            )?;
             let planning_run_id = StableIdentityFactory::from_command(
                 StableIdKind::ModelRun,
                 &format!("{command_id}:plan"),
             )?;
+            let planning_profile = gateway.resolve_step_profile(planner.capability())?;
             let planning_spec = ModelRunSpec {
                 model_run_id: planning_run_id.clone(),
                 job_id: Some(job_id.clone()),
                 step_id: None,
-                provider: provider_profile.provider.clone(),
-                model: provider_profile.model.clone(),
+                provider: planning_profile.provider.clone(),
+                model: planning_profile.model.clone(),
                 idempotency_key: format!("{idempotency_key}:plan"),
-                capability: "PLAN_STRATEGY".into(),
+                capability: planner.capability().into(),
                 prompt_ref: None,
                 context_manifest_ref: Some(context_ref.artifact_id.clone()),
                 budget_id: Some(production_budget_id.clone()),
@@ -2469,7 +2555,12 @@ fn run_chapter_production_inner(
                 attempt_no: 1,
                 repair_round: 0,
             };
-            let planning_input = json!({
+            let horizon_capacity = crate::planning::horizon_capacity_after_chapter(
+                connection,
+                &project_id,
+                &chapter_id,
+            )?;
+            let mut planning_input = json!({
                 "projectId":project_id,
                 "chapterId":chapter_id,
                 "executionMode":execution_mode,
@@ -2479,53 +2570,65 @@ fn run_chapter_production_inner(
                 "authorityContext":authority_context.clone(),
                 "activeTaskRefs":compiler_input.active_task_refs,
                 "continuityThreadRefs":compiler_input.continuity_threads.iter().map(|thread| thread.thread_id.clone()).collect::<Vec<_>>(),
-                "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(connection, &project_id, &chapter_id)?,
+                "horizonPreviewCapacity":horizon_capacity,
+                "chapterLengthRange":length_range.to_json(),
                 "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前章节计划，并让主角完成一次可验证的主动选择。")
             });
-            let planning_result = execute_production_model_with_profile(
+            crate::chapter_craft::extend_planning_input(
+                &mut planning_input,
+                chapter_number,
+                &chapter_history.recent,
+                length_range,
+            )?;
+            planner.extend_input(&mut planning_input);
+            let triggered_threads = compiler_input
+                .continuity_threads
+                .iter()
+                .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+                .map(|thread| thread.thread_id.clone())
+                .collect::<Vec<_>>();
+            let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
+            let accept = |raw: Value| -> Result<Value, String> {
+                let mut plan = crate::planning::normalize_chapter_plan_model_output(
+                    raw,
+                    &triggered_threads,
+                    &planning_input,
+                );
+                plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+                plan["entityRefs"] = hard_scope["entityRefs"].clone();
+                plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+                plan["hardScope"] = hard_scope.clone();
+                planner.check_craft(&plan)?;
+                crate::planning::validate_chapter_plan(&plan)
+                    .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
+                crate::planning::validate_current_chapter_plan(
+                    &plan,
+                    &chapter_id,
+                    &compiler_input.active_task_refs,
+                    &triggered_threads,
+                    horizon_capacity,
+                )?;
+                planner.check_r1(|| {
+                    if gateway.enforces_chapter_length() {
+                        crate::chapter_craft::check_plan(
+                            &plan,
+                            length_range,
+                            &chapter_history.recent,
+                        )
+                    } else {
+                        Ok(())
+                    }
+                })?;
+                Ok(plan)
+            };
+            let (plan_payload, planning_run_id) = plan_chapter_with_feedback(
                 connection,
                 gateway,
-                &provider_profile,
+                &planning_profile,
                 &planning_spec,
-                "PLAN_STRATEGY",
                 planning_input.clone(),
                 &now,
-            )?;
-            let plan_payload = planning_result
-                .parsed
-                .ok_or_else(|| "B08_PLANNING_OUTPUT_INVALID".to_string())?;
-            let mut plan_payload = crate::planning::normalize_chapter_plan_model_output(
-                plan_payload,
-                &compiler_input
-                    .continuity_threads
-                    .iter()
-                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                    .map(|thread| thread.thread_id.clone())
-                    .collect::<Vec<_>>(),
-                &planning_input,
-            );
-            let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
-            plan_payload["activeTaskRefs"] = hard_scope["taskRefs"].clone();
-            plan_payload["entityRefs"] = hard_scope["entityRefs"].clone();
-            plan_payload["reservationRefs"] = hard_scope["reservationRefs"].clone();
-            plan_payload["hardScope"] = hard_scope;
-            crate::generated::validators::validate_chapter_plan_r1(&plan_payload)
-                .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
-            crate::planning::validate_current_chapter_plan(
-                &plan_payload,
-                &chapter_id,
-                &compiler_input.active_task_refs,
-                &compiler_input
-                    .continuity_threads
-                    .iter()
-                    .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-                    .map(|thread| thread.thread_id.clone())
-                    .collect::<Vec<_>>(),
-                crate::planning::horizon_capacity_after_chapter(
-                    connection,
-                    &project_id,
-                    &chapter_id,
-                )?,
+                &accept,
             )?;
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
             let planning_receipt = crate::planning::recompile_chapter_plan_owner(
@@ -2603,6 +2706,9 @@ fn run_chapter_production_inner(
                 audit_contract,
             )
         };
+    if gateway.enforces_chapter_length() && !crate::chapter_craft::is_craft_plan(&plan_payload) {
+        crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
+    }
     if let Err(error) = validate_plan_is_current(
         connection,
         request,
@@ -2627,152 +2733,321 @@ fn run_chapter_production_inner(
         &plan_payload,
         current_revision,
     )?;
-    // B10 is an enrichment/quality layer on the existing B08 composition
-    // root. Disabling it is an explicit compatibility path and still uses the
-    // exact same renderer, audit, CommitBundle and FinalChapter owners.
-    let creative_enrichment = if request
-        .pointer("/payload/skillsEnabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
-        let default_primary = if execution_mode == "OPENING_BOOTSTRAP" {
-            "S14"
-        } else {
-            "S21"
-        };
-        let default_support = if execution_mode == "OPENING_BOOTSTRAP" {
-            vec!["S10".to_string()]
-        } else {
-            vec!["S23".to_string()]
-        };
-        let primary = request
-            .pointer("/payload/primarySkillId")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(default_primary);
-        let support = request
-            .pointer("/payload/supportSkillIds")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or(default_support);
-        let required_resources = request
-            .pointer("/payload/skillResourcePaths")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        Some(
-            crate::creative_skills::enrich_chapter_with_loader(
-                &project_id,
-                &chapter_id,
-                current_revision,
-                &context_ref.artifact_id,
-                &plan_payload,
-                execution_mode,
-                primary,
-                support,
-                required_resources,
-                &now,
-                skill_bundle_loader,
-            )
-            .map_err(|error| format!("B10_SKILL_RUNTIME:{error}"))?,
-        )
-    } else {
-        None
-    };
-    let mut creative_enrichment_payload = creative_enrichment
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|error| format!("B10_SKILL_PAYLOAD:{error}"))?;
+    // Owner decision (2026-10-24): the v1.2 enrichment, its quality report
+    // and S40 candidate repair are retired from chapter production; the v2
+    // craft skills and the rule checks guide the writing instead.
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
-    let target_chinese_characters = request
-        .pointer("/payload/targetChineseCharacters")
-        .and_then(Value::as_i64)
-        .unwrap_or(1_800)
-        .clamp(800, 5_000);
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"targetChineseCharacters":target_chinese_characters});
-    if let Some(enrichment) = creative_enrichment_payload.clone() {
-        render_input["creativeEnrichment"] = enrichment;
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
+    let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
+    if !avoid_phrases.is_empty() {
+        render_input["avoidPhrases"] = json!(avoid_phrases);
     }
-    let reusable_render = retry_of_job_id
-        .as_deref()
-        .map(|previous_job_id| {
-            DurableModelRunner::completed_result_for_job(
+    let avoid_tics = crate::chapter_craft::overused_tics(&chapter_history.bodies);
+    if !avoid_tics.is_empty() {
+        render_input["avoidTics"] = json!(avoid_tics);
+    }
+    let mut craft_signals = crate::chapter_craft::plan_signals(&plan_payload, chapter_number);
+    render_input["craftGuidance"] = crate::chapter_craft::guidance("render", &craft_signals)?;
+    // The skills each step received, for the receipt. Chapter planning
+    // selects from the chapter position and the previous chapter, so the
+    // selection is reproducible for plans compiled by an earlier command.
+    use crate::chapter_craft::guidance_skill_ids as skill_ids;
+    let mut craft_skills = json!({
+        "skillsVersion":crate::skills_v2::SKILLS_V2_VERSION,
+        "chapterPlan":skill_ids(&crate::chapter_craft::guidance(
+            "chapter_plan",
+            &crate::chapter_craft::planning_signals(chapter_number, &chapter_history.recent),
+        )?),
+        "render":skill_ids(&render_input["craftGuidance"])
+    });
+    if crate::chapter_craft::is_craft_plan(&plan_payload) {
+        let planned = craft_skills["chapterPlan"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        craft_skills["chapterPlanDecisions"] =
+            crate::craft_plan::skill_decisions(&plan_payload, &planned);
+    }
+    // CRAFT v3: an r2 chapter is written whole from its craft decisions with
+    // the story bible and the style card (CRAFT_V3_DESIGN §4.4).
+    let craft_writing = crate::chapter_craft::is_craft_plan(&plan_payload)
+        .then(|| {
+            crate::craft_plan::WritingContext::for_chapter(
                 connection,
                 &project_id,
-                previous_job_id,
-                "RENDER_CHAPTER",
+                &chapter_id,
+                chapter_number,
             )
         })
-        .transpose()
-        .map_err(|error| error.to_string())?
-        .flatten();
-    let (render_run_id, render_payload) = if let Some((model_run_id, parsed)) = reusable_render {
-        (
-            model_run_id,
-            parse_provider_model_payload_for_capability(parsed, "RENDER_CHAPTER")?,
-        )
+        .transpose()?;
+    if let Some(writing) = &craft_writing {
+        writing.extend_render_input(&mut render_input, &chapter_history.recent);
+    }
+    let render_capability = if craft_writing.is_some() {
+        "RENDER_CHAPTER_CRAFT"
     } else {
-        let render_spec = ModelRunSpec {
-            model_run_id: new_render_run_id.clone(),
+        "RENDER_CHAPTER"
+    };
+    let render_profile = gateway.resolve_step_profile("RENDER_CHAPTER")?;
+    // One model call of a craft step; `suffix` names the call within this
+    // job. Returns the run id and its outcome.
+    let craft_call = |suffix: &str,
+                      capability: &str,
+                      profile: &ResolvedProviderProfile,
+                      attempt_no: i64,
+                      input: Value|
+     -> Result<(String, ModelRunOutcome), String> {
+        let model_run_id = StableIdentityFactory::from_command(
+            StableIdKind::ModelRun,
+            &format!("{command_id}:{suffix}"),
+        )?;
+        let spec = ModelRunSpec {
+            model_run_id: model_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: provider_profile.provider.clone(),
-            model: provider_profile.model.clone(),
-            idempotency_key: format!("{idempotency_key}:render"),
-            capability: "RENDER_CHAPTER".into(),
+            provider: profile.provider.clone(),
+            model: profile.model.clone(),
+            idempotency_key: format!("{idempotency_key}:{suffix}"),
+            capability: capability.into(),
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
             budget_id: Some(production_budget_id.clone()),
             predicted_cost_cents: 0,
             cost_snapshot: None,
-            attempt_no: 1,
+            attempt_no,
             repair_round: 0,
         };
-        let result = execute_production_model_with_profile(
-            connection,
-            gateway,
-            &provider_profile,
-            &render_spec,
-            "RENDER_CHAPTER",
-            render_input,
-            &now,
+        let outcome = execute_production_model_with_profile(
+            connection, gateway, profile, &spec, capability, input, &now,
         )?;
-        (
-            new_render_run_id,
-            result
-                .parsed
-                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?,
+        Ok((model_run_id, outcome))
+    };
+    use crate::chapter_length::character_count;
+    let length_error = |body: &str| {
+        format!(
+            "B08_RENDER_LENGTH_OUT_OF_RANGE:{}:{}-{}",
+            character_count(body),
+            length_range.min,
+            length_range.max
         )
     };
-    let mut body = render_payload
-        .get("body")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-    let method_injection_provenance = creative_enrichment
-        .as_ref()
-        .map(|enrichment| {
-            crate::creative_skills::method_injection_provenance(enrichment, &render_run_id)
+    // CRAFT v3 (owner decision 2026-10-23): a chapter is written in one
+    // call. A retry reuses the earlier prose only where it is committed as
+    // written; where the prose is sized and rewritten afterwards, a retry
+    // writes it again so the audit always reads what is committed.
+    let reusable_render = retry_of_job_id
+        .as_deref()
+        .filter(|_| !gateway.enforces_chapter_length())
+        .map(|previous_job_id| {
+            DurableModelRunner::completed_result_for_job(
+                connection,
+                &project_id,
+                previous_job_id,
+                render_capability,
+            )
         })
         .transpose()
-        .map_err(|error| format!("B10_METHOD_INJECTION_PROVENANCE:{error}"))?
-        .unwrap_or_else(|| json!([]));
-    if let Some(enrichment_payload) = creative_enrichment_payload.as_mut() {
-        enrichment_payload["methodInjectionProvenance"] = method_injection_provenance.clone();
+        .map_err(|error| error.to_string())?
+        .flatten();
+    // An earlier audit only fits a retry that reuses that attempt's prose.
+    let render_reused = reusable_render.is_some();
+    let (render_run_id, mut body) = if let Some((model_run_id, parsed)) = reusable_render {
+        let payload = parse_provider_model_payload_for_capability(parsed, render_capability)?;
+        let body = payload
+            .get("body")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+        (model_run_id, body)
+    } else {
+        let (model_run_id, result) = craft_call(
+            "render",
+            render_capability,
+            &render_profile,
+            1,
+            render_input,
+        )?;
+        let body = result
+            .parsed
+            .as_ref()
+            .and_then(|payload| payload.get("body"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
+        (model_run_id, body)
+    };
+    // Craft v2 (owner decision 2026-10-19): the written chapter is read once
+    // with the review skills, and passages it flags are rewritten in place
+    // with the rewrite skills. Only edits whose passage occurs once apply,
+    // and a rewrite that leaves the length range is dropped whole.
+    let mut prose_run_ids = Vec::new();
+    // A chapter outside the length range gets one expand or compress call;
+    // it is never committed outside the range.
+    if gateway.enforces_chapter_length() {
+        let in_range = |text: &str| length_range.accepts(character_count(text));
+        body = crate::chapter_craft::normalize_typography(body.trim());
+        if !in_range(&body) {
+            let length = character_count(&body);
+            let (run_id, outcome) = craft_call(
+                "adjust-length",
+                "ADJUST_CHAPTER_LENGTH",
+                &render_profile,
+                2,
+                json!({
+                    "chapterId":chapter_id,"chapterPlan":plan_payload,"body":body,
+                    "direction":if length < length_range.min { "EXPAND" } else { "COMPRESS" },
+                    "currentChars":length,
+                    "targetChars":length_range.target(),
+                    "chapterLengthRange":length_range.to_json()
+                }),
+            )?;
+            prose_run_ids.push(run_id);
+            body = outcome
+                .parsed
+                .as_ref()
+                .and_then(|payload| payload.get("body"))
+                .and_then(Value::as_str)
+                .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
+                .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
+        }
+        if !in_range(&body) {
+            return Err(length_error(&body));
+        }
+    }
+    if gateway.reviews_chapter_prose() {
+        let mut craft_step = |suffix: &str,
+                              capability: &str,
+                              profile: &ResolvedProviderProfile,
+                              input: Value|
+         -> Result<Value, String> {
+            let (run_id, outcome) = craft_call(suffix, capability, profile, 1, input)?;
+            prose_run_ids.push(run_id);
+            outcome
+                .parsed
+                .ok_or_else(|| format!("B08_{capability}_OUTPUT_INVALID"))
+        };
+        let codes = crate::skills_v2::finding_vocabulary()?;
+        // CRAFT v3 chapters are checked by rule only (CRAFT_V3_DESIGN §4.4);
+        // model editing belongs to the prose optimizer.
+        let review = if craft_writing.is_some() {
+            json!({})
+        } else {
+            let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
+            craft_skills["review"] = json!(skill_ids(&review_guidance));
+            craft_step(
+                "review",
+                "REVIEW_CHAPTER",
+                &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
+                json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
+            )?
+        };
+        let findings = review
+            .get("findings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|finding| {
+                finding
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| codes.iter().any(|known| known == code))
+                    && matches!(
+                        finding.get("severity").and_then(Value::as_str),
+                        Some("HIGH" | "MEDIUM" | "LOW")
+                    )
+                    && finding
+                        .get("quote")
+                        .and_then(Value::as_str)
+                        .is_some_and(|quote| locate_unique_quote(&body, quote).is_some())
+            })
+            .take(6)
+            .collect::<Vec<_>>();
+        // Rule findings (plan wording, measures, similes, tics, panels)
+        // join the review's, one per sentence.
+        let rules = match &craft_writing {
+            Some(writing) => crate::chapter_craft::craft_rule_findings(
+                &plan_payload,
+                &body,
+                &writing.bible,
+                writing.style_card.as_ref(),
+            ),
+            None => crate::chapter_craft::rule_findings(&plan_payload, &body),
+        };
+        let to_fix = findings
+            .iter()
+            .copied()
+            .filter(|finding| finding["severity"] != "LOW")
+            .chain(rules.iter().filter(|rule| {
+                !findings.iter().any(|finding| {
+                    finding["quote"].as_str().is_some_and(|quote| {
+                        rule["quote"]
+                            .as_str()
+                            .is_some_and(|sentence| sentence.contains(quote))
+                    })
+                })
+            }))
+            .collect::<Vec<_>>();
+        // Phrases this chapter uses a third time across the recent chapters
+        // (signing check F1-5) go to the rewrite as well.
+        let repeated = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
+        let mut applied = 0;
+        let mut in_range = true;
+        let mut repeats_grew = false;
+        if !to_fix.is_empty() || !repeated.is_empty() {
+            craft_signals.findings = to_fix
+                .iter()
+                .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
+                .chain((!repeated.is_empty()).then(|| "word_repetition".to_string()))
+                .collect();
+            let rewrite_guidance = crate::chapter_craft::guidance("rewrite", &craft_signals)?;
+            craft_skills["rewrite"] = json!(skill_ids(&rewrite_guidance));
+            let rewrite_profile = gateway.resolve_step_profile("REWRITE_PASSAGES")?;
+            let rewrite = craft_step(
+                "rewrite",
+                "REWRITE_PASSAGES",
+                &rewrite_profile,
+                json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"repeatedPhrases":repeated,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
+            )?;
+            let (revised, count) = apply_unique_edits(&body, &rewrite);
+            let revised = crate::chapter_craft::normalize_typography(revised.trim());
+            let length = character_count(&revised);
+            in_range = (length_range.min..=length_range.ceiling()).contains(&length);
+            repeats_grew =
+                crate::chapter_craft::overused_phrases(&chapter_history.bodies, &revised).len()
+                    > repeated.len();
+            applied = count;
+            if applied > 0 && in_range && !repeats_grew {
+                body = revised;
+            }
+        }
+        let discarded = if applied == 0 {
+            Value::Null
+        } else if !in_range {
+            json!("LENGTH_OUT_OF_RANGE")
+        } else if repeats_grew {
+            json!("MORE_REPEATED_PHRASES")
+        } else {
+            Value::Null
+        };
+        craft_skills["proseReview"] = json!({
+            "findings":findings.len(),
+            "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
+            "repeatedPhrases":repeated.len(),
+            "ruleCodes":rules.iter().map(|rule| rule["code"].clone()).collect::<Vec<_>>(),
+            "editsApplied":if discarded.is_null() { applied } else { 0 },
+            "discarded":discarded
+        });
+        if let Some(writing) = &craft_writing {
+            craft_skills["proseReview"]["rhythmNotes"] = json!(writing
+                .style_card
+                .as_ref()
+                .map(|card| crate::chapter_craft::rhythm_notes(&body, card))
+                .unwrap_or_default());
+        }
     }
     let body_digest = sha256_canonical(&json!(body)).map_err(|e| e.to_string())?;
     validate_candidate_evidence_range(&body, 0, body.chars().count())?;
@@ -2781,8 +3056,8 @@ fn run_chapter_production_inner(
         "payloadSchema":"chapter-candidate.r1","chapterId":chapter_id,
         "chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),
         "body":body.clone(),"bodyDigest":body_digest,"evidenceRanges":[],
-        "renderer":{"modelRunId":render_run_id,"capability":"RENDER_CHAPTER","provider":provider_profile.provider.clone(),"model":provider_profile.model.clone()},
-        "creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null)
+        "renderer":{"modelRunId":render_run_id,"capability":render_capability,"provider":render_profile.provider.clone(),"model":render_profile.model.clone()},
+        "creativeEnrichment":Value::Null
     });
     let mut candidate = artifact(
         &project_id,
@@ -2798,392 +3073,15 @@ fn run_chapter_production_inner(
     )?;
     candidate.provenance.context_manifest_ref = Some(context_ref.artifact_id.clone());
 
-    let mut candidate_ref = reference(&candidate);
-    let initial_candidate_ref = candidate_ref.clone();
-    let mut candidate_history = Vec::new();
-    let mut repair_model_run_ids = Vec::new();
-    let mut candidate_repaired = false;
-    let mut quality_report = None;
-    let mut repair_evidence = Value::Null;
-    if let Some(enrichment) = creative_enrichment.as_ref() {
-        let mut report = crate::creative_skills::evaluate_narrative_quality(
-            &candidate_ref,
-            &project_id,
-            current_revision,
-            &body,
-            &enrichment.taste_profile,
-            enrichment
-                .invocations
-                .iter()
-                .map(|invocation| invocation.invocation_id.clone())
-                .collect(),
-        )
-        .map_err(|error| format!("B10_QUALITY_EVALUATION:{error}"))?;
-        let requested_repair_limit = request
-            .pointer("/payload/repairRunLimit")
-            .and_then(Value::as_i64)
-            .unwrap_or(enrichment.context.budget.repair_runs);
-        let repair_limit = requested_repair_limit
-            .max(0)
-            .min(enrichment.context.budget.repair_runs.max(0));
-        let affected_dimensions = report.repairable_dimensions.clone();
-        let mut status = "NO_REPAIR";
-        let mut escalation = Value::Null;
-        let mut repair_run = 0;
-        let mut s40_provenance = Value::Null;
-        let mut s40_output_record = Value::Null;
-        if !affected_dimensions.is_empty() {
-            if repair_limit <= 1 {
-                status = "ADVISORY_ESCALATION";
-                escalation = json!("REPAIR_RUN_LIMIT");
-            } else {
-                let s40_selection =
-                    skill_bundle_loader.select(crate::creative_skills::SkillSelectionRequest {
-                        primary: "S40".into(),
-                        support: Vec::new(),
-                        budget_reason: Some("Bounded repair for current Candidate findings".into()),
-                        context_tokens: enrichment.context.budget.context_tokens,
-                        model_calls: enrichment.context.budget.model_calls,
-                    })?;
-                let s40_resources = vec!["resources/operating_method.md".to_string()];
-                let s40_loaded =
-                    skill_bundle_loader.load_selected(&s40_selection, &s40_resources)?;
-                let s40_text = s40_loaded
-                    .skill_texts
-                    .iter()
-                    .find(|loaded| {
-                        loaded
-                            .reference
-                            .ends_with("/skills/surgical-repair/SKILL.md")
-                    })
-                    .ok_or_else(|| "B10_S40_SKILL_TEXT_MISSING".to_string())?;
-                let loaded_resources = s40_loaded
-                    .skill_texts
-                    .iter()
-                    .map(|loaded| json!({"reference":loaded.reference,"digest":loaded.digest}))
-                    .chain(s40_loaded.resources.iter().map(|loaded| {
-                        json!({
-                            "reference":loaded.reference,
-                            "digest":loaded.digest
-                        })
-                    }))
-                    .collect::<Vec<_>>();
-                s40_provenance = json!({
-                    "skillId":s40_selection.primary.id,
-                    "skillVersion":s40_selection.primary.version,
-                    "skillReference":s40_text.reference,
-                    "skillDigest":s40_text.digest,
-                    "bundleDigest":s40_selection.primary.bundle_digest,
-                    "deploymentManifestDigest":s40_loaded.identity.deployed_manifest_digest,
-                    "loadedResources":loaded_resources
-                });
-                let repair_run_id = StableIdentityFactory::from_command(
-                    StableIdKind::ModelRun,
-                    &format!("{command_id}:repair:1"),
-                )?;
-                let repair_findings = report
-                    .findings
-                    .iter()
-                    .filter(|finding| affected_dimensions.contains(&finding.dimension))
-                    .collect::<Vec<_>>();
-                let repair_input = json!({
-                    "skill":{
-                        "skillId":s40_selection.primary.id,
-                        "skillVersion":s40_selection.primary.version,
-                        "bundleDigest":s40_selection.primary.bundle_digest,
-                        "skillReference":s40_text.reference,
-                        "skillDigest":s40_text.digest,
-                        "skillText":s40_text.text,
-                        "resources":s40_loaded.resources.iter().map(|resource| json!({
-                            "reference":resource.reference,
-                            "digest":resource.digest,
-                            "text":resource.text
-                        })).collect::<Vec<_>>(),
-                        "deploymentManifestDigest":s40_loaded.identity.deployed_manifest_digest
-                    },
-                    "skillTaskContext":enrichment.context,
-                    "candidate":{"candidateRef":candidate_ref,"status":"CANDIDATE","body":body},
-                    "findings":repair_findings,
-                    "protectedSpans":[{
-                        "candidateRef":candidate_ref,
-                        "bodyDigest":body_digest,
-                        "preserveAllCharactersOutsideReturnedTargetSpan":true
-                    }],
-                    "sceneContract":{
-                        "chapterGoal":plan_payload.get("chapterGoal"),
-                        "sceneExecution":plan_payload.get("sceneExecution"),
-                        "requiredStateOutcomes":plan_payload.get("requiredStateOutcomes"),
-                        "forbiddenTransitions":plan_payload.get("forbiddenTransitions")
-                    },
-                    "chapterPlanRef":plan_ref,
-                    "chapterPlan":plan_payload,
-                    "affectedDimensions":affected_dimensions,
-                    "repairRun":1,
-                    "repairRunLimit":repair_limit
-                });
-                let repair_spec = ModelRunSpec {
-                    model_run_id: repair_run_id.clone(),
-                    job_id: Some(job_id.clone()),
-                    step_id: None,
-                    provider: provider_profile.provider.clone(),
-                    model: provider_profile.model.clone(),
-                    idempotency_key: format!("{idempotency_key}:repair:1"),
-                    capability: "REPAIR_CANDIDATE".into(),
-                    prompt_ref: None,
-                    context_manifest_ref: Some(context_ref.artifact_id.clone()),
-                    budget_id: Some(production_budget_id.clone()),
-                    predicted_cost_cents: 0,
-                    cost_snapshot: None,
-                    attempt_no: 1,
-                    repair_round: 1,
-                };
-                let repair_result = execute_production_model_with_profile(
-                    connection,
-                    gateway,
-                    &provider_profile,
-                    &repair_spec,
-                    "REPAIR_CANDIDATE",
-                    repair_input,
-                    &now,
-                )?;
-                repair_model_run_ids.push(repair_run_id.clone());
-                let patch_payload = repair_result
-                    .parsed
-                    .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-                let allowed_context_refs = enrichment
-                    .context
-                    .bounded_refs
-                    .iter()
-                    .map(|reference| reference.reference.clone())
-                    .collect::<BTreeSet<_>>();
-                let parsed_s40 = parse_s40_repair_output(
-                    patch_payload,
-                    &s40_selection.primary,
-                    &enrichment.context.task_id,
-                    &body,
-                    &affected_dimensions,
-                    &allowed_context_refs,
-                )?;
-                s40_output_record = parsed_s40.skill_output.clone();
-                let requested_escalation = parsed_s40
-                    .skill_output
-                    .pointer("/payload/escalation_if_failed")
-                    .cloned()
-                    .unwrap_or_else(|| json!("ADVISORY_ESCALATION"));
-                if parsed_s40.status != "OK" {
-                    status = "ADVISORY_ESCALATION";
-                    escalation = requested_escalation;
-                } else {
-                    let s40_patch = parsed_s40
-                        .patch
-                        .ok_or_else(|| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-                    if s40_patch.replacement.is_empty() {
-                        status = "ADVISORY_ESCALATION";
-                        escalation = json!("S40_NEEDS_INPUT");
-                    } else {
-                        let patch = crate::creative_skills::repair_candidate(
-                            crate::creative_skills::RepairCandidateRequest {
-                                candidate_ref: candidate_ref.artifact_id.clone(),
-                                candidate_status: "CANDIDATE".into(),
-                                body: body.clone(),
-                                finding_refs: repair_findings
-                                    .iter()
-                                    .map(|finding| finding.finding_id.clone())
-                                    .collect(),
-                                affected_dimensions: affected_dimensions.clone(),
-                                start: s40_patch.start,
-                                end: s40_patch.end,
-                                replacement: s40_patch.replacement.clone(),
-                                skill_id: s40_selection.primary.id.clone(),
-                                skill_version: s40_selection.primary.version.clone(),
-                                model: provider_profile.model.clone(),
-                                repair_run: 1,
-                                repair_run_limit: repair_limit,
-                                context_tokens: s40_selection.context_tokens,
-                                model_calls: s40_selection.model_calls,
-                            },
-                        )
-                        .map_err(|_| "B10_REPAIR_OUTPUT_INVALID".to_string())?;
-                        if patch.status != "CANDIDATE" || patch.transport_calls != 1 {
-                            return Err("B10_REPAIR_OUTPUT_INVALID".into());
-                        }
-                        if patch.body == body {
-                            status = "ADVISORY_ESCALATION";
-                            escalation = json!("S40_NO_EFFECT");
-                        } else {
-                            let candidate_before = candidate_ref.clone();
-                            let repaired_candidate_id = StableIdentityFactory::from_command(
-                                StableIdKind::Artifact,
-                                &format!("{command_id}:candidate:repair:1"),
-                            )?;
-                            let patch_record = json!({
-                                "kind":patch.kind,
-                                "status":patch.status,
-                                "repairRun":patch.repair_run,
-                                "repairRunLimit":patch.repair_run_limit,
-                                "findingRefs":patch.finding_refs,
-                                "affectedDimensions":patch.affected_dimensions,
-                                "start":s40_patch.start,
-                                "end":s40_patch.end,
-                                "replacement":s40_patch.replacement,
-                                "candidateDigest":patch.candidate_digest,
-                                "candidateBefore":candidate_before,
-                                "modelRunId":repair_run_id,
-                                "protectedSpans":s40_patch.protected_spans,
-                                "skillOutput":s40_output_record,
-                                "skill":s40_provenance
-                            });
-                            let mut repaired_payload = candidate.payload.clone();
-                            repaired_payload["body"] = json!(patch.body);
-                            repaired_payload["bodyDigest"] =
-                                json!(sha256_canonical(&json!(patch.body))
-                                    .map_err(|error| error.to_string())?);
-                            repaired_payload["candidatePatch"] = patch_record;
-                            let mut repaired_candidate = artifact(
-                                &project_id,
-                                repaired_candidate_id,
-                                ArtifactType::ChapterCandidate,
-                                &chapter_id,
-                                repaired_payload,
-                                &command_id,
-                                &job_id,
-                                Some(&repair_run_id),
-                                &now,
-                                vec![
-                                    candidate_before.clone(),
-                                    plan_ref.clone(),
-                                    context_ref.clone(),
-                                ],
-                            )?;
-                            repaired_candidate.provenance.context_manifest_ref =
-                                Some(context_ref.artifact_id.clone());
-                            candidate_history.push(candidate);
-                            candidate = repaired_candidate;
-                            candidate_ref = reference(&candidate);
-                            body = patch.body.clone();
-                            report = crate::creative_skills::recheck_affected_dimensions(
-                                &report,
-                                &body,
-                                &enrichment.taste_profile,
-                                affected_dimensions.clone(),
-                            )
-                            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
-                            crate::creative_skills::rebind_quality_candidate(
-                                &mut report,
-                                candidate_ref.clone(),
-                            )
-                            .map_err(|error| format!("B10_QUALITY_RECHECK:{error}"))?;
-                            let unresolved_affected_dimension =
-                                affected_dimensions.iter().any(|dimension| {
-                                    report
-                                        .dimensions
-                                        .get(dimension)
-                                        .is_some_and(|item| item.score < 45)
-                                });
-                            status = if unresolved_affected_dimension {
-                                "ADVISORY_ESCALATION"
-                            } else {
-                                "REPAIRED"
-                            };
-                            if unresolved_affected_dimension {
-                                escalation = json!("REPAIR_RUN_LIMIT");
-                            }
-                            repair_run = 1;
-                            candidate_repaired = true;
-                        }
-                    }
-                }
-            }
-        }
-        report.repair = Some(json!({
-            "status":status,
-            "run":repair_run,
-            "limit":repair_limit,
-            "transportCalls":repair_model_run_ids.len(),
-            "candidateBefore":initial_candidate_ref,
-            "candidateAfter":candidate_ref.clone(),
-            "affectedDimensions":affected_dimensions,
-            "scope":affected_dimensions,
-            "recheckedDimensions":report.rechecked_dimensions,
-            "escalation":escalation,
-            "modelRunIds":repair_model_run_ids,
-            "skill":s40_provenance,
-            "s40Output":s40_output_record
-        }));
-        quality_report = Some(report);
-        repair_evidence = json!({
-            "status":status,
-            "run":repair_run,
-            "limit":repair_limit,
-            "transportCalls":repair_model_run_ids.len(),
-            "effectiveCandidateRef":candidate_ref,
-            "candidateAfter":candidate_ref,
-            "affectedDimensions":affected_dimensions,
-            "recheckedDimensions":quality_report.as_ref().map(|report| &report.rechecked_dimensions),
-            "escalation":escalation,
-            "modelRunIds":repair_model_run_ids,
-            "skill":s40_provenance,
-            "s40Output":s40_output_record
-        });
-    }
-    let (taste_artifact, quality_artifact, taste_ref, quality_ref) =
-        if let Some(enrichment) = creative_enrichment.as_ref() {
-            let taste_payload = serde_json::to_value(&enrichment.taste_profile)
-                .map_err(|error| format!("B10_TASTE_PAYLOAD:{error}"))?;
-            let mut taste_payload = taste_payload;
-            taste_payload["payloadSchema"] = json!("narrative-taste-profile.r1");
-            let mut taste = artifact(
-                &project_id,
-                taste_profile_id,
-                ArtifactType::NarrativeTasteProfile,
-                &chapter_id,
-                taste_payload,
-                &command_id,
-                &job_id,
-                None,
-                &now,
-                vec![context_ref.clone()],
-            )?;
-            taste.provenance.created_by = "B10::NarrativeTasteProfileOwner".into();
-            let taste_ref = reference(&taste);
-            let report = quality_report
-                .take()
-                .ok_or_else(|| "B10_QUALITY_REPORT_MISSING".to_string())?;
-            let report_value = serde_json::to_value(&report)
-                .map_err(|error| format!("B10_QUALITY_PAYLOAD:{error}"))?;
-            let mut quality_payload = report_value;
-            quality_payload["payloadSchema"] = json!("narrative-quality-report.r1");
-            quality_payload["invocationProvenance"] = json!([]);
-            quality_payload["methodInjectionProvenance"] = method_injection_provenance.clone();
-            quality_payload["skillSelection"] = serde_json::to_value(&enrichment.selection)
-                .map_err(|error| format!("B10_SELECTION_PAYLOAD:{error}"))?;
-            quality_payload["repairEvidence"] = repair_evidence.clone();
-            let mut quality = artifact(
-                &project_id,
-                quality_report_id,
-                ArtifactType::NarrativeQualityReport,
-                &chapter_id,
-                quality_payload,
-                &command_id,
-                &job_id,
-                None,
-                &now,
-                vec![candidate_ref.clone(), taste_ref.clone()],
-            )?;
-            quality.provenance.created_by = "B10::NarrativeQualityOwner".into();
-            let quality_ref = reference(&quality);
-            (
-                Some(taste),
-                Some(quality),
-                Some(taste_ref),
-                Some(quality_ref),
-            )
-        } else {
-            (None, None, None, None)
-        };
+    let candidate_ref = reference(&candidate);
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
-    let audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":quality_ref});
-    let reusable_audit = if candidate_repaired {
+    let mut audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":Value::Null});
+    // CRAFT v3 (CRAFT_V3_DESIGN §4.3): the same audit call also records the
+    // habits, looks and objects later chapters must keep consistent.
+    if craft_writing.is_some() {
+        audit_input["continuityDetailsWanted"] = json!(true);
+    }
+    let reusable_audit = if !render_reused {
         None
     } else {
         retry_of_job_id
@@ -3200,7 +3098,9 @@ fn run_chapter_production_inner(
             .map_err(|error| error.to_string())?
             .flatten()
     };
-    let (audit_run_id, audit_payload) = if let Some((model_run_id, parsed)) = reusable_audit {
+    let audit_reused = reusable_audit.is_some();
+    let audit_profile = gateway.resolve_step_profile("AUDIT_EXTRACT")?;
+    let (mut audit_run_id, raw_audit) = if let Some((model_run_id, parsed)) = reusable_audit {
         (
             model_run_id,
             parse_provider_model_payload_for_capability(parsed, "AUDIT_EXTRACT")?,
@@ -3210,13 +3110,13 @@ fn run_chapter_production_inner(
             model_run_id: new_audit_run_id.clone(),
             job_id: Some(job_id.clone()),
             step_id: None,
-            provider: provider_profile.provider.clone(),
-            model: provider_profile.model.clone(),
+            provider: audit_profile.provider.clone(),
+            model: audit_profile.model.clone(),
             idempotency_key: format!("{idempotency_key}:audit"),
             capability: "AUDIT_EXTRACT".into(),
             prompt_ref: None,
             context_manifest_ref: Some(context_ref.artifact_id.clone()),
-            budget_id: Some(production_budget_id),
+            budget_id: Some(production_budget_id.clone()),
             predicted_cost_cents: 0,
             cost_snapshot: None,
             attempt_no: 1,
@@ -3225,10 +3125,10 @@ fn run_chapter_production_inner(
         let result = execute_production_model_with_profile(
             connection,
             gateway,
-            &provider_profile,
+            &audit_profile,
             &audit_spec,
             "AUDIT_EXTRACT",
-            audit_input,
+            audit_input.clone(),
             &now,
         )?;
         (
@@ -3238,19 +3138,194 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
         )
     };
-    let audit_payload = normalize_audit_model_output(audit_payload, &body);
-    let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
-        .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
-    validate_audit_completeness(&audit_payload, &extraction)?;
-    validate_actual_extraction(
-        connection,
-        &project_id,
-        &chapter_id,
-        &body,
-        &plan_payload,
-        &gate_policy_payload,
-        &mut extraction,
-    )?;
+    let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
+        let claimed_fact_ids = raw
+            .get("canonCandidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("factId").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        let existing_fact_ids =
+            crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
+                connection,
+                &project_id,
+                &claimed_fact_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| error.to_string())?;
+        let renamed_fact_ids = fresh_audit_fact_ids(&mut raw, &existing_fact_ids, &chapter_id);
+        let mut audit_payload = normalize_audit_model_output(raw, &body);
+        if !renamed_fact_ids.is_empty() {
+            audit_payload["normalization"]["renamedFactIds"] = json!(renamed_fact_ids);
+        }
+        let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
+        let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
+            connection,
+            &project_id,
+            &unplanned_task_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        drop_invented_task_candidates(&mut audit_payload, &unplanned_task_ids, &known_task_ids);
+        // A reveal of a reservation neither this plan nor the BookPlan names
+        // is an audit invention: it is dropped and recorded. A real
+        // reservation revealed outside the plan still fails the chapter.
+        let unplanned_reveals = audit_payload
+            .get("revealedReservationRefs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|reference| {
+                !plan_payload
+                    .get("reservationRefs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|refs| refs.iter().any(|item| item == reference))
+            })
+            .collect::<Vec<_>>();
+        let known_reservations =
+            crate::repositories::narrative::NarrativeRepository::known_reservation_refs(
+                connection,
+                &project_id,
+                &unplanned_reveals,
+            )
+            .map_err(|error| error.to_string())?;
+        let invented_reveals = unplanned_reveals
+            .into_iter()
+            .filter(|reference| !known_reservations.contains(*reference))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if let Some(reveals) = audit_payload
+            .get_mut("revealedReservationRefs")
+            .and_then(Value::as_array_mut)
+        {
+            reveals.retain(|item| {
+                !item
+                    .as_str()
+                    .is_some_and(|r| invented_reveals.iter().any(|i| i == r))
+            });
+        }
+        if !invented_reveals.is_empty() {
+            audit_payload["normalization"]["droppedInventedReservations"] = json!(invented_reveals);
+        }
+        let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
+            .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
+        validate_audit_completeness(&audit_payload, &extraction)?;
+        let mut extraction = extraction;
+        validate_actual_extraction(
+            connection,
+            &project_id,
+            &chapter_id,
+            &body,
+            &plan_payload,
+            &gate_policy_payload,
+            &mut extraction,
+        )?;
+        Ok((audit_payload, extraction))
+    };
+    // Craft rule (2026-10-18): an audit whose evidence cannot be located in
+    // the body (for example quoting the plan) is run once more with the
+    // unlocatable quotes; a second failure still blocks the chapter. Owner
+    // decision (2026-10-19): so is an audit using an unregistered predicate,
+    // with the registered ones; the policy itself stays fail-closed.
+    let (mut audit_payload, extraction) = match check_audit(raw_audit.clone()) {
+        Err(error)
+            if !audit_reused
+                && (matches!(
+                    error.as_str(),
+                    "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
+                        | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
+                        | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
+                ) || error
+                    .starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
+        {
+            let rerun_id = StableIdentityFactory::from_command(
+                StableIdKind::ModelRun,
+                &format!("{command_id}:audit-feedback"),
+            )?;
+            let mut input = audit_input;
+            input["auditFeedback"] = json!({
+                "rejectedFor":error,
+                "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
+                "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
+                "instruction":"上次提取不完整：unlocatableQuotes 中的引文在正文 body 中找不到（可能引用了规划或改写了原文），incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
+            });
+            if error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS") {
+                input["auditFeedback"]["registeredPredicates"] = json!(
+                    crate::canon_semantics::CanonSemanticPolicy::from_gate_policy(
+                        &gate_policy_payload
+                    )
+                    .map_err(str::to_owned)?
+                    .predicates()
+                );
+                input["auditFeedback"]["instruction"] = json!("上次提取的 canonCandidates 用了未登记的 predicate（见 rejectedFor）。请重新完整提取：每条事实的 predicate 只能取 registeredPredicates 中的一个，表达不了的变化不要写成事实。");
+            }
+            let rerun_spec = ModelRunSpec {
+                model_run_id: rerun_id.clone(),
+                job_id: Some(job_id.clone()),
+                step_id: None,
+                provider: audit_profile.provider.clone(),
+                model: audit_profile.model.clone(),
+                idempotency_key: format!("{idempotency_key}:audit-feedback"),
+                capability: "AUDIT_EXTRACT".into(),
+                prompt_ref: None,
+                context_manifest_ref: Some(context_ref.artifact_id.clone()),
+                budget_id: Some(production_budget_id.clone()),
+                predicted_cost_cents: 0,
+                cost_snapshot: None,
+                attempt_no: 2,
+                repair_round: 0,
+            };
+            let result = execute_production_model_with_profile(
+                connection,
+                gateway,
+                &audit_profile,
+                &rerun_spec,
+                "AUDIT_EXTRACT",
+                input,
+                &now,
+            )?;
+            audit_run_id = rerun_id;
+            let rerun_raw = result
+                .parsed
+                .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+            match check_audit(rerun_raw.clone()) {
+                Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
+                    let (kept, dropped) = drop_unlocatable_audit_candidates(&rerun_raw, &body);
+                    // Real run 2026-10-24: every fact was dropped and the
+                    // chapter committed with no canon. A chapter is not
+                    // committed without the facts its audit reported.
+                    let has_canon = |value: &Value| {
+                        value["canonCandidates"]
+                            .as_array()
+                            .is_some_and(|items| !items.is_empty())
+                    };
+                    if has_canon(&rerun_raw) && !has_canon(&kept) {
+                        return Err(error);
+                    }
+                    let (mut payload, extraction) = check_audit(kept)?;
+                    payload["normalization"]["droppedUnlocatable"] = dropped;
+                    (payload, extraction)
+                }
+                other => other?,
+            }
+        }
+        other => other?,
+    };
+    if !extraction.dropped_unbound_knowledge.is_empty() {
+        audit_payload["normalization"]["droppedUnboundKnowledge"] =
+            json!(extraction.dropped_unbound_knowledge);
+    }
+    if !extraction.downgraded_task_claims.is_empty() {
+        audit_payload["normalization"]["downgradedTaskClaims"] =
+            json!(extraction.downgraded_task_claims);
+    }
     let planned_continuity_refs = plan_payload
         .get("continuityActions")
         .and_then(Value::as_array)
@@ -3586,7 +3661,7 @@ fn run_chapter_production_inner(
             })
         })
         .collect::<Vec<_>>();
-    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
+    let final_payload = json!({"payloadSchema":"final-chapter.r1","chapterId":chapter_id,"body":candidate.payload["body"],"bodyDigest":candidate.payload["bodyDigest"],"candidateRef":candidate_ref.clone(),"chapterPlanRef":plan_ref.clone(),"contextManifestRef":context_ref.clone(),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"wordCount":candidate.payload["body"].as_str().map(|s| s.chars().count()).unwrap_or(0),"stateDigest":state_digest,"validatedEvidence":evidence_records,"validatedObligationEvidence":obligation_evidence_records,"newResponsibilityEvidence":new_responsibility_evidence});
     let mut final_artifact = artifact(
         &project_id,
         final_id,
@@ -3812,8 +3887,14 @@ fn run_chapter_production_inner(
         })
     }));
     let mut model_run_refs = vec![render_run_id.clone(), audit_run_id.clone()];
-    model_run_refs.extend(repair_model_run_ids.iter().cloned());
-    let receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":quality_ref,"tasteProfileRef":taste_ref,"creativeEnrichment":creative_enrichment_payload.clone().unwrap_or(Value::Null),"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions});
+    model_run_refs.extend(prose_run_ids.iter().cloned());
+    let mut receipt_payload = json!({"payloadSchema":"production-receipt.r1","executionMode":execution_mode,"projectId":project_id,"chapterId":chapter_id,"jobId":job_id,"contextManifestRef":context_ref,"chapterPlanRef":plan_ref.clone(),"gatePolicyRef":policy_ref.clone(),"canonSemanticPolicyVersion":gate_policy_payload.pointer("/canonSemantics/policyVersion").and_then(Value::as_str),"threadPromotionRuleVersion":crate::narrative::THREAD_PROMOTION_RULE_VERSION,"candidateRef":candidate_ref.clone(),"finalChapterRef":reference(&final_artifact),"auditRef":reference(&audit),"qualityReportRef":Value::Null,"tasteProfileRef":Value::Null,"creativeEnrichment":Value::Null,"modelRunRefs":model_run_refs,"reconciliation":reconciliation,"reality":reality,"threadPromotionDecisions":thread_promotion_decisions,"craftSkills":craft_skills});
+    if craft_writing.is_some() {
+        receipt_payload["continuityDetails"] = json!(crate::craft_plan::continuity_details(
+            &audit.payload["audit"],
+            &body
+        ));
+    }
     let receipt_artifact = artifact(
         &project_id,
         receipt_artifact_id,
@@ -3826,10 +3907,7 @@ fn run_chapter_production_inner(
         &now,
         vec![reference(&final_artifact), reference(&exit_artifact)],
     )?;
-    let certificate_evidence = quality_artifact
-        .as_ref()
-        .map(|quality| vec![reference(&audit), reference(quality)])
-        .unwrap_or_else(|| vec![reference(&audit)]);
+    let certificate_evidence = vec![reference(&audit)];
     let certificate = make_certificate(
         &project_id,
         policy_ref,
@@ -3862,7 +3940,9 @@ fn run_chapter_production_inner(
             "entityType":item.entity_type,
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
-            "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote}
+            "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote},
+            "supersedesFactId":extraction.canon_transitions.get(&item.fact_id),
+            "alsoSupersedesFactIds":extraction.canon_duplicate_transitions.get(&item.fact_id)
         }
     })).collect::<Vec<_>>();
     let knowledge_delta = extraction.knowledge_candidates.iter().map(|item| json!({
@@ -3886,14 +3966,7 @@ fn run_chapter_production_inner(
         },
         "payloadJson":{"actualNarrative":true,"sourceArtifactId":final_ref.artifact_id,"sourceVersion":final_ref.version}
     })).collect::<Vec<_>>();
-    bundle_artifacts.extend(candidate_history);
     bundle_artifacts.push(candidate);
-    if let Some(taste) = taste_artifact {
-        bundle_artifacts.push(taste);
-    }
-    if let Some(quality) = quality_artifact {
-        bundle_artifacts.push(quality);
-    }
     bundle_artifacts.extend([audit, final_artifact, exit_artifact, receipt_artifact]);
     bundle_artifacts.extend(change_request_artifacts);
     let dependency_source_hash = if gateway.fault_injection() == Some("dependency_source_hash") {
@@ -3913,7 +3986,7 @@ fn run_chapter_production_inner(
         "stateDelta":state_delta,
         "dependencyEdges":[{"edgeId":format!("edge:{}:plan",final_ref.artifact_id),"sourceRef":plan_ref.artifact_id,"targetRef":final_ref.artifact_id,"dependencyType":"PLAN_INPUT","scope":"CHAPTER","impactClass":"HARD","sourceHash":dependency_source_hash,"payloadJson":{"createdBy":"B08::ChapterProductionRuntime"}}],
         "jobUpdates":[{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}],
-        "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation}}
+        "gateCertificates":[certificate],"receiptDraft":{"domain":"B08_CHAPTER_PRODUCTION","artifactRefs":[],"payload":{"executionMode":execution_mode,"chapterId":chapter_id,"reconciliation":reconciliation,"droppedUnboundKnowledge":extraction.dropped_unbound_knowledge}}
     })).map_err(|error| format!("B08_BUNDLE_INVALID:{error}"))?;
     let _commit_control_guard =
         update_commit_stage(manager, connection, &project_id, &job_id, &now)?;
@@ -4190,6 +4263,20 @@ struct AuditExtraction {
     evidence_ranges: Vec<EvidenceSpan>,
     audit_completeness: AuditCompleteness,
     unresolved_hard: bool,
+    /// FX-17: knowledge whose knower/fact is neither existing nor extracted in
+    /// this audit; dropped from the commit and kept here as a durable record.
+    #[serde(default)]
+    dropped_unbound_knowledge: Vec<Value>,
+    /// Completion claims whose dependencies or predicate are unmet; kept as
+    /// progress (ACTIVE) and recorded here.
+    #[serde(default)]
+    downgraded_task_claims: Vec<Value>,
+    /// FX-17: new fact id -> the open fact from an earlier chapter it replaces.
+    #[serde(default)]
+    canon_transitions: BTreeMap<String, String>,
+    /// New fact id -> further open facts with the same value it replaces.
+    #[serde(default)]
+    canon_duplicate_transitions: BTreeMap<String, Vec<String>>,
 }
 
 fn validate_audit_candidate_binding(
@@ -4209,6 +4296,120 @@ fn validate_audit_candidate_binding_value(
         return Err("B08_AUDIT_CANDIDATE_BINDING_MISMATCH".into());
     }
     Ok(())
+}
+
+/// Evidence quotes of a raw audit reply that occur nowhere in the body, even
+/// ignoring whitespace or across an ellipsis.
+fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
+    let squeezed = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let body_squeezed = squeezed(body);
+    let body_chars = body.chars().collect::<Vec<_>>();
+    let mut quotes = Vec::new();
+    let fields = [
+        "canonCandidates",
+        "knowledgeCandidates",
+        "continuityCandidates",
+        "taskProgressCandidates",
+    ];
+    let candidate_quotes = fields.iter().flat_map(|field| {
+        raw.get(*field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.pointer("/evidence/quote").and_then(Value::as_str))
+    });
+    let range_quotes = raw
+        .get("evidenceRanges")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("quote").and_then(Value::as_str));
+    for quote in candidate_quotes.chain(range_quotes) {
+        let found = body.contains(quote)
+            || body_squeezed.contains(&squeezed(quote))
+            || bounded_ellipsis_span(body, quote).is_some()
+            || omission_unique_span(&body_chars, quote).is_some();
+        if !quote.is_empty() && !found && !quotes.iter().any(|known| known == quote) {
+            quotes.push(quote.to_owned());
+        }
+    }
+    quotes
+}
+
+/// Candidates of a raw audit reply missing a required field or evidence,
+/// named so a rerun can complete them.
+fn incomplete_audit_candidates(raw: &Value) -> Value {
+    let requirements: [(&str, &str, &[&str]); 4] = [
+        (
+            "canonCandidates",
+            "factId",
+            &["factId", "subjectId", "predicate", "objectJson", "evidence"],
+        ),
+        (
+            "knowledgeCandidates",
+            "knowledgeId",
+            &[
+                "knowledgeId",
+                "knowerId",
+                "factId",
+                "epistemicState",
+                "acquiredStoryTime",
+                "visibilityScope",
+                "evidence",
+            ],
+        ),
+        (
+            "continuityCandidates",
+            "threadRef",
+            &["threadRef", "disposition"],
+        ),
+        (
+            "taskProgressCandidates",
+            "taskId",
+            &["taskId", "status", "evidence"],
+        ),
+    ];
+    let mut incomplete = Vec::new();
+    for (field, id_key, required) in requirements {
+        for item in raw
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let missing = required
+                .iter()
+                .filter(|key| item.get(**key).is_none())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                incomplete.push(json!({"field":field,"id":item.get(id_key),"missing":missing}));
+            }
+        }
+    }
+    json!(incomplete)
+}
+
+/// The chapter plan as the audit sees it: scenes keep only their type,
+/// size and reveal markers, so no plan prose can be quoted as evidence.
+fn audit_plan_view(plan: &Value) -> Value {
+    let mut view = plan.clone();
+    if let Some(scenes) = view.get_mut("sceneExecution").and_then(Value::as_array_mut) {
+        for scene in scenes {
+            if let Some(object) = scene.as_object_mut() {
+                object.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "sceneType" | "estimatedCharacters" | "action" | "reservationRef"
+                    )
+                });
+            }
+        }
+    }
+    view
 }
 
 fn validate_audit_completeness(
@@ -4280,10 +4481,73 @@ fn validate_audit_completeness(
 }
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
+    // FX-17: models label a newly observed thread "new_thread:<id>"; the
+    // runtime's thread ref namespace is "thread:<id>". A collision with an
+    // existing thread is still blocked as THREAD_TRANSITION_OUTSIDE_PLAN.
+    if let Some(candidates) = payload
+        .get_mut("continuityCandidates")
+        .and_then(Value::as_array_mut)
+    {
+        for candidate in candidates {
+            let renamed = candidate
+                .get("threadRef")
+                .and_then(Value::as_str)
+                .and_then(|thread_ref| thread_ref.strip_prefix("new_thread:"))
+                .map(|id| format!("thread:{id}"));
+            if let Some(renamed) = renamed {
+                candidate["threadRef"] = json!(renamed);
+            }
+        }
+    }
     let body_chars = body.chars().collect::<Vec<_>>();
     let mut rebound_evidence = 0_u64;
     let mut invalid_continuity_evidence = 0_u64;
     let normalize_evidence = |value: &Value| -> Option<Value> {
+        // FX-17: a verbatim quote that occurs exactly once identifies the
+        // evidence exactly, whatever offsets the model computed; offsets are
+        // only trusted when they reproduce the supplied quote. Anything else
+        // (ambiguous, absent or ellipsis quotes) stays rebound and incomplete.
+        let supplied_quote = value
+            .get("quote")
+            .and_then(Value::as_str)
+            .filter(|quote| !quote.is_empty());
+        let supplied_offsets = value
+            .get("start")
+            .and_then(Value::as_u64)
+            .zip(value.get("end").and_then(Value::as_u64))
+            .map(|(start, end)| (start as usize, end as usize));
+        if let Some(quote) = supplied_quote {
+            let offsets_reproduce_quote = supplied_offsets.is_some_and(|(start, end)| {
+                start < end
+                    && end <= body_chars.len()
+                    && body_chars[start..end].iter().collect::<String>() == quote
+            });
+            let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
+            if !offsets_reproduce_quote && matches.len() == 1 {
+                let char_start = body[..matches[0].0].chars().count();
+                return Some(json!({
+                    "start":char_start,
+                    "end":char_start + quote.chars().count(),
+                    "quote":quote,
+                    "rebound":false
+                }));
+            }
+            // A verbatim quote that only lost whitespace (typically paragraph
+            // breaks) still identifies one exact passage of the body.
+            if !offsets_reproduce_quote && matches.is_empty() {
+                let span = whitespace_insensitive_unique_span(&body_chars, quote)
+                    .or_else(|| bounded_ellipsis_span(body, quote))
+                    .or_else(|| omission_unique_span(&body_chars, quote));
+                if let Some((start, end)) = span {
+                    return Some(json!({
+                        "start":start,
+                        "end":end,
+                        "quote":body_chars[start..end].iter().collect::<String>(),
+                        "rebound":false
+                    }));
+                }
+            }
+        }
         let start = value.get("start")?.as_u64()? as usize;
         let end = value.get("end")?.as_u64()? as usize;
         if start < end && end <= body_chars.len() {
@@ -4345,15 +4609,28 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         ("taskProgressCandidates", &["taskId", "status"][..]),
     ];
     let mut dropped = serde_json::Map::new();
+    let mut without_evidence = Vec::new();
     for (field, required) in candidate_requirements {
         let Some(items) = payload.get_mut(field).and_then(Value::as_array_mut) else {
             continue;
         };
         let before = items.len();
+        let unquoted_before = without_evidence.len();
         items.retain_mut(|item| {
             let Some(object) = item.as_object_mut() else {
                 return false;
             };
+            // Without a stated authority a fact gets the lowest level, as the
+            // commit already assumes.
+            if field == "canonCandidates" {
+                object.entry("authorityLevel").or_insert_with(|| json!("C"));
+                // A fact object stated as a bare value keeps it under `value`.
+                if let Some(value) = object.get_mut("objectJson") {
+                    if !value.is_object() && !value.is_null() {
+                        *value = json!({"value":value.take()});
+                    }
+                }
+            }
             if !required.iter().all(|key| object.contains_key(*key)) {
                 return false;
             }
@@ -4374,6 +4651,17 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                 }
                 return true;
             }
+            // Owner decision (2026-10-18): a candidate the model gave no
+            // evidence for cannot be verified; it is left out and recorded.
+            if !object.contains_key("evidence") {
+                let id = ["factId", "knowledgeId", "taskId"]
+                    .iter()
+                    .find_map(|key| object.get(*key))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                without_evidence.push(json!({"field":field,"id":id}));
+                return false;
+            }
             let Some(evidence) = object.get("evidence").and_then(normalize_evidence) else {
                 return false;
             };
@@ -4386,10 +4674,24 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                     return false;
                 };
                 let normalized_state = match state {
-                    "KNOWS" | "KNOWS_WITH_CONTEXT" | "KNOWS_WITH_EVIDENCE" | "KNOWS_FACT" => {
-                        "KNOWS"
-                    }
+                    "KNOWS"
+                    | "KNOWS_WITH_CONTEXT"
+                    | "KNOWS_WITH_EVIDENCE"
+                    | "KNOWS_FACT"
+                    | "REMEMBERS"
+                    | "REMEMBERED"
+                    | "RECALLS"
+                    | "RECALLED"
+                    | "REALIZES"
+                    | "REALIZED"
+                    | "LEARNS"
+                    | "LEARNED"
+                    | "DISCOVERS"
+                    | "DISCOVERED" => "KNOWS",
                     "BELIEVES_TRUE" | "BELIEVES" => "BELIEVES_TRUE",
+                    "DOUBTS" | "INFERS" => "SUSPECTS",
+                    "HIDES" => "CONCEALS",
+                    "FORGETS" | "FORGOT" | "FORGOTTEN" => "UNKNOWN",
                     "BELIEVES_FALSE" | "SUSPECTS" | "CONCEALS" | "UNKNOWN" => state,
                     _ => return false,
                 };
@@ -4397,7 +4699,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
             }
             true
         });
-        dropped.insert(field.into(), json!(before - items.len()));
+        let unquoted = without_evidence.len() - unquoted_before;
+        dropped.insert(field.into(), json!(before - items.len() - unquoted));
     }
     let (normalized_ranges, dropped_ranges) = payload
         .get("evidenceRanges")
@@ -4418,14 +4721,307 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     if let Some(ranges) = normalized_ranges {
         payload["evidenceRanges"] = json!(ranges);
     }
+    // "Complete with delta" and "complete, no change" only summarize whether
+    // anything was extracted, so the label follows the candidates.
+    if matches!(
+        payload.get("auditCompleteness").and_then(Value::as_str),
+        Some("COMPLETE_NO_CHANGE" | "COMPLETE_WITH_DELTA")
+    ) {
+        let has_delta = [
+            "canonCandidates",
+            "knowledgeCandidates",
+            "continuityCandidates",
+            "taskProgressCandidates",
+            "revealedReservationRefs",
+        ]
+        .iter()
+        .any(|field| {
+            payload
+                .get(*field)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        });
+        payload["auditCompleteness"] = json!(if has_delta {
+            "COMPLETE_WITH_DELTA"
+        } else {
+            "COMPLETE_NO_CHANGE"
+        });
+    }
     payload["normalization"] = json!({
         "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
         "droppedCandidates":dropped,
         "droppedEvidenceRanges":dropped_ranges,
+        "droppedWithoutEvidence":without_evidence,
         "reboundEvidence":rebound_evidence,
         "invalidContinuityEvidence":invalid_continuity_evidence
     });
     payload
+}
+
+fn unplanned_task_candidate_ids(audit: &Value, plan: &Value) -> BTreeSet<String> {
+    let planned = plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    audit
+        .get("taskProgressCandidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| candidate.get("taskId").and_then(Value::as_str))
+        .filter(|task_id| !planned.contains(task_id))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// FX-17: a task ID that is neither planned nor a real project task was
+/// invented by the model ("do not invent authority refs") and is dropped like
+/// other unbound candidates. A real task outside the plan still reaches the
+/// Task Scope Gate and blocks.
+fn drop_invented_task_candidates(
+    audit: &mut Value,
+    unplanned: &BTreeSet<String>,
+    known: &BTreeSet<String>,
+) {
+    let mut dropped = 0_u64;
+    if let Some(candidates) = audit
+        .get_mut("taskProgressCandidates")
+        .and_then(Value::as_array_mut)
+    {
+        candidates.retain(|candidate| {
+            let task_id = candidate
+                .get("taskId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let invented = unplanned.contains(task_id) && !known.contains(task_id);
+            dropped += u64::from(invented);
+            !invented
+        });
+    }
+    if let Some(normalization) = audit
+        .get_mut("normalization")
+        .and_then(Value::as_object_mut)
+    {
+        normalization.insert("droppedInventedTasks".into(), json!(dropped));
+    }
+}
+
+/// Char span of the only passage of `body` equal to `quote` once whitespace
+/// is ignored on both sides; None when absent or ambiguous.
+fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
+    let needle = quote
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if needle.is_empty() {
+        return None;
+    }
+    let positions = (0..body.len())
+        .filter(|&index| !body[index].is_whitespace())
+        .collect::<Vec<_>>();
+    let compact = positions
+        .iter()
+        .map(|&index| body[index])
+        .collect::<Vec<_>>();
+    let mut found = compact
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle.as_slice())
+        .map(|(offset, _)| offset);
+    let offset = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some((positions[offset], positions[offset + needle.len() - 1] + 1))
+}
+
+/// Applies the rewrite's `edits` whose passage occurs once in `body` and
+/// whose replacement adds no model habit, each spliced at its own span;
+/// returns the new body and how many applied.
+fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
+    let mut revised = body.to_string();
+    let mut applied = 0;
+    for edit in rewrite
+        .get("edits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+    {
+        let (Some(quote), Some(replacement)) = (
+            edit.get("quote").and_then(Value::as_str),
+            edit.get("replacement").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // A rewrite must not trade one model habit for another.
+        if replacement.trim().is_empty()
+            || crate::chapter_craft::habit_count(replacement)
+                > crate::chapter_craft::habit_count(quote)
+        {
+            continue;
+        }
+        if let Some((start, end)) = locate_unique_quote(&revised, quote) {
+            let mut chars = revised.chars().collect::<Vec<_>>();
+            chars.splice(start..end, replacement.chars());
+            revised = chars.into_iter().collect();
+            applied += 1;
+        }
+    }
+    (revised, applied)
+}
+
+/// A new Canon fact must never reuse the id of a committed fact (the commit
+/// would overwrite it) or of another fact in the same audit. Such facts get
+/// an id of their own, and knowledge in the audit that names the reused id
+/// follows the new fact. Returns `{from, to}` for each renamed fact.
+fn fresh_audit_fact_ids(
+    raw: &mut Value,
+    existing: &BTreeSet<String>,
+    chapter_id: &str,
+) -> Vec<Value> {
+    let prefix = sha256_canonical(&json!(chapter_id))
+        .map(|digest| digest.chars().take(24).collect::<String>())
+        .unwrap_or_default();
+    let mut taken = existing.clone();
+    let mut seen = BTreeSet::new();
+    let mut renamed = Vec::new();
+    let mut mapping = BTreeMap::<String, String>::new();
+    let mut next = 1_usize;
+    if let Some(items) = raw.get_mut("canonCandidates").and_then(Value::as_array_mut) {
+        for item in items {
+            let Some(fact_id) = item
+                .get("factId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            if !existing.contains(&fact_id) && seen.insert(fact_id.clone()) {
+                taken.insert(fact_id);
+                continue;
+            }
+            let fresh = loop {
+                let candidate = format!("canon:{prefix}:{next}");
+                next += 1;
+                if !taken.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            taken.insert(fresh.clone());
+            item["factId"] = json!(fresh);
+            mapping
+                .entry(fact_id.clone())
+                .or_insert_with(|| fresh.clone());
+            renamed.push(json!({"from":fact_id,"to":fresh}));
+        }
+    }
+    if let Some(items) = raw
+        .get_mut("knowledgeCandidates")
+        .and_then(Value::as_array_mut)
+    {
+        for item in items {
+            let target = item
+                .get("factId")
+                .and_then(Value::as_str)
+                .and_then(|fact_id| mapping.get(fact_id))
+                .cloned();
+            if let Some(target) = target {
+                item["factId"] = json!(target);
+            }
+        }
+    }
+    renamed
+}
+
+/// Owner decision (2026-10-18): a quote that left words out of one body
+/// passage binds to that whole passage when its characters occur there in
+/// order, cover at least two thirds of it, and no other passage matches.
+fn omission_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
+    let needle = quote
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<Vec<_>>();
+    if needle.len() < 8 {
+        return None;
+    }
+    let limit = needle.len() * 3 / 2;
+    let mut spans = Vec::new();
+    for start in (0..body.len()).filter(|&index| body[index] == needle[0]) {
+        let (mut matched, mut length, mut index) = (0, 0, start);
+        while index < body.len() && matched < needle.len() && length <= limit {
+            if !body[index].is_whitespace() {
+                length += 1;
+                if body[index] == needle[matched] {
+                    matched += 1;
+                }
+            }
+            index += 1;
+        }
+        if matched == needle.len() && length <= limit {
+            spans.push((start, index));
+        }
+    }
+    // Keep only the tightest spans; one must remain.
+    let tight = spans
+        .iter()
+        .filter(|outer| {
+            !spans
+                .iter()
+                .any(|inner| inner != *outer && outer.0 <= inner.0 && inner.1 <= outer.1)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    match tight.as_slice() {
+        [span] => Some(*span),
+        _ => None,
+    }
+}
+
+/// Whether `quote` identifies exactly one passage of `body`.
+fn quote_locates_uniquely(body: &str, body_chars: &[char], quote: &str) -> bool {
+    body.matches(quote).count() == 1
+        || whitespace_insensitive_unique_span(body_chars, quote).is_some()
+        || bounded_ellipsis_span(body, quote).is_some()
+        || omission_unique_span(body_chars, quote).is_some()
+}
+
+/// Owner decision (2026-10-18): after the audit rerun, candidates whose
+/// quote still identifies no single body passage are dropped and named, as
+/// facts without evidence are; evidence ranges that fail the same way go.
+fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) {
+    let body_chars = body.chars().collect::<Vec<_>>();
+    let unlocatable = |quote: Option<&str>| {
+        quote.is_some_and(|quote| {
+            !quote.is_empty() && !quote_locates_uniquely(body, &body_chars, quote)
+        })
+    };
+    let mut kept = raw.clone();
+    let mut dropped = Vec::new();
+    for (field, id_key) in [
+        ("canonCandidates", "factId"),
+        ("knowledgeCandidates", "knowledgeId"),
+        ("continuityCandidates", "threadRef"),
+        ("taskProgressCandidates", "taskId"),
+    ] {
+        if let Some(items) = kept.get_mut(field).and_then(Value::as_array_mut) {
+            items.retain(|item| {
+                let quote = item.pointer("/evidence/quote").and_then(Value::as_str);
+                if !unlocatable(quote) {
+                    return true;
+                }
+                dropped.push(json!({"field":field,"id":item.get(id_key),"quote":quote}));
+                false
+            });
+        }
+    }
+    if let Some(ranges) = kept.get_mut("evidenceRanges").and_then(Value::as_array_mut) {
+        ranges.retain(|range| !unlocatable(range.get("quote").and_then(Value::as_str)));
+    }
+    (kept, json!(dropped))
 }
 
 fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
@@ -4439,6 +5035,23 @@ fn exact_quote(body: &str, evidence: &EvidenceSpan) -> Result<(), String> {
         return Err("B08_EVIDENCE_QUOTE_MISMATCH".into());
     }
     Ok(())
+}
+
+/// Where a verbatim quote occurs exactly once in `body` (ignoring only
+/// whitespace), as character offsets; `None` when absent or ambiguous.
+pub fn locate_unique_quote(body: &str, quote: &str) -> Option<(usize, usize)> {
+    if quote.is_empty() {
+        return None;
+    }
+    let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
+    if matches.len() == 1 {
+        let start = body[..matches[0].0].chars().count();
+        return Some((start, start + quote.chars().count()));
+    }
+    if !matches.is_empty() {
+        return None;
+    }
+    whitespace_insensitive_unique_span(&body.chars().collect::<Vec<_>>(), quote)
 }
 
 pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Result<(), String> {
@@ -4515,6 +5128,14 @@ fn validate_actual_extraction(
     .map_err(|error| error.to_string())?
     .ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
 
+    let mut canon_transitions = BTreeMap::<String, String>::new();
+    let mut duplicate_transitions = BTreeMap::<String, Vec<String>>::new();
+    // FX-19: process Canon candidates in reading order so a later value of a
+    // single-valued fact in this chapter can replace an earlier one.
+    audit
+        .canon_candidates
+        .sort_by_key(|candidate| candidate.evidence.start);
+    let mut pending_evidence = BTreeMap::<String, (usize, usize)>::new();
     for candidate in &audit.canon_candidates {
         canon_semantics
             .as_ref()
@@ -4574,9 +5195,65 @@ fn validate_actual_extraction(
             valid_from_chapter_no: candidate_from_chapter_no,
             valid_to_chapter_no: candidate_to_chapter_no,
         };
+        let ended = canon_transitions
+            .values()
+            .chain(duplicate_transitions.values().flatten())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let current = current
+            .into_iter()
+            .filter(|fact| !ended.contains(&fact.fact_id))
+            .collect::<Vec<_>>();
+        let mut replaced = Vec::new();
+        for fact in pending_canon_facts.get(&semantic_key).into_iter().flatten() {
+            let earlier_ends_first = pending_evidence
+                .get(&fact.fact_id)
+                .is_some_and(|(_, end)| *end <= candidate.evidence.start);
+            if !ended.contains(&fact.fact_id)
+                && earlier_ends_first
+                && policy.in_chapter_transition(
+                    &candidate.predicate,
+                    fact,
+                    candidate_input.clone(),
+                )?
+            {
+                replaced.push(fact.fact_id.clone());
+            }
+        }
+        for fact in &current {
+            if fact.fact_id != candidate.fact_id
+                && policy.narrative_transition(
+                    &candidate.predicate,
+                    fact,
+                    candidate_input.clone(),
+                )?
+            {
+                replaced.push(fact.fact_id.clone());
+            }
+        }
+        if replaced.len() > 1 {
+            // Equal open values (a restated fact) are one state and are all
+            // replaced together; different values stay ambiguous.
+            let object_of = |fact_id: &String| {
+                current
+                    .iter()
+                    .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
+                    .find(|fact| &fact.fact_id == fact_id)
+                    .map(|fact| fact.object_json.clone())
+            };
+            let first = object_of(&replaced[0]);
+            if first.is_none() || replaced.iter().any(|fact_id| object_of(fact_id) != first) {
+                return Err("B08_CANON_TIME_UNRESOLVED".into());
+            }
+            duplicate_transitions.insert(candidate.fact_id.clone(), replaced[1..].to_vec());
+        }
+        if let Some(old_fact_id) = replaced.first() {
+            canon_transitions.insert(candidate.fact_id.clone(), old_fact_id.clone());
+        }
         for fact in current
             .iter()
             .chain(pending_canon_facts.get(&semantic_key).into_iter().flatten())
+            .filter(|fact| !replaced.contains(&fact.fact_id) && !ended.contains(&fact.fact_id))
         {
             if let Some(error) = policy
                 .evaluate(&candidate.predicate, fact, candidate_input.clone())
@@ -4585,6 +5262,10 @@ fn validate_actual_extraction(
                 return Err(error.into());
             }
         }
+        pending_evidence.insert(
+            candidate.fact_id.clone(),
+            (candidate.evidence.start, candidate.evidence.end),
+        );
         pending_canon_facts.entry(semantic_key).or_default().push(
             crate::repositories::narrative::SemanticCanonFactRecord {
                 fact_id: candidate.fact_id.clone(),
@@ -4598,7 +5279,12 @@ fn validate_actual_extraction(
             },
         );
     }
-    for candidate in &audit.task_progress_candidates {
+    audit.canon_transitions = canon_transitions;
+    audit.canon_duplicate_transitions = duplicate_transitions;
+    let mut downgraded = Vec::new();
+    // Completion predicates read the rest of this audit (its canon).
+    let canon_view = audit.clone();
+    for candidate in &mut audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
         if !active_tasks.contains(candidate.task_id.as_str()) {
             return Err("B08_TASK_SCOPE_VIOLATION".into());
@@ -4609,10 +5295,26 @@ fn validate_actual_extraction(
         ) {
             return Err("B08_TASK_STATUS_INVALID".into());
         }
+        // The volume plan's predicate decides completion: an audit claim it
+        // does not support only records progress (2026-10-19).
         if candidate.status == "SATISFIED" {
-            validate_task_completion_claim(connection, project_id, chapter_id, candidate, audit)?;
+            if let Err(error) = validate_task_completion_claim(
+                connection,
+                project_id,
+                chapter_id,
+                candidate,
+                &canon_view,
+            ) {
+                if error != "B08_TASK_COMPLETION_PREDICATE_UNSATISFIED" {
+                    return Err(error);
+                }
+                candidate.status = "ACTIVE".into();
+                downgraded
+                    .push(json!({"taskId":candidate.task_id,"claimed":"SATISFIED","reason":error}));
+            }
         }
     }
+    audit.downgraded_task_claims = downgraded;
     for candidate in &audit.continuity_candidates {
         let planned = continuity.contains(candidate.thread_ref.as_str());
         if let Some(evidence) = &candidate.evidence {
@@ -4698,7 +5400,7 @@ fn validate_actual_extraction(
         .collect::<BTreeSet<_>>();
     let knowledge_candidates = std::mem::take(&mut audit.knowledge_candidates);
     let mut bound_knowledge_candidates = Vec::new();
-    for candidate in knowledge_candidates {
+    for mut candidate in knowledge_candidates {
         exact_quote(body, &candidate.evidence)?;
         let knower_exists =
             crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
@@ -4721,16 +5423,19 @@ fn validate_actual_extraction(
             &pending_entities,
             &pending_facts,
         ) {
-            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_UNBOUND".into());
+            audit.dropped_unbound_knowledge.push(json!({
+                "knowledgeId":candidate.knowledge_id,"knowerId":candidate.knower_id,
+                "factId":candidate.fact_id,"reason":"KNOWLEDGE_UNBOUND"
+            }));
+            continue;
         }
-        let pending_fact_time = audit
+        let pending_fact = audit
             .canon_candidates
             .iter()
-            .find(|fact| fact.fact_id == candidate.fact_id)
-            .and_then(|fact| fact.story_time.as_deref());
-        let fact_timing = if pending_fact_time.is_some() {
+            .find(|fact| fact.fact_id == candidate.fact_id);
+        let fact_timing = if let Some(pending_fact) = pending_fact {
             Some(crate::repositories::narrative::CanonFactTimingRecord {
-                story_time: pending_fact_time.map(ToOwned::to_owned),
+                story_time: pending_fact.story_time.clone(),
                 source_chapter_no: Some(current_chapter_no),
             })
         } else {
@@ -4742,21 +5447,22 @@ fn validate_actual_extraction(
             .map_err(|error| error.to_string())?
         };
         let fact_timing = fact_timing.ok_or("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
-        let acquired_time = candidate
-            .acquired_story_time
-            .as_deref()
-            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
-        let fact_time = fact_timing
-            .story_time
-            .as_deref()
-            .filter(|time| !time.trim().is_empty() && *time != "UNKNOWN");
-        let (Some(acquired_time), Some(fact_time)) = (acquired_time, fact_time) else {
-            return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        // FX-17 (RV-07: Narrative Order and World Time are separate rules):
+        // an explicit UNKNOWN World Time leaves the Narrative Order check below
+        // to decide future knowledge; World Time is compared only when both
+        // sides state one. A missing acquiredStoryTime or a malformed time
+        // still fails closed (FX-4); a fact without storyTime is unknown.
+        let world_time = |time: Option<&str>, missing_is_unknown: bool| match time.map(str::trim) {
+            Some("UNKNOWN") => Ok(None),
+            Some(time) if !time.is_empty() => crate::canon_semantics::parse_world_time(time)
+                .map(Some)
+                .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"),
+            _ if missing_is_unknown => Ok(None),
+            _ => Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"),
         };
-        let acquired_time = crate::canon_semantics::parse_world_time(acquired_time)
-            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
-        let fact_time = crate::canon_semantics::parse_world_time(fact_time)
-            .map_err(|_| "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME")?;
+        let acquired_time = world_time(candidate.acquired_story_time.as_deref(), false)?;
+        let fact_time = world_time(fact_timing.story_time.as_deref(), true)?;
+        let world_times = acquired_time.zip(fact_time);
         if fact_timing
             .source_chapter_no
             .is_some_and(|source| source > current_chapter_no)
@@ -4769,6 +5475,9 @@ fn validate_actual_extraction(
             .is_none_or(|scope| scope.trim().is_empty() || scope == "UNKNOWN")
         {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME".into());
+        }
+        if candidate.visibility_scope.as_deref() == Some("PRIVATE") {
+            candidate.visibility_scope = Some(format!("CHARACTER:{}", candidate.knower_id));
         }
         let visibility_scope = candidate.visibility_scope.as_deref().unwrap_or_default();
         let valid_visibility_scope = visibility_scope == "PUBLIC"
@@ -4787,7 +5496,7 @@ fn validate_actual_extraction(
         if !valid_visibility_scope {
             return Err("B08_AUDIT_INCOMPLETE_KNOWLEDGE_VISIBILITY".into());
         }
-        if acquired_time < fact_time {
+        if world_times.is_some_and(|(acquired_time, fact_time)| acquired_time < fact_time) {
             return Err("B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION".into());
         }
         bound_knowledge_candidates.push(candidate);
@@ -5016,6 +5725,12 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx18_configured_provider_enforces_the_chapter_length_range() {
+        let paths = crate::project_db::paths::AppPaths::new(std::env::temp_dir());
+        assert!(super::ConfiguredProductionGateway::for_desktop(paths).enforces_chapter_length());
+    }
+
     use super::*;
 
     #[test]
@@ -5292,6 +6007,34 @@ mod tests {
     }
 
     #[test]
+    fn craft_renderer_payload_escapes_raw_control_characters_in_the_body() {
+        let value = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"第一段。\n\t第二段。\"}"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(value, "RENDER_CHAPTER").unwrap(),
+            json!({"body":"第一段。\n\t第二段。"})
+        );
+        let truncated = json!({
+            "choices": [{
+                "message": {"content": "{\"body\":\"第一段。\n第二段"}
+            }]
+        });
+        assert_eq!(
+            parse_provider_model_payload_for_capability(truncated, "RENDER_CHAPTER").unwrap(),
+            json!({"body":"第一段。\n第二段"})
+        );
+        let plan = json!({
+            "choices": [{
+                "message": {"content": "{\"chapterGoal\":\"一\n二\"}"}
+            }]
+        });
+        assert!(parse_provider_model_payload_for_capability(plan, "PLAN_STRATEGY").is_err());
+    }
+
+    #[test]
     fn planner_payload_never_uses_renderer_recovery() {
         let value = json!({
             "choices": [{
@@ -5401,6 +6144,40 @@ mod tests {
     }
 
     #[test]
+    fn fx17_invented_task_is_dropped_but_real_unplanned_task_is_kept_for_the_gate() {
+        let mut audit = json!({
+            "taskProgressCandidates":[
+                {"taskId":"task:first_memory_repair","status":"SATISFIED"},
+                {"taskId":"task:real_future","status":"ACTIVE"},
+                {"taskId":"task:planned","status":"ACTIVE"}
+            ],
+            "normalization":{"policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES"}
+        });
+        let plan = json!({"activeTaskRefs":["task:planned"]});
+        let unplanned = unplanned_task_candidate_ids(&audit, &plan);
+        assert_eq!(
+            unplanned,
+            BTreeSet::from([
+                "task:first_memory_repair".to_string(),
+                "task:real_future".to_string()
+            ])
+        );
+        drop_invented_task_candidates(
+            &mut audit,
+            &unplanned,
+            &BTreeSet::from(["task:real_future".to_string()]),
+        );
+        let kept = audit["taskProgressCandidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["taskId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(kept, ["task:real_future", "task:planned"]);
+        assert_eq!(audit["normalization"]["droppedInventedTasks"], 1);
+    }
+
+    #[test]
     fn evidence_ranges_are_bounded_by_actual_candidate_text() {
         assert!(validate_candidate_evidence_range("你好世界", 0, 4).is_ok());
         assert!(validate_candidate_evidence_range("你好世界", 3, 2).is_err());
@@ -5452,6 +6229,190 @@ mod tests {
         );
     }
 
+    fn fx17_real_audit() -> (String, Value) {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fx17_audit_real_evidence.json"
+        ))
+        .unwrap();
+        (
+            fixture["body"].as_str().unwrap().to_owned(),
+            fixture["audit"].clone(),
+        )
+    }
+
+    #[test]
+    fn fx17_audit_unique_quote_with_wrong_offsets_is_located_exactly() {
+        let body = "沈砚站在“城市记忆档案局”第七分部的走廊尽头，指尖摩挲着档案。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":20,"end":24,"quote":"“城市记忆档案局”第七分部的走廊尽头"}]}),
+            body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(
+            evidence["rebound"], false,
+            "a unique verbatim quote is exact evidence"
+        );
+        assert_eq!(evidence["start"], 4);
+        assert_eq!(
+            evidence["end"],
+            4 + "“城市记忆档案局”第七分部的走廊尽头".chars().count()
+        );
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 0);
+    }
+
+    #[test]
+    fn fx17_audit_quote_missing_only_paragraph_breaks_is_located_exactly() {
+        let body = "他调出了“回溯仪”。\n\n“开始修复。”他低声说道。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[
+                {"start":0,"end":3,"quote":"调出了“回溯仪”。“开始修复。”他低声说道"},
+                {"start":0,"end":3,"quote":"不存在的引文"}
+            ]}),
+            body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(evidence["rebound"], false);
+        assert_eq!(evidence["start"], 1);
+        assert_eq!(
+            evidence["quote"],
+            "调出了“回溯仪”。\n\n“开始修复。”他低声说道"
+        );
+        let chars = body.chars().collect::<Vec<_>>();
+        assert_eq!(
+            chars[1..evidence["end"].as_u64().unwrap() as usize]
+                .iter()
+                .collect::<String>(),
+            evidence["quote"].as_str().unwrap()
+        );
+        assert_eq!(normalized["evidenceRanges"][1]["rebound"], true);
+        assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
+    }
+
+    #[test]
+    fn fx19_ellipsis_quote_binds_to_the_full_passage_when_parts_are_unique_and_close() {
+        let body = format!(
+            "开头。他撕下一页纸，抄下坐标。{}他把纸条藏进口袋。结尾。",
+            "雨".repeat(40)
+        );
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[
+                {"start":0,"end":2,"quote":"他撕下一页纸，抄下坐标...他把纸条藏进口袋。"},
+                {"start":0,"end":2,"quote":"开头……结尾。"}
+            ]}),
+            &body,
+        );
+        let evidence = &normalized["evidenceRanges"][0];
+        assert_eq!(evidence["rebound"], false, "{normalized}");
+        assert_eq!(
+            evidence["quote"],
+            format!(
+                "他撕下一页纸，抄下坐标。{}他把纸条藏进口袋。",
+                "雨".repeat(40)
+            )
+        );
+        let chars = body.chars().collect::<Vec<_>>();
+        let (start, end) = (
+            evidence["start"].as_u64().unwrap() as usize,
+            evidence["end"].as_u64().unwrap() as usize,
+        );
+        assert_eq!(
+            chars[start..end].iter().collect::<String>(),
+            evidence["quote"].as_str().unwrap()
+        );
+        // "开头" + ... + "结尾。" spans the whole body but is still within 300.
+        assert_eq!(normalized["evidenceRanges"][1]["rebound"], false);
+    }
+
+    #[test]
+    fn fx19_ellipsis_quote_with_a_wide_gap_or_repeated_part_stays_rebound() {
+        let wide = format!("甲乙丙。{}丁戊己。", "雨".repeat(301));
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"甲乙丙...丁戊己。"}]}),
+            &wide,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+        let repeated = "甲乙丙。中间。甲乙丙。丁戊己。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"甲乙丙...丁戊己。"}]}),
+            repeated,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+    }
+
+    #[test]
+    fn fx17_new_thread_prefix_is_normalized_to_a_thread_ref() {
+        let normalized = normalize_audit_model_output(
+            json!({"continuityCandidates":[
+                {"threadRef":"new_thread:sister_trace","disposition":"ADVANCE"},
+                {"threadRef":"thread:existing","disposition":"ADVANCE"}
+            ]}),
+            "正文",
+        );
+        assert_eq!(
+            normalized["continuityCandidates"][0]["threadRef"],
+            "thread:sister_trace"
+        );
+        assert_eq!(
+            normalized["continuityCandidates"][1]["threadRef"],
+            "thread:existing"
+        );
+    }
+
+    #[test]
+    fn fx17_audit_whitespace_insensitive_quote_must_still_be_unique() {
+        let body = "他说：好。\n他说：好。";
+        let normalized = normalize_audit_model_output(
+            json!({"evidenceRanges":[{"start":0,"end":1,"quote":"他说： 好。"}]}),
+            body,
+        );
+        assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
+    }
+
+    #[test]
+    fn fx17_real_audit_keeps_only_ambiguous_evidence_as_rebound() {
+        let (body, audit) = fx17_real_audit();
+        let normalized = normalize_audit_model_output(audit, &body);
+        let mut exact = 0;
+        let mut rebound = Vec::new();
+        for category in [
+            "canonCandidates",
+            "knowledgeCandidates",
+            "continuityCandidates",
+            "taskProgressCandidates",
+        ] {
+            for item in normalized[category].as_array().unwrap() {
+                let evidence = &item["evidence"];
+                let quote = evidence["quote"].as_str().unwrap();
+                let start = evidence["start"].as_u64().unwrap() as usize;
+                let end = evidence["end"].as_u64().unwrap() as usize;
+                // Whatever is kept must point at exactly its quote in the body.
+                assert_eq!(
+                    body.chars()
+                        .skip(start)
+                        .take(end - start)
+                        .collect::<String>(),
+                    quote
+                );
+                if evidence["rebound"] == true {
+                    rebound.push(quote.to_owned());
+                } else {
+                    exact += 1;
+                }
+            }
+        }
+        // 12 model offsets were all wrong: the 9 unique verbatim quotes and
+        // (FX-19) the ellipsis quote with unique, close parts are now exact;
+        // the two bare names still fail closed (RV-16).
+        assert_eq!(exact, 10, "rebound: {rebound:?}");
+        assert_eq!(rebound.len(), 2);
+        assert!(
+            normalized["normalization"]["reboundEvidence"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
     #[test]
     fn audit_evidence_rebinding_is_marked_and_makes_audit_incomplete() {
         let normalized = normalize_audit_model_output(
@@ -5462,11 +6423,11 @@ mod tests {
                 "continuityCandidates":[],
                 "taskProgressCandidates":[],
                 "revealedReservationRefs":[],
-                "evidenceRanges":[{"start":900,"end":901,"quote":"证据"}],
+                "evidenceRanges":[{"start":1,"end":3,"quote":"证据"}],
                 "auditCompleteness":"COMPLETE_NO_CHANGE",
                 "unresolvedHard":false
             }),
-            "正文包含证据。",
+            "证据在前，证据在后。",
         );
         assert_eq!(normalized["evidenceRanges"][0]["rebound"], true);
         assert_eq!(normalized["normalization"]["reboundEvidence"], 1);
@@ -5542,6 +6503,234 @@ mod tests {
             "你好世界",
         );
         assert_eq!(unknown["knowledgeCandidates"], json!([]));
+    }
+
+    #[test]
+    fn audit_normalization_maps_common_knowledge_state_synonyms() {
+        // Seen on 2026-10-18: a real audit reported REMEMBERED.
+        for (state, expected) in [
+            ("REMEMBERED", "KNOWS"),
+            ("RECALLS", "KNOWS"),
+            ("REALIZES", "KNOWS"),
+            ("LEARNED", "KNOWS"),
+            ("DOUBTS", "SUSPECTS"),
+            ("HIDES", "CONCEALS"),
+            ("FORGOTTEN", "UNKNOWN"),
+        ] {
+            let normalized = normalize_audit_model_output(
+                json!({
+                    "knowledgeCandidates":[{
+                        "knowledgeId":"know:synonym",
+                        "knowerId":"entity:hero",
+                        "factId":"fact:hero",
+                        "epistemicState":state,
+                        "evidence":{"start":0,"end":2,"quote":"你好"}
+                    }]
+                }),
+                "你好世界",
+            );
+            assert_eq!(
+                normalized["knowledgeCandidates"][0]["epistemicState"], expected,
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_input_keeps_every_field_next_to_an_instruction() {
+        // The signing evaluation once sent only its instruction, without the
+        // chapters it was asked to evaluate.
+        let sent = serialize_provider_input(&json!({
+            "prompt":"执行黄金三章评估",
+            "chapters":[{"chapterNo":1,"body":"正文第一句"}]
+        }));
+        assert!(sent.starts_with("执行黄金三章评估"));
+        assert!(sent.contains("正文第一句"));
+        assert!(!sent.contains("\"prompt\""));
+        assert_eq!(
+            serialize_provider_input(&json!({"prompt":"只有指令"})),
+            "只有指令"
+        );
+        assert_eq!(serialize_provider_input(&json!({"a":1})), "{\"a\":1}");
+    }
+
+    #[test]
+    fn omission_span_binds_a_quote_that_left_out_words_to_its_one_passage() {
+        let body = "雨停了。沈砚没动。他慢慢从内袋掏出信封，纸面泛黄卷边。门开了。"
+            .chars()
+            .collect::<Vec<_>>();
+        let (start, end) =
+            omission_unique_span(&body, "沈砚从内袋掏出信封，纸面泛黄卷边。").unwrap();
+        assert_eq!(
+            body[start..end].iter().collect::<String>(),
+            "沈砚没动。他慢慢从内袋掏出信封，纸面泛黄卷边。"
+        );
+        // Reordered or invented text never binds.
+        assert!(omission_unique_span(&body, "纸面泛黄卷边。沈砚从内袋掏出信封，").is_none());
+        assert!(omission_unique_span(&body, "确立对抗档案局掩盖真相的决心。").is_none());
+    }
+
+    #[test]
+    fn unlocatable_candidates_are_dropped_and_named() {
+        let body = "林舟推开石门。他看见一盏灯。";
+        let (kept, dropped) = drop_unlocatable_audit_candidates(
+            &json!({
+                "canonCandidates":[
+                    {"factId":"fact:door","evidence":{"start":0,"end":7,"quote":"林舟推开石门。"}},
+                    {"factId":"fact:plan","evidence":{"start":0,"end":5,"quote":"确立对抗的决心。"}}
+                ],
+                "evidenceRanges":[{"start":0,"end":5,"quote":"确立对抗的决心。"}]
+            }),
+            body,
+        );
+        assert_eq!(kept["canonCandidates"].as_array().unwrap().len(), 1);
+        assert_eq!(kept["evidenceRanges"], json!([]));
+        assert_eq!(
+            dropped,
+            json!([{"field":"canonCandidates","id":"fact:plan","quote":"确立对抗的决心。"}])
+        );
+    }
+
+    #[test]
+    fn rewrite_edits_that_add_model_habits_are_not_applied() {
+        let body = "他没点保存键。门开了。";
+        let rewrite = json!({"edits":[
+            {"quote":"他没点保存键。","replacement":"指尖悬在保存键上方，像被磁石吸住。"},
+            {"quote":"门开了。","replacement":"门轴吱呀一声，冷风灌进来。"}
+        ]});
+        let (revised, applied) = apply_unique_edits(body, &rewrite);
+        assert_eq!(applied, 1);
+        assert_eq!(revised, "他没点保存键。门轴吱呀一声，冷风灌进来。");
+    }
+
+    #[test]
+    fn audit_normalization_wraps_a_scalar_canon_object_in_a_map() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[{
+                    "factId":"fact:awake","subjectId":"entity:hero","predicate":"is_awake",
+                    "objectJson":true,"authorityLevel":"C",
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(
+            normalized["canonCandidates"][0]["objectJson"],
+            json!({"value":true})
+        );
+    }
+
+    #[test]
+    fn audit_normalization_gives_a_canon_candidate_without_authority_the_lowest_level() {
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[{
+                    "factId":"fact:item","subjectId":"entity:hero","predicate":"owns_item",
+                    "objectJson":{"item":"钢笔"},
+                    "evidence":{"start":0,"end":2,"quote":"你好"}
+                }]
+            }),
+            "你好世界",
+        );
+        assert_eq!(normalized["canonCandidates"][0]["authorityLevel"], "C");
+        assert_eq!(
+            normalized["normalization"]["droppedCandidates"]["canonCandidates"],
+            0
+        );
+    }
+
+    #[test]
+    fn audit_feedback_names_candidates_missing_fields_or_evidence() {
+        let raw = json!({
+            "canonCandidates":[
+                {"factId":"fact:ok","subjectId":"s","predicate":"p","objectJson":{},"evidence":{"quote":"你好"}},
+                {"factId":"fact:bare","subjectId":"s","predicate":"p","objectJson":{}}
+            ],
+            "knowledgeCandidates":[{"knowledgeId":"know:1","factId":"fact:ok","evidence":{"quote":"你好"}}]
+        });
+        assert_eq!(
+            incomplete_audit_candidates(&raw),
+            json!([
+                {"field":"canonCandidates","id":"fact:bare","missing":["evidence"]},
+                {"field":"knowledgeCandidates","id":"know:1","missing":["knowerId","epistemicState","acquiredStoryTime","visibilityScope"]}
+            ])
+        );
+    }
+
+    #[test]
+    fn audit_normalization_derives_the_complete_label_from_the_candidates() {
+        let candidate = json!({
+            "factId":"fact:item","subjectId":"entity:hero","predicate":"owns_item",
+            "objectJson":{"item":"钢笔"},"authorityLevel":"C",
+            "evidence":{"start":0,"end":2,"quote":"你好"}
+        });
+        // Seen on 2026-10-18: nineteen candidates labeled COMPLETE_NO_CHANGE.
+        let with_delta = normalize_audit_model_output(
+            json!({"canonCandidates":[candidate],"auditCompleteness":"COMPLETE_NO_CHANGE"}),
+            "你好世界",
+        );
+        assert_eq!(with_delta["auditCompleteness"], "COMPLETE_WITH_DELTA");
+        let no_change = normalize_audit_model_output(
+            json!({"canonCandidates":[],"auditCompleteness":"COMPLETE_WITH_DELTA"}),
+            "你好世界",
+        );
+        assert_eq!(no_change["auditCompleteness"], "COMPLETE_NO_CHANGE");
+        let incomplete = normalize_audit_model_output(
+            json!({"canonCandidates":[],"auditCompleteness":"INCOMPLETE"}),
+            "你好世界",
+        );
+        assert_eq!(incomplete["auditCompleteness"], "INCOMPLETE");
+    }
+
+    #[test]
+    fn audit_normalization_drops_and_records_candidates_without_evidence() {
+        // Owner decision (2026-10-18): an unverifiable fact is left out and
+        // recorded instead of failing the chapter.
+        let normalized = normalize_audit_model_output(
+            json!({
+                "canonCandidates":[
+                    {"factId":"fact:quoted","subjectId":"s","predicate":"owns_item","objectJson":{},"authorityLevel":"C","evidence":{"start":0,"end":2,"quote":"你好"}},
+                    {"factId":"fact:bare","subjectId":"s","predicate":"owns_item","objectJson":{},"authorityLevel":"C"}
+                ],
+                "qualityFindings":[],"knowledgeCandidates":[],"continuityCandidates":[],
+                "taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false
+            }),
+            "你好世界",
+        );
+        assert_eq!(normalized["canonCandidates"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            normalized["normalization"]["droppedCandidates"]["canonCandidates"],
+            0
+        );
+        assert_eq!(
+            normalized["normalization"]["droppedWithoutEvidence"],
+            json!([{"field":"canonCandidates","id":"fact:bare"}])
+        );
+        let audit: AuditExtraction = serde_json::from_value(normalized.clone()).unwrap();
+        assert!(validate_audit_completeness(&normalized, &audit).is_ok());
+    }
+
+    #[test]
+    fn audit_sees_the_plan_without_prose_it_could_quote() {
+        // Seen on 2026-10-18: audits quoted plan beats instead of the body.
+        let plan = json!({
+            "chapterGoal":"查明来源",
+            "continuityActions":[{"threadRef":"thread:1","disposition":"ADVANCE"}],
+            "sceneExecution":[{
+                "sceneType":"调查","goal":"拿到线索","conflict":"守卫","turn":"放行","result":"被盯上",
+                "beats":["沈砚接入深层网络，面对破碎的记忆碎片进行重组"],"estimatedCharacters":900
+            }]
+        });
+        let view = audit_plan_view(&plan);
+        assert_eq!(view["chapterGoal"], "查明来源");
+        assert_eq!(view["continuityActions"], plan["continuityActions"]);
+        assert_eq!(
+            view["sceneExecution"],
+            json!([{"sceneType":"调查","estimatedCharacters":900}])
+        );
+        assert!(!view.to_string().contains("深层网络"));
     }
 
     #[test]

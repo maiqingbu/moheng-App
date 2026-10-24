@@ -5,7 +5,8 @@ use crate::commit::CommitService;
 use crate::generated::types::ArtifactRef;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle, CommitReceipt, HeadChange};
 use crate::generated::validators::{
-    validate_book_plan_r1, validate_chapter_plan_r1, validate_volume_plan_r1,
+    validate_book_plan_r1, validate_chapter_plan_r1, validate_chapter_plan_r2,
+    validate_volume_plan_r1,
 };
 use crate::hash::sha256_canonical;
 use crate::repositories::narrative::OpeningActualState;
@@ -25,6 +26,17 @@ pub fn normalize_legacy_book_plan_payload(payload: &Value) -> (Value, Vec<String
     (normalized, ignored_fields)
 }
 
+/// Validates a chapter plan against its own revision: CRAFT v3 plans are
+/// `chapter-plan.r2`, earlier chapters stay readable as `chapter-plan.r1`.
+pub fn validate_chapter_plan(plan: &Value) -> Result<(), String> {
+    if crate::chapter_craft::is_craft_plan(plan) {
+        validate_chapter_plan_r2(plan)
+    } else {
+        validate_chapter_plan_r1(plan)
+    }
+    .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))
+}
+
 pub fn normalize_chapter_plan_model_output(
     mut plan: Value,
     triggered_thread_refs: &[String],
@@ -40,6 +52,7 @@ pub fn normalize_chapter_plan_model_output(
                     | "compiledFromStateDigest"
                     | "contextManifestRef"
                     | "chapterGoal"
+                    | "chapterRole"
                     | "activeTaskRefs"
                     | "continuityActions"
                     | "requiredStateOutcomes"
@@ -47,11 +60,34 @@ pub fn normalize_chapter_plan_model_output(
                     | "knowledgeBoundaries"
                     | "reservationRefs"
                     | "sceneExecution"
+                    | "craft"
                     | "horizonPreview"
             )
         });
     }
-    plan["payloadSchema"] = json!("chapter-plan.r1");
+    if let Some(object) = plan.as_object_mut() {
+        let valid_role = object
+            .get("chapterRole")
+            .and_then(Value::as_str)
+            .is_some_and(|role| crate::chapter_craft::CHAPTER_ROLES.contains(&role));
+        if !valid_role {
+            object.remove("chapterRole");
+        }
+    }
+    // A plan carrying the CRAFT v3 decisions is r2, which replaces the
+    // scene/beat execution list.
+    if plan.get("craft").is_some_and(Value::is_object) {
+        plan["payloadSchema"] = json!("chapter-plan.r2");
+        crate::craft_plan::strip_plan_quotes(&mut plan);
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("sceneExecution");
+        }
+    } else {
+        plan["payloadSchema"] = json!("chapter-plan.r1");
+        if let Some(object) = plan.as_object_mut() {
+            object.remove("craft");
+        }
+    }
     for field in [
         "chapterId",
         "compiledFromProjectRevision",
@@ -164,11 +200,22 @@ pub fn normalize_chapter_plan_model_output(
                 .as_str()
                 .or_else(|| item.get("objective").and_then(Value::as_str))
                 .or_else(|| item.get("description").and_then(Value::as_str))
+                .or_else(|| item.get("content").and_then(Value::as_str))
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             if let Some(objective) = objective {
                 normalized_items.push(json!({"slotNo":normalized_items.len() + 1,"objective":objective,"tentative":true}));
             }
+        }
+        // FX-17: the horizon is the soft rolling preview (architecture: future
+        // 3-8 chapters). Extra tentative slots beyond the authoritative capacity
+        // are dropped in order; too few still fails in validate_chapter_plan_horizon.
+        // The untrimmed model output stays in the persisted raw response.
+        if let Some(capacity) = authoritative_bindings
+            .get("horizonPreviewCapacity")
+            .and_then(Value::as_i64)
+        {
+            normalized_items.truncate(capacity.clamp(0, 8) as usize);
         }
         *items = normalized_items;
     }
@@ -1469,8 +1516,7 @@ pub fn validate_change_target_owner(
             }
         }
         "ChapterPlan" => {
-            validate_chapter_plan_r1(candidate)
-                .map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+            validate_chapter_plan(candidate)?;
             let scope_chapter = scope
                 .get("chapterId")
                 .and_then(Value::as_str)
@@ -1826,6 +1872,25 @@ pub fn validate_task_reality(
     route_plan: &Value,
     task_states: &[(&str, &str)],
 ) -> Result<(), String> {
+    for task_ref in chapter_plan
+        .get("activeTaskRefs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        task_ready(task_ref, route_plan, task_states)?;
+    }
+    Ok(())
+}
+
+/// Whether a chapter may work on `task_ref` now: a planned, unreserved task
+/// that is neither invalidated nor blocked and whose dependencies are met.
+pub fn task_ready(
+    task_ref: &str,
+    route_plan: &Value,
+    task_states: &[(&str, &str)],
+) -> Result<(), String> {
     let tasks = route_plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -1834,35 +1899,27 @@ pub fn validate_task_reality(
         .iter()
         .copied()
         .collect::<std::collections::BTreeMap<_, _>>();
-    for task_ref in chapter_plan
-        .get("activeTaskRefs")
+    let task = tasks
+        .iter()
+        .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
+        .ok_or("TASK_SCOPE_VIOLATION")?;
+    if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
+        return Err("TASK_SCOPE_VIOLATION".into());
+    }
+    match states.get(task_ref).copied() {
+        Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
+        Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
+        _ => {}
+    }
+    for dependency in task
+        .get("dependsOnTaskIds")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
     {
-        let task = tasks
-            .iter()
-            .find(|item| item.get("taskId").and_then(Value::as_str) == Some(task_ref))
-            .ok_or("TASK_SCOPE_VIOLATION")?;
-        if task.get("class").and_then(Value::as_str) == Some("RESERVED") {
-            return Err("TASK_SCOPE_VIOLATION".into());
-        }
-        match states.get(task_ref).copied() {
-            Some("INVALIDATED") => return Err("TASK_SCOPE_VIOLATION".into()),
-            Some("BLOCKED") => return Err("TASK_DEPENDENCY_UNMET".into()),
-            _ => {}
-        }
-        for dependency in task
-            .get("dependsOnTaskIds")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            if states.get(dependency).copied() != Some("SATISFIED") {
-                return Err("TASK_DEPENDENCY_UNMET".into());
-            }
+        if states.get(dependency).copied() != Some("SATISFIED") {
+            return Err("TASK_DEPENDENCY_UNMET".into());
         }
     }
     Ok(())
@@ -2385,7 +2442,7 @@ pub fn validate_current_chapter_plan(
     triggered_threads: &[String],
     remaining_chapter_capacity: i64,
 ) -> Result<(), String> {
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(current_chapter_id) {
         return Err("CHAPTER_PLAN_CURRENT_ONLY".into());
     }
@@ -2637,7 +2694,7 @@ pub fn recompile_chapter_plan_owner(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "CHAPTER_NOT_FOUND".to_string())?;
-    validate_chapter_plan_r1(plan).map_err(|error| format!("CHAPTER_PLAN_CONTRACT:{error}"))?;
+    validate_chapter_plan(plan)?;
     if plan.get("chapterId").and_then(Value::as_str) != Some(chapter_id) {
         return Err("CHAPTER_PLAN_CHAPTER_MISMATCH".into());
     }
@@ -2978,6 +3035,88 @@ pub fn commit_opening_chapter_plan_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn craft_plan_normalization_keeps_the_chapter_role() {
+        let plan = normalize_chapter_plan_model_output(
+            json!({"chapterGoal":"目标","chapterRole":"回报","unexpected":1,"sceneExecution":[]}),
+            &[],
+            &json!({}),
+        );
+        assert_eq!(plan["chapterRole"], "回报");
+        assert!(plan.get("unexpected").is_none());
+    }
+
+    #[test]
+    fn craft_plan_normalization_drops_an_unknown_or_null_role() {
+        for role in [json!(null), json!("主线"), json!(3)] {
+            let plan = normalize_chapter_plan_model_output(
+                json!({"chapterGoal":"目标","chapterRole":role,"sceneExecution":[]}),
+                &[],
+                &json!({}),
+            );
+            assert!(plan.get("chapterRole").is_none());
+        }
+    }
+
+    fn fx17_real_horizon_items() -> Vec<Value> {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/fx17_plan_horizon_45_items.json"
+        ))
+        .unwrap();
+        fixture["horizonPreview"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fx17_model_horizon_beyond_capacity_is_trimmed_in_order() {
+        let items = fx17_real_horizon_items();
+        assert_eq!(items.len(), 45);
+        for (capacity, expected) in [(8_i64, 8_usize), (20, 8), (5, 5)] {
+            let plan = json!({"horizonPreview":items.clone()});
+            let normalized = normalize_chapter_plan_model_output(
+                plan,
+                &[],
+                &json!({"horizonPreviewCapacity":capacity}),
+            );
+            let horizon = normalized["horizonPreview"].as_array().unwrap();
+            assert_eq!(horizon.len(), expected, "capacity {capacity}");
+            assert_eq!(horizon[0]["objective"], items[0]["description"]);
+            assert_eq!(horizon[expected - 1]["slotNo"], expected);
+            assert!(validate_chapter_plan_horizon(&normalized, capacity).is_ok());
+        }
+    }
+
+    #[test]
+    fn fx17_horizon_items_written_as_content_are_kept() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fx17_plan_horizon_content_key.json"
+        )))
+        .unwrap();
+        let items = fixture["horizonPreview"].as_array().unwrap().clone();
+        assert_eq!(items.len(), 8);
+        let normalized = normalize_chapter_plan_model_output(
+            json!({"horizonPreview":items.clone()}),
+            &[],
+            &json!({"horizonPreviewCapacity":35}),
+        );
+        let horizon = normalized["horizonPreview"].as_array().unwrap();
+        assert_eq!(horizon.len(), 8);
+        assert_eq!(horizon[0]["objective"], items[0]["content"]);
+        assert!(validate_chapter_plan_horizon(&normalized, 35).is_ok());
+    }
+
+    #[test]
+    fn fx17_horizon_below_minimum_still_fails_closed() {
+        let items = fx17_real_horizon_items();
+        let plan = json!({"horizonPreview":items[..2].to_vec()});
+        let normalized =
+            normalize_chapter_plan_model_output(plan, &[], &json!({"horizonPreviewCapacity":8}));
+        assert_eq!(
+            validate_chapter_plan_horizon(&normalized, 8),
+            Err("ROLLING_HORIZON_CAPACITY_INVALID".into())
+        );
+    }
 
     fn chapter_plan() -> Value {
         json!({"payloadSchema":"chapter-plan.r1","chapterId":"chapter:1","compiledFromProjectRevision":1,"compiledFromStateDigest":"a".repeat(64),"contextManifestRef":{"artifactId":"context:1","version":1,"payloadHash":"b".repeat(64)},"chapterGoal":"advance","activeTaskRefs":["task:required"],"continuityActions":[{"threadRef":"thread:promise","disposition":"DEFER_WITH_BRIDGE","bridge":"interrupted meeting"}],"requiredStateOutcomes":[],"forbiddenTransitions":[],"knowledgeBoundaries":[],"reservationRefs":[],"sceneExecution":[],"horizonPreview":[{"slotNo":1,"objective":"one","tentative":true},{"slotNo":2,"objective":"two","tentative":true},{"slotNo":3,"objective":"three","tentative":true}]})

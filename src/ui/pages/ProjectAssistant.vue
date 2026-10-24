@@ -6,6 +6,7 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import BaseModal from '../components/BaseModal.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
+import { assistantIntentLabel, changeTypeForIntent } from '../presentation/assistantIntent'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import {
   createGroundedAssistantRetcon,
@@ -41,9 +42,15 @@ const displayScopes = (values: unknown) => Array.isArray(values)
   ? values.map(value => sanitizeProductText(value, '当前作品')).filter(Boolean).join('、') || '无'
   : '无'
 
+// FX-21: shows how the assistant understood the last question.
+const intentLabel = ref('')
+
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
-  if (session) presentation.value = presentAssistantSession(session)
+  if (session) {
+    presentation.value = presentAssistantSession(session)
+    intentLabel.value = assistantIntentLabel(session.intent)
+  }
 }
 
 async function prepareRepair() {
@@ -53,6 +60,7 @@ async function prepareRepair() {
   repairOutcomeResolved.value = false
   try {
     plan.value = await store.prepareAssistantRepair(question.value)
+    intentLabel.value = assistantIntentLabel(plan.value.intent)
   } catch (error) {
     repairMessage.value = productErrorMessage(error, '暂时无法核对修复范围，请刷新当前作品后重试。')
     repairOpen.value = true
@@ -138,8 +146,11 @@ async function proposeChange() {
   const projectId = store.currentProjectId
   if (!projectId || !question.value.trim()) return
   const changeId = `change:${projectId}:${Date.now()}`
-  const changeType = /事实|改成|原来|没有死|其实/.test(question.value) ? 'RETCON' : 'CHANGE'
   try {
+    // FX-21: the backend understands the request (model, keyword fallback).
+    const understood = await store.classifyAssistantIntent(question.value, 'CHANGE')
+    const changeType = changeTypeForIntent(understood)
+    intentLabel.value = assistantIntentLabel(understood)
     if (changeType === 'RETCON') {
       const grounded = await createGroundedAssistantRetcon({
         execute: (key, request) => store.runCommand(key, request),
@@ -222,6 +233,7 @@ onMounted(() => {
       <label class="field"><span class="field-label">你想确认什么</span><textarea v-model="question" class="textarea" /></label>
       <div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" @click="ask">查询当前作品记录</button><button class="btn" @click="prepareRepair">准备一次可核对的修复</button><button class="btn warning" @click="proposeChange">建立变更提案</button></div>
       <CommandFeedback :state="queryState" />
+      <p v-if="intentLabel" class="muted" data-assistant-intent style="font-size:12px;margin-top:6px">{{ intentLabel }}</p>
       <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
       <div v-if="groundingOptions.length" class="section" style="display:grid;gap:8px;margin-top:12px"><span class="muted">请选择要修订的当前事实：</span><button v-for="fact in groundingOptions" :key="fact.factId" class="btn" @click="chooseGrounding(fact.factId)">{{ fact.label }}</button></div>
     </section>

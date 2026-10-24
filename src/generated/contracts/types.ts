@@ -183,6 +183,7 @@ export interface ChapterPlanR1 {
   "compiledFromStateDigest": string
   "contextManifestRef": ArtifactRef
   "chapterGoal": string
+  "chapterRole"?: "普通" | "过渡" | "重要" | "升级" | "回报" | "高潮前" | "高潮"
   "activeTaskRefs": Array<string>
   "entityRefs"?: Array<string>
   "hardScope"?: { "taskRefs": Array<string>; "responsibilityRefs": Array<string>; "reservationRefs": Array<string>; "entityRefs": Array<string> }
@@ -193,6 +194,66 @@ export interface ChapterPlanR1 {
   "reservationRefs": Array<string>
   "sceneExecution": Array<unknown>
   "horizonPreview": Array<HorizonSlot>
+}
+
+export interface ChapterPlanR2 {
+  "payloadSchema": unknown
+  "chapterId": string
+  "compiledFromProjectRevision": number
+  "compiledFromStateDigest": string
+  "contextManifestRef": ArtifactRef
+  "chapterGoal": string
+  "chapterRole"?: "普通" | "过渡" | "重要" | "升级" | "回报" | "高潮前" | "高潮"
+  "activeTaskRefs": Array<string>
+  "entityRefs"?: Array<string>
+  "hardScope"?: { "taskRefs": Array<string>; "responsibilityRefs": Array<string>; "reservationRefs": Array<string>; "entityRefs": Array<string> }
+  "continuityActions": Array<{ "threadRef": string; "disposition": "ADVANCE" | "RESOLVE" | "DEFER_WITH_BRIDGE" | "NO_LONGER_APPLICABLE_CHANGE_REQUEST"; "bridge"?: string | null }>
+  "requiredStateOutcomes": Array<Condition>
+  "forbiddenTransitions": Array<Condition>
+  "knowledgeBoundaries": Array<string>
+  "reservationRefs": Array<string>
+  "horizonPreview": Array<HorizonSlot>
+  "craft": { "bigTurn": string; "smallDiscovery": string; "protagonistWin": string; "device": { "name": string; "status": "NEW" | "ESCALATED"; "howUsed": string }; "warmth": string; "emotionalBeat": string; "situationChange": { "before": string; "after": string }; "scenes": Array<{ "place": string; "people": Array<{ "name": string; "wants": string; "hides": string; "whyHere": string }>; "conflict": string; "events": Array<string>; "readerQuestion": string }>; "newLosses": Array<string>; "endHook": string }
+}
+
+export interface StoryBibleR1 {
+  "payloadSchema": unknown
+  "stage": "CANDIDATE" | "CONFIRMED"
+  "generation": number
+  "variant": string
+  "angle": string
+  "storyConstitutionRef": ArtifactRef
+  "confirmedFromRef": unknown
+  "normalWorld": string
+  "mechanism": { "experience": string; "rules": Array<{ "rule": string; "numbers": string; "howReadersSeeIt": string }> }
+  "protagonist": { "name": string; "personality": string; "flaw": string; "wantsNow": string; "humorStyle": string; "innerVoiceStyle": string }
+  "emotionalAnchor": { "object": string; "memorySummary": string }
+  "antagonist": { "name": string; "position": string; "wants": string; "method": string }
+  "cast": Array<{ "name": string; "role": string; "relation": string; "privateAgenda": string; "speechStyle": string; "contrastWithProtagonist": string; "firstAppears": number }>
+  "openingArc": Array<{ "chapter": number; "direction": string; "protagonistWin": string }>
+  "createdAt": Rfc3339Utc
+}
+
+export interface Range {
+  "min": number
+  "max": number
+}
+
+export interface StyleCardR1 {
+  "payloadSchema": unknown
+  "stage": "CANDIDATE" | "CONFIRMED"
+  "generation": number
+  "variant": string
+  "label": string
+  "source": { "kind": "MARKET_ARCHETYPE" | "USER_SAMPLE"; "archetypeIds": Array<string>; "sampleDigest": string | null }
+  "confirmedFromRef": unknown
+  "targets": { "avgParagraphChars": Range; "shortParagraphPct": Range; "dialogueParagraphPct": Range; "similePer1k": Range; "explainPer1k": Range; "exclaimPer1k": Range; "questionPer1k": Range; "ellipsisPer1k": Range }
+  "narration": { "person": "FIRST" | "THIRD"; "povPolicy": "STRICT" | "SHORT_CUTS_ALLOWED"; "voice": string }
+  "openingStructure": Array<string>
+  "rules": Array<string>
+  "forbidden": Array<string>
+  "examples": Array<{ "technique": string; "lines": Array<string> }>
+  "createdAt": Rfc3339Utc
 }
 
 export interface ChapterExitStateR1 {
@@ -223,7 +284,7 @@ export type Rfc3339Utc = string
 
 export type Sha256 = string
 
-export type ArtifactType = "CreativeBrief" | "MarketSnapshot" | "MarketEvidenceBundle" | "GenreOpportunity" | "MarketStrategyContract" | "ProjectPitch" | "StoryBlueprint" | "NamingSystem" | "EntityNameDesign" | "StoryConstitution" | "ConstitutionSeal" | "BookPlan" | "MainContract" | "EndgameContract" | "BookStateSnapshot" | "BookExitState" | "BookHealthReport" | "BookCompletionReport" | "NarrativeTasteProfile" | "NarrativeSemanticSeal" | "VolumeIntent" | "VolumePlan" | "VolumeContract" | "PlanningStateLedger" | "VolumeExitState" | "VolumeHealthReport" | "ArcPlan" | "ArcContract" | "ArcExitState" | "ChapterPlan" | "SceneContract" | "DramaticAuthoringPlan" | "SceneStrategySet" | "SceneStrategyDecision" | "ContextManifest" | "ChapterCandidate" | "ReviewReport" | "NarrativeQualityReport" | "RevisionPatch" | "GatePolicy" | "GateCertificate" | "FinalChapter" | "ChapterSummary" | "ChapterExitState" | "ProductionReceipt" | "NarrativeObligationSet" | "ForeshadowPlan" | "CharacterArcPlan" | "KnowledgePlan" | "MysteryPlan" | "ReaderDesireSnapshot" | "ChangeRequest" | "ImpactPlan" | "RetconPlan" | "PlatformPolicy" | "OpeningContract" | "SimulatedSigningReceipt" | "PublishedChapterSnapshot" | "PublishedPerformanceSnapshot" | "PromptPackage" | "ModelRunReceipt" | "ExportPackage" | "BackupReceipt" | "IntegrityReport"
+export type ArtifactType = "CreativeBrief" | "MarketSnapshot" | "MarketEvidenceBundle" | "GenreOpportunity" | "MarketStrategyContract" | "ProjectPitch" | "StoryBlueprint" | "NamingSystem" | "EntityNameDesign" | "StoryConstitution" | "StoryBible" | "StyleCard" | "ConstitutionSeal" | "BookPlan" | "MainContract" | "EndgameContract" | "BookStateSnapshot" | "BookExitState" | "BookHealthReport" | "BookCompletionReport" | "NarrativeTasteProfile" | "NarrativeSemanticSeal" | "VolumeIntent" | "VolumePlan" | "VolumeContract" | "PlanningStateLedger" | "VolumeExitState" | "VolumeHealthReport" | "ArcPlan" | "ArcContract" | "ArcExitState" | "ChapterPlan" | "SceneContract" | "DramaticAuthoringPlan" | "SceneStrategySet" | "SceneStrategyDecision" | "ContextManifest" | "ChapterCandidate" | "ReviewReport" | "NarrativeQualityReport" | "RevisionPatch" | "GatePolicy" | "GateCertificate" | "FinalChapter" | "ChapterSummary" | "ChapterExitState" | "ProductionReceipt" | "NarrativeObligationSet" | "ForeshadowPlan" | "CharacterArcPlan" | "KnowledgePlan" | "MysteryPlan" | "ReaderDesireSnapshot" | "ChangeRequest" | "ImpactPlan" | "RetconPlan" | "PlatformPolicy" | "OpeningContract" | "SimulatedSigningReceipt" | "PublishedChapterSnapshot" | "PublishedPerformanceSnapshot" | "PromptPackage" | "ModelRunReceipt" | "ExportPackage" | "BackupReceipt" | "IntegrityReport"
 
 export type ArtifactStatus = "CANDIDATE" | "VALIDATED" | "COMMITTED" | "STALE" | "REJECTED" | "SUPERSEDED"
 

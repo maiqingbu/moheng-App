@@ -1,8 +1,13 @@
+pub mod assistant_intent;
 pub mod canon_semantics;
 pub mod catalog;
 pub mod change_retcon;
+pub mod chapter_craft;
+pub mod chapter_length;
 pub mod commands;
 pub mod commit;
+pub mod craft_plan;
+pub mod craft_setup;
 pub mod creative_skills;
 pub mod endgame;
 pub mod export;
@@ -23,7 +28,9 @@ pub mod repair;
 pub mod repositories;
 pub mod signing;
 pub mod skill_deployment;
+pub mod skills_v2;
 pub mod stable_id;
+pub mod style_card;
 pub mod volume_lifecycle;
 
 pub use repositories::runtime;

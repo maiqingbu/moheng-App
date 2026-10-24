@@ -36,9 +36,12 @@ import type {
   SettingsProjection,
   ProviderSettingsInput,
   AssistantRepairPlan,
+  AssistantIntentResolution,
+  BackupEntry,
   OpeningReadyProjection,
   StoryDirectionProjection,
   StorySetupProjection,
+  CraftSetupProjection,
   VersionProjection,
   VolumeDetailProjection,
   VolumeProgressProjection,
@@ -100,8 +103,11 @@ export class TauriFrontendPort implements FrontendPort {
   queryMarketStrategy(request: ProjectQueryRequest) { return invokeQuery<MarketStrategyProjection>(this.ipc, 'query_market_strategy', { request }) }
   queryStoryDirections(request: ProjectQueryRequest) { return invokeQuery<StoryDirectionProjection>(this.ipc, 'query_story_directions', { request }) }
   queryStorySetup(request: ProjectQueryRequest) { return invokeQuery<StorySetupProjection>(this.ipc, 'query_story_setup', { request }) }
+  queryCraftSetup(request: ProjectQueryRequest) { return invokeQuery<CraftSetupProjection>(this.ipc, 'query_craft_setup', { request }) }
   queryOpeningReady(request: ProjectQueryRequest) { return invokeQuery<OpeningReadyProjection>(this.ipc, 'query_opening_ready', { request }) }
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }) { return invokeQuery<AssistantRepairPlan>(this.ipc, 'query_assistant_repair_plan', { request }) }
+  queryBackups(request: ProjectQueryRequest) { return invokeQuery<{ projectId: string; backups: BackupEntry[] }>(this.ipc, 'query_backups', { request }) }
+  classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }) { return invokeQuery<AssistantIntentResolution>(this.ipc, 'classify_assistant_intent', { request }) }
   queryProductionCenter(request: ProjectQueryRequest) { return invokeQuery<ProductionCenterProjection>(this.ipc, 'query_production_center', { request }) }
   queryVolumeList(request: ProjectQueryRequest) { return invokeQuery<PageResult<VolumeSummary>>(this.ipc, 'query_volume_list', { request }) }
   queryVolumeDetail(request: Parameters<FrontendPort['queryVolumeDetail']>[0]) { return invokeQuery<VolumeDetailProjection>(this.ipc, 'query_volume_detail', { request }) }

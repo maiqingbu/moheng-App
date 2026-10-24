@@ -1,6 +1,8 @@
 import type {
   ArtifactSummary,
   AssistantRepairPlan,
+  AssistantIntentResolution,
+  BackupEntry,
   BookHealthProjection,
   ChapterListItem,
   ChapterProjection,
@@ -32,6 +34,7 @@ import type {
   SettingsProjection,
   StoryDirectionProjection,
   StorySetupProjection,
+  CraftSetupProjection,
   SupportSessionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -428,6 +431,13 @@ export class BrowserDemoPort implements FrontendPort {
     })
   }
 
+  async queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection> {
+    await wait(35)
+    this.record(request.projectId)
+    // The browser demo has no model: it shows an empty craft setup.
+    return { storyBible: { candidates: [], confirmed: null }, styleCard: { candidates: [], confirmed: null }, sample: null, archetypes: [] }
+  }
+
   async queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection> {
     await wait(35)
     const record = this.record(request.projectId)
@@ -455,6 +465,21 @@ export class BrowserDemoPort implements FrontendPort {
       forbiddenReveals: ['前三章不揭开机制来源'],
       readerDesire: '看见主角如何用自己的选择承担代价。',
     })
+  }
+
+  async queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }> {
+    await wait(10)
+    return { projectId: request.projectId, backups: [] }
+  }
+
+  async classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution> {
+    await wait(10)
+    // The demo has no model: keyword routing only.
+    const intent = request.entry === 'CHANGE'
+      ? (/事实|改成|原来|没有死|其实/.test(request.question) ? 'RETCON' : 'CHANGE')
+      : request.entry === 'REPAIR' ? (/搜索|索引/.test(request.question) ? 'REBUILD_FTS' : 'NO_ACTION')
+      : (/知道/.test(request.question) ? 'KNOWLEDGE' : 'PROJECT_OVERVIEW')
+    return { intent, source: 'KEYWORD', subjects: [], attribute: null, modelRunId: null, fallbackReason: 'DEMO_NO_MODEL' }
   }
 
   async queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan> {

@@ -294,17 +294,28 @@ fn model_item_result(
         else {
             return empty_model_item(item_id, "引用章节不属于本次黄金三章。");
         };
-        if range_start >= range_end
-            || crate::production::exact_quote_span(
+        let offsets_match = range_start < range_end
+            && crate::production::exact_quote_span(
                 &chapter.body,
                 range_start,
                 range_end,
                 exact_quote,
             )
-            .is_err()
-        {
+            .is_ok();
+        // A verbatim quote found exactly once in its chapter is bound to where
+        // it actually is, as audit evidence is; anything else is unverified.
+        let Some((range_start, range_end)) = offsets_match
+            .then_some((range_start, range_end))
+            .or_else(|| crate::production::locate_unique_quote(&chapter.body, exact_quote))
+        else {
             return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
-        }
+        };
+        let exact_quote = chapter
+            .body
+            .chars()
+            .skip(range_start)
+            .take(range_end - range_start)
+            .collect::<String>();
         checked_evidence.push(json!({
             "chapterNo":chapter_no,
             "chapterId":chapter.chapter_id,
@@ -323,19 +334,19 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
         && value.get("bundleDigest") == expected_input.get("bundleDigest")
         && value.get("taskId") == expected_input.pointer("/taskContext/taskId")
         && value.get("status").and_then(Value::as_str) == Some("OK")
-        && value.get("sourceRefs").and_then(Value::as_array).is_some()
-        && value.get("assumptions").and_then(Value::as_array).is_some()
-        && value.get("findings").and_then(Value::as_array).is_some()
-        && value.get("contextRefs").and_then(Value::as_array).is_some()
-        && value
-            .get("runtimeCheckRequests")
-            .and_then(Value::as_array)
-            .is_some()
+        // A bookkeeping list the model left out is empty; one of another
+        // type is still malformed.
+        && [
+            "sourceRefs",
+            "assumptions",
+            "findings",
+            "contextRefs",
+            "runtimeCheckRequests",
+            "nextSkillHints",
+        ]
+        .iter()
+        .all(|field| value.get(*field).is_none_or(Value::is_array))
         && value.get("confidence").and_then(Value::as_f64).is_some()
-        && value
-            .get("nextSkillHints")
-            .and_then(Value::as_array)
-            .is_some()
         && [
             "quality_vector",
             "findings",
@@ -343,11 +354,18 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
             "desire_state",
             "repetition",
             "signing_recommendation",
-            "repair_scope",
             "signingEvaluationItems",
         ]
         .iter()
         .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
+        // Payload lists signing never reads: a left-out one is empty.
+        && ["repair_scope"]
+            .iter()
+            .all(|field| {
+                value
+                    .pointer(&format!("/payload/{field}"))
+                    .is_none_or(Value::is_array)
+            })
 }
 
 fn model_results(
@@ -577,6 +595,17 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
     }) {
         findings.push("连续重复标点".to_string());
     }
+    // A decimal point or clock colon between digits is a number separator,
+    // not punctuation.
+    let punctuation_use = |half: char| {
+        chars.iter().enumerate().any(|(index, character)| {
+            *character == half
+                && !(matches!(half, '.' | ':')
+                    && index > 0
+                    && chars[index - 1].is_ascii_digit()
+                    && chars.get(index + 1).is_some_and(char::is_ascii_digit))
+        })
+    };
     for (full, half) in [
         ('，', ','),
         ('。', '.'),
@@ -585,7 +614,7 @@ fn punctuation_or_layout_findings(body: &str) -> Vec<String> {
         ('：', ':'),
         ('；', ';'),
     ] {
-        if body.contains(full) && body.contains(half) {
+        if body.contains(full) && punctuation_use(half) {
             findings.push(format!("全半角标点混用:{full}{half}"));
         }
     }
@@ -651,8 +680,10 @@ fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
     let mut counts = BTreeMap::<String, usize>::new();
     for chapter in chapters {
         let chars = chapter.body.chars().collect::<Vec<_>>();
-        for window in chars.windows(12) {
-            *counts.entry(window.iter().collect()).or_default() += 1;
+        for window in chars.windows(crate::chapter_craft::PHRASE_CHARACTERS) {
+            if !crate::chapter_craft::is_identifier_window(window) {
+                *counts.entry(window.iter().collect()).or_default() += 1;
+            }
         }
     }
     counts.values().filter(|count| **count >= 3).count()
@@ -1461,13 +1492,9 @@ pub fn execute_opening_evaluation_with_observer(
             return Ok((model_results(None, &chapters, Some(reason), None), None));
         }
         let profile = gateway.resolve_profile()?;
-        let first_chapter_id = chapters
-            .first()
-            .map(|chapter| chapter.chapter_id.as_str())
-            .ok_or_else(|| "B02_OPENING_THREE_CHAPTERS_REQUIRED".to_string())?;
-        let budget_id =
-            DurableModelRunner::chapter_budget_id(&handle, &project_id, first_chapter_id)
-                .map_err(|error| error.to_string())?;
+        // The evaluation belongs to the project, not to chapter 1's
+        // production quota, which a hard-won chapter may have used up.
+        let budget_id = DurableModelRunner::project_budget_id(&project_id);
         let run_id = StableIdentityFactory::from_command(
             StableIdKind::ModelRun,
             &format!("{command_id}:signing-evaluation"),
@@ -1499,14 +1526,26 @@ pub fn execute_opening_evaluation_with_observer(
             "bundleDigest":input["bundleDigest"],
             "taskContext":{"taskId":input.pointer("/taskContext/taskId")}
         });
-        let outcome = execute_production_model(
-            &handle,
-            gateway,
-            &spec,
-            SIGNING_EVALUATION_CAPABILITY,
-            input,
-            &now,
-        )?;
+        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec| {
+            if spec.attempt_no > 1 {
+                DurableJobService::reopen_b02_phase_job_for_resend(
+                    &handle,
+                    &project_id,
+                    &job_id,
+                    worker_id,
+                    &now,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            execute_production_model(
+                &handle,
+                gateway,
+                spec,
+                SIGNING_EVALUATION_CAPABILITY,
+                input.clone(),
+                &now,
+            )
+        })?;
         Ok((
             model_results(
                 outcome.parsed.as_ref(),
@@ -2049,6 +2088,13 @@ pub fn confirm_signing_platform(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn f1_2_number_separators_are_not_mixed_punctuation() {
+        assert!(punctuation_or_layout_findings("峰值0.87，时间00:07，日期2013.08.17。").is_empty());
+        assert!(!punctuation_or_layout_findings("他走了.她留下。").is_empty());
+    }
+
     use super::*;
 
     fn fixture_chapter(chapter_no: i64, body: &str) -> ChapterInput {
@@ -2097,6 +2143,71 @@ mod tests {
         );
         assert_eq!(result["result"], "NOT_VERIFIED");
         assert!(result["evidence"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signing_verbatim_unique_quote_with_wrong_offsets_is_located() {
+        let chapter = fixture_chapter(1, "雨夜里，林舟找到一页旧账。");
+        let result = model_item_result(
+            Some(&json!({
+                "itemId":"R2-5",
+                "result":"PASS",
+                "reason":"表述清晰",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":"林舟找到一页旧账"}]
+            })),
+            "R2-5",
+            &[chapter],
+            None,
+        );
+        assert_eq!(result["result"], "PASS");
+        assert_eq!(result["evidence"][0]["rangeStart"], 4);
+        assert_eq!(result["evidence"][0]["rangeEnd"], 12);
+        assert_eq!(result["evidence"][0]["exactQuote"], "林舟找到一页旧账");
+    }
+
+    #[test]
+    fn repeated_identifiers_are_not_repeated_phrases() {
+        // Real run 2026-10-24: an archive number and an account name came
+        // back three times each, as the plot needed them.
+        let coded = fixture_chapter(
+            1,
+            &"他调出档案B-4-1998-07-22，登录账号ZhouYQ-0724。".repeat(3),
+        );
+        assert_eq!(repeated_phrase_count(&[coded]), 0);
+        let prose = fixture_chapter(1, &"他把那张泛黄的旧照片翻过来看了很久。".repeat(3));
+        assert!(repeated_phrase_count(&[prose]) > 0);
+    }
+
+    #[test]
+    fn signing_envelope_treats_a_missing_bookkeeping_list_as_empty() {
+        let expected = json!({"skillVersion":"1.2.0","bundleDigest":"sha256:x","taskContext":{"taskId":"task:1"}});
+        let payload = json!({
+            "quality_vector":{},"findings":[],"promise_coverage":{},"desire_state":{},
+            "repetition":{},"signing_recommendation":"PASS","repair_scope":[],"signingEvaluationItems":[]
+        });
+        // Seen on 2026-10-18: the top-level findings list was left out.
+        let envelope = json!({
+            "skillId":"S35","skillVersion":"1.2.0","bundleDigest":"sha256:x","taskId":"task:1",
+            "status":"OK","sourceRefs":[],"assumptions":[],"contextRefs":[],
+            "runtimeCheckRequests":[],"confidence":0.9,"nextSkillHints":[],"payload":payload
+        });
+        assert!(valid_s35_signing_envelope(&envelope, &expected));
+        // Seen on 2026-10-24: the payload's repair_scope was left out.
+        let mut no_repair_scope = envelope.clone();
+        no_repair_scope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repair_scope");
+        assert!(valid_s35_signing_envelope(&no_repair_scope, &expected));
+        let mut wrong_identity = envelope.clone();
+        wrong_identity["bundleDigest"] = json!("sha256:other");
+        assert!(!valid_s35_signing_envelope(&wrong_identity, &expected));
+        let mut no_items = envelope;
+        no_items["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("signingEvaluationItems");
+        assert!(!valid_s35_signing_envelope(&no_items, &expected));
     }
 
     #[test]

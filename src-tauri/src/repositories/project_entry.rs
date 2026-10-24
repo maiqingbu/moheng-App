@@ -285,8 +285,14 @@ pub fn ensure_opening_topology(
             libsql_rusqlite::params![chapter_title, project_id, chapter_id, chapter_no],
         )?;
         connection.execute(
-            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'IMPORTANT',12,0,?4)",
-            libsql_rusqlite::params![budget_id, project_id, chapter_id, now],
+            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'IMPORTANT',?5,0,?4)",
+            libsql_rusqlite::params![
+                budget_id,
+                project_id,
+                chapter_id,
+                now,
+                crate::repositories::production::CHAPTER_RUN_ALLOWANCE
+            ],
         )?;
     }
     Ok(OpeningTopology {

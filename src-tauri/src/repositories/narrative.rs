@@ -39,6 +39,8 @@ pub(crate) fn formal_payload_schema(artifact_type: &str) -> Option<&'static str>
         "ContextManifest" => Some("context-manifest.r1"),
         "ChapterExitState" => Some("chapter-exit-state.r1"),
         "VolumeExitState" => Some("volume-exit-state.r1"),
+        "StoryBible" => Some("story-bible.r1"),
+        "StyleCard" => Some("style-card.r1"),
         _ => None,
     }
 }
@@ -48,9 +50,12 @@ pub(crate) fn parse_formal_payload(
     raw_payload: &str,
 ) -> Result<Value, NarrativeRepositoryError> {
     let payload = serde_json::from_str(raw_payload).unwrap_or(Value::Null);
-    if formal_payload_schema(artifact_type).is_some_and(|expected| {
-        payload.get("payloadSchema").and_then(Value::as_str) != Some(expected)
-    }) {
+    let actual = payload.get("payloadSchema").and_then(Value::as_str);
+    // CRAFT v3 chapters are planned as r2; earlier chapters stay r1.
+    let accepted = artifact_type == "ChapterPlan" && actual == Some("chapter-plan.r2");
+    if !accepted
+        && formal_payload_schema(artifact_type).is_some_and(|expected| actual != Some(expected))
+    {
         return Err(NarrativeRepositoryError::LegacyUntyped);
     }
     Ok(payload)
@@ -1884,6 +1889,58 @@ impl NarrativeRepository {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// FX-17: which of the given IDs are real project tasks (declared in a
+    /// committed VolumePlan route or carrying Task Reality).
+    pub fn known_task_ids(
+        connection: &Connection,
+        project_id: &str,
+        task_ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if task_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(task_ids)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM state_deltas d WHERE d.project_id=?1 AND d.state_type='volume.task.progress' AND d.state_id=c.value) OR EXISTS(SELECT 1 FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version, json_each(p.payload_json,'$.tasks') t WHERE h.project_id=?1 AND h.artifact_type='VolumePlan' AND json_extract(t.value,'$.taskId')=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
+    /// The given fact ids that Canon already holds.
+    pub fn existing_canon_fact_ids(
+        connection: &Connection,
+        project_id: &str,
+        fact_ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if fact_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(fact_ids)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM canon_facts f WHERE f.project_id=?1 AND f.fact_id=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
+    /// The given reservation ids that the project's BookPlan declares.
+    pub fn known_reservation_refs(
+        connection: &Connection,
+        project_id: &str,
+        refs: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if refs.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let ids = Self::ids_json(refs)?;
+        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version, json_each(p.payload_json,'$.futureReservations') r WHERE a.project_id=?1 AND a.artifact_type='BookPlan' AND json_extract(r.value,'$.reservationId')=c.value)")?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+    }
+
     pub fn volume_plan_route(
         connection: &Connection,
         project_id: &str,
@@ -1911,6 +1968,23 @@ impl NarrativeRepository {
             libsql_rusqlite::params![project_id, artifact_type, canonical_scope, scope_key],
             |row| Ok(ArtifactRef { artifact_id: row.get(0)?, version: row.get(1)?, payload_hash: row.get(2)? }),
         ).optional().map_err(Into::into)
+    }
+
+    /// The model run recorded as the source of an artifact, if any.
+    pub fn artifact_model_run_id(
+        connection: &Connection,
+        project_id: &str,
+        reference: &ArtifactRef,
+    ) -> Result<Option<String>, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                "SELECT json_extract(provenance_json,'$.modelRunId') FROM artifacts WHERE project_id=?1 AND artifact_id=?2 AND version=?3",
+                libsql_rusqlite::params![project_id, reference.artifact_id, reference.version],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
     }
 
     pub fn chapter_volume_id(
@@ -2313,8 +2387,14 @@ impl NarrativeRepository {
             ));
         }
         connection.execute(
-            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',12,0,?4)",
-            libsql_rusqlite::params![budget_id, project_id, chapter_id, now],
+            "INSERT OR IGNORE INTO chapter_production_budgets(budget_id,project_id,chapter_id,importance_class,hard_max_model_runs,cost_budget_cents,frozen_at) VALUES (?1,?2,?3,'NORMAL',?5,0,?4)",
+            libsql_rusqlite::params![
+                budget_id,
+                project_id,
+                chapter_id,
+                now,
+                crate::repositories::production::CHAPTER_RUN_ALLOWANCE
+            ],
         )?;
         Ok(())
     }

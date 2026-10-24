@@ -100,7 +100,7 @@ async function run() {
     const chapters = await frontendPort!.queryChapterList({ projectId: projectId.value, volumeId, scope: 'chapters', pageSize: 10 } as never) as unknown as Record<string, unknown>
     const openingChapters = ((chapters.items as Array<Record<string, unknown>> | undefined) ?? []).filter(chapter => Number(chapter.number) <= 3).sort((a, b) => Number(a.number) - Number(b.number))
     for (const chapter of openingChapters) {
-      await productionWithRetry({ chapterId: chapter.id, volumeId, executionMode: 'OPENING_BOOTSTRAP', skillsEnabled: false, targetChineseCharacters: 1800, chapterGoalHint: `完成第${chapter.number}章并让实际正文进入正式审计。` })
+      await productionWithRetry({ chapterId: chapter.id, volumeId, executionMode: 'OPENING_BOOTSTRAP', skillsEnabled: false, chapterLengthRange: { min: 2000, max: 3000 }, chapterGoalHint: `完成第${chapter.number}章并让实际正文进入正式审计。` })
     }
     await command('opening_evaluate')
     await command('book_plan_revise')
@@ -111,7 +111,7 @@ async function run() {
     const chapter4 = ((afterPrepare.items as Array<Record<string, unknown>> | undefined) ?? []).find(chapter => Number(chapter.number) === 4)
     if (!chapter4?.id) throw new Error('UI_GATE_CHAPTER4_NOT_FOUND')
     await command('planning_compile_chapter_plan', { chapterId: chapter4.id, chapterGoalHint: '用上一阶段 Reality 的真实事实推进下一项调查。' })
-    const production4 = await productionWithRetry({ chapterId: chapter4.id, volumeId, executionMode: 'LONG_FORM', skillsEnabled: false, targetChineseCharacters: 1800, chapterGoalHint: '推进调查并让真实选择产生可验证后果。' })
+    const production4 = await productionWithRetry({ chapterId: chapter4.id, volumeId, executionMode: 'LONG_FORM', skillsEnabled: false, chapterLengthRange: { min: 2000, max: 3000 }, chapterGoalHint: '推进调查并让真实选择产生可验证后果。' })
     const after = await frontendPort!.queryChapterList({ projectId: projectId.value, volumeId, scope: 'chapters', pageSize: 20 } as never) as unknown as Record<string, unknown>
     const chapter5 = ((after.items as Array<Record<string, unknown>> | undefined) ?? []).find(chapter => Number(chapter.number) === 5)
     trace.value = { rootTraceId, projectId: projectId.value, finalSourceCommit: import.meta.env.VITE_SOURCE_COMMIT ?? 'runtime', uiPath: 'TauriFrontendPort', directExecuteCommandImpl: 0, provider: 'formal app composition root', openingChapters: openingChapters.map(chapter => chapter.id), chapter4: chapter4.id, chapter5: chapter5?.id ?? null, production4, events: events.value, status: 'PASS' }

@@ -7,9 +7,13 @@ import RuntimeBanner from '../components/RuntimeBanner.vue'
 import NarrativeValidation from '../components/NarrativeValidation.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
 import ResumeConditionFields from '../components/ResumeConditionFields.vue'
+import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
+import { withChapterLengthRange, type ChapterLengthRange } from '../presentation/chapterLength'
+import { chapterQuotaLabel, chapterQuotaResetRequest, isChapterQuotaExhausted } from '../presentation/chapterQuota'
 import { useProjectStore } from '../stores/projectStore'
-import type { ProductionCenterProjection, RunState } from '../../application/contracts'
+import type { ProductionCenterProjection } from '../../application/contracts'
 import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { productionRunStateForJob } from '../presentation/productionRunState'
 import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
 import { buildResponsibilityEvidence, createResumeConditionDraft, serializeResumeCondition, type ResumeConditionDraft } from '../flows/resumeCondition'
 import { resumeConditionLabel } from '../presentation/continuity'
@@ -110,19 +114,9 @@ const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed !== true
   && passingSigningPlatforms.value.length > 0)
 const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
-const authoritativeRunState = computed<RunState>(() => {
-  switch (production.value?.jobStatus) {
-    case 'FAILED': return 'FAILED'
-    case 'WAITING_DECISION': return 'WAITING_DECISION'
-    case 'PAUSED': return 'PAUSED'
-    case 'RUNNING':
-    case 'WAITING_MODEL': return 'ACTIVE'
-    case 'BLOCKED': return 'BLOCKED'
-    case 'COMPLETED': return 'COMPLETED'
-    case 'CANCELLED': return 'IDLE'
-    default: return project.value?.runState ?? 'IDLE'
-  }
-})
+const authoritativeRunState = computed(() =>
+  productionRunStateForJob(production.value?.jobStatus, project.value?.runState ?? 'IDLE'),
+)
 
 const runtimePoller = createProductionRuntimePoller({
   query: async () => {
@@ -276,6 +270,9 @@ async function disableGatePolicyRule(rule: Record<string, unknown>) {
   await updateGatePolicy('DISABLE_RULE', { predicate })
 }
 
+// FX-18: an opening chapter is planned at production start, so its length
+// range can be chosen here; long-form chapters choose it when the plan is made.
+const chapterLengthRange = ref<ChapterLengthRange | null>(null)
 async function startProduction() {
   if (!canStartProduction.value) return
   const chapter = production.value?.nextChapter
@@ -289,7 +286,7 @@ async function startProduction() {
   try {
     await store.runCommand(lastCommand.value, {
       type: 'production_start',
-      payload: {
+      payload: withChapterLengthRange({
         chapterId: chapter.id,
         volumeId: chapter.volumeId,
         executionMode: chapter.executionMode,
@@ -299,12 +296,30 @@ async function startProduction() {
         ...(canRetryProduction.value && production.value?.tasks[0]?.id
           ? { retryOfJobId: production.value.tasks[0].id }
           : {}),
-      },
+      }, chapter.executionMode === 'LONG_FORM' ? null : chapterLengthRange.value),
     })
   } catch {
     // The store has already placed the typed failure in CommandFeedback.
   } finally {
     if (!productionIsActive.value || isProductionJobTerminal(production.value?.jobStatus)) runtimePoller.stop()
+  }
+}
+
+// Owner decision 2026-10-17: a chapter whose model-run quota is used up can
+// be given a fresh allowance by hand, after a second confirmation.
+const chapterQuota = computed(() => production.value?.nextChapter?.quota ?? null)
+const chapterQuotaExhausted = computed(() => isChapterQuotaExhausted(chapterQuota.value))
+const quotaResetPending = ref(false)
+async function resetChapterQuota() {
+  const chapter = production.value?.nextChapter
+  if (!chapter) return
+  quotaResetPending.value = false
+  lastCommand.value = 'chapter-quota-reset'
+  try {
+    await store.runCommand(lastCommand.value, chapterQuotaResetRequest(chapter.id))
+    await store.loadProduction(true)
+  } catch {
+    // CommandFeedback displays the typed backend result.
   }
 }
 
@@ -506,6 +521,17 @@ function costText(value: number | null | undefined) {
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_cancel')">取消本章生成</button>
     </PageHeader>
     <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
+    <div v-if="canStartProduction && !productionIsActive && production.nextChapter && production.nextChapter.executionMode !== 'LONG_FORM'" class="section" data-chapter-length-override>
+      <ChapterLengthPicker v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${production.nextChapter.number} 章字数区间`" />
+    </div>
+    <div v-if="chapterQuota && chapterQuotaExhausted && !productionIsActive" class="banner warning" data-chapter-quota>
+      <span>{{ chapterQuotaLabel(chapterQuota) }}，已用完。重置后本章可再调用 {{ chapterQuota.allowance }} 次，已花费的记录会保留。</span>
+      <button v-if="!quotaResetPending" class="btn" @click="quotaResetPending = true">重置本章额度</button>
+      <template v-else>
+        <button class="btn primary" @click="resetChapterQuota">确认重置</button>
+        <button class="btn" @click="quotaResetPending = false">取消</button>
+      </template>
+    </div>
     <CommandFeedback :state="commandState" @confirm="store.confirmCommandResult(lastCommand)" />
     <div v-if="productionLoadError" class="banner warning" role="alert"><span>{{ productionLoadError }}</span><button class="btn" @click="loadProductionProjection">重新读取</button></div>
     <NarrativeValidation :validation="production.validation" :advanced="store.advancedMode" />

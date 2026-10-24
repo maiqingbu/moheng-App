@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8')
 
 test('R6 authorization evidence must come from a runtime recorder, not static capture literals', () => {
-  const bridge = read('src-tauri/src/bin/post_b14_ui_r4_bridge.rs')
+  const bridge = read('src-tauri/test-support/post_b14_ui_r4_bridge.rs')
   const capture = read('scripts/capture-post-b14-ui-r5.mjs')
   assert.match(bridge, /R6_TRACE|r6_query_trace|BRIDGE_RUNTIME_RECORDER/)
   assert.doesNotMatch(bridge, /SELECT\s+setting_key/) 
@@ -30,7 +30,7 @@ test('R6 no-op repair is rejected by the typed owner verification', () => {
 
 test('R6 expected command failures use a typed receipt instead of an HTTP error', () => {
   const bridge = read('scripts/post-b14-ui-r4-bridge.mjs')
-  const rustBridge = read('src-tauri/src/bin/post_b14_ui_r4_bridge.rs')
+  const rustBridge = read('src-tauri/test-support/post_b14_ui_r4_bridge.rs')
   assert.match(bridge, /failedCommandReceipt\([\s\S]*?finalStatus: 'failed'/)
   assert.match(bridge, /input\?\.command === 'execute_command'[\s\S]*?response\.writeHead\(200/)
   assert.match(rustBridge, /testOnlyFailureInjection[\s\S]*?"finalStatus": "failed"/)
