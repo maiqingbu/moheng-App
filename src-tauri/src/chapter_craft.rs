@@ -755,6 +755,38 @@ pub fn overused_phrases(history: &[String], text: &str) -> Vec<String> {
     phrases_used(&texts, history.len(), 3)
 }
 
+/// The sentences of `body` that use one of `phrases` (from
+/// `overused_phrases`), as rule findings the rewrite must fix: given only
+/// the phrases, a real rewrite left them alone (2026-10-24).
+pub fn repetition_findings(phrases: &[String], body: &str) -> Vec<Value> {
+    if phrases.is_empty() {
+        return Vec::new();
+    }
+    unique_sentences(body)
+        .into_iter()
+        .filter_map(|sentence| {
+            let windows = sentence
+                .chars()
+                .collect::<Vec<_>>()
+                .windows(PHRASE_CHARACTERS)
+                .map(|window| window.iter().collect::<String>())
+                .collect::<Vec<_>>();
+            let phrase = phrases.iter().find(|phrase| {
+                windows
+                    .iter()
+                    .any(|window| phrase.contains(window.as_str()))
+            })?;
+            Some(rule_finding(
+                "word_repetition",
+                "MEDIUM",
+                &sentence,
+                format!("「{phrase}」在最近几章已经出现两次，这是第三次"),
+                "换一种说法写这句，意思和信息不变",
+            ))
+        })
+        .collect()
+}
+
 /// Maximal spans in `texts[from..]` covered by phrases used at least
 /// `times` times across all of `texts`.
 fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {

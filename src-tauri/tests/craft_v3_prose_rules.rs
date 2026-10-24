@@ -122,6 +122,24 @@ fn a_repeated_archive_number_is_not_an_overused_phrase() {
 }
 
 #[test]
+fn a_sentence_used_a_third_time_is_a_finding_the_rewrite_must_fix() {
+    // Real run 2026-10-24: given only the phrase, the rewrite fixed nine
+    // findings and left the third use alone.
+    use ai_novel_production_system_core::chapter_craft::{overused_phrases, repetition_findings};
+    let history = vec![
+        "他想起那只搪瓷杯。今天早上，它不在玻璃柜里。门外有人喊他。".to_string(),
+        "镜子起了雾。今天早上，它不在玻璃柜里。他记得昨晚还在。".to_string(),
+    ];
+    let body = "他想起姐姐的杯子。今天早上，它不在玻璃柜里。林薇在客厅喊他。";
+    let findings = repetition_findings(&overused_phrases(&history, body), body);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0]["code"], "word_repetition");
+    assert_eq!(findings[0]["quote"], "今天早上，它不在玻璃柜里。");
+    assert_eq!(findings[0]["source"], "rule");
+    assert!(repetition_findings(&overused_phrases(&history[..1], body), body).is_empty());
+}
+
+#[test]
 fn a_stock_trope_counts_as_a_habit_so_a_rewrite_cannot_introduce_one() {
     use ai_novel_production_system_core::chapter_craft::habit_count;
     assert_eq!(habit_count("林满没吭声，转身进了面馆。"), 0);

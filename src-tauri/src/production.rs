@@ -2968,7 +2968,7 @@ fn run_chapter_production_inner(
             .collect::<Vec<_>>();
         // Rule findings (plan wording, measures, similes, tics, panels)
         // join the review's, one per sentence.
-        let rules = match &craft_writing {
+        let mut rules = match &craft_writing {
             Some(writing) => crate::chapter_craft::craft_rule_findings(
                 &plan_payload,
                 &body,
@@ -2977,6 +2977,15 @@ fn run_chapter_production_inner(
             ),
             None => crate::chapter_craft::rule_findings(&plan_payload, &body),
         };
+        // Phrases this chapter uses a third time across the recent chapters
+        // (signing check F1-5) go to the rewrite as well: each sentence using
+        // one is a finding like the others, so the rewrite has to answer it.
+        let repeated = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
+        let repetition = crate::chapter_craft::repetition_findings(&repeated, &body)
+            .into_iter()
+            .filter(|finding| !rules.iter().any(|rule| rule["quote"] == finding["quote"]))
+            .collect::<Vec<_>>();
+        rules.extend(repetition);
         let to_fix = findings
             .iter()
             .copied()
@@ -2991,9 +3000,6 @@ fn run_chapter_production_inner(
                 })
             }))
             .collect::<Vec<_>>();
-        // Phrases this chapter uses a third time across the recent chapters
-        // (signing check F1-5) go to the rewrite as well.
-        let repeated = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
         let mut applied = 0;
         let mut in_range = true;
         let mut repeats_grew = false;
@@ -3001,7 +3007,11 @@ fn run_chapter_production_inner(
             craft_signals.findings = to_fix
                 .iter()
                 .filter_map(|finding| finding["code"].as_str().map(ToOwned::to_owned))
-                .chain((!repeated.is_empty()).then(|| "word_repetition".to_string()))
+                .chain(
+                    (!repeated.is_empty()
+                        && !to_fix.iter().any(|f| f["code"] == "word_repetition"))
+                    .then(|| "word_repetition".to_string()),
+                )
                 .collect();
             let rewrite_guidance = crate::chapter_craft::guidance("rewrite", &craft_signals)?;
             craft_skills["rewrite"] = json!(skill_ids(&rewrite_guidance));
