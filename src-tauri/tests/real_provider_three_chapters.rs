@@ -217,6 +217,80 @@ fn real_state() -> (AppPaths, KernelState) {
     (paths, state)
 }
 
+/// Writes `renderModelId` into the global provider settings for one run and
+/// restores the previous settings when dropped, even when the run fails.
+/// The settings file is secret-free; the API key stays in the keychain.
+struct RenderModelOverride {
+    paths: AppPaths,
+    original: serde_json::Value,
+}
+
+impl RenderModelOverride {
+    fn from_env(paths: &AppPaths) -> Option<Self> {
+        let model = std::env::var("MOHENG_REAL_RENDER_MODEL").ok()?;
+        let original = ProviderSettingsRepository::read_global(paths).unwrap();
+        let mut settings = original.clone();
+        settings["renderModelId"] = json!(model);
+        ProviderSettingsRepository::write_global(paths, &settings).unwrap();
+        println!("REAL_RENDER_MODEL_OVERRIDE renderModelId={model}");
+        Some(Self {
+            paths: paths.clone(),
+            original,
+        })
+    }
+}
+
+impl Drop for RenderModelOverride {
+    fn drop(&mut self) {
+        ProviderSettingsRepository::write_global(&self.paths, &self.original).unwrap();
+    }
+}
+
+/// CRAFT v3: generates and confirms the first story bible and the first
+/// genre-recommended style card, so the project's chapters plan as r2.
+fn confirm_craft_setup(state: &KernelState, prefix: &str, project_id: &str) {
+    let command = |kind: &str, suffix: &str, payload: serde_json::Value| {
+        execute(
+            state,
+            json!({
+                "type":kind,"commandId":format!("{prefix}:{suffix}"),
+                "idempotencyKey":format!("{prefix}:{suffix}:key"),"projectId":project_id,
+                "expectedRevision":current_revision(state, project_id),"requestedAt":NOW,
+                "payload":payload
+            }),
+        );
+    };
+    let setup = || {
+        ai_novel_production_system_core::commands::query_craft_setup_impl(
+            state,
+            json!({"projectId":project_id}),
+        )
+        .unwrap()
+    };
+    command("story_bible_generate", "bible", json!({}));
+    let bible = setup()["storyBible"]["candidates"][0].clone();
+    command(
+        "story_bible_confirm",
+        "bible-confirm",
+        json!({"candidateId":bible["id"],"bible":bible}),
+    );
+    command(
+        "style_card_generate",
+        "style",
+        json!({"source":"MARKET_ARCHETYPE"}),
+    );
+    let card = setup()["styleCard"]["candidates"][0].clone();
+    command(
+        "style_card_confirm",
+        "style-confirm",
+        json!({"candidateId":card["id"],"card":card}),
+    );
+    println!(
+        "REAL_CRAFT_SETUP bibleAngle={} styleCard={} archetypes={}",
+        bible["angle"], card["label"], card["source"]["archetypeIds"]
+    );
+}
+
 /// A new project from the harness idea, taken through directions, setup
 /// and opening readiness; returns it with its three opening chapters.
 fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (String, Vec<String>) {
@@ -706,7 +780,8 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
         Ok("1"),
         "set MOHENG_RUN_REAL_TEN_CHAPTERS=1 to acknowledge real API use"
     );
-    let (_paths, state) = real_state();
+    let (paths, state) = real_state();
+    let _render_model = RenderModelOverride::from_env(&paths);
     let run = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -714,6 +789,7 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
     let prefix = format!("real-ten-chapters:{run}");
     let title = format!("Harness 真实十章验收 {run}");
     let (project_id, opening) = create_real_project(&state, &prefix, &title);
+    confirm_craft_setup(&state, &prefix, &project_id);
     let opening_goals = OPENING_GOALS;
     for (index, chapter_id) in opening.iter().enumerate() {
         execute_real_production(
@@ -866,9 +942,78 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
     assert!(word_counts
         .iter()
         .all(|(_, count)| (2000..=3300).contains(count)));
+    if let Ok(out) = std::env::var("MOHENG_CRAFT_LAB_OUT") {
+        write_ten_chapter_evidence(&connection, &project_id, std::path::Path::new(&out));
+    }
     println!(
         "REAL_TEN_CHAPTER_RESULT projectId={project_id} wordCounts={word_counts:?} modelRuns={runs} status=PASS"
     );
+}
+
+/// For evaluation: each chapter's prose, and per chapter the plan revision,
+/// rule findings, rhythm notes, recorded continuity details and the token
+/// usage by model.
+fn write_ten_chapter_evidence(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    out: &std::path::Path,
+) {
+    std::fs::create_dir_all(out).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT c.chapter_no, json_extract(f.payload_json,'$.body'), r.payload_json, json_extract(pl.payload_json,'$.payloadSchema') \
+             FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
+             JOIN artifacts ra ON ra.project_id=c.project_id AND ra.artifact_type='ProductionReceipt' AND ra.artifact_status='COMMITTED' \
+             JOIN artifact_payloads r ON r.artifact_id=ra.artifact_id AND r.version=ra.version AND json_extract(r.payload_json,'$.finalChapterRef.artifactId')=c.final_artifact_id \
+             JOIN artifact_payloads pl ON pl.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND pl.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
+             WHERE c.project_id=?1 ORDER BY c.chapter_no",
+        )
+        .unwrap();
+    let chapters = statement
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut summary = Vec::new();
+    for (number, body, receipt, schema) in chapters {
+        std::fs::write(out.join(format!("chapter-{number:02}.txt")), &body).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        let review = &receipt["craftSkills"]["proseReview"];
+        summary.push(json!({
+            "chapter":number,"planSchema":schema,"characters":body.chars().count(),
+            "ruleCodes":review["ruleCodes"],"editsApplied":review["editsApplied"],
+            "discarded":review["discarded"],"rhythmNotes":review["rhythmNotes"],
+            "skillDecisions":receipt["craftSkills"]["chapterPlanDecisions"].as_array().map(Vec::len),
+            "continuityDetails":receipt["continuityDetails"].as_array().map(Vec::len)
+        }));
+    }
+    let usage = connection
+        .prepare(
+            "SELECT r.model, r.capability, COUNT(*), SUM(u.input_tokens), SUM(u.output_tokens) FROM model_runs r LEFT JOIN model_usage u ON u.model_run_id=r.model_run_id \
+             WHERE r.project_id=?1 GROUP BY r.model, r.capability ORDER BY r.model, r.capability",
+        )
+        .unwrap()
+        .query_map([project_id], |row| {
+            Ok(json!({"model":row.get::<_, String>(0)?,"capability":row.get::<_, String>(1)?,
+                "runs":row.get::<_, i64>(2)?,"inputTokens":row.get::<_, Option<i64>>(3)?,
+                "outputTokens":row.get::<_, Option<i64>>(4)?}))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    std::fs::write(
+        out.join("summary.json"),
+        serde_json::to_string_pretty(&json!({"projectId":project_id,"chapters":summary,"usage":usage}))
+            .unwrap(),
+    )
+    .unwrap();
 }
 
 /// The configured writer without the v2 craft skills: no skill guidance in

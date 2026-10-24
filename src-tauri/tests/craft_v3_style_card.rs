@@ -65,6 +65,11 @@ fn rhythm_candidate_takes_the_secondary_rhythm_and_keeps_primary_rules() {
 #[test]
 fn recommends_archetypes_by_genre_and_falls_back_to_general_ones() {
     assert_eq!(recommend_archetypes("悬疑灵异 民俗").unwrap()[0], "A3");
+    // A project tagged with a broader genre word still finds its archetype.
+    assert_eq!(
+        recommend_archetypes("都市悬疑 成长 记忆谜案").unwrap()[0],
+        "A3"
+    );
     assert_eq!(recommend_archetypes("现代言情").unwrap()[0], "A6");
     assert_eq!(recommend_archetypes("完全未知").unwrap(), vec!["A1", "A2"]);
 }
