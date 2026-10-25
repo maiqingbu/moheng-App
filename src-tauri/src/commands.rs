@@ -7074,6 +7074,7 @@ fn compile_current_chapter_plan(
         .map_err(|error| error.to_string())?
         .as_ref(),
         project_settings.get("chapterLengthRange"),
+        crate::chapter_length::work_platform(&handle, project_id, &project_settings)?.as_deref(),
     )?;
     if let Some(range) = chosen_range {
         crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(

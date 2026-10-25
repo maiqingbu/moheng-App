@@ -346,7 +346,7 @@ fn craft_v2_long_form_plan_compile_gets_guidance_and_replans_a_rejected_plan() {
         json!({
             "type":"planning_compile_chapter_plan","commandId":"cmd:craft:long","idempotencyKey":"key:craft:long",
             "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+            "payload":{"chapterId":chapter_id,"chapterLengthRange":{"min":2000,"max":3000},"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
         }),
     );
     assert_eq!(result.unwrap()["finalStatus"], "committed");
@@ -580,7 +580,7 @@ fn craft_v2_long_form_plan_with_too_short_a_horizon_is_replanned() {
         json!({
             "type":"planning_compile_chapter_plan","commandId":"cmd:craft:long-horizon","idempotencyKey":"key:craft:long-horizon",
             "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
+            "payload":{"chapterId":chapter_id,"chapterLengthRange":{"min":2000,"max":3000},"scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}}
         }),
     );
     assert_eq!(result.unwrap()["finalStatus"], "committed");

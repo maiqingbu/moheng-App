@@ -712,7 +712,16 @@ fn repeated_phrase_count(chapters: &[ChapterInput]) -> usize {
         .count()
 }
 
-fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) -> Vec<Value> {
+/// Characters an opening chapter needs at least, unless its platform's range
+/// starts lower (LD-1.5: 番茄 and 七猫 chapters run from 1800).
+const OPENING_CHAPTER_MIN_CHARACTERS: usize = 2000;
+const OPENING_CHAPTER_MAX_CHARACTERS: usize = 5000;
+
+fn deterministic_results(
+    chapters: &[ChapterInput],
+    corpus: &OriginalityCorpus,
+    min_characters: usize,
+) -> Vec<Value> {
     let complete_chapters = chapters.len()
         == crate::repositories::project_entry::OPENING_CHAPTER_COUNT as usize
         && chapters
@@ -726,7 +735,8 @@ fn deterministic_results(chapters: &[ChapterInput], corpus: &OriginalityCorpus) 
     let length_fail = !complete_chapters
         || chapters.iter().any(|chapter| {
             let count = chapter.body.chars().count();
-            chapter.title.trim().is_empty() || !(2000..=5000).contains(&count)
+            chapter.title.trim().is_empty()
+                || !(min_characters..=OPENING_CHAPTER_MAX_CHARACTERS).contains(&count)
         });
     let formatting = chapters
         .iter()
@@ -1454,7 +1464,19 @@ pub fn execute_opening_evaluation_with_observer(
     let (binding, binding_digest, corpus, readiness, profiles) = current_binding(&signing_context)?;
     let core = core_rules()?;
     let schema = model_output_schema()?;
-    let deterministic = deterministic_results(&chapters, &corpus);
+    let work_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &handle,
+        &project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let min_characters =
+        crate::chapter_length::work_platform(&handle, &project_id, &work_settings)?
+            .as_deref()
+            .and_then(crate::chapter_length::ChapterLengthRange::for_platform)
+            .map_or(OPENING_CHAPTER_MIN_CHARACTERS, |range| {
+                (range.min as usize).min(OPENING_CHAPTER_MIN_CHARACTERS)
+            });
+    let deterministic = deterministic_results(&chapters, &corpus, min_characters);
     let missing_committed_canon = !readiness
         .get("openingCanonCommitted")
         .and_then(Value::as_bool)
@@ -2306,6 +2328,28 @@ mod tests {
     }
 
     #[test]
+    fn ld3_a_chapter_at_its_platform_length_passes_the_length_rule() {
+        // LD-1.5: 番茄 chapters aim for 2000 and run from 1800.
+        let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
+            .map(|chapter_no| fixture_chapter(chapter_no, &"林".repeat(1900)))
+            .collect::<Vec<_>>();
+        let corpus = OriginalityCorpus {
+            bodies: Vec::new(),
+            digest: "b".repeat(64),
+            complete: true,
+        };
+        let f11 = |min| {
+            deterministic_results(&chapters, &corpus, min)
+                .into_iter()
+                .find(|item| item["itemId"] == "F1-1")
+                .unwrap()["result"]
+                .clone()
+        };
+        assert_eq!(f11(1800), "PASS");
+        assert_eq!(f11(2000), "FAIL");
+    }
+
+    #[test]
     fn first_layer_failure_blocks_model_evaluation() {
         let chapters = (1..=crate::repositories::project_entry::OPENING_CHAPTER_COUNT)
             .map(|chapter_no| fixture_chapter(chapter_no, "短正文"))
@@ -2315,7 +2359,8 @@ mod tests {
             digest: "b".repeat(64),
             complete: true,
         };
-        let deterministic = deterministic_results(&chapters, &corpus);
+        let deterministic =
+            deterministic_results(&chapters, &corpus, OPENING_CHAPTER_MIN_CHARACTERS);
         assert!(deterministic_model_gate(
             &deterministic,
             &chapters,
@@ -2340,7 +2385,11 @@ mod tests {
             digest: "f".repeat(64),
             complete: false,
         };
-        let results = deterministic_results(&chapters, &incomplete_corpus);
+        let results = deterministic_results(
+            &chapters,
+            &incomplete_corpus,
+            OPENING_CHAPTER_MIN_CHARACTERS,
+        );
         assert_eq!(result_for(&results, "C0-3"), "NOT_VERIFIED");
     }
 

@@ -35,9 +35,9 @@ fn inputs(calls: &[(String, Value)], capability: &str) -> Vec<Value> {
 
 const TROPE_SENTENCE: &str = "林满倒吸一口凉气，转身进了面馆。";
 
-/// A chapter in the default 2000–3000 range with one stock phrasing.
+/// A chapter in the 番茄 range (1800–2200, LD-1.5) with one stock phrasing.
 fn long_body(chapter: usize) -> String {
-    let mut lines = (1..=110)
+    let mut lines = (1..=80)
         .map(|index| format!("货单第{index}页写着{index}箱桐油，老董按了第{chapter}个手印。"))
         .collect::<Vec<_>>();
     lines.insert(40, TROPE_SENTENCE.to_string());
@@ -196,6 +196,8 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
     );
     let render = call("RENDER_CHAPTER_CRAFT").expect("craft writer");
     assert_eq!(render["storyBible"]["antagonist"]["name"], "彭三");
+    // LD-1.5: a 番茄 work writes 90%–110% of 2000 characters.
+    assert_eq!(render["chapterLengthRange"], json!({"min":1800,"max":2200}));
     assert_eq!(render["styleCard"]["narration"]["povPolicy"], "STRICT");
     assert!(
         render["styleCard"].get("stage").is_none(),

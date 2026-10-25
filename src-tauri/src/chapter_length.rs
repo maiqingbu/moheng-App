@@ -18,6 +18,19 @@ pub const DEFAULT_CHAPTER_LENGTH_RANGE: ChapterLengthRange = ChapterLengthRange 
     max: 3_000,
 };
 
+/// LD-1.5 (owner decision 2026-10-25): the characters a chapter aims for
+/// on each platform (ids as in signing.rs `PLATFORM_IDS`), and the names a
+/// work may give the platform. These are
+/// trade conventions, not platform rules: platforms count daily updates,
+/// not chapter length (番茄 chapters run 2000-2300, paid platforms 2500-3500).
+const PLATFORM_CHAPTER_TARGETS: &[(&[&str], i64)] = &[
+    (&["FANQIE", "番茄"], 2_000),
+    (&["QIMAO", "七猫"], 2_000),
+    (&["QIDIAN", "起点"], 3_000),
+    (&["ZONGHENG", "纵横"], 3_000),
+    (&["JJWXC", "晋江"], 3_000),
+];
+
 const SMALLEST_MIN: i64 = 500;
 const LARGEST_MAX: i64 = 10_000;
 
@@ -47,12 +60,33 @@ impl ChapterLengthRange {
         Ok(None)
     }
 
+    /// The range for a platform the work names (its id or Chinese name):
+    /// 90% to 110% of the platform's target. A text that names more than
+    /// one platform names none.
+    pub fn for_platform(platform: &str) -> Option<Self> {
+        let platform = platform.trim().to_uppercase();
+        let exact = PLATFORM_CHAPTER_TARGETS
+            .iter()
+            .find(|(names, _)| names[0] == platform);
+        let mut named = PLATFORM_CHAPTER_TARGETS
+            .iter()
+            .filter(|(names, _)| names.iter().any(|name| platform.contains(name)));
+        exact
+            .or_else(|| named.next().filter(|_| named.next().is_none()))
+            .map(|(_, target)| Self {
+                min: target * 9 / 10,
+                max: target * 11 / 10,
+            })
+    }
+
     /// A range chosen now for this chapter, then the range saved for this
-    /// chapter earlier, then the work's setting, then the default.
+    /// chapter earlier, then the work's setting, then its platform's, then
+    /// the default.
     pub fn resolve(
         chosen: Option<Self>,
         chapter_setting: Option<&Value>,
         work_setting: Option<&Value>,
+        platform: Option<&str>,
     ) -> Result<Self, String> {
         if let Some(range) = chosen {
             return Ok(range);
@@ -62,7 +96,9 @@ impl ChapterLengthRange {
             .or(work_setting.filter(|setting| !setting.is_null()))
         {
             Some(setting) => Self::from_value(setting),
-            None => Ok(DEFAULT_CHAPTER_LENGTH_RANGE),
+            None => Ok(platform
+                .and_then(Self::for_platform)
+                .unwrap_or(DEFAULT_CHAPTER_LENGTH_RANGE)),
         }
     }
 
@@ -83,6 +119,37 @@ impl ChapterLengthRange {
     pub fn to_json(self) -> Value {
         json!({"min":self.min,"max":self.max})
     }
+}
+
+/// The platform the work is written for: the one confirmed at signing, else
+/// the one in the work's settings, else the one it was started for.
+pub fn work_platform(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    work_settings: &Value,
+) -> Result<Option<String>, String> {
+    use crate::repositories::project_entry::{canonical_head, latest_artifact_by_type};
+    let named = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|platform| !platform.trim().is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let signed = canonical_head(connection, project_id, "SimulatedSigningReceipt")
+        .map_err(|error| error.to_string())?
+        .filter(|head| head.payload.pointer("/confirmation/confirmed") == Some(&Value::Bool(true)))
+        .and_then(|head| named(head.payload.pointer("/confirmation/platformId")));
+    if signed.is_some() {
+        return Ok(signed);
+    }
+    if let Some(platform) = named(work_settings.get("platform")) {
+        return Ok(Some(platform));
+    }
+    Ok(
+        latest_artifact_by_type(connection, project_id, "CreativeBrief")
+            .map_err(|error| error.to_string())?
+            .and_then(|brief| named(brief.payload.get("platform"))),
+    )
 }
 
 /// The count shown to the user as the chapter's word count.
@@ -136,19 +203,64 @@ mod tests {
         );
         assert_eq!(ChapterLengthRange::from_payload(&json!({})), Ok(None));
         assert_eq!(
-            ChapterLengthRange::resolve(Some(range(4000, 5000)), Some(&saved), Some(&work)),
+            ChapterLengthRange::resolve(Some(range(4000, 5000)), Some(&saved), Some(&work), None),
             Ok(range(4000, 5000))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(None, Some(&saved), Some(&work)),
+            ChapterLengthRange::resolve(None, Some(&saved), Some(&work), None),
             Ok(range(2500, 3500))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(None, None, Some(&work)),
+            ChapterLengthRange::resolve(None, None, Some(&work), None),
             Ok(range(3000, 4000))
         );
         assert_eq!(
-            ChapterLengthRange::resolve(None, None, None),
+            ChapterLengthRange::resolve(None, None, None, None),
+            Ok(DEFAULT_CHAPTER_LENGTH_RANGE)
+        );
+    }
+
+    #[test]
+    fn ld3_a_platform_sets_the_range_at_ninety_to_one_hundred_ten_percent_of_its_target() {
+        let range = |min, max| ChapterLengthRange { min, max };
+        assert_eq!(
+            ChapterLengthRange::for_platform("番茄小说"),
+            Some(range(1800, 2200))
+        );
+        assert_eq!(
+            ChapterLengthRange::for_platform("QIMAO"),
+            Some(range(1800, 2200))
+        );
+        assert_eq!(
+            ChapterLengthRange::for_platform("起点中文网"),
+            Some(range(2700, 3300))
+        );
+        assert_eq!(
+            ChapterLengthRange::for_platform("纵横"),
+            Some(range(2700, 3300))
+        );
+        assert_eq!(
+            ChapterLengthRange::for_platform("晋江文学城"),
+            Some(range(2700, 3300))
+        );
+        assert_eq!(ChapterLengthRange::for_platform("某个新平台"), None);
+        assert_eq!(
+            ChapterLengthRange::for_platform("fanqie"),
+            Some(range(1800, 2200))
+        );
+        assert_eq!(ChapterLengthRange::for_platform("番茄或起点"), None);
+        // The work's own setting still wins; the platform comes before the default.
+        let work = json!({"min":3000,"max":4000});
+        assert_eq!(
+            ChapterLengthRange::resolve(None, None, Some(&work), Some("番茄小说")),
+            Ok(range(3000, 4000))
+        );
+        assert_eq!(
+            ChapterLengthRange::resolve(None, None, None, Some("番茄小说")),
+            Ok(range(1800, 2200))
+        );
+        assert_eq!(
+            ChapterLengthRange::resolve(None, None, None, Some("某个新平台")),
             Ok(DEFAULT_CHAPTER_LENGTH_RANGE)
         );
     }

@@ -127,7 +127,6 @@ fn execute_real_production(
             "chapterId":chapter_id,
             "executionMode":execution_mode,
             "skillsEnabled":false,
-            "chapterLengthRange":{"min":2000,"max":3000},
             "chapterGoalHint":chapter_goal
         });
         if let Some(volume_id) = volume_id {
@@ -806,7 +805,8 @@ fn compile_real_chapter_plan(
                 "type":"planning_compile_chapter_plan","commandId":command_id,
                 "idempotencyKey":format!("{command_id}:key"),"projectId":project_id,
                 "expectedRevision":current_revision(state, project_id),"requestedAt":NOW,
-                "payload":{"chapterId":chapter_id,"chapterLengthRange":{"min":2000,"max":3000},
+                // LD-1.5: the chapter length comes from the work's platform.
+                "payload":{"chapterId":chapter_id,
                     "chapterGoalHint":"承接上一章结尾，推进主线调查，并让主角的选择产生可核对的后果。"}
             }),
         );
