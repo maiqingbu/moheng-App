@@ -65,7 +65,10 @@ fn full_signing_items(input: &Value) -> Value {
     // Real run 2026-10-25: without a definition the model read C0-2 as the
     // AI declaration.
     assert!(
-        input["prompt"].as_str().unwrap().contains("C0-2 是通用内容禁区"),
+        input["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("C0-2 是通用内容禁区"),
         "the evaluation prompt defines C0-2"
     );
     let chapters = input

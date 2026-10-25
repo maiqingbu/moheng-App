@@ -164,6 +164,10 @@ fn a_short_line_repeated_as_its_own_paragraph_is_a_finding_the_rewrite_must_fix(
     for finding in &findings {
         let quote = finding["quote"].as_str().unwrap();
         assert!(quote.contains("他也在看"), "{quote}");
-        assert_eq!(body.matches(quote).count(), 1, "a rewrite can locate {quote}");
+        assert_eq!(
+            body.matches(quote).count(),
+            1,
+            "a rewrite can locate {quote}"
+        );
     }
 }

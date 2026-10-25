@@ -426,6 +426,70 @@ fn craft_a_new_fact_reusing_an_existing_fact_id_gets_its_own_id() {
     assert_eq!(opened, 1);
 }
 
+/// The audit names its knowledge with an id an earlier chapter's knowledge
+/// already has, as a real audit did on 2026-10-25 (chapter 4's `know-1`
+/// replaced chapter 1's and made the signing evaluation stale).
+struct ReusedKnowledgeIdGateway;
+
+impl ProductionModelGateway for ReusedKnowledgeIdGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let fact = response.output["canonCandidates"][0].clone();
+            response.output["knowledgeCandidates"] = json!([{
+                "knowledgeId":"know-1","knowerId":fact["subjectId"],"factId":fact["factId"],
+                "epistemicState":"KNOWS","visibilityScope":format!("CHARACTER:{}", fact["subjectId"].as_str().unwrap()),
+                "acquiredStoryTime":fact["storyTime"],"evidence":fact["evidence"]
+            }]);
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_new_knowledge_reusing_an_existing_knowledge_id_gets_its_own_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(ReusedKnowledgeIdGateway),
+    );
+    let project_id = "p-craft-reused-knowledge-id";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    connection
+        .execute(
+            "INSERT INTO canon_knowledge(knowledge_id,project_id,knower_id,fact_id,epistemic_state,visibility_scope,created_at,updated_at) VALUES ('know-1',?1,'entity:actual:linzhou','fact:actual:seed','KNOWS','CHARACTER:entity:actual:linzhou',?2,?2)",
+            libsql_rusqlite::params![project_id, NOW],
+        )
+        .unwrap();
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:reused-knowledge","idempotencyKey":"key:craft:reused-knowledge",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    // The committed knowledge keeps its row; the new one is stored beside it.
+    let seed: String = connection
+        .query_row(
+            "SELECT fact_id FROM canon_knowledge WHERE knowledge_id='know-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(seed, "fact:actual:seed");
+    let added: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_knowledge WHERE knowledge_id<>'know-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(added, 1);
+}
+
 /// The first audit states a fact with a predicate the canon semantics policy
 /// does not register, as a real audit did on 2026-10-19; later audits keep
 /// to registered predicates.

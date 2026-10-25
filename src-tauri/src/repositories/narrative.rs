@@ -1913,11 +1913,36 @@ impl NarrativeRepository {
         project_id: &str,
         fact_ids: &[&str],
     ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
-        if fact_ids.is_empty() {
+        Self::existing_ids(connection, project_id, "canon_facts", "fact_id", fact_ids)
+    }
+
+    /// The given knowledge ids that Canon already has.
+    pub fn existing_canon_knowledge_ids(
+        connection: &Connection,
+        project_id: &str,
+        knowledge_ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        Self::existing_ids(
+            connection,
+            project_id,
+            "canon_knowledge",
+            "knowledge_id",
+            knowledge_ids,
+        )
+    }
+
+    fn existing_ids(
+        connection: &Connection,
+        project_id: &str,
+        table: &str,
+        column: &str,
+        ids: &[&str],
+    ) -> Result<BTreeSet<String>, NarrativeRepositoryError> {
+        if ids.is_empty() {
             return Ok(BTreeSet::new());
         }
-        let ids = Self::ids_json(fact_ids)?;
-        let mut statement = connection.prepare("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM canon_facts f WHERE f.project_id=?1 AND f.fact_id=c.value)")?;
+        let ids = Self::ids_json(ids)?;
+        let mut statement = connection.prepare(&format!("SELECT DISTINCT c.value FROM json_each(?2) c WHERE EXISTS(SELECT 1 FROM {table} f WHERE f.project_id=?1 AND f.{column}=c.value)"))?;
         let rows = statement.query_map(libsql_rusqlite::params![project_id, ids], |row| {
             row.get::<_, String>(0)
         })?;

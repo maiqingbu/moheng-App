@@ -940,7 +940,11 @@ pub fn resend_once_on_invalid_json(
 
 /// A new model run following `spec`: its ids carry `suffix` and its attempt
 /// number is `later` attempts after the original.
-fn follow_up_spec(spec: &ModelRunSpec, suffix: &str, later: i64) -> Result<ModelRunSpec, String> {
+pub(crate) fn follow_up_spec(
+    spec: &ModelRunSpec,
+    suffix: &str,
+    later: i64,
+) -> Result<ModelRunSpec, String> {
     Ok(ModelRunSpec {
         model_run_id: StableIdentityFactory::from_command(
             StableIdKind::ModelRun,
@@ -2149,7 +2153,8 @@ pub fn run_chapter_production(
                     // the job's last plan was rejected.
                     let failure_code = if error.starts_with(
                         "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=",
-                    ) || error.starts_with(crate::craft_plan::PLAN_CRAFT_ERROR)
+                    ) || error
+                        .starts_with(crate::craft_plan::PLAN_CRAFT_ERROR)
                     {
                         error.as_str()
                     } else {
@@ -3164,28 +3169,58 @@ fn run_chapter_production_inner(
         )
     };
     let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
-        let claimed_fact_ids = raw
-            .get("canonCandidates")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("factId").and_then(Value::as_str))
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
         let existing_fact_ids =
             crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
                 connection,
                 &project_id,
-                &claimed_fact_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
+                &claimed_audit_ids(&raw, "canonCandidates", "factId"),
             )
             .map_err(|error| error.to_string())?;
-        let renamed_fact_ids = fresh_audit_fact_ids(&mut raw, &existing_fact_ids, &chapter_id);
+        let existing_knowledge_ids =
+            crate::repositories::narrative::NarrativeRepository::existing_canon_knowledge_ids(
+                connection,
+                &project_id,
+                &claimed_audit_ids(&raw, "knowledgeCandidates", "knowledgeId"),
+            )
+            .map_err(|error| error.to_string())?;
+        let (renamed_fact_ids, fact_mapping) = fresh_audit_ids(
+            &mut raw,
+            "canonCandidates",
+            "factId",
+            "canon",
+            &existing_fact_ids,
+            &chapter_id,
+        );
+        // Knowledge that names a reused fact id follows the new fact.
+        for item in raw
+            .get_mut("knowledgeCandidates")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(target) = item
+                .get("factId")
+                .and_then(Value::as_str)
+                .and_then(|fact_id| fact_mapping.get(fact_id))
+                .cloned()
+            {
+                item["factId"] = json!(target);
+            }
+        }
+        let (renamed_knowledge_ids, _) = fresh_audit_ids(
+            &mut raw,
+            "knowledgeCandidates",
+            "knowledgeId",
+            "know",
+            &existing_knowledge_ids,
+            &chapter_id,
+        );
         let mut audit_payload = normalize_audit_model_output(raw, &body);
         if !renamed_fact_ids.is_empty() {
             audit_payload["normalization"]["renamedFactIds"] = json!(renamed_fact_ids);
+        }
+        if !renamed_knowledge_ids.is_empty() {
+            audit_payload["normalization"]["renamedKnowledgeIds"] = json!(renamed_knowledge_ids);
         }
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
@@ -4899,15 +4934,20 @@ fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
     (revised, applied)
 }
 
-/// A new Canon fact must never reuse the id of a committed fact (the commit
-/// would overwrite it) or of another fact in the same audit. Such facts get
-/// an id of their own, and knowledge in the audit that names the reused id
-/// follows the new fact. Returns `{from, to}` for each renamed fact.
-fn fresh_audit_fact_ids(
+/// A new Canon fact or knowledge item must never reuse the id of a committed
+/// one (the commit would overwrite it: on 2026-10-25 chapter 4's `know-1`
+/// replaced chapter 1's and made the signing evaluation stale) or of another
+/// item in the same audit. Such items get an id of their own,
+/// `{tag}:{chapter digest}:{n}`. Returns `{from, to}` for each renamed item
+/// and the first new id of each reused one.
+fn fresh_audit_ids(
     raw: &mut Value,
+    array: &str,
+    key: &str,
+    tag: &str,
     existing: &BTreeSet<String>,
     chapter_id: &str,
-) -> Vec<Value> {
+) -> (Vec<Value>, BTreeMap<String, String>) {
     let prefix = sha256_canonical(&json!(chapter_id))
         .map(|digest| digest.chars().take(24).collect::<String>())
         .unwrap_or_default();
@@ -4916,50 +4956,42 @@ fn fresh_audit_fact_ids(
     let mut renamed = Vec::new();
     let mut mapping = BTreeMap::<String, String>::new();
     let mut next = 1_usize;
-    if let Some(items) = raw.get_mut("canonCandidates").and_then(Value::as_array_mut) {
-        for item in items {
-            let Some(fact_id) = item
-                .get("factId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-            else {
-                continue;
-            };
-            if !existing.contains(&fact_id) && seen.insert(fact_id.clone()) {
-                taken.insert(fact_id);
-                continue;
-            }
-            let fresh = loop {
-                let candidate = format!("canon:{prefix}:{next}");
-                next += 1;
-                if !taken.contains(&candidate) {
-                    break candidate;
-                }
-            };
-            taken.insert(fresh.clone());
-            item["factId"] = json!(fresh);
-            mapping
-                .entry(fact_id.clone())
-                .or_insert_with(|| fresh.clone());
-            renamed.push(json!({"from":fact_id,"to":fresh}));
-        }
-    }
-    if let Some(items) = raw
-        .get_mut("knowledgeCandidates")
+    for item in raw
+        .get_mut(array)
         .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
     {
-        for item in items {
-            let target = item
-                .get("factId")
-                .and_then(Value::as_str)
-                .and_then(|fact_id| mapping.get(fact_id))
-                .cloned();
-            if let Some(target) = target {
-                item["factId"] = json!(target);
-            }
+        let Some(id) = item.get(key).and_then(Value::as_str).map(ToOwned::to_owned) else {
+            continue;
+        };
+        if !existing.contains(&id) && seen.insert(id.clone()) {
+            taken.insert(id);
+            continue;
         }
+        let fresh = loop {
+            let candidate = format!("{tag}:{prefix}:{next}");
+            next += 1;
+            if !taken.contains(&candidate) {
+                break candidate;
+            }
+        };
+        taken.insert(fresh.clone());
+        item[key] = json!(fresh);
+        mapping.entry(id.clone()).or_insert_with(|| fresh.clone());
+        renamed.push(json!({"from":id,"to":fresh}));
     }
-    renamed
+    (renamed, mapping)
+}
+
+/// The ids the audit gives in `raw[array][*][key]`.
+fn claimed_audit_ids<'a>(raw: &'a Value, array: &str, key: &str) -> Vec<&'a str> {
+    raw.get(array)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get(key).and_then(Value::as_str))
+        .collect()
 }
 
 /// Owner decision (2026-10-18): a quote that left words out of one body
