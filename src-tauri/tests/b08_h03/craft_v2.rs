@@ -734,6 +734,29 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
 }
 
 #[test]
+fn craft_v2_a_repeat_that_would_fail_signing_is_the_first_rewrite_finding() {
+    // Real run 2026-10-25: the rewrite applies at most eight edits and the
+    // repeat came after eight other findings. It leads the review's too.
+    let gateway = Arc::new(CraftGateway {
+        motifs: vec![3],
+        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],
+        // A review finding, with a rewrite the length check discards.
+        rewrite_ending: Some("长".repeat(2000)),
+        ..CraftGateway::new(vec![good_plan()], &[2500])
+    });
+    let project_id = "p-craft-repeat-first";
+    let (_temp, _state, _chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let findings = gateway.inputs("REWRITE_PASSAGES")[0]["findings"].clone();
+    let findings = findings.as_array().unwrap();
+    assert!(findings.len() > 1, "{findings:?}");
+    assert!(
+        findings[0]["quote"].as_str().unwrap().contains("蓝莓籽"),
+        "{findings:?}"
+    );
+}
+
+#[test]
 fn craft_v2_rule_findings_go_to_the_rewrite_with_the_review() {
     let gateway = Arc::new(CraftGateway {
         inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],

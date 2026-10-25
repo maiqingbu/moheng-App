@@ -299,13 +299,23 @@ fn sentence_spans(body: &str) -> Vec<(usize, usize)> {
         }
     };
     let mut start = 0;
-    for (index, character) in body.char_indices() {
+    let mut characters = body.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
         if character == '\n' {
             push(start, index);
             start = index + 1;
         } else if matches!(character, '。' | '！' | '？' | '…') {
-            push(start, index + character.len_utf8());
-            start = index + character.len_utf8();
+            // A closing quote or a doubled mark after the mark belongs to
+            // this sentence (2026-10-25: split off alone, it matched every
+            // repeated line).
+            let mut end = index + character.len_utf8();
+            while let Some((next, mark)) = characters
+                .next_if(|&(_, mark)| matches!(mark, '”' | '’' | '」' | '』' | '…' | '！' | '？'))
+            {
+                end = next + mark.len_utf8();
+            }
+            push(start, end);
+            start = end;
         }
     }
     push(start, body.len());
@@ -806,7 +816,8 @@ pub fn repetition_findings(phrases: &[String], body: &str) -> Vec<Value> {
 fn uses_phrase(sentence: &str, phrase: &str) -> bool {
     let chars = sentence.chars().collect::<Vec<_>>();
     if chars.len() < PHRASE_CHARACTERS {
-        return phrase.contains(sentence);
+        // Punctuation alone is in every phrase that spans a line break.
+        return chars.iter().any(|c| c.is_alphanumeric()) && phrase.contains(sentence);
     }
     chars
         .windows(PHRASE_CHARACTERS)

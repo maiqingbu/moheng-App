@@ -171,3 +171,18 @@ fn a_short_line_repeated_as_its_own_paragraph_is_a_finding_the_rewrite_must_fix(
         );
     }
 }
+
+#[test]
+fn other_dialogue_is_not_a_repetition_finding() {
+    // Real run 2026-10-25: a closing quote mark split off as its own
+    // sentence matched the repeated phrase, so every line of dialogue in
+    // chapter 2 became a finding (51) and the real repeat was not rewritten.
+    use ai_novel_production_system_core::chapter_craft::{overused_phrases, repetition_findings};
+    let body = "林薇站在门口。\n\n“走吧。”\n\n他展开便签。\n\n“他也在看。”\n\n他走到通风口。\n\n“他也在看。”\n\n她回头看他。\n\n“你听见了吗？”\n\n“真的？！”\n\n他走出面馆。\n\n“他也在看。”\n\n沈砚抬头。";
+    let findings = repetition_findings(&overused_phrases(&[], body), body);
+    assert!(!findings.is_empty());
+    for finding in &findings {
+        let quote = finding["quote"].as_str().unwrap();
+        assert!(quote.contains("他也在看"), "{quote}");
+    }
+}

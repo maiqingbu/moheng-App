@@ -3000,17 +3000,24 @@ fn run_chapter_production_inner(
         // Phrases this chapter uses a third time across the recent chapters
         // (signing check F1-5) go to the rewrite as well: each sentence using
         // one is a finding like the others, so the rewrite has to answer it.
+        // They lead every finding: the rewrite applies at most eight edits
+        // (real run 2026-10-25).
         let repeated = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
         let repetition = crate::chapter_craft::repetition_findings(&repeated, &body)
             .into_iter()
             .filter(|finding| !rules.iter().any(|rule| rule["quote"] == finding["quote"]))
             .collect::<Vec<_>>();
-        rules.extend(repetition);
-        let to_fix = findings
+        let leading = repetition.len();
+        rules.splice(0..0, repetition);
+        let to_fix = rules[..leading]
             .iter()
-            .copied()
-            .filter(|finding| finding["severity"] != "LOW")
-            .chain(rules.iter().filter(|rule| {
+            .chain(
+                findings
+                    .iter()
+                    .copied()
+                    .filter(|finding| finding["severity"] != "LOW"),
+            )
+            .chain(rules[leading..].iter().filter(|rule| {
                 !findings.iter().any(|finding| {
                     finding["quote"].as_str().is_some_and(|quote| {
                         rule["quote"]
