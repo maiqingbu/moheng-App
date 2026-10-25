@@ -413,6 +413,8 @@ impl OpenAiCompatibleProvider {
             payload["enable_thinking"] = json!(false);
             payload["stream"] = json!(false);
             payload["max_tokens"] = json!(8_192);
+            // Every step returns JSON; the server keeps it valid.
+            payload["response_format"] = json!({"type":"json_object"});
         }
         payload
     }
@@ -843,6 +845,34 @@ mod tests {
         assert_eq!(payload["max_tokens"], 8_192);
         assert!(payload.get("thinking").is_none());
         assert!(payload.get("max_completion_tokens").is_none());
+        // Real run 2026-10-25: qwen-plus closed the signing JSON a brace early.
+        assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn every_structured_prompt_says_json_as_json_mode_requires() {
+        for capability in [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "REPAIR_CANDIDATE",
+            "AUDIT_EXTRACT",
+            "CLASSIFY_ASSISTANT_INTENT",
+            "GENERATE_STORY_DIRECTIONS",
+            "RENDER_CHAPTER_CRAFT",
+            "ADJUST_CHAPTER_LENGTH",
+            "PLAN_CHAPTER_CRAFT",
+            "GENERATE_STORY_BIBLE",
+            "OPENING_SIGNING_EVALUATION",
+            "REVIEW_CHAPTER",
+            "REWRITE_PASSAGES",
+            "TEST_PROVIDER",
+            "ANY_OTHER_STEP",
+        ] {
+            assert!(
+                OpenAiCompatibleProvider::structured_prompt(capability).contains("JSON"),
+                "{capability}"
+            );
+        }
     }
 
     #[test]
