@@ -21,6 +21,10 @@ const SAMPLE_LINE: &str =
 struct CraftGateway {
     ready_sentence: AtomicBool,
     bible_inputs: Mutex<Vec<Value>>,
+    /// The next bible reply leaves out a required field.
+    missing_field_once: AtomicBool,
+    /// The next directions reply has two pitches instead of three.
+    short_directions_once: AtomicBool,
 }
 
 fn bible(index: usize) -> Value {
@@ -78,6 +82,11 @@ impl ProductionModelGateway for CraftGateway {
                         pitch
                     })
                     .collect::<Vec<_>>();
+                let pitches = if self.short_directions_once.swap(false, Ordering::SeqCst) {
+                    pitches[..2].to_vec()
+                } else {
+                    pitches
+                };
                 Ok(ProductionModelResponse::deterministic(
                     json!({"pitches":pitches}),
                 ))
@@ -88,6 +97,12 @@ impl ProductionModelGateway for CraftGateway {
                 if self.ready_sentence.load(Ordering::SeqCst) {
                     bibles[1]["protagonist"]["innerVoiceStyle"] =
                         json!("常对自己说：“这笔账我记下了。”");
+                }
+                if self.missing_field_once.swap(false, Ordering::SeqCst) {
+                    bibles[0]["mechanism"]["rules"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("howReadersSeeIt");
                 }
                 Ok(ProductionModelResponse::deterministic(
                     json!({"bibles":bibles}),
@@ -241,6 +256,11 @@ fn story_bible_candidates_with_ready_sentences_are_rejected_without_writes() {
 
     assert!(error.contains("STORY_BIBLE_READY_SENTENCE"), "{error}");
     assert_eq!(
+        fixture.gateway.bible_inputs.lock().unwrap().len(),
+        2,
+        "generated again once before giving up"
+    );
+    assert_eq!(
         fixture
             .manager
             .project_revision(&fixture.project_id)
@@ -253,6 +273,86 @@ fn story_bible_candidates_with_ready_sentences_are_rejected_without_writes() {
             "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='StoryBible'"
         ),
         0
+    );
+}
+
+#[test]
+fn a_story_bible_reply_missing_a_field_is_generated_again_once() {
+    // Owner decision (2026-10-25): a setup step whose output fails its
+    // checks is generated again once before the user has to.
+    let fixture = project_with_story_setup();
+    fixture
+        .gateway
+        .missing_field_once
+        .store(true, Ordering::SeqCst);
+
+    command(
+        &fixture,
+        "story_bible_generate",
+        "craft:bible-retry",
+        json!({}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        setup(&fixture)["storyBible"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(fixture.gateway.bible_inputs.lock().unwrap().len(), 2);
+    assert_eq!(
+        count(
+            &fixture,
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='GENERATE_STORY_BIBLE'"
+        ),
+        2,
+        "the rejected reply stays recorded"
+    );
+}
+
+#[test]
+fn a_story_directions_reply_with_too_few_pitches_is_generated_again_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway::default());
+    gateway.short_directions_once.store(true, Ordering::SeqCst);
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let created = execute_command_impl(&state, json!({
+        "type":"project_create_from_idea","commandId":"craft:create","idempotencyKey":"craft:create:key",
+        "requestedAt":NOW,
+        "payload":{"title":"码头账房","idea":"码头账房能听见旧物的声音。","platform":"番茄小说","mode":"DIRECTOR","tags":["年代"]}
+    })).unwrap();
+    let fixture = Fixture {
+        _temp: temp,
+        state,
+        gateway,
+        project_id: created["projectId"].as_str().unwrap().to_owned(),
+    };
+
+    command(
+        &fixture,
+        "story_directions_generate",
+        "craft:directions",
+        json!({}),
+    )
+    .unwrap();
+
+    let directions = query_story_directions_impl(
+        &fixture,
+        json!({"projectId":fixture.project_id,"scope":"directions","pageSize":10}),
+    )
+    .unwrap();
+    assert_eq!(directions["pitches"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        count(
+            &fixture,
+            "SELECT COUNT(*) FROM model_runs WHERE project_id=?1 AND capability='GENERATE_STORY_DIRECTIONS'"
+        ),
+        2
     );
 }
 

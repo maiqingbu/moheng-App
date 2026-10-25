@@ -253,11 +253,13 @@ pub(crate) struct EntryModelRun {
     pub model_run_id: String,
 }
 
-/// Starts an entry job for `capability` and runs its single model call. Ids
-/// and the idempotency key derive from `suffix`, so a replayed command maps
-/// to the same job and model run.
+/// Starts an entry job for `capability` and runs its model call. Ids and the
+/// idempotency key derive from `suffix`, so a replayed command maps to the
+/// same job and model run. A reply `accept` rejects is generated again once
+/// in the same job (owner decision 2026-10-25), the rejected run staying
+/// recorded; a second rejection fails the job.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_entry_model_job(
+pub(crate) fn run_entry_model_job<T>(
     connection: &ProjectHandle,
     project_id: &str,
     command_id: &str,
@@ -269,7 +271,8 @@ pub(crate) fn run_entry_model_job(
     request: Value,
     generation: i64,
     gateway: &dyn ProductionModelGateway,
-) -> Result<EntryModelRun, String> {
+    accept: &dyn Fn(&EntryModelRun) -> Result<T, String>,
+) -> Result<(EntryModelRun, T), String> {
     let job_id =
         StableIdentityFactory::from_command(StableIdKind::Job, &format!("{command_id}:{suffix}"))?;
     let model_run_id = StableIdentityFactory::from_command(
@@ -327,15 +330,45 @@ pub(crate) fn run_entry_model_job(
         attempt_no: 1,
         repair_round: 0,
     };
-    let result = execute_production_model_with_profile(
-        connection, gateway, &profile, &spec, capability, request, now,
-    )?;
-    Ok(EntryModelRun {
-        parsed: result.parsed,
-        job_id,
-        profile,
-        model_run_id,
-    })
+    let run = |spec: &ModelRunSpec| -> Result<EntryModelRun, String> {
+        let result = execute_production_model_with_profile(
+            connection,
+            gateway,
+            &profile,
+            spec,
+            capability,
+            request.clone(),
+            now,
+        )?;
+        Ok(EntryModelRun {
+            parsed: result.parsed,
+            job_id: job_id.clone(),
+            profile: profile.clone(),
+            model_run_id: spec.model_run_id.clone(),
+        })
+    };
+    let first = run(&spec)?;
+    let (last, accepted) = match accept(&first) {
+        Ok(accepted) => (first, Ok(accepted)),
+        Err(_) => {
+            let again = run(&crate::production::follow_up_spec(&spec, ":regenerate", 1)?)?;
+            let accepted = accept(&again);
+            (again, accepted)
+        }
+    };
+    match accepted {
+        Ok(accepted) => Ok((last, accepted)),
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                &job_id,
+                "MODEL_CONTRACT_INVALID",
+                now,
+            )?;
+            Err(error)
+        }
+    }
 }
 
 /// Commits an entry bundle that also completes `job_id`, failing the job
@@ -413,7 +446,11 @@ fn generate_story_directions(
         "capability":GENERATE_STORY_DIRECTIONS,
         "input":prompt
     });
-    let run = run_entry_model_job(
+    let adjustment = payload
+        .get("adjustment")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (run, normalized) = run_entry_model_job(
         connection,
         project_id,
         command_id,
@@ -425,34 +462,22 @@ fn generate_story_directions(
         input,
         generation,
         gateway,
-    )?;
-    let parsed = run
-        .parsed
-        .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_MISSING".to_string())?;
-    let normalized = match normalize_story_direction_output(
-        parsed,
-        source_digest,
-        payload
-            .get("adjustment")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        generation,
-        &run.model_run_id,
-        &run.profile,
-        now,
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            fail_entry_job(
-                connection,
-                project_id,
-                &run.job_id,
-                "MODEL_CONTRACT_INVALID",
+        &|run| {
+            let parsed = run
+                .parsed
+                .clone()
+                .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_MISSING".to_string())?;
+            normalize_story_direction_output(
+                parsed,
+                source_digest,
+                adjustment,
+                generation,
+                &run.model_run_id,
+                &run.profile,
                 now,
-            )?;
-            return Err(error);
-        }
-    };
+            )
+        },
+    )?;
     Ok((normalized, run.job_id, run.profile, run.model_run_id))
 }
 

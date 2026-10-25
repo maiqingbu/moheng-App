@@ -48,9 +48,9 @@ fn execute(state: &KernelState, request: serde_json::Value) -> serde_json::Value
 }
 
 /// A setup step that calls the model, generated again (as the user would
-/// press regenerate) when the model's JSON comes back cut off or misses a
-/// required field. Seen on 2026-10-24: qwen3.8-flash stopped mid-object
-/// with finish_reason stop; 2026-10-25: qwen-plus left out a bible field.
+/// press regenerate) when the model's JSON comes back cut off. Seen on
+/// 2026-10-24: qwen3.8-flash stopped mid-object with finish_reason stop.
+/// A reply missing a required field is generated again by the product.
 fn execute_model_step(state: &KernelState, request: serde_json::Value) -> serde_json::Value {
     const ATTEMPTS: usize = 3;
     for attempt in 1..=ATTEMPTS {
@@ -67,10 +67,7 @@ fn execute_model_step(state: &KernelState, request: serde_json::Value) -> serde_
                 assert_eq!(response["finalStatus"], "committed");
                 return response;
             }
-            Err(error)
-                if (error.contains("P01_MODEL_JSON_INVALID") || error.contains("_CONTRACT:"))
-                    && attempt < ATTEMPTS =>
-            {
+            Err(error) if error.contains("P01_MODEL_JSON_INVALID") && attempt < ATTEMPTS => {
                 println!("REAL_SETUP_REGENERATE attempt={attempt} error={error}");
             }
             Err(error) => panic!("real setup failed: {error}"),

@@ -11,8 +11,7 @@ use crate::generated::validators::{validate_story_bible_r1, validate_style_card_
 use crate::production::ProductionModelGateway;
 use crate::project_db::ProjectHandle;
 use crate::project_entry::{
-    artifact, artifact_ref, bundle, commit_entry_job_bundle, fail_entry_job, project_scope,
-    run_entry_model_job,
+    artifact, artifact_ref, bundle, commit_entry_job_bundle, project_scope, run_entry_model_job,
 };
 use crate::repositories::craft;
 use crate::repositories::project_entry::{self, EntryArtifactRow};
@@ -222,7 +221,7 @@ pub fn commit_story_bible_candidates(
             "generation":generation
         }
     });
-    let run = run_entry_model_job(
+    let (run, candidates) = run_entry_model_job(
         connection,
         project_id,
         command_id,
@@ -234,13 +233,12 @@ pub fn commit_story_bible_candidates(
         input,
         generation,
         gateway,
-    )?;
-    let candidates = run.parsed.as_ref()
-        .and_then(|output| output["bibles"].as_array())
-        .filter(|items| items.len() == CANDIDATE_COUNT)
-        .ok_or_else(|| "STORY_BIBLE_COUNT_INVALID".to_string())
-        .and_then(|items| {
-            items
+        &|run| {
+            run.parsed
+                .as_ref()
+                .and_then(|output| output["bibles"].as_array())
+                .filter(|items| items.len() == CANDIDATE_COUNT)
+                .ok_or_else(|| "STORY_BIBLE_COUNT_INVALID".to_string())?
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
@@ -252,20 +250,8 @@ pub fn commit_story_bible_candidates(
                     checked_bible(with_fields(metadata, item, STORY_BIBLE.fields))
                 })
                 .collect::<Result<Vec<_>, _>>()
-        });
-    let candidates = match candidates {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            fail_entry_job(
-                connection,
-                project_id,
-                &run.job_id,
-                "MODEL_CONTRACT_INVALID",
-                now,
-            )?;
-            return Err(error);
-        }
-    };
+        },
+    )?;
     let commit = candidates_bundle(
         &STORY_BIBLE,
         project_id,
