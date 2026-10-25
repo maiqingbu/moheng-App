@@ -509,8 +509,10 @@ impl ProductionModelGateway for BareThreadRefGateway {
     }
 }
 
+/// An earlier chapter's audit already named a thread `thread-1` too, as on
+/// 2026-10-25 when chapter 2 then failed with B08_THREAD_TRANSITION_OUTSIDE_PLAN.
 #[test]
-fn craft_new_thread_named_without_the_thread_prefix_gets_a_thread_id() {
+fn craft_new_thread_named_without_the_thread_prefix_gets_a_thread_of_its_own() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
@@ -519,6 +521,10 @@ fn craft_new_thread_named_without_the_thread_prefix_gets_a_thread_id() {
     let project_id = "p-craft-bare-thread-ref";
     let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    connection.execute(
+        "INSERT INTO narrative_obligations(obligation_id,project_id,scope,obligation_type,authority_level,source_artifact_id,source_version,description,prerequisites_json,lifecycle,created_at,updated_at,resume_condition_json) SELECT 'thread-1',?1,'BOOK','PROMISE','B',artifact_id,version,'上一章的承诺','[]','PROGRESSING',?2,?2,'{\"kind\":\"ENTITY_PRESENT\",\"value\":\"entity:actual:linzhou\"}' FROM artifacts WHERE project_id=?1 LIMIT 1",
+        libsql_rusqlite::params![project_id, NOW],
+    ).unwrap();
     drop(connection);
     let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:craft:bare-thread","idempotencyKey":"key:craft:bare-thread",
@@ -527,6 +533,15 @@ fn craft_new_thread_named_without_the_thread_prefix_gets_a_thread_id() {
     }))
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    let earlier: String = connection
+        .query_row(
+            "SELECT description FROM narrative_obligations WHERE obligation_id='thread-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(earlier, "上一章的承诺");
 }
 
 /// The first audit states a fact with a predicate the canon semantics policy

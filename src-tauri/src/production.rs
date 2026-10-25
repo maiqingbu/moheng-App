@@ -3176,6 +3176,7 @@ fn run_chapter_production_inner(
         )
     };
     let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
+        scope_bare_thread_refs(&mut raw, &plan_payload, &chapter_id);
         let existing_fact_ids =
             crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
                 connection,
@@ -3393,13 +3394,7 @@ fn run_chapter_production_inner(
         audit_payload["normalization"]["downgradedTaskClaims"] =
             json!(extraction.downgraded_task_claims);
     }
-    let planned_continuity_refs = plan_payload
-        .get("continuityActions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|action| action.get("threadRef").and_then(Value::as_str))
-        .collect::<BTreeSet<_>>();
+    let planned_continuity_refs = planned_continuity_refs(&plan_payload);
     let thread_promotion_decisions = extraction
         .continuity_candidates
         .iter()
@@ -4556,16 +4551,11 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         .and_then(Value::as_array_mut)
     {
         for candidate in candidates {
-            // A ref without `thread:` (`new_thread:x`, or a bare `thread-1`)
-            // names the thread after its id.
             let renamed = candidate
                 .get("threadRef")
                 .and_then(Value::as_str)
-                .filter(|thread_ref| !thread_ref.starts_with("thread:"))
-                .map(|thread_ref| {
-                    let id = thread_ref.strip_prefix("new_thread:").unwrap_or(thread_ref);
-                    format!("thread:{id}")
-                });
+                .and_then(|thread_ref| thread_ref.strip_prefix("new_thread:"))
+                .map(|id| format!("thread:{id}"));
             if let Some(renamed) = renamed {
                 candidate["threadRef"] = json!(renamed);
             }
@@ -4960,9 +4950,7 @@ fn fresh_audit_ids(
     existing: &BTreeSet<String>,
     chapter_id: &str,
 ) -> (Vec<Value>, BTreeMap<String, String>) {
-    let prefix = sha256_canonical(&json!(chapter_id))
-        .map(|digest| digest.chars().take(24).collect::<String>())
-        .unwrap_or_default();
+    let prefix = chapter_id_digest(chapter_id);
     let mut taken = existing.clone();
     let mut seen = BTreeSet::new();
     let mut renamed = Vec::new();
@@ -4994,6 +4982,56 @@ fn fresh_audit_ids(
         renamed.push(json!({"from":id,"to":fresh}));
     }
     (renamed, mapping)
+}
+
+/// The part of an id that names the chapter an audit item comes from.
+fn chapter_id_digest(chapter_id: &str) -> String {
+    sha256_canonical(&json!(chapter_id))
+        .map(|digest| digest.chars().take(24).collect::<String>())
+        .unwrap_or_default()
+}
+
+/// The thread refs the chapter plan's continuity actions name.
+fn planned_continuity_refs(plan: &Value) -> BTreeSet<&str> {
+    plan.get("continuityActions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| action.get("threadRef").and_then(Value::as_str))
+        .collect()
+}
+
+/// A thread ref the audit gives without `thread:` (real audits on 2026-10-25
+/// wrote `thread-1`, and every chapter's audit started again at `thread-1`)
+/// names the thread this chapter's plan calls `thread:{ref}`, or else a new
+/// thread of this chapter, `thread:{chapter}:{ref}`, so it never lands on
+/// an earlier chapter's thread of the same name.
+fn scope_bare_thread_refs(raw: &mut Value, plan: &Value, chapter_id: &str) {
+    let planned = planned_continuity_refs(plan);
+    let chapter = chapter_id_digest(chapter_id);
+    for candidate in raw
+        .get_mut("continuityCandidates")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let Some(bare) = candidate
+            .get("threadRef")
+            .and_then(Value::as_str)
+            .filter(|thread_ref| {
+                !thread_ref.starts_with("thread:") && !thread_ref.starts_with("new_thread:")
+            })
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        let planned_ref = format!("thread:{bare}");
+        candidate["threadRef"] = json!(if planned.contains(planned_ref.as_str()) {
+            planned_ref
+        } else {
+            format!("thread:{chapter}:{bare}")
+        });
+    }
 }
 
 /// The ids the audit gives in `raw[array][*][key]`.
@@ -5169,13 +5207,7 @@ fn validate_actual_extraction(
         .flatten()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
-    let continuity = plan
-        .get("continuityActions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("threadRef").and_then(Value::as_str))
-        .collect::<BTreeSet<_>>();
+    let continuity = planned_continuity_refs(plan);
     let reservations = plan
         .get("reservationRefs")
         .and_then(Value::as_array)
@@ -6413,15 +6445,9 @@ mod tests {
         let normalized = normalize_audit_model_output(
             json!({"continuityCandidates":[
                 {"threadRef":"new_thread:sister_trace","disposition":"ADVANCE"},
-                {"threadRef":"thread:existing","disposition":"ADVANCE"},
-                {"threadRef":"thread-1","disposition":"ADVANCE"}
+                {"threadRef":"thread:existing","disposition":"ADVANCE"}
             ]}),
             "正文",
-        );
-        // Real audit 2026-10-25: a bare `thread-1` failed chapter 1 every retry.
-        assert_eq!(
-            normalized["continuityCandidates"][2]["threadRef"],
-            "thread:thread-1"
         );
         assert_eq!(
             normalized["continuityCandidates"][0]["threadRef"],
