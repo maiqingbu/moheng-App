@@ -4357,7 +4357,6 @@ fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
             .collect::<String>()
     };
     let body_squeezed = squeezed(body);
-    let body_chars = body.chars().collect::<Vec<_>>();
     let mut quotes = Vec::new();
     let fields = [
         "canonCandidates",
@@ -4381,8 +4380,7 @@ fn unlocatable_audit_quotes(raw: &Value, body: &str) -> Vec<String> {
     for quote in candidate_quotes.chain(range_quotes) {
         let found = body.contains(quote)
             || body_squeezed.contains(&squeezed(quote))
-            || bounded_ellipsis_span(body, quote).is_some()
-            || omission_unique_span(&body_chars, quote).is_some();
+            || locate_quote_span(body, quote).is_some();
         if !quote.is_empty() && !found && !quotes.iter().any(|known| known == quote) {
             quotes.push(quote.to_owned());
         }
@@ -4554,29 +4552,18 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
                     && end <= body_chars.len()
                     && body_chars[start..end].iter().collect::<String>() == quote
             });
-            let matches = body.match_indices(quote).take(2).collect::<Vec<_>>();
-            if !offsets_reproduce_quote && matches.len() == 1 {
-                let char_start = body[..matches[0].0].chars().count();
-                return Some(json!({
-                    "start":char_start,
-                    "end":char_start + quote.chars().count(),
-                    "quote":quote,
-                    "rebound":false
-                }));
-            }
-            // A verbatim quote that only lost whitespace (typically paragraph
-            // breaks) still identifies one exact passage of the body.
-            if !offsets_reproduce_quote && matches.is_empty() {
-                let span = whitespace_insensitive_unique_span(&body_chars, quote)
-                    .or_else(|| bounded_ellipsis_span(body, quote))
-                    .or_else(|| omission_unique_span(&body_chars, quote));
-                if let Some((start, end)) = span {
-                    return Some(json!({
-                        "start":start,
-                        "end":end,
-                        "quote":body_chars[start..end].iter().collect::<String>(),
-                        "rebound":false
-                    }));
+            // A quote that identifies one passage (verbatim, or loosely: lost
+            // whitespace, an ellipsis, left-out words or a few changed
+            // characters) is bound to that passage.
+            if !offsets_reproduce_quote {
+                if let Some((start, end)) = locate_quote_span(body, quote) {
+                    let located = body_chars[start..end].iter().collect::<String>();
+                    let mut evidence =
+                        json!({"start":start,"end":end,"quote":located,"rebound":false});
+                    if located != quote {
+                        evidence["suppliedQuote"] = json!(quote);
+                    }
+                    return Some(evidence);
                 }
             }
         }
@@ -5060,22 +5047,12 @@ fn omission_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
 }
 
 /// Whether `quote` identifies exactly one passage of `body`.
-fn quote_locates_uniquely(body: &str, body_chars: &[char], quote: &str) -> bool {
-    body.matches(quote).count() == 1
-        || whitespace_insensitive_unique_span(body_chars, quote).is_some()
-        || bounded_ellipsis_span(body, quote).is_some()
-        || omission_unique_span(body_chars, quote).is_some()
-}
-
 /// Owner decision (2026-10-18): after the audit rerun, candidates whose
 /// quote still identifies no single body passage are dropped and named, as
 /// facts without evidence are; evidence ranges that fail the same way go.
 fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) {
-    let body_chars = body.chars().collect::<Vec<_>>();
     let unlocatable = |quote: Option<&str>| {
-        quote.is_some_and(|quote| {
-            !quote.is_empty() && !quote_locates_uniquely(body, &body_chars, quote)
-        })
+        quote.is_some_and(|quote| !quote.is_empty() && locate_quote_span(body, quote).is_none())
     };
     let mut kept = raw.clone();
     let mut dropped = Vec::new();
@@ -5130,6 +5107,94 @@ pub fn locate_unique_quote(body: &str, quote: &str) -> Option<(usize, usize)> {
         return None;
     }
     whitespace_insensitive_unique_span(&body.chars().collect::<Vec<_>>(), quote)
+}
+
+/// Where a quote from a model stands in `body`, in characters: verbatim
+/// and unique, or else the one passage it loosely names (lost whitespace, an
+/// ellipsis, left-out words, or LD-1.3 a few changed characters).
+pub fn locate_quote_span(body: &str, quote: &str) -> Option<(usize, usize)> {
+    if let Some(span) = locate_unique_quote(body, quote) {
+        return Some(span);
+    }
+    if body.contains(quote) {
+        return None;
+    }
+    let body_chars = body.chars().collect::<Vec<_>>();
+    bounded_ellipsis_span(body, quote)
+        .or_else(|| omission_unique_span(&body_chars, quote))
+        .or_else(|| near_unique_span(&body_chars, quote))
+}
+
+/// Shortest quote matched loosely by its characters (a tenth of it, one
+/// character, may differ).
+const NEAR_QUOTE_MIN_CHARS: usize = 10;
+
+/// LD-1.3 (real signing evaluation 2026-10-25: 他→沈砚, 攥着→攥紧): the one
+/// passage of `body` the quote differs from by at most a tenth of its
+/// characters (edits: change, add or drop a character). Nothing when the
+/// quote is short, too far off, or as close to another passage.
+fn near_unique_span(body: &[char], quote: &str) -> Option<(usize, usize)> {
+    let quote = quote.chars().collect::<Vec<_>>();
+    if quote.len() < NEAR_QUOTE_MIN_CHARS {
+        return None;
+    }
+    let allowed = quote.len() / 10;
+    // Approximate substring search: row[j] is the fewest edits turning the
+    // quote so far into a passage ending before body[j]; starts[j] where it
+    // begins.
+    let mut row = vec![0_usize; body.len() + 1];
+    let mut starts = (0..=body.len()).collect::<Vec<_>>();
+    for (i, quote_char) in quote.iter().enumerate() {
+        let mut next = vec![i + 1; body.len() + 1];
+        let mut next_starts = vec![0_usize; body.len() + 1];
+        for j in 1..=body.len() {
+            let replace = row[j - 1] + usize::from(*quote_char != body[j - 1]);
+            let skip_quote = row[j] + 1;
+            let skip_body = next[j - 1] + 1;
+            // On a tie, drop a quote character rather than change a body
+            // one, so the passage does not take in the character before it.
+            (next[j], next_starts[j]) = if skip_quote <= replace && skip_quote <= skip_body {
+                (skip_quote, starts[j])
+            } else if replace <= skip_body {
+                (replace, starts[j - 1])
+            } else {
+                (skip_body, next_starts[j - 1])
+            };
+        }
+        row = next;
+        starts = next_starts;
+    }
+    let best = (1..=body.len()).min_by_key(|&end| row[end])?;
+    if row[best] > allowed {
+        return None;
+    }
+    // Another passage as close (ending away from this one) makes it
+    // ambiguous; for a longer quote, so does one only an edit further off.
+    let margin = usize::from(allowed >= 2);
+    let elsewhere = (1..=body.len())
+        .any(|end| row[end] <= row[best] + margin && end.abs_diff(best) > quote.len() / 2);
+    if elsewhere {
+        return None;
+    }
+    // Equal edits can start the passage a character early or late (沈砚 is
+    // as close to 。他 as to 他); a quote is a whole clause, so its start is
+    // moved to the clause boundary, within the edits allowed.
+    let boundary = |c: char| c.is_whitespace() || "。！？，、；：…—“”‘’「」『』（）".contains(c);
+    let (mut start, mut end) = (starts[best], best);
+    while start < end && boundary(body[start]) && quote[0] != body[start] {
+        start += 1;
+    }
+    // Only a start the quote changed is widened (a quote that merely begins
+    // mid-clause keeps its start).
+    let mut widened = 0;
+    while start > 0 && body[start] != quote[0] && !boundary(body[start - 1]) && widened < allowed {
+        start -= 1;
+        widened += 1;
+    }
+    while end > start && body[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    Some((start, end))
 }
 
 pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Result<(), String> {
@@ -6433,6 +6498,43 @@ mod tests {
         assert_eq!(
             raw["continuityCandidates"][1]["sourceEventId"],
             format!("event:{}", fact(2))
+        );
+    }
+
+    #[test]
+    fn ld1_a_quote_a_character_or_two_off_binds_to_its_passage() {
+        // Real signing evaluation 2026-10-25: 他→沈砚 and 攥着→攥紧.
+        let body = "雨停了。\n他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。他把饼干收好。\n他攥着铃舌，掌心伤口贴着金属缺口，血和锈混在一起。\n巷口没有人。";
+        let span = |quote: &str| {
+            locate_quote_span(body, quote).map(|(start, end)| {
+                body.chars()
+                    .skip(start)
+                    .take(end - start)
+                    .collect::<String>()
+            })
+        };
+        assert_eq!(
+            span("沈砚低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。").as_deref(),
+            Some("他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。")
+        );
+        assert_eq!(
+            span("他攥紧铃舌，掌心伤口贴着金属缺口，血和锈混在一起。").as_deref(),
+            Some("他攥着铃舌，掌心伤口贴着金属缺口，血和锈混在一起。")
+        );
+    }
+
+    #[test]
+    fn ld1_a_quote_too_far_off_or_matching_two_passages_is_not_located() {
+        let body = "他推开门，看见院子里有一棵树。她推开门，看见院子里有一棵树。";
+        // Two passages are equally close.
+        assert_eq!(
+            locate_quote_span(body, "你推开门，看见院子里有一棵树。"),
+            None
+        );
+        // More than a tenth of the quote differs.
+        assert_eq!(
+            locate_quote_span("他把信交给了门口的守卫。", "她把钥匙递给了窗边的老人。"),
+            None
         );
     }
 

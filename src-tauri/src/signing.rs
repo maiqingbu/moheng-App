@@ -302,43 +302,53 @@ fn model_item_result(
                 exact_quote,
             )
             .is_ok();
-        // A verbatim quote found exactly once in its chapter is bound to where
-        // it actually is, as audit evidence is; one found in exactly one other
-        // chapter of the three is bound to that chapter (owner decision
-        // 2026-10-25); anything else is unverified.
+        // A quote located in its chapter (verbatim, or loosely as audit
+        // evidence is) is bound to where it actually is; one located in
+        // exactly one other chapter of the three is bound to that chapter
+        // (owner decision 2026-10-25); anything else is unverified.
+        // Verbatim first in every chapter, then loosely, so a loose match in
+        // the labelled chapter never wins over a verbatim one elsewhere.
+        let find = |locate: fn(&str, &str) -> Option<(usize, usize)>| {
+            locate(&chapter.body, exact_quote)
+                .map(|span| (chapter, span))
+                .or_else(|| {
+                    let mut found = chapters
+                        .iter()
+                        .filter(|other| other.chapter_no != chapter_no)
+                        .filter_map(|other| {
+                            locate(&other.body, exact_quote).map(|span| (other, span))
+                        });
+                    found.next().filter(|_| found.next().is_none())
+                })
+        };
         let located = offsets_match
             .then_some((chapter, (range_start, range_end)))
-            .or_else(|| {
-                crate::production::locate_unique_quote(&chapter.body, exact_quote)
-                    .map(|span| (chapter, span))
-            })
-            .or_else(|| {
-                let mut found = chapters
-                    .iter()
-                    .filter(|other| other.chapter_no != chapter_no)
-                    .filter_map(|other| {
-                        crate::production::locate_unique_quote(&other.body, exact_quote)
-                            .map(|span| (other, span))
-                    });
-                found.next().filter(|_| found.next().is_none())
-            });
+            .or_else(|| find(crate::production::locate_unique_quote))
+            .or_else(|| find(crate::production::locate_quote_span));
         let Some((chapter, (range_start, range_end))) = located else {
             return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
         };
+        let supplied_quote = exact_quote;
         let exact_quote = chapter
             .body
             .chars()
             .skip(range_start)
             .take(range_end - range_start)
             .collect::<String>();
-        checked_evidence.push(json!({
+        let mut checked = json!({
             "chapterNo":chapter.chapter_no,
             "chapterId":chapter.chapter_id,
             "finalChapterRef":ref_value(&chapter.final_ref),
             "rangeStart":range_start,
             "rangeEnd":range_end,
             "exactQuote":exact_quote
-        }));
+        });
+        // LD-1.3: a quote a few characters off is bound to its passage and
+        // the model's wording is kept beside it.
+        if supplied_quote != exact_quote {
+            checked["suppliedQuote"] = json!(supplied_quote);
+        }
+        checked_evidence.push(checked);
     }
     json!({"itemId":item_id,"result":result,"reason":reason,"evidence":checked_evidence})
 }
@@ -2204,6 +2214,50 @@ mod tests {
         assert_eq!(bound["evidence"][0]["rangeStart"], 7);
         // A quote found in more than one other chapter cannot be bound.
         assert_eq!(item("亮着绿灯")["result"], "NOT_VERIFIED");
+    }
+
+    #[test]
+    fn signing_quote_a_character_off_is_bound_to_its_sentence() {
+        // Real run 2026-10-25: R2-5 quoted 沈砚低头看饼干 for 他低头看饼干.
+        let chapters = [fixture_chapter(
+            1,
+            "雨停了。他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。",
+        )];
+        let quote = "沈砚低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。";
+        let bound = model_item_result(
+            Some(&json!({
+                "itemId":"R2-5","result":"PASS","reason":"表述清晰",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":quote}]
+            })),
+            "R2-5",
+            &chapters,
+            None,
+        );
+        assert_eq!(bound["result"], "PASS");
+        assert_eq!(
+            bound["evidence"][0]["exactQuote"],
+            "他低头看饼干。油渍在纸袋底洇成一个不规则的圆，像一枚被压扁的铃铛。"
+        );
+        assert_eq!(bound["evidence"][0]["suppliedQuote"], quote);
+    }
+
+    #[test]
+    fn signing_verbatim_quote_elsewhere_wins_over_a_loose_one_in_the_labelled_chapter() {
+        let chapters = [
+            fixture_chapter(1, "他推开门，看见院子里有一棵老树。"),
+            fixture_chapter(2, "她推开门，看见院子里有一棵老树。"),
+        ];
+        let bound = model_item_result(
+            Some(&json!({
+                "itemId":"R2-6","result":"PASS","reason":"语体稳定",
+                "evidence":[{"chapterNo":1,"rangeStart":0,"rangeEnd":2,"exactQuote":"她推开门，看见院子里有一棵老树。"}]
+            })),
+            "R2-6",
+            &chapters,
+            None,
+        );
+        assert_eq!(bound["evidence"][0]["chapterNo"], 2);
+        assert!(bound["evidence"][0].get("suppliedQuote").is_none());
     }
 
     #[test]
