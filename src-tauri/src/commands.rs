@@ -7141,7 +7141,8 @@ fn compile_current_chapter_plan(
             )
         })
         .collect::<Vec<_>>();
-    let accept = |raw: Value| -> Result<Value, String> {
+    let accept = |raw: Value, lenient: bool| -> Result<(Value, Vec<String>), String> {
+        let mut problems = Vec::new();
         let mut plan = crate::planning::normalize_chapter_plan_model_output(
             raw,
             &triggered_threads,
@@ -7173,19 +7174,26 @@ fn compile_current_chapter_plan(
         // Checked here, not only at commit, so the planner gets the reason
         // and one more try.
         let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
-        planner.check_craft(&plan, horizon_capacity)?;
+        let mut soft = |result| crate::production::note_if_lenient(lenient, &mut problems, result);
+        soft(planner.check_craft(&plan, horizon_capacity))?;
+        if lenient {
+            crate::planning::pad_chapter_plan_horizon(&mut plan, horizon_capacity);
+        }
         // r2 plans had their horizon checked with the craft problems; r1 here.
-        crate::planning::validate_chapter_plan_horizon(&plan, horizon_capacity)?;
-        planner.check_r1(|| {
+        soft(crate::planning::validate_chapter_plan_horizon(
+            &plan,
+            horizon_capacity,
+        ))?;
+        soft(planner.check_r1(|| {
             if enforces_length {
                 crate::chapter_craft::check_plan(&plan, length_range, &history.recent)
             } else {
                 Ok(())
             }
-        })?;
-        Ok(plan)
+        }))?;
+        Ok((plan, problems))
     };
-    let (plan, planning_run_id) = crate::production::plan_chapter_with_feedback(
+    let (plan, planning_run_id, plan_problems) = crate::production::plan_chapter_with_feedback(
         &handle,
         state.production_gateway.as_ref(),
         &profile,
@@ -7205,7 +7213,13 @@ fn compile_current_chapter_plan(
         context_input_from_authority(&handle, &plan_authority, project_id, planning_revision)?;
     plan["compiledFromStateDigest"] =
         json!(crate::narrative::relevant_state_digest(&plan_context)?);
-    let receipt = crate::planning::recompile_chapter_plan_owner(
+    let decisions = crate::production::plan_reminder_decision(
+        command_id,
+        chapter_id,
+        history.number(),
+        &plan_problems,
+    )?;
+    let receipt = crate::planning::recompile_chapter_plan_owner_with_decisions(
         &handle,
         project_id,
         chapter_id,
@@ -7216,6 +7230,7 @@ fn compile_current_chapter_plan(
         planning_revision,
         requested_at,
         Some(&planning_run_id),
+        &decisions,
     )?;
     let plan_ref = receipt
         .committed_artifact_refs

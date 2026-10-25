@@ -984,8 +984,8 @@ pub fn plan_chapter_with_feedback(
     spec: &ModelRunSpec,
     input: Value,
     now: &str,
-    accept: &dyn Fn(Value) -> Result<Value, String>,
-) -> Result<(Value, String), String> {
+    accept: &dyn Fn(Value, bool) -> Result<(Value, Vec<String>), String>,
+) -> Result<(Value, String, Vec<String>), String> {
     let plan = |spec: &ModelRunSpec, input: Value| {
         execute_production_model_with_profile(
             connection,
@@ -1001,7 +1001,8 @@ pub fn plan_chapter_with_feedback(
     };
     let mut input = input;
     let mut run_id = spec.model_run_id.clone();
-    let mut result = accept(plan(spec, input.clone())?);
+    let mut last = plan(spec, input.clone())?;
+    let mut result = accept(last.clone(), false);
     for round in 1..=PLAN_FEEDBACK_ROUNDS {
         let Some(feedback) = result
             .as_ref()
@@ -1017,10 +1018,34 @@ pub fn plan_chapter_with_feedback(
         };
         let replan = follow_up_spec(spec, &suffix, round)?;
         input["planFeedback"] = feedback;
-        result = accept(plan(&replan, input.clone())?);
+        last = plan(&replan, input.clone())?;
+        result = accept(last.clone(), false);
         run_id = replan.model_run_id;
     }
-    result.map(|accepted| (accepted, run_id))
+    // LD-1 step 2: problems the planner was told about and could not fix go
+    // on with the last plan as a reminder; anything else still fails.
+    let (plan, problems) = match result {
+        Ok(accepted) => accepted,
+        Err(error) if crate::chapter_craft::plan_feedback(&error).is_some() => accept(last, true)?,
+        Err(error) => return Err(error),
+    };
+    Ok((plan, run_id, problems))
+}
+
+/// In a lenient plan check (LD-1 step 2), a problem the planner could fix is
+/// noted in `problems` instead of failing; everything else still fails.
+pub(crate) fn note_if_lenient(
+    lenient: bool,
+    problems: &mut Vec<String>,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    match result {
+        Err(error) if lenient && crate::chapter_craft::plan_feedback(&error).is_some() => {
+            problems.push(error);
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 fn execute_production_model_with_profile_once(
@@ -2631,7 +2656,8 @@ fn run_chapter_production_inner(
                 .map(|thread| thread.thread_id.clone())
                 .collect::<Vec<_>>();
             let hard_scope = crate::narrative::context_hard_scope(&compiler_input);
-            let accept = |raw: Value| -> Result<Value, String> {
+            let accept = |raw: Value, lenient: bool| -> Result<(Value, Vec<String>), String> {
+                let mut problems = Vec::new();
                 let mut plan = crate::planning::normalize_chapter_plan_model_output(
                     raw,
                     &triggered_threads,
@@ -2641,7 +2667,14 @@ fn run_chapter_production_inner(
                 plan["entityRefs"] = hard_scope["entityRefs"].clone();
                 plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
                 plan["hardScope"] = hard_scope.clone();
-                planner.check_craft(&plan, horizon_capacity)?;
+                note_if_lenient(
+                    lenient,
+                    &mut problems,
+                    planner.check_craft(&plan, horizon_capacity),
+                )?;
+                if lenient {
+                    crate::planning::pad_chapter_plan_horizon(&mut plan, horizon_capacity);
+                }
                 crate::planning::validate_chapter_plan(&plan)
                     .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
                 crate::planning::validate_current_chapter_plan(
@@ -2651,20 +2684,24 @@ fn run_chapter_production_inner(
                     &triggered_threads,
                     horizon_capacity,
                 )?;
-                planner.check_r1(|| {
-                    if gateway.enforces_chapter_length() {
-                        crate::chapter_craft::check_plan(
-                            &plan,
-                            length_range,
-                            &chapter_history.recent,
-                        )
-                    } else {
-                        Ok(())
-                    }
-                })?;
-                Ok(plan)
+                note_if_lenient(
+                    lenient,
+                    &mut problems,
+                    planner.check_r1(|| {
+                        if gateway.enforces_chapter_length() {
+                            crate::chapter_craft::check_plan(
+                                &plan,
+                                length_range,
+                                &chapter_history.recent,
+                            )
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                )?;
+                Ok((plan, problems))
             };
-            let (plan_payload, planning_run_id) = plan_chapter_with_feedback(
+            let (plan_payload, planning_run_id, problems) = plan_chapter_with_feedback(
                 connection,
                 gateway,
                 &planning_profile,
@@ -2674,7 +2711,15 @@ fn run_chapter_production_inner(
                 &accept,
             )?;
             let planning_command_id = format!("{bootstrap_command_id}:planning-owner");
-            let planning_receipt = crate::planning::recompile_chapter_plan_owner(
+            // The plan's reminder is committed with the plan, so a retry that
+            // reuses the plan does not lose it (LD-1 step 2).
+            let plan_reminder = plan_reminder_decision(
+                &planning_command_id,
+                &chapter_id,
+                chapter_number,
+                &problems,
+            )?;
+            let planning_receipt = crate::planning::recompile_chapter_plan_owner_with_decisions(
                 connection,
                 &project_id,
                 &chapter_id,
@@ -2691,6 +2736,7 @@ fn run_chapter_production_inner(
                 current_revision,
                 &now,
                 Some(&planning_run_id),
+                &plan_reminder,
             )?;
             let plan_ref = planning_receipt
                 .committed_artifact_refs
@@ -2750,7 +2796,14 @@ fn run_chapter_production_inner(
             )
         };
     if gateway.enforces_chapter_length() && !crate::chapter_craft::is_craft_plan(&plan_payload) {
-        crate::chapter_length::validate_plan_length(&plan_payload, length_range)?;
+        // A plan sized off the range was reported when it was made (LD-1
+        // step 2) and is written anyway; the body's length is still checked.
+        if let Err(error) = crate::chapter_length::validate_plan_length(&plan_payload, length_range)
+        {
+            if crate::chapter_craft::plan_feedback(&error).is_none() {
+                return Err(error);
+            }
+        }
     }
     if let Err(error) = validate_plan_is_current(
         connection,
@@ -5071,6 +5124,45 @@ fn held_back_reason(code: &str) -> &'static str {
     }
 }
 
+/// Reminder entries for the plan problems a chapter was written with: each
+/// listed craft problem on its own, any other problem by its instruction.
+fn plan_reminder_items(problems: &[String]) -> Vec<Value> {
+    problems
+        .iter()
+        .filter_map(|problem| crate::chapter_craft::plan_feedback(problem))
+        .flat_map(|feedback| {
+            let reason = feedback["rejectedFor"].clone();
+            let items = match feedback["problems"].as_array() {
+                Some(problems) => problems.clone(),
+                None => vec![feedback["instruction"].clone()],
+            };
+            items
+                .into_iter()
+                .map(move |item| json!({"field":"plan","item":item,"reason":reason}))
+        })
+        .collect()
+}
+
+/// The reminder committed with a plan about the problems its planner could
+/// not fix, if any.
+pub(crate) fn plan_reminder_decision(
+    command_id: &str,
+    chapter_id: &str,
+    chapter_number: Option<u32>,
+    problems: &[String],
+) -> Result<Vec<Value>, String> {
+    let items = plan_reminder_items(problems);
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![audit_reminder(
+        command_id,
+        chapter_id,
+        chapter_number,
+        &items,
+    )?])
+}
+
 /// The chapter's one reminder about audit items that were not recorded.
 fn audit_reminder(
     final_id: &str,
@@ -5089,6 +5181,9 @@ fn audit_reminder(
     let lines = held
         .iter()
         .map(|entry| {
+            if entry["field"] == "plan" {
+                return format!("计划：{}", entry["item"].as_str().unwrap_or(""));
+            }
             let quote = entry
                 .pointer("/item/evidence/quote")
                 .and_then(Value::as_str)
@@ -5114,8 +5209,8 @@ fn audit_reminder(
         "reason":lines.join("；"),
         "sourceRef":chapter_id,
         "payloadJson":{
-            "category":"审计提醒",
-            "title":format!("{chapter}有 {} 条内容没有记入作品档案", held.len()),
+            "category":if held.iter().all(|entry| entry["field"] == "plan") { "计划提醒" } else { "审计提醒" },
+            "title":format!("{chapter}有 {} 条内容需要你留意", held.len()),
             "chapterId":chapter_id,
             "heldBack":held,
             "allowedActions":["ACKNOWLEDGE"]

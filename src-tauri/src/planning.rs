@@ -2493,6 +2493,19 @@ pub fn horizon_slot_range(remaining_chapter_capacity: i64) -> (usize, usize) {
     (if capacity >= 3 { 3 } else { 0 }, capacity)
 }
 
+/// LD-1 step 2: a plan written anyway with too short a preview gets
+/// tentative slots up to the minimum, so its contract holds; the short
+/// preview itself is reported as a plan problem.
+pub fn pad_chapter_plan_horizon(plan: &mut Value, remaining_chapter_capacity: i64) {
+    let (minimum, _) = horizon_slot_range(remaining_chapter_capacity);
+    if let Some(horizon) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
+        while horizon.len() < minimum {
+            let slot = horizon.len() + 1;
+            horizon.push(json!({"slotNo":slot,"objective":"待后续规划确定","tentative":true}));
+        }
+    }
+}
+
 pub fn validate_chapter_plan_horizon(
     plan: &Value,
     remaining_chapter_capacity: i64,
@@ -2692,6 +2705,37 @@ pub fn recompile_chapter_plan_owner(
     expected_revision: i64,
     now: &str,
     model_run_id: Option<&str>,
+) -> Result<CommitReceipt, String> {
+    recompile_chapter_plan_owner_with_decisions(
+        connection,
+        project_id,
+        chapter_id,
+        plan,
+        authority_request,
+        command_id,
+        idempotency_key,
+        expected_revision,
+        now,
+        model_run_id,
+        &[],
+    )
+}
+
+/// Commits a chapter plan together with `decisions` (LD-1 step 2: the
+/// reminder about plan problems the planner could not fix).
+#[allow(clippy::too_many_arguments)]
+pub fn recompile_chapter_plan_owner_with_decisions(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    plan: &Value,
+    authority_request: &Value,
+    command_id: &str,
+    idempotency_key: &str,
+    expected_revision: i64,
+    now: &str,
+    model_run_id: Option<&str>,
+    decisions: &[Value],
 ) -> Result<CommitReceipt, String> {
     let execution_mode = preflight_chapter_plan_owner(connection, project_id, chapter_id)?;
     validate_chapter_plan_target(connection, project_id, chapter_id, execution_mode)?;
@@ -2894,7 +2938,8 @@ pub fn recompile_chapter_plan_owner(
         "idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,
         "contractVersion":"m0a.v1","createdAt":now,"artifacts":[artifact],
         "headUpdates":[{"artifactType":"ChapterPlan","scope":{"level":"CHAPTER","chapterId":chapter_id},
-            "artifactId":artifact_id,"version":version,"payloadHash":hash}]
+            "artifactId":artifact_id,"version":version,"payloadHash":hash}],
+        "decisionUpdates":decisions
     }))
     .map_err(|error| error.to_string())?;
     CommitService::commit(connection, &bundle, now).map_err(|error| error.to_string())

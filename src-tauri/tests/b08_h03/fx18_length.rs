@@ -166,12 +166,14 @@ fn fx18_chapter_still_outside_the_range_after_its_adjustment_is_not_committed() 
 }
 
 #[test]
-fn fx18_plan_sized_below_the_range_is_rejected_before_writing_or_committing_it() {
+fn fx18_plan_sized_below_the_range_is_written_and_reported() {
+    // LD-1 step 2: the plan's estimate no longer stops the chapter; the
+    // body is written for the range and the plan problem is reported.
     let gateway = Arc::new(LengthGateway::new(&[250, 250], &[2500]));
-    let (_temp, state, chapter_id, result) =
+    let (_temp, state, _chapter_id, result) =
         start(gateway.clone(), "p-fx18-thin-plan", json!({}), None);
-    assert_eq!(result.unwrap_err(), "B08_PLAN_LENGTH_OUT_OF_RANGE");
-    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 0);
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+    assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
     assert_eq!(
         gateway.inputs("PLAN_STRATEGY")[0]["chapterLengthRange"],
         json!({"min":2000,"max":3000})
@@ -180,11 +182,11 @@ fn fx18_plan_sized_below_the_range_is_rejected_before_writing_or_committing_it()
         .manager
         .open("p-fx18-thin-plan", "FX18 length", NOW)
         .unwrap();
-    assert!(crate_head_missing(
+    assert_held_back(
         &connection,
         "p-fx18-thin-plan",
-        &chapter_id
-    ));
+        "B08_PLAN_LENGTH_OUT_OF_RANGE",
+    );
 }
 
 fn crate_head_missing(connection: &Connection, project_id: &str, chapter_id: &str) -> bool {
@@ -290,9 +292,23 @@ fn fx18_long_form_plan_compile_is_sized_for_the_chapter_range() {
     assert_eq!(result.unwrap()["finalStatus"], "committed");
     assert_eq!(range, json!({"min":3000,"max":4000}));
     assert!(!head_missing);
-    let (result, _, head_missing, _temp) = compile(&[800, 900, 700], "p-fx18-long-thin");
-    assert_eq!(result.unwrap_err(), "B08_PLAN_LENGTH_OUT_OF_RANGE");
-    assert!(head_missing);
+    // LD-1 step 2: a thin plan is kept, with a reminder to look at it.
+    let (result, _, head_missing, temp) = compile(&[800, 900, 700], "p-fx18-long-thin");
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+    assert!(!head_missing);
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(LengthGateway::new(&[], &[])),
+    );
+    let connection = state
+        .manager
+        .open("p-fx18-long-thin", "FX18 long", NOW)
+        .unwrap();
+    assert_held_back(
+        &connection,
+        "p-fx18-long-thin",
+        "B08_PLAN_LENGTH_OUT_OF_RANGE",
+    );
 }
 
 #[test]

@@ -473,6 +473,7 @@ export type DecisionCategory =
   | '大规模修复'
   | '完结冲突'
   | '审计提醒'
+  | '计划提醒'
 
 export interface DecisionItem {
   id: string

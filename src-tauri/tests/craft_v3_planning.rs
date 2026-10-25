@@ -22,6 +22,8 @@ struct CraftGateway {
     vague_plans: AtomicUsize,
     /// The first plan previews only two later chapters.
     short_horizon_once: AtomicBool,
+    /// Every plan previews only two later chapters.
+    short_horizon_always: bool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -57,7 +59,9 @@ impl ProductionModelGateway for CraftGateway {
                     .is_ok();
                 let first_try_of_chapter_one = chapter == 1 && input.get("planFeedback").is_none();
                 let mut plan = craft_plan(input, chapter, forced || first_try_of_chapter_one);
-                if self.short_horizon_once.swap(false, Ordering::SeqCst) {
+                if self.short_horizon_once.swap(false, Ordering::SeqCst)
+                    || self.short_horizon_always
+                {
                     plan["horizonPreview"].as_array_mut().unwrap().truncate(2);
                 }
                 plan
@@ -258,10 +262,10 @@ fn a_plan_with_a_short_horizon_and_craft_problems_gets_all_of_them_back_at_once(
 }
 
 #[test]
-fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_placeholder() {
-    // Real run 2026-10-24: both plans of the first attempt were rejected, the
-    // retry found the completed planner run and rebound the r1 placeholder
-    // that opening preparation had committed.
+fn a_plan_still_vague_after_its_replans_is_written_with_a_plan_reminder() {
+    // LD-1 step 2: problems the planner could not fix in its replans no
+    // longer fail the job; the chapter is written from the last plan and the
+    // problems wait in 待处理.
     let temp = tempfile::tempdir().unwrap();
     let gateway = Arc::new(CraftGateway {
         vague_plans: AtomicUsize::new(3),
@@ -271,18 +275,18 @@ fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_plac
         AppPaths::new(temp.path().to_path_buf()),
         gateway.clone(),
     );
-    let project_id = project_with_confirmed_bible(&state, "retry");
+    let project_id = project_with_confirmed_bible(&state, "lenient");
     command(
         &state,
         &project_id,
-        "retry:opening",
+        "lenient:opening",
         "opening_ready",
         json!({"approved":true}),
     );
     command(
         &state,
         &project_id,
-        "retry:start",
+        "lenient:start",
         "opening_start_creating",
         json!({}),
     );
@@ -291,57 +295,91 @@ fn a_retry_after_a_rejected_plan_plans_again_instead_of_reusing_the_opening_plac
         json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
     )
     .unwrap();
-    let payload = json!({
-        "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
-        "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
-    });
-    let start = |id: &str, payload: Value| {
-        ai_novel_production_system_core::commands::execute_command_impl(
-            &state,
-            json!({
-                "type":"production_start","commandId":id,"idempotencyKey":format!("{id}:key"),
-                "projectId":project_id,"expectedRevision":state.manager.project_revision(&project_id).unwrap(),
-                "requestedAt":NOW,"payload":payload
-            }),
-        )
-    };
-    let error = start("retry:production:1", payload.clone()).unwrap_err();
-    assert!(error.starts_with("B08_PLAN_CRAFT"), "{error}");
+    let result = command(
+        &state,
+        &project_id,
+        "lenient:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed");
+    // A plan and its two replans.
+    assert_eq!(gateway.plan_inputs.lock().unwrap().len(), 3);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let (failed_job, failure): (String, String) = connection
+    let payload: String = connection
         .query_row(
-            "SELECT job_id, error_code FROM jobs WHERE project_id=?1 AND status='FAILED' ORDER BY created_at DESC, job_id DESC LIMIT 1",
-            [&project_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert!(
-        failure.starts_with("B08_PLAN_CRAFT:") && failure.contains("温度或幽默"),
-        "the failed job keeps why its plans were rejected: {failure}"
-    );
-    drop(connection);
-    let mut retry = payload;
-    retry["retryOfJobId"] = json!(failed_job);
-    assert_eq!(
-        start("retry:production:2", retry).unwrap()["finalStatus"],
-        "committed"
-    );
-
-    // Three rejected plans (a plan and two replans), then the retry plans
-    // again (its first try of chapter one is vague in this fixture, so it
-    // replans once).
-    assert_eq!(
-        gateway.plan_inputs.lock().unwrap().len(),
-        5,
-        "the retry plans again"
-    );
-    let connection = state.manager.open(&project_id, "", NOW).unwrap();
-    let schema: String = connection
-        .query_row(
-            "SELECT json_extract(p.payload_json,'$.payloadSchema') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'",
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER'",
             [&project_id],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "chapter-plan.r2");
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["category"], "计划提醒");
+    assert!(
+        payload["heldBack"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["field"] == "plan"
+                && entry["item"].as_str().unwrap().contains("温度或幽默")),
+        "{payload}"
+    );
+}
+
+#[test]
+fn a_plan_whose_horizon_stays_short_is_written_with_a_plan_reminder() {
+    // LD-1 step 2: the preview is padded with tentative slots so the plan's
+    // contract holds, and the short preview is reported.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        short_horizon_always: true,
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "short");
+    command(
+        &state,
+        &project_id,
+        "short:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "short:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "short:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='计划提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("horizonPreview"), "{payload}");
 }
