@@ -1539,7 +1539,7 @@ pub fn execute_opening_evaluation_with_observer(
             "bundleDigest":input["bundleDigest"],
             "taskContext":{"taskId":input.pointer("/taskContext/taskId")}
         });
-        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec| {
+        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec, _| {
             if spec.attempt_no > 1 {
                 DurableJobService::reopen_b02_phase_job_for_resend(
                     &handle,

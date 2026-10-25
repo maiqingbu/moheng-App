@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter audit extraction",
+  "type": "object",
+  "required": [
+    "qualityFindings",
+    "canonCandidates",
+    "knowledgeCandidates",
+    "continuityCandidates",
+    "taskProgressCandidates",
+    "revealedReservationRefs",
+    "evidenceRanges",
+    "auditCompleteness",
+    "unresolvedHard"
+  ],
+  "properties": {
+    "qualityFindings": {
+      "type": "array"
+    },
+    "canonCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "knowledgeCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "continuityCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "taskProgressCandidates": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "revealedReservationRefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidenceRanges": {
+      "type": "array"
+    },
+    "auditCompleteness": {
+      "enum": [
+        "COMPLETE_NO_CHANGE",
+        "COMPLETE_WITH_DELTA",
+        "INCOMPLETE",
+        "TRUNCATED",
+        "UNRESOLVED_HARD"
+      ]
+    },
+    "unresolvedHard": {
+      "type": "boolean"
+    },
+    "continuityDetails": {
+      "type": "array"
+    }
+  }
+}

@@ -883,7 +883,16 @@ pub fn execute_production_model(
     }
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(
-            match parse_provider_model_payload_for_capability(parsed, capability) {
+            match parse_provider_model_payload_for_capability(parsed, capability).and_then(
+                |payload| {
+                    // LD-1: a fresh reply must be on its step's output spec.
+                    if outcome.replayed {
+                        Ok(payload)
+                    } else {
+                        crate::model_output::check(capability, &payload).map(|()| payload)
+                    }
+                },
+            ) {
                 Ok(payload) => payload,
                 Err(error) => {
                     DurableModelRunner::mark_model_payload_parse_failure(
@@ -911,28 +920,33 @@ pub fn execute_production_model_with_profile(
     input: Value,
     now: &str,
 ) -> Result<ModelRunOutcome, String> {
-    resend_once_on_invalid_json(spec, |spec| {
+    resend_once_on_invalid_json(spec, |spec, off_spec| {
+        let mut input = input.clone();
+        if let Some(error) = off_spec {
+            input["outputFeedback"] = json!({
+                "rejectedFor":error,
+                "instruction":"上一次回复不符合输出规范：按 rejectedFor 列出的问题修正，返回完整回复。"
+            });
+        }
         execute_production_model_with_profile_once(
-            connection,
-            gateway,
-            profile,
-            spec,
-            capability,
-            input.clone(),
-            now,
+            connection, gateway, profile, spec, capability, input, now,
         )
     })
 }
 
-/// Runs `run` with `spec`; a reply that is not valid JSON is resent once as
-/// a new model run (FX-19), and the bad run stays recorded as failed.
+/// Runs `run` with `spec`; a reply that is not valid JSON (FX-19) or not on
+/// its step's output spec (LD-1) is resent once as a new model run, the
+/// latter with what was off the spec; the bad run stays recorded as failed.
 pub fn resend_once_on_invalid_json(
     spec: &ModelRunSpec,
-    run: impl Fn(&ModelRunSpec) -> Result<ModelRunOutcome, String>,
+    run: impl Fn(&ModelRunSpec, Option<&str>) -> Result<ModelRunOutcome, String>,
 ) -> Result<ModelRunOutcome, String> {
-    match run(spec) {
+    match run(spec, None) {
         Err(error) if error.contains("P01_MODEL_JSON_INVALID:") => {
-            run(&follow_up_spec(spec, ":truncated-resend", 1)?)
+            run(&follow_up_spec(spec, ":truncated-resend", 1)?, None)
+        }
+        Err(error) if error.contains(crate::model_output::OFF_SPEC) => {
+            run(&follow_up_spec(spec, ":off-spec-resend", 1)?, Some(&error))
         }
         result => result,
     }
@@ -1041,7 +1055,16 @@ fn execute_production_model_with_profile_once(
     }
     if let Some(parsed) = outcome.parsed.take() {
         outcome.parsed = Some(
-            match parse_provider_model_payload_for_capability(parsed, capability) {
+            match parse_provider_model_payload_for_capability(parsed, capability).and_then(
+                |payload| {
+                    // LD-1: a fresh reply must be on its step's output spec.
+                    if outcome.replayed {
+                        Ok(payload)
+                    } else {
+                        crate::model_output::check(capability, &payload).map(|()| payload)
+                    }
+                },
+            ) {
                 Ok(payload) => payload,
                 Err(error) => {
                     DurableModelRunner::mark_model_payload_parse_failure(

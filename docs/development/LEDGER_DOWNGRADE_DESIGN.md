@@ -40,9 +40,17 @@
 
 ### 2.2 一份规范，三处使用
 
-1. **请求**：模型支持严格模式（Qwen3.7/3.8 系列）时发 `response_format: json_schema, strict: true`；否则发 `json_object`（qwen-plus、DeepSeek 只支持这个）。
-2. **提示词**：系统提示里的“输出形状”说明由规范生成，不再手写第二份。
-3. **检查**：模型回复先按规范校验；不合规范 → 带着校验错误重新生成一次；第二次仍不合 → 该步骤失败（这是“格式”硬检查，见 3.1）。
+1. **提示词**：规范原文附在系统提示末尾（`The reply must be valid against this JSON Schema: …`）。各步骤提示词里手写的形状说明在该步骤改造时删去，只留语义说明。
+2. **请求格式**：阿里云一律 `json_object`。严格模式（`json_schema` + `strict`）只有 Qwen3.7/3.8 系列支持，当前用的 qwen-plus、DeepSeek 都不支持，暂不启用；换模型时再接。
+3. **检查**：模型回复先按规范校验；不合规范 → 带着校验错误（`outputFeedback`）重新生成一次；第二次仍不合 → 该步骤失败（这是“格式”硬检查，见 3.1）。规范只写后续代码真正依赖的字段，不增加新的拦截。
+
+签约评估沿用 S35 技能包自带的 outputSchema 作为它的规范。
+
+只检查新收到的回复；续跑时复用的已存回复（重放、reusable render/audit）按当时接受的结果使用，不再检查，以免续跑因规范更新而失败。
+
+重试会叠加（每次都单独记账、单独预留费用，不重复计费）：审计最坏 4 次（原始、规范重发、auditFeedback 重跑、再规范重发）；计划最坏 6 次（3 轮重计划 × 每轮可能一次规范重发）。每章 16 次模型调用的上限仍然兜底。
+
+已覆盖（第 1a 步）：RENDER_CHAPTER_CRAFT、ADJUST_CHAPTER_LENGTH（`chapter-body`）、REWRITE_PASSAGES、AUDIT_EXTRACT。
 
 ### 2.3 编号由系统分配（LD-1.2）
 

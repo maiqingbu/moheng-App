@@ -3918,7 +3918,8 @@ fn b1a_incomplete_unresolved_and_truncated_audits_fail_closed_before_final_commi
             Arc::new(AuditVariantGateway {
                 variant: "missing-category",
             }) as Arc<dyn ProductionModelGateway>,
-            "B08_AUDIT_INCOMPLETE",
+            // LD-1: a missing category is off the audit's output spec.
+            "P01_MODEL_OUTPUT_SPEC",
         ),
         (
             "unresolved",
