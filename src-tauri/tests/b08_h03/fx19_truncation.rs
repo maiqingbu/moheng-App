@@ -490,6 +490,45 @@ fn craft_new_knowledge_reusing_an_existing_knowledge_id_gets_its_own_id() {
     assert_eq!(added, 1);
 }
 
+/// The audit names a new thread `thread-1` instead of `thread:<id>`, as a
+/// real audit did on 2026-10-25 and failed chapter 1 on every retry.
+struct BareThreadRefGateway;
+
+impl ProductionModelGateway for BareThreadRefGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let evidence = response.output["canonCandidates"][0]["evidence"].clone();
+            response.output["continuityCandidates"] = json!([{
+                "threadRef":"thread-1","disposition":"ADVANCE",
+                "promotionSignals":{"mysteryOrRevealResponsibility":false},
+                "evidence":evidence
+            }]);
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn craft_new_thread_named_without_the_thread_prefix_gets_a_thread_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(BareThreadRefGateway),
+    );
+    let project_id = "p-craft-bare-thread-ref";
+    let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:craft:bare-thread","idempotencyKey":"key:craft:bare-thread",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+}
+
 /// The first audit states a fact with a predicate the canon semantics policy
 /// does not register, as a real audit did on 2026-10-19; later audits keep
 /// to registered predicates.

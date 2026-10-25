@@ -4556,11 +4556,16 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         .and_then(Value::as_array_mut)
     {
         for candidate in candidates {
+            // A ref without `thread:` (`new_thread:x`, or a bare `thread-1`)
+            // names the thread after its id.
             let renamed = candidate
                 .get("threadRef")
                 .and_then(Value::as_str)
-                .and_then(|thread_ref| thread_ref.strip_prefix("new_thread:"))
-                .map(|id| format!("thread:{id}"));
+                .filter(|thread_ref| !thread_ref.starts_with("thread:"))
+                .map(|thread_ref| {
+                    let id = thread_ref.strip_prefix("new_thread:").unwrap_or(thread_ref);
+                    format!("thread:{id}")
+                });
             if let Some(renamed) = renamed {
                 candidate["threadRef"] = json!(renamed);
             }
@@ -6408,9 +6413,15 @@ mod tests {
         let normalized = normalize_audit_model_output(
             json!({"continuityCandidates":[
                 {"threadRef":"new_thread:sister_trace","disposition":"ADVANCE"},
-                {"threadRef":"thread:existing","disposition":"ADVANCE"}
+                {"threadRef":"thread:existing","disposition":"ADVANCE"},
+                {"threadRef":"thread-1","disposition":"ADVANCE"}
             ]}),
             "正文",
+        );
+        // Real audit 2026-10-25: a bare `thread-1` failed chapter 1 every retry.
+        assert_eq!(
+            normalized["continuityCandidates"][2]["threadRef"],
+            "thread:thread-1"
         );
         assert_eq!(
             normalized["continuityCandidates"][0]["threadRef"],
