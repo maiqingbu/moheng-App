@@ -3,8 +3,11 @@
   :root { --sidebar: 210px; }
   .market-grid,.pitch-grid { grid-template-columns:1fr; }
   .reader-layout { grid-template-columns:190px minmax(0,1fr); }
-  .reader-tools { grid-column:2; position:static; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .reader-tools { position:static; grid-template-columns:repeat(2,minmax(0,1fr)); }
   .launch-grid,.production-layout { grid-template-columns:1fr; }
+}
+@media (min-width: 821px) and (max-width: 1180px) {
+  .reader-tools { grid-column:2; }
 }
 @media (max-width: 820px) {
   .app-shell { display:block; }
@@ -16,6 +19,7 @@
   .metric-grid { grid-template-columns:repeat(2,1fr); }
   .decision-layout,.settings-layout,.reader-layout { grid-template-columns:1fr; }
   .chapter-nav,.settings-nav,.reader-tools { position:static; }
+  .chapter-nav > .select { flex:none; width:auto; min-width:170px; }
   .chapter-nav { display:flex; overflow:auto; gap:5px; }
   .chapter-link { min-width:150px; }
   .manuscript { padding:34px 24px 48px; }

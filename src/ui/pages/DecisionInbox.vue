@@ -2,7 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import { RouterLink } from 'vue-router'
 import { useProjectStore } from '../stores/projectStore'
+import LoadingBlock from '../components/LoadingBlock.vue'
+import { decisionWorkspaces } from '../presentation/decisionWorkspaces'
+import { isInFlight } from '../presentation/productLanguage'
 
 const store = useProjectStore()
 type DecisionFilter = 'pending' | 'resolved' | 'all'
@@ -30,6 +34,8 @@ const actionLabels = {
   CANCEL_JOB: '取消任务'
 } as const
 const allowedActions = computed(() => selected.value?.allowedActions ?? [])
+const inFlight = computed(() => isInFlight(state.value.status))
+const workspace = computed(() => selected.value ? decisionWorkspaces[selected.value.category] : undefined)
 async function submit(choice: 'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB') {
   if (!selected.value) return
   await store.runCommand(commandKey.value, {
@@ -59,7 +65,8 @@ watch(filter, load)
           <h3>{{ decision.title }}</h3>
           <div class="muted" style="font-size:11px">{{ decision.summary }}</div>
         </button>
-        <div v-if="!items.length" class="empty">当前没有符合条件的决定。</div>
+        <LoadingBlock v-if="!store.decisions" caption="正在读取决定…" />
+        <div v-else-if="!items.length" class="empty">当前没有符合条件的决定。</div>
       </section>
 
       <section v-if="selected" class="card decision-detail">
@@ -69,12 +76,15 @@ watch(filter, load)
         <div v-if="selected.recommendation" class="banner info">
           <div><div class="banner-title">系统建议</div><div class="banner-copy">{{ selected.recommendation }}</div></div>
         </div>
-        <label class="field section"><span class="field-label">补充意见</span><textarea v-model="note" class="textarea" placeholder="用读者语言描述你的要求" /></label>
+        <label v-if="selected.status === 'pending' && allowedActions.length" class="field section"><span class="field-label">补充意见</span><textarea v-model="note" class="textarea" placeholder="用读者语言描述你的要求" /></label>
         <CommandFeedback :state="state" />
-        <div v-if="selected.status === 'pending' && allowedActions.length" class="button-row">
-          <button v-for="action in allowedActions" :key="action" class="btn" :class="{ primary: action === 'RETRY_REMOTE' }" @click="submit(action)">{{ actionLabels[action] }}</button>
+        <div v-if="selected.status === 'pending' && allowedActions.length" class="actions">
+          <button v-for="action in allowedActions" :key="action" class="btn" :class="{ primary: action === 'RETRY_REMOTE' }" :disabled="inFlight" :aria-busy="inFlight" @click="submit(action)">{{ actionLabels[action] }}</button>
         </div>
-        <div v-else-if="selected.status === 'pending'" class="muted">请前往对应工作区完成这项决定。</div>
+        <div v-else-if="selected.status === 'pending'" class="actions section">
+          <RouterLink v-if="workspace && store.project" class="btn primary" :to="`/projects/${store.project.id}/${workspace.path}`">{{ workspace.label }}</RouterLink>
+          <span class="muted">这项决定在对应工作区完成。</span>
+        </div>
       </section>
     </div>
   </div>

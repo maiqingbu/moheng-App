@@ -393,6 +393,11 @@ export function selectEvidenceByIdentity<T extends ProductEvidenceLookup>(items:
     && (identity.payloadHash === undefined || item.payloadHash === identity.payloadHash))
 }
 
+/** A command that was sent and has not settled yet. */
+export function isInFlight(status: unknown): boolean {
+  return status === 'submitting' || status === 'accepted' || status === 'processing'
+}
+
 export function commandMessage(state: { status?: unknown; message?: unknown } | unknown): string {
   const record = state && typeof state === 'object' ? state as Record<string, unknown> : {}
   const message = productErrorMessage(record.message, '')

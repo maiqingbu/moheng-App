@@ -38,6 +38,7 @@ import type {
 } from '../../application/contracts'
 import { getFrontendPort } from '../../app/providers/runtimePort'
 import {
+  isInFlight,
   parseContextHardBudgetFailure,
   receiptSummary,
   repairExecutionLabel,
@@ -163,6 +164,11 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
 
   const project = computed(() => overview.value?.project ?? null)
+  // What the shell shows as running: a command on its way, or a page reading.
+  const activity = computed<'command' | 'loading' | null>(() =>
+    Object.values(commandStates.value).some(state => isInFlight(state.status))
+      ? 'command'
+      : loading.value || Object.values(workspaceLoading.value).some(Boolean) ? 'loading' : null)
   const pendingDecisionCount = computed(() => overview.value?.pendingDecisionCount ?? decisions.value?.items.filter(item => item.status === 'pending').length ?? 0)
   const pendingDecisions = computed(() => decisions.value?.items.filter(item => item.status === 'pending') ?? [])
   const recentOfficialChapters = computed(() => overview.value?.recentChapters ?? [])
@@ -953,7 +959,7 @@ export const useProjectStore = defineStore('project-projection', () => {
   return {
     currentProjectId, overview, marketStrategy, directions, storySetup, craftSetup, openingReady, assistantSession, production, volumes, volumeDetail, planningRoute, continuityProjection, continuityVolumeId, withdrawRequests, writeLocked, decisions,
     readerVolumes, chapterLists, activeChapter, chapterVersions, canon, health, healthFactorSourcePages, healthError, history, historyKind, settings, searchResults, volumeLifecycle,
-    loading, loadError, project, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
+    loading, loadError, project, activity, pendingDecisionCount, pendingDecisions, recentOfficialChapters, advancedMode,
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadCraftSetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,

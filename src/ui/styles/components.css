@@ -36,7 +36,7 @@
 .btn.ghost { border-color:transparent; background:transparent; }
 .btn.small { min-height:32px; padding:0 10px; font-size:12px; }
 .btn.large { min-height:46px; padding:0 18px; border-radius:11px; font-size:14px; }
-.btn:disabled { cursor:not-allowed; opacity:.5; transform:none; box-shadow:none; }
+.btn:disabled,.btn[aria-disabled="true"] { cursor:not-allowed; opacity:.5; transform:none; box-shadow:none; }
 .icon-btn { width:38px; height:38px; padding:0; border:1px solid var(--line); border-radius:9px; background:var(--surface); display:grid; place-items:center; }
 .card { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md); box-shadow:var(--shadow-1); }
 .card.pad { padding:20px; }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
 import RuntimeBanner from '../components/RuntimeBanner.vue'
@@ -12,7 +12,7 @@ import { withChapterLengthRange, type ChapterLengthRange } from '../presentation
 import { chapterQuotaLabel, chapterQuotaResetRequest, isChapterQuotaExhausted } from '../presentation/chapterQuota'
 import { useProjectStore } from '../stores/projectStore'
 import type { ProductionCenterProjection } from '../../application/contracts'
-import { isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
+import { isInFlight, isProductUxEvidenceDemoEnabled, productErrorMessage, receiptSummary, repairExecutionLabel, sanitizeProductText, scopeLabel as productScopeLabel, statusLabel as productStatusLabel } from '../presentation/productLanguage'
 import { productionRunStateForJob } from '../presentation/productionRunState'
 import { createProductionRuntimePoller, isProductionJobTerminal } from '../runtime/productionRuntimeSync'
 import { buildResponsibilityEvidence, createResumeConditionDraft, serializeResumeCondition, type ResumeConditionDraft } from '../flows/resumeCondition'
@@ -101,9 +101,9 @@ const productUxStateMessage = computed(() => {
 const productionStatus = computed(() => production.value?.jobStatus ?? null)
 const productionIsActive = computed(() => production.value?.isActive === true)
 const canRetryProduction = computed(() => production.value?.canRetry === true)
-const productionStartInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(productionStartState.value.status))
-const evaluationInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(evaluationCommandState.value.status))
-const bookPlanInFlight = computed(() => ['submitting', 'accepted', 'processing'].includes(bookPlanCommandState.value.status))
+const productionStartInFlight = computed(() => isInFlight(productionStartState.value.status))
+const evaluationInFlight = computed(() => isInFlight(evaluationCommandState.value.status))
+const bookPlanInFlight = computed(() => isInFlight(bookPlanCommandState.value.status))
 const canEvaluateOpening = computed(() => openingProgress.value?.completed === openingProgress.value?.total
   && openingProgress.value?.total === 3
   && signing.value?.status !== 'PASS')
@@ -114,6 +114,10 @@ const canConfirmSigning = computed(() => signing.value?.status === 'PASS'
   && signing.value?.confirmation?.confirmed !== true
   && passingSigningPlatforms.value.length > 0)
 const canStartProduction = computed(() => !productionLoadError.value && production.value?.validation?.canExecute !== false && production.value?.stale?.status !== 'PLAN_STALE' && Boolean(production.value?.nextChapter) && (productionIsActive.value || !production.value?.jobStatus || ['COMPLETED', 'CANCELLED'].includes(production.value.jobStatus) || canRetryProduction.value))
+const activeStep = computed(() => {
+  const item = production.value?.timeline?.find(entry => entry.status === 'active')
+  return item ? `正在${timelineLabel(item.title)}` : ''
+})
 const authoritativeRunState = computed(() =>
   productionRunStateForJob(production.value?.jobStatus, project.value?.runState ?? 'IDLE'),
 )
@@ -515,12 +519,13 @@ function costText(value: number | null | undefined) {
 
 <template>
   <div v-if="project && production" class="page">
-    <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。">
-      <button v-if="canStartProduction && productionStartState.confirmation !== 'pending'" class="btn primary" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? (productionStatus === 'PAUSED' ? '继续生成' : '重新生成') : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
+    <PageHeader title="创作" subtitle="从章节准备到正文候选、检查与正式确认，都从当前作品记录重新查询。" />
+    <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" :step="activeStep">
+      <button v-if="canStartProduction && productionStartState.confirmation !== 'pending'" class="btn primary large" :aria-busy="productionStartInFlight" @click="startProduction">{{ productionStartInFlight || productionIsActive ? '查看第' : (canRetryProduction ? (productionStatus === 'PAUSED' ? '继续生成' : '重新生成') : '开始') }}{{ productionStartInFlight || productionIsActive ? ` ${production.nextChapter?.number} 章进度` : `第 ${production.nextChapter?.number} 章` }}</button>
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_pause')">暂停</button>
       <button v-if="productionIsActive" class="btn" @click="controlProduction('production_cancel')">取消本章生成</button>
-    </PageHeader>
-    <RuntimeBanner :state="authoritativeRunState" :reason="project.blockReason" />
+      <RouterLink v-if="store.pendingDecisionCount > 0" class="btn" :class="{ primary: !canStartProduction }" :to="`/projects/${project.id}/decisions`">去处理 {{ store.pendingDecisionCount }} 项决定</RouterLink>
+    </RuntimeBanner>
     <div v-if="canStartProduction && !productionIsActive && production.nextChapter && production.nextChapter.executionMode !== 'LONG_FORM'" class="section" data-chapter-length-override>
       <ChapterLengthPicker v-model="chapterLengthRange" allow-default :default-range="store.settings?.chapterLengthRange ?? null" :label="`第 ${production.nextChapter.number} 章字数区间`" />
     </div>
@@ -626,7 +631,7 @@ function costText(value: number | null | undefined) {
         </div>
       </div>
       <div class="actions" style="margin-top:14px">
-        <button v-if="canEvaluateOpening" class="btn primary" @click="evaluateOpening">{{ evaluationActionLabel() }}</button>
+        <button v-if="canEvaluateOpening" class="btn primary" :aria-busy="evaluationInFlight" @click="evaluateOpening">{{ evaluationActionLabel() }}</button>
         <label v-if="canConfirmSigning" class="field signing-platform-select">
           <span class="field-label">确认签约平台</span>
           <select :value="selectedSigningPlatformId" class="select" @change="selectedSigningPlatform = ($event.target as HTMLSelectElement).value">
@@ -634,7 +639,7 @@ function costText(value: number | null | undefined) {
           </select>
         </label>
         <button v-if="canConfirmSigning" class="btn primary" @click="confirmSigning">确认签约</button>
-        <button v-if="canFinalizeBookPlan" class="btn primary" @click="finalizeBookPlan">{{ bookPlanActionLabel() }}</button>
+        <button v-if="canFinalizeBookPlan" class="btn primary" :aria-busy="bookPlanInFlight" @click="finalizeBookPlan">{{ bookPlanActionLabel() }}</button>
       </div>
     </section>
 
@@ -797,7 +802,7 @@ function costText(value: number | null | undefined) {
         <div><h2 class="card-title">需要确认的修复</h2><p class="card-subtitle">系统会先说明影响范围；只有你明确确认后才会执行，并在完成后重新核对。</p></div>
         <button v-if="production.repair.status === 'PROPOSED'" class="btn primary" @click="authorizeRepair">明确授权</button>
         <button v-if="production.repair.status === 'AUTHORIZED' && !production.repair.consumedAt && !repairExecutionPending" class="btn primary" @click="executeRepair">执行一次性修复</button>
-        <button v-if="production.repair.executionReceipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE' && production.repair.authorizationId && production.repair.consumedAt" class="btn primary" :disabled="repairReverifyInFlight" @click="reverifyRepair">{{ repairReverifyInFlight ? '正在重新核对…' : '重新核对结果' }}</button>
+        <button v-if="production.repair.executionReceipt?.status === 'REPAIR_VERIFICATION_INCOMPLETE' && production.repair.authorizationId && production.repair.consumedAt" class="btn primary" :disabled="repairReverifyInFlight" :aria-busy="repairReverifyInFlight" @click="reverifyRepair">{{ repairReverifyInFlight ? '正在重新核对…' : '重新核对结果' }}</button>
       </div>
       <div class="metric-grid">
         <MetricCard label="状态" :value="statusLabel(production.repair.status)" :note="production.repair.authorizationId ? '已获得本次确认' : '尚未确认'" />

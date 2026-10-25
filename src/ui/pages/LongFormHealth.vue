@@ -109,7 +109,7 @@ function openDestination(destination: string) {
 <template>
   <div class="page">
     <PageHeader title="长篇健康" subtitle="依据当前正式记录，帮助你及时发现长期推进中的风险与趋势。">
-      <button class="btn" :disabled="loading" @click="refresh">重新检查</button>
+      <button class="btn" :disabled="loading" :aria-busy="loading" @click="refresh">{{ loading ? '正在检查…' : '重新检查' }}</button>
     </PageHeader>
 
     <div v-if="loading" class="card pad section" role="status">正在检查长篇健康，请稍候。</div>
