@@ -12,7 +12,7 @@ use ai_novel_production_system_core::production::{
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use craft_v3_support::*;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -20,6 +20,8 @@ struct CraftGateway {
     plan_inputs: Mutex<Vec<Value>>,
     /// The first this-many plans are too vague to pass the r2 checks.
     vague_plans: AtomicUsize,
+    /// The first plan previews only two later chapters.
+    short_horizon_once: AtomicBool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -54,7 +56,11 @@ impl ProductionModelGateway for CraftGateway {
                     })
                     .is_ok();
                 let first_try_of_chapter_one = chapter == 1 && input.get("planFeedback").is_none();
-                craft_plan(input, chapter, forced || first_try_of_chapter_one)
+                let mut plan = craft_plan(input, chapter, forced || first_try_of_chapter_one);
+                if self.short_horizon_once.swap(false, Ordering::SeqCst) {
+                    plan["horizonPreview"].as_array_mut().unwrap().truncate(2);
+                }
+                plan
             }
             "RENDER_CHAPTER_CRAFT" => json!({"body":"林满推开面馆的门，把账本放在了灶台边。"}),
             "AUDIT_EXTRACT" => audit_no_change(),
@@ -194,6 +200,61 @@ fn a_project_with_a_confirmed_story_bible_plans_r2_chapters_with_bible_and_ledge
         let win = golden["decisions"]["protagonistWin"].as_str().unwrap();
         assert!(win.ends_with("章林满当众把假账揪了出来"), "{win}");
     }
+}
+
+#[test]
+fn a_plan_with_a_short_horizon_and_craft_problems_gets_all_of_them_back_at_once() {
+    // Real run 2026-10-25: chapter 8 was rejected for its horizon, then for
+    // its craft, and each replan fixed only what it was told and undid the
+    // other, until the plans ran out.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        short_horizon_once: AtomicBool::new(true),
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "horizon");
+    command(
+        &state,
+        &project_id,
+        "horizon:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "horizon:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "horizon:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed");
+
+    let inputs = gateway.plan_inputs.lock().unwrap();
+    assert!(inputs[0]["horizonPreviewCapacity"].as_i64().unwrap() >= 3);
+    let problems = inputs[1]["planFeedback"]["problems"].to_string();
+    assert!(
+        problems.contains("horizonPreview") && problems.contains("温度或幽默"),
+        "{problems}"
+    );
 }
 
 #[test]

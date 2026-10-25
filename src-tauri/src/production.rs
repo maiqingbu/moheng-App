@@ -2618,7 +2618,7 @@ fn run_chapter_production_inner(
                 plan["entityRefs"] = hard_scope["entityRefs"].clone();
                 plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
                 plan["hardScope"] = hard_scope.clone();
-                planner.check_craft(&plan)?;
+                planner.check_craft(&plan, horizon_capacity)?;
                 crate::planning::validate_chapter_plan(&plan)
                     .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;
                 crate::planning::validate_current_chapter_plan(

@@ -254,7 +254,10 @@ pub fn check_craft_plan(
     bible: &Value,
     ledger: &Value,
 ) -> Result<(), String> {
-    let problems = plan_problems(plan, chapter, bible, ledger);
+    craft_result(plan_problems(plan, chapter, bible, ledger))
+}
+
+fn craft_result(problems: Vec<String>) -> Result<(), String> {
     if problems.is_empty() {
         Ok(())
     } else {
@@ -491,10 +494,11 @@ impl ChapterPlanner {
         }
     }
 
-    /// The r2 checks against the whole ledger (a plan without craft decisions
-    /// is sent back too); nothing for r1 planning. Run before the contract so
-    /// shape problems reach the planner for a replan.
-    pub fn check_craft(&self, plan: &Value) -> Result<(), String> {
+    /// The r2 checks against the whole ledger, with the horizon count among
+    /// the problems so one replan fixes all of them (a plan without craft
+    /// decisions is sent back too); nothing for r1 planning. Run before the
+    /// contract so shape problems reach the planner for a replan.
+    pub fn check_craft(&self, plan: &Value, horizon_capacity: i64) -> Result<(), String> {
         let Some(craft) = &self.craft else {
             return Ok(());
         };
@@ -503,7 +507,16 @@ impl ChapterPlanner {
                 "{PLAN_CRAFT_ERROR}:计划缺少 craft 写作决定，请按 chapter-plan.r2 返回"
             ));
         }
-        check_craft_plan(plan, i64::from(self.chapter), &craft.bible, &craft.ledger)
+        let mut problems =
+            plan_problems(plan, i64::from(self.chapter), &craft.bible, &craft.ledger);
+        if crate::planning::validate_chapter_plan_horizon(plan, horizon_capacity).is_err() {
+            let (minimum, capacity) = crate::planning::horizon_slot_range(horizon_capacity);
+            problems.push(format!(
+                "horizonPreview 要有 {minimum} 到 {capacity} 条，每条都是 {{\"objective\":string,\"tentative\":true}}，这一版有 {} 条",
+                plan["horizonPreview"].as_array().map_or(0, Vec::len)
+            ));
+        }
+        craft_result(problems)
     }
 
     /// Runs `r1_check` for r1 planning only.

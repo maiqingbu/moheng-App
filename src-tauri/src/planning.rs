@@ -2486,6 +2486,13 @@ pub fn validate_current_chapter_plan(
     Ok(())
 }
 
+/// How many tentative horizon slots a plan may preview: none to all of a
+/// capacity under 3, otherwise 3 to at most 8.
+pub fn horizon_slot_range(remaining_chapter_capacity: i64) -> (usize, usize) {
+    let capacity = remaining_chapter_capacity.clamp(0, 8) as usize;
+    (if capacity >= 3 { 3 } else { 0 }, capacity)
+}
+
 pub fn validate_chapter_plan_horizon(
     plan: &Value,
     remaining_chapter_capacity: i64,
@@ -2494,8 +2501,7 @@ pub fn validate_chapter_plan_horizon(
         .get("horizonPreview")
         .and_then(Value::as_array)
         .ok_or("CHAPTER_PLAN_HORIZON_REQUIRED")?;
-    let capacity = remaining_chapter_capacity.clamp(0, 8) as usize;
-    let minimum = if capacity >= 3 { 3 } else { 0 };
+    let (minimum, capacity) = horizon_slot_range(remaining_chapter_capacity);
     if horizon.len() < minimum
         || horizon.len() > capacity
         || horizon
