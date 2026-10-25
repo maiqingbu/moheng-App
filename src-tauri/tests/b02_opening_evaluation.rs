@@ -11,7 +11,7 @@ use ai_novel_production_system_core::narrative::{
     GoalContractField,
 };
 use ai_novel_production_system_core::production::{
-    ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
+    new_audit_item_id, ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
@@ -247,7 +247,17 @@ impl ProductionModelGateway for B02Gateway {
                     knowledge_candidates.push(json!({
                         "knowledgeId":"knowledge:b02:linzhou-ledger",
                         "knowerId":"entity:b02:linzhou",
-                        "factId":"fact:b02:opening:1",
+                        // Chapter 1's fact, by the id it was committed with.
+                        "factId":input
+                            .pointer("/authorityContext/state/facts")
+                            .and_then(Value::as_array)
+                            .and_then(|facts| facts.iter().find(|fact| {
+                                fact["subjectId"] == "entity:b02:linzhou"
+                                    && fact["predicate"] != "distrusts"
+                                    && fact["predicate"] != "allied_with"
+                            }))
+                            .and_then(|fact| fact["factId"].as_str())
+                            .unwrap_or("fact:b02:opening:1"),
                         "epistemicState":"KNOWS",
                         "visibilityScope":"CHARACTER:entity:b02:linzhou",
                         "acquiredStoryTime":"2026-01-02T00:00:00Z",
@@ -1107,6 +1117,20 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
     let project_id = create_opening_project(&state);
     let opening_productions = commit_three_opening_chapters_with_outputs(&state, &project_id);
 
+    // LD-1.2: chapter 1's audit facts carry system ids, in audit order.
+    let chapter_one: String = state
+        .manager
+        .open(&project_id, "", NOW)
+        .unwrap()
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let opening_one = new_audit_item_id("canon", &chapter_one, 1);
+    let guqing = new_audit_item_id("canon", &chapter_one, 2);
+    let relation_anchor = new_audit_item_id("canon", &chapter_one, 3);
     let opening_contexts = gateway.planning_contexts.lock().unwrap();
     assert_eq!(opening_contexts.len(), 3);
     assert_eq!(opening_contexts[0]["selectedEvidence"], json!([]));
@@ -1138,9 +1162,9 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
         .iter()
         .filter_map(|fact| fact["factId"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(opening_two_fact_ids.contains("fact:b02:opening:1"));
-    assert!(opening_two_fact_ids.contains("fact:b02:guqing"));
-    assert!(opening_two_fact_ids.contains("fact:b02:relation-anchor"));
+    assert!(opening_two_fact_ids.contains(opening_one.as_str()));
+    assert!(opening_two_fact_ids.contains(guqing.as_str()));
+    assert!(opening_two_fact_ids.contains(relation_anchor.as_str()));
     assert_eq!(
         opening_contexts[1]["selectedEvidence"]
             .as_array()
@@ -1190,9 +1214,9 @@ fn f03_formal_context_projection_carries_three_openings_through_long_form_and_re
                 &connection,
                 &project_id,
                 &[
-                    "fact:b02:opening:1",
-                    "fact:b02:guqing",
-                    "fact:b02:relation-anchor",
+                    opening_one.as_str(),
+                    guqing.as_str(),
+                    relation_anchor.as_str(),
                 ],
                 100,
             )

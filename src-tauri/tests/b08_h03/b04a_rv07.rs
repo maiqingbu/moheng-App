@@ -119,10 +119,16 @@ fn fx17_unbound_knowledge_candidate_is_dropped_and_recorded() {
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
         1
     );
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1 AND knowledge_id='knowledge:actual:flashback'",
-        [project_id], |row| row.get(0)
-    ).unwrap(), 0);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1 AND knowledge_id=?2",
+                libsql_rusqlite::params![project_id, new_audit_item_id("know", &chapter_id, 1)],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
     let receipt: Value = serde_json::from_str(&connection.query_row::<String, _, _>(
         "SELECT receipt_json FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'",
         [project_id], |row| row.get(0)
@@ -130,7 +136,10 @@ fn fx17_unbound_knowledge_candidate_is_dropped_and_recorded() {
     let dropped = receipt
         .pointer("/payload/droppedUnboundKnowledge")
         .unwrap_or_else(|| panic!("{receipt}"));
-    assert_eq!(dropped[0]["knowledgeId"], "knowledge:actual:flashback");
+    assert_eq!(
+        dropped[0]["knowledgeId"],
+        new_audit_item_id("know", &chapter_id, 1)
+    );
     assert_eq!(dropped[0]["factId"], "fact:unbound");
 }
 #[test]
@@ -293,8 +302,8 @@ fn fx17_explicit_unknown_time_and_private_visibility_commit_by_narrative_order()
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
     assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT visibility_scope FROM canon_knowledge WHERE project_id=?1 AND knowledge_id='knowledge:actual:flashback'",
-        [project_id], |row| row.get(0)
+        "SELECT visibility_scope FROM canon_knowledge WHERE project_id=?1 AND knowledge_id=?2",
+        libsql_rusqlite::params![project_id, new_audit_item_id("know", &chapter_id, 1)], |row| row.get(0)
     ).unwrap(), "CHARACTER:entity:actual:linzhou");
 }
 
@@ -348,10 +357,13 @@ fn fx17_later_chapter_location_change_supersedes_the_open_earlier_fact() {
         "SELECT superseded_by FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:seed'",
         [project_id], |row| row.get(0)
     ).unwrap();
-    assert_eq!(superseded_by.as_deref(), Some("fact:fx17:moved"));
+    assert_eq!(
+        superseded_by.as_deref(),
+        Some(new_audit_item_id("canon", &chapter_id, 1).as_str())
+    );
     let (object, valid_from) = connection.query_row::<(String, String), _, _>(
-        "SELECT object_json, valid_from_chapter_id FROM canon_facts WHERE project_id=?1 AND fact_id='fact:fx17:moved' AND superseded_by IS NULL",
-        [project_id], |row| Ok((row.get(0)?, row.get(1)?))
+        "SELECT object_json, valid_from_chapter_id FROM canon_facts WHERE project_id=?1 AND fact_id=?2 AND superseded_by IS NULL",
+        libsql_rusqlite::params![project_id, new_audit_item_id("canon", &chapter_id, 1)], |row| Ok((row.get(0)?, row.get(1)?))
     ).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&object).unwrap(),
@@ -431,6 +443,14 @@ fn craft_location_change_supersedes_every_equal_open_fact() {
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
+    let chapter_id: String = connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let moved = new_audit_item_id("canon", &chapter_id, 1);
     for fact_id in ["fact:actual:seed", "fact:actual:seed-again"] {
         let superseded_by = connection
             .query_row::<Option<String>, _, _>(
@@ -439,11 +459,7 @@ fn craft_location_change_supersedes_every_equal_open_fact() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            superseded_by.as_deref(),
-            Some("fact:fx17:moved"),
-            "{fact_id}"
-        );
+        assert_eq!(superseded_by.as_deref(), Some(moved.as_str()), "{fact_id}");
     }
 }
 

@@ -109,6 +109,16 @@ fn fx19_two_values_in_one_chapter_replace_each_other_in_reading_order() {
     let (_temp, state, result) = produce_in_chapter("没有完成它", project_id);
     result.unwrap();
     let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    let chapter_id: String = connection
+        .query_row(
+            "SELECT chapter_id FROM chapters WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // The audit lists the hall first and the door second.
+    let hall = new_audit_item_id("canon", &chapter_id, 1);
+    let door = new_audit_item_id("canon", &chapter_id, 2);
     let superseded_by = |fact_id: &str| {
         connection
             .query_row::<Option<String>, _, _>(
@@ -118,11 +128,8 @@ fn fx19_two_values_in_one_chapter_replace_each_other_in_reading_order() {
             )
             .unwrap()
     };
-    assert_eq!(
-        superseded_by("fact:fx19:door").as_deref(),
-        Some("fact:fx19:hall")
-    );
-    assert_eq!(superseded_by("fact:fx19:hall"), None);
+    assert_eq!(superseded_by(&door).as_deref(), Some(hall.as_str()));
+    assert_eq!(superseded_by(&hall), None);
 }
 
 #[test]

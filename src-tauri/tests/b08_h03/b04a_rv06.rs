@@ -128,14 +128,16 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
     )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
+    let thread_ref = new_audit_item_id("thread", &chapter_id, 1);
+    let obligation_id = new_thread_obligation_id(&chapter_id, 1);
 
     let connection = state
         .manager
         .open(project_id, "B08 responsibility", NOW)
         .unwrap();
     let (authority, lifecycle, resume_condition): (String, String, String) = connection.query_row(
-        "SELECT authority_level,lifecycle,resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:jade-to-gugu'",
-        [project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        "SELECT authority_level,lifecycle,resume_condition_json FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, obligation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     ).unwrap();
     assert_eq!(authority, "B");
     assert_eq!(lifecycle, "PROGRESSING");
@@ -169,14 +171,14 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
     let manifest = query_context_manifest_impl(&state, json!({
         "projectId":project_id,"chapterId":next_chapter_id,"volumeId":volume_id,
         "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou","entity:actual:gugu"],
-        "references":["promise:jade-to-gugu"],
-        "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":["promise:jade-to-gugu"],"reservationRefs":[],"entityRefs":["entity:actual:linzhou","entity:actual:gugu"]}
+        "references":[obligation_id],
+        "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[obligation_id],"reservationRefs":[],"entityRefs":["entity:actual:linzhou","entity:actual:gugu"]}
     })).unwrap();
-    assert!(manifest.to_string().contains("promise:jade-to-gugu"));
+    assert!(manifest.to_string().contains(&obligation_id));
     let continuity = ai_novel_production_system_core::commands::query_continuity_impl(
         &state,
         json!({
-            "projectId":project_id,"references":["promise:jade-to-gugu"],
+            "projectId":project_id,"references":[obligation_id],
             "entityIds":["entity:actual:linzhou","entity:actual:gugu"]
         }),
     )
@@ -185,7 +187,7 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["threadId"] == "thread:promise:jade-to-gugu")
+        .find(|item| item["threadId"] == thread_ref.as_str())
         .unwrap();
     assert_eq!(
         thread["resumeCondition"],
@@ -202,7 +204,7 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
         "type":"thread_responsibility_adjust","commandId":"cmd:b08:new-responsibility-downgrade",
         "idempotencyKey":"key:b08:new-responsibility-downgrade","projectId":project_id,
         "expectedRevision":before_revision + 1,"requestedAt":NOW,
-        "payload":{"threadRef":"thread:promise:jade-to-gugu","action":"DOWNGRADE"}
+        "payload":{"threadRef":thread_ref,"action":"DOWNGRADE"}
     })).unwrap();
     assert_eq!(adjustment["finalStatus"], "committed");
     let connection = state
@@ -222,8 +224,8 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
             .as_str()
             .is_some_and(|quote| quote.contains("玉符"))));
     let current_level: String = connection.query_row(
-        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:jade-to-gugu'",
-        [project_id], |row| row.get(0)
+        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, obligation_id], |row| row.get(0)
     ).unwrap();
     assert_eq!(current_level, "C");
     drop(connection);
@@ -236,21 +238,25 @@ fn b08_new_explicit_promise_is_b_responsibility_in_next_chapter_context() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item == "thread:promise:jade-to-gugu"));
-    let upgrade = execute_command_impl(&state, json!({
-        "type":"thread_responsibility_adjust","commandId":"cmd:b08:new-responsibility-upgrade",
-        "idempotencyKey":"key:b08:new-responsibility-upgrade","projectId":project_id,
-        "expectedRevision":before_revision + 2,"requestedAt":NOW,
-        "payload":{"threadRef":"thread:promise:jade-to-gugu","action":"UPGRADE","authorityLevel":"A"}
-    })).unwrap();
+        .any(|item| *item == json!(thread_ref)));
+    let upgrade = execute_command_impl(
+        &state,
+        json!({
+            "type":"thread_responsibility_adjust","commandId":"cmd:b08:new-responsibility-upgrade",
+            "idempotencyKey":"key:b08:new-responsibility-upgrade","projectId":project_id,
+            "expectedRevision":before_revision + 2,"requestedAt":NOW,
+            "payload":{"threadRef":thread_ref,"action":"UPGRADE","authorityLevel":"A"}
+        }),
+    )
+    .unwrap();
     assert_eq!(upgrade["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 responsibility", NOW)
         .unwrap();
     assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id='promise:jade-to-gugu'",
-        [project_id], |row| row.get(0)
+        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, obligation_id], |row| row.get(0)
     ).unwrap(), "A");
 }
 #[test]
@@ -274,13 +280,15 @@ fn b08_incomplete_new_responsibility_is_retained_as_c_without_blocking_the_chapt
     )
     .unwrap();
     assert_eq!(result["finalStatus"], "committed");
+    let thread_ref = new_audit_item_id("thread", &chapter_id, 1);
+    let obligation_id = new_thread_obligation_id(&chapter_id, 1);
     let connection = state
         .manager
         .open(project_id, "B08 responsibility", NOW)
         .unwrap();
     let authority: String = connection.query_row(
-        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id='mystery:hint-only'",
-        [project_id], |row| row.get(0)
+        "SELECT authority_level FROM narrative_obligations WHERE project_id=?1 AND obligation_id=?2",
+        libsql_rusqlite::params![project_id, obligation_id], |row| row.get(0)
     ).unwrap();
     assert_eq!(authority, "C");
     let next_chapter_id = StableIdentityFactory::from_command(
@@ -302,12 +310,12 @@ fn b08_incomplete_new_responsibility_is_retained_as_c_without_blocking_the_chapt
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item == "thread:mystery:hint-only"));
+        .any(|item| *item == json!(thread_ref)));
     let upgrade = execute_command_impl(&state, json!({
         "type":"thread_responsibility_adjust","commandId":"cmd:b08:incomplete-responsibility-upgrade",
         "idempotencyKey":"key:b08:incomplete-responsibility-upgrade","projectId":project_id,
         "expectedRevision":1,"requestedAt":NOW,
-        "payload":{"threadRef":"thread:mystery:hint-only","action":"UPGRADE","authorityLevel":"B",
+        "payload":{"threadRef":thread_ref,"action":"UPGRADE","authorityLevel":"B",
             "fulfillmentObject":"entity:actual:linzhou",
             "resumeCondition":{"kind":"ENTITY_PRESENT","value":"entity:actual:linzhou"},
             "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}}
@@ -316,14 +324,14 @@ fn b08_incomplete_new_responsibility_is_retained_as_c_without_blocking_the_chapt
     let recompiled_context = query_context_manifest_impl(&state, json!({
         "projectId":project_id,"chapterId":next_chapter_id,"volumeId":volume_id,
         "executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],
-        "references":["mystery:hint-only"],
-        "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":["mystery:hint-only"],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
+        "references":[obligation_id],
+        "scopeSelection":{"taskRefs":["task:actual"],"responsibilityRefs":[obligation_id],"reservationRefs":[],"entityRefs":["entity:actual:linzhou"]}
     })).unwrap();
     assert!(recompiled_context["continuityThreadRefs"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item == "thread:mystery:hint-only"));
+        .any(|item| *item == json!(thread_ref)));
 }
 #[test]
 fn b08_defer_with_bridge_updates_existing_thread_and_records_the_bridge() {

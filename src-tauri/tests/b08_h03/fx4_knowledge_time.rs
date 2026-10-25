@@ -132,8 +132,8 @@ fn fx4_knowledge_time_compares_parsed_instants() {
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1 AND knowledge_id='knowledge:fx4:time'",
-                [project_id],
+                "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1 AND knowledge_id=?2",
+                libsql_rusqlite::params![project_id, new_audit_item_id("know", &chapter_id, 1)],
                 |row| row.get(0),
             )
             .unwrap(),

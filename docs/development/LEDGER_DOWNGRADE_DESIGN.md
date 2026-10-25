@@ -62,7 +62,13 @@
 | 推进已有线索 | 模型给 `threadRef` | 只能从输入列出的已有线索编号里选（规范里列为枚举） |
 | 人物/实体 | 模型给 `subjectId` | 只能从输入列出的实体编号里选 |
 
-`fresh_audit_ids`、`scope_bare_thread_refs` 等事后改名补丁在本步完成后删除。
+`fresh_audit_ids`、`scope_bare_thread_refs` 和 FX-17 的 `new_thread:` 改名已删除，统一由 `assign_audit_ids` 处理（第 1b 步）。补充约定：
+
+- 认知指向已提交的事实时仍用该事实的 `factId`（来自 authorityContext）。
+- 模型给新事实起的名字保留为 `modelLabel`：计划任务的 `CANON_FACT_MATCH` 按系统编号或这个名字匹配；被丢弃的候选记录里也带上它。
+- 序号（`factIndex`、`sourceFactIndex`）只用一次，用后即删；之后按编号追踪，丢弃部分候选再分配时不会错位。
+- 同一回复里同名的新线索合并为一条。
+- 已提交的章节不会再次生产（`B08_CHAPTER_ALREADY_COMMITTED`），系统编号不会覆盖旧事实。
 
 ### 2.4 引文由系统定位（LD-1.3）
 

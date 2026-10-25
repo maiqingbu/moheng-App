@@ -3198,61 +3198,20 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?,
         )
     };
+    // Threads the audit may name: those it was shown and those the plan names.
+    let known_threads = authority_context
+        .get("continuityThreads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|thread| thread.get("threadId").and_then(Value::as_str))
+        .chain(planned_continuity_refs(&plan_payload))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
     let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
-        scope_bare_thread_refs(&mut raw, &plan_payload, &chapter_id);
-        let existing_fact_ids =
-            crate::repositories::narrative::NarrativeRepository::existing_canon_fact_ids(
-                connection,
-                &project_id,
-                &claimed_audit_ids(&raw, "canonCandidates", "factId"),
-            )
-            .map_err(|error| error.to_string())?;
-        let existing_knowledge_ids =
-            crate::repositories::narrative::NarrativeRepository::existing_canon_knowledge_ids(
-                connection,
-                &project_id,
-                &claimed_audit_ids(&raw, "knowledgeCandidates", "knowledgeId"),
-            )
-            .map_err(|error| error.to_string())?;
-        let (renamed_fact_ids, fact_mapping) = fresh_audit_ids(
-            &mut raw,
-            "canonCandidates",
-            "factId",
-            "canon",
-            &existing_fact_ids,
-            &chapter_id,
-        );
-        // Knowledge that names a reused fact id follows the new fact.
-        for item in raw
-            .get_mut("knowledgeCandidates")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(target) = item
-                .get("factId")
-                .and_then(Value::as_str)
-                .and_then(|fact_id| fact_mapping.get(fact_id))
-                .cloned()
-            {
-                item["factId"] = json!(target);
-            }
-        }
-        let (renamed_knowledge_ids, _) = fresh_audit_ids(
-            &mut raw,
-            "knowledgeCandidates",
-            "knowledgeId",
-            "know",
-            &existing_knowledge_ids,
-            &chapter_id,
-        );
+        let assigned = assign_audit_ids(&mut raw, &chapter_id, &known_threads);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
-        if !renamed_fact_ids.is_empty() {
-            audit_payload["normalization"]["renamedFactIds"] = json!(renamed_fact_ids);
-        }
-        if !renamed_knowledge_ids.is_empty() {
-            audit_payload["normalization"]["renamedKnowledgeIds"] = json!(renamed_knowledge_ids);
-        }
+        audit_payload["normalization"]["assignedIds"] = assigned;
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
             connection,
@@ -3388,7 +3347,10 @@ fn run_chapter_production_inner(
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
             match check_audit(rerun_raw.clone()) {
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
-                    let (kept, dropped) = drop_unlocatable_audit_candidates(&rerun_raw, &body);
+                    // Ids first, so what is kept still names the facts it named.
+                    let mut assigned = rerun_raw.clone();
+                    assign_audit_ids(&mut assigned, &chapter_id, &known_threads);
+                    let (kept, dropped) = drop_unlocatable_audit_candidates(&assigned, &body);
                     // Real run 2026-10-24: every fact was dropped and the
                     // chapter committed with no canon. A chapter is not
                     // committed without the facts its audit reported.
@@ -4262,6 +4224,9 @@ struct EvidenceSpan {
 #[serde(rename_all = "camelCase")]
 struct CanonCandidate {
     fact_id: String,
+    /// The model's own label for the fact (LD-1.2: the system names it).
+    #[serde(default)]
+    model_label: Option<String>,
     subject_id: String,
     #[serde(default)]
     entity_id: Option<String>,
@@ -4566,24 +4531,6 @@ fn validate_audit_completeness(
 }
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
-    // FX-17: models label a newly observed thread "new_thread:<id>"; the
-    // runtime's thread ref namespace is "thread:<id>". A collision with an
-    // existing thread is still blocked as THREAD_TRANSITION_OUTSIDE_PLAN.
-    if let Some(candidates) = payload
-        .get_mut("continuityCandidates")
-        .and_then(Value::as_array_mut)
-    {
-        for candidate in candidates {
-            let renamed = candidate
-                .get("threadRef")
-                .and_then(Value::as_str)
-                .and_then(|thread_ref| thread_ref.strip_prefix("new_thread:"))
-                .map(|id| format!("thread:{id}"));
-            if let Some(renamed) = renamed {
-                candidate["threadRef"] = json!(renamed);
-            }
-        }
-    }
     let body_chars = body.chars().collect::<Vec<_>>();
     let mut rebound_evidence = 0_u64;
     let mut invalid_continuity_evidence = 0_u64;
@@ -4959,52 +4906,10 @@ fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
     (revised, applied)
 }
 
-/// A new Canon fact or knowledge item must never reuse the id of a committed
-/// one (the commit would overwrite it: on 2026-10-25 chapter 4's `know-1`
-/// replaced chapter 1's and made the signing evaluation stale) or of another
-/// item in the same audit. Such items get an id of their own,
-/// `{tag}:{chapter digest}:{n}`. Returns `{from, to}` for each renamed item
-/// and the first new id of each reused one.
-fn fresh_audit_ids(
-    raw: &mut Value,
-    array: &str,
-    key: &str,
-    tag: &str,
-    existing: &BTreeSet<String>,
-    chapter_id: &str,
-) -> (Vec<Value>, BTreeMap<String, String>) {
-    let prefix = chapter_id_digest(chapter_id);
-    let mut taken = existing.clone();
-    let mut seen = BTreeSet::new();
-    let mut renamed = Vec::new();
-    let mut mapping = BTreeMap::<String, String>::new();
-    let mut next = 1_usize;
-    for item in raw
-        .get_mut(array)
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-    {
-        let Some(id) = item.get(key).and_then(Value::as_str).map(ToOwned::to_owned) else {
-            continue;
-        };
-        if !existing.contains(&id) && seen.insert(id.clone()) {
-            taken.insert(id);
-            continue;
-        }
-        let fresh = loop {
-            let candidate = format!("{tag}:{prefix}:{next}");
-            next += 1;
-            if !taken.contains(&candidate) {
-                break candidate;
-            }
-        };
-        taken.insert(fresh.clone());
-        item[key] = json!(fresh);
-        mapping.entry(id.clone()).or_insert_with(|| fresh.clone());
-        renamed.push(json!({"from":id,"to":fresh}));
-    }
-    (renamed, mapping)
+/// The id the system gives the `n`th (from 1) new audit item of a kind
+/// (`canon`, `know` or `thread`) in a chapter (LD-1.2).
+pub fn new_audit_item_id(kind: &str, chapter_id: &str, n: usize) -> String {
+    format!("{kind}:{}:{n}", chapter_id_digest(chapter_id))
 }
 
 /// The part of an id that names the chapter an audit item comes from.
@@ -5024,47 +4929,90 @@ fn planned_continuity_refs(plan: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
-/// A thread ref the audit gives without `thread:` (real audits on 2026-10-25
-/// wrote `thread-1`, and every chapter's audit started again at `thread-1`)
-/// names the thread this chapter's plan calls `thread:{ref}`, or else a new
-/// thread of this chapter, `thread:{chapter}:{ref}`, so it never lands on
-/// an earlier chapter's thread of the same name.
-fn scope_bare_thread_refs(raw: &mut Value, plan: &Value, chapter_id: &str) {
-    let planned = planned_continuity_refs(plan);
-    let chapter = chapter_id_digest(chapter_id);
-    for candidate in raw
-        .get_mut("continuityCandidates")
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-    {
-        let Some(bare) = candidate
-            .get("threadRef")
-            .and_then(Value::as_str)
-            .filter(|thread_ref| {
-                !thread_ref.starts_with("thread:") && !thread_ref.starts_with("new_thread:")
-            })
-            .map(ToOwned::to_owned)
-        else {
-            continue;
-        };
-        let planned_ref = format!("thread:{bare}");
-        candidate["threadRef"] = json!(if planned.contains(planned_ref.as_str()) {
-            planned_ref
-        } else {
-            format!("thread:{chapter}:{bare}")
-        });
+/// LD-1.2: the system names everything new an audit reports, so a model's
+/// own labels never collide with earlier chapters (on 2026-10-25 chapter 4's
+/// `know-1` overwrote chapter 1's, and every chapter's audit restarted at
+/// `thread-1`). New facts become `canon:{chapter digest}:{n}` and knowledge
+/// `know:{chapter digest}:{n}`; knowledge names its fact by `factIndex` (or
+/// the model's own fact label) and a continuity candidate its source event by
+/// `sourceFactIndex` (or `event:{label}`). A thread ref that names a thread
+/// in `known` (with or without `thread:`) keeps it; any other is a new thread
+/// `thread:{chapter digest}:{n}`. Returns the labels that were replaced.
+fn assign_audit_ids(raw: &mut Value, chapter_id: &str, known: &BTreeSet<String>) -> Value {
+    fn items<'a>(raw: &'a mut Value, array: &str) -> impl Iterator<Item = &'a mut Value> {
+        raw.get_mut(array)
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
     }
-}
-
-/// The ids the audit gives in `raw[array][*][key]`.
-fn claimed_audit_ids<'a>(raw: &'a Value, array: &str, key: &str) -> Vec<&'a str> {
-    raw.get(array)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get(key).and_then(Value::as_str))
-        .collect()
+    let mut fact_ids = Vec::new();
+    let mut by_label = BTreeMap::<String, String>::new();
+    for (index, fact) in items(raw, "canonCandidates").enumerate() {
+        let id = new_audit_item_id("canon", chapter_id, index + 1);
+        if let Some(label) = fact
+            .get("factId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            by_label.entry(label.clone()).or_insert_with(|| id.clone());
+            // A plan may name the fact by the model's label (CANON_FACT_MATCH).
+            if fact.get("modelLabel").is_none() {
+                fact["modelLabel"] = json!(label);
+            }
+        }
+        fact["factId"] = json!(id);
+        fact_ids.push(id);
+    }
+    // An index is used once: after it the fact is named by its id, so a later
+    // pass (after candidates were dropped) follows the fact, not the position.
+    let fact_at = |item: &mut Value, index_key: &str, label: Option<String>| {
+        let index = item
+            .as_object_mut()
+            .and_then(|item| item.remove(index_key))
+            .and_then(|index| index.as_u64());
+        index
+            .and_then(|index| fact_ids.get(index as usize).cloned())
+            .or_else(|| label.and_then(|label| by_label.get(&label).cloned()))
+    };
+    for (index, item) in items(raw, "knowledgeCandidates").enumerate() {
+        item["knowledgeId"] = json!(new_audit_item_id("know", chapter_id, index + 1));
+        let label = item
+            .get("factId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let fact = fact_at(item, "factIndex", label);
+        if let Some(fact) = fact {
+            item["factId"] = json!(fact);
+        }
+    }
+    let mut new_threads = Vec::new();
+    let mut thread_by_label = BTreeMap::<String, String>::new();
+    for item in items(raw, "continuityCandidates") {
+        let event_label = item
+            .get("sourceEventId")
+            .and_then(Value::as_str)
+            .and_then(|event| event.strip_prefix("event:"))
+            .map(ToOwned::to_owned);
+        if let Some(fact) = fact_at(item, "sourceFactIndex", event_label) {
+            item["sourceEventId"] = json!(format!("event:{fact}"));
+        }
+        let given = item.get("threadRef").and_then(Value::as_str).unwrap_or("");
+        let prefixed = format!("thread:{given}");
+        let thread_ref = if known.contains(given) {
+            given.to_owned()
+        } else if known.contains(&prefixed) {
+            prefixed
+        } else if let Some(id) = thread_by_label.get(given).filter(|_| !given.is_empty()) {
+            id.clone()
+        } else {
+            let id = new_audit_item_id("thread", chapter_id, new_threads.len() + 1);
+            new_threads.push(json!({"from":given,"to":id}));
+            thread_by_label.insert(given.to_owned(), id.clone());
+            id
+        };
+        item["threadRef"] = json!(thread_ref);
+    }
+    json!({"factLabels":by_label,"newThreads":new_threads})
 }
 
 /// Owner decision (2026-10-18): a quote that left words out of one body
@@ -5143,7 +5091,7 @@ fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) 
                 if !unlocatable(quote) {
                     return true;
                 }
-                dropped.push(json!({"field":field,"id":item.get(id_key),"quote":quote}));
+                dropped.push(json!({"field":field,"id":item.get(id_key),"label":item.get("modelLabel"),"quote":quote}));
                 false
             });
         }
@@ -5715,11 +5663,9 @@ fn b03_completion_predicate_satisfied(
             let fact_id = value.get("factId").and_then(Value::as_str);
             let expected = value.get("expected");
             if let (Some(fact_id), Some(expected)) = (fact_id, expected) {
-                if let Some(candidate) = audit
-                    .canon_candidates
-                    .iter()
-                    .find(|item| item.fact_id == fact_id)
-                {
+                if let Some(candidate) = audit.canon_candidates.iter().find(|item| {
+                    item.fact_id == fact_id || item.model_label.as_deref() == Some(fact_id)
+                }) {
                     &candidate.object_json == expected
                 } else {
                     crate::repositories::narrative::NarrativeRepository::canon_fact_object_matches(
@@ -6464,21 +6410,90 @@ mod tests {
     }
 
     #[test]
-    fn fx17_new_thread_prefix_is_normalized_to_a_thread_ref() {
-        let normalized = normalize_audit_model_output(
-            json!({"continuityCandidates":[
-                {"threadRef":"new_thread:sister_trace","disposition":"ADVANCE"},
-                {"threadRef":"thread:existing","disposition":"ADVANCE"}
-            ]}),
-            "正文",
+    fn ld1_new_facts_and_knowledge_get_system_ids_and_knowledge_follows_its_fact() {
+        let mut raw = json!({
+            "canonCandidates":[{"factId":"fact-1","predicate":"located_at"},{"predicate":"owns_item"}],
+            "knowledgeCandidates":[{"knowledgeId":"know-1","factIndex":1},{"factId":"fact-1"}],
+            "continuityCandidates":[{"sourceEventId":"event:fact-1"},{"sourceFactIndex":1}]
+        });
+        assign_audit_ids(&mut raw, "chap:1", &BTreeSet::new());
+        let fact = |n: usize| new_audit_item_id("canon", "chap:1", n);
+        assert_eq!(raw["canonCandidates"][0]["factId"], fact(1));
+        assert_eq!(raw["canonCandidates"][1]["factId"], fact(2));
+        assert_eq!(
+            raw["knowledgeCandidates"][0]["knowledgeId"],
+            new_audit_item_id("know", "chap:1", 1)
+        );
+        assert_eq!(raw["knowledgeCandidates"][0]["factId"], fact(2));
+        assert_eq!(raw["knowledgeCandidates"][1]["factId"], fact(1));
+        assert_eq!(
+            raw["continuityCandidates"][0]["sourceEventId"],
+            format!("event:{}", fact(1))
         );
         assert_eq!(
-            normalized["continuityCandidates"][0]["threadRef"],
-            "thread:sister_trace"
+            raw["continuityCandidates"][1]["sourceEventId"],
+            format!("event:{}", fact(2))
         );
+    }
+
+    #[test]
+    fn ld1_ids_survive_dropping_a_fact_and_assigning_again() {
+        // The unlocatable-quote rerun drops candidates and checks the rest.
+        let mut raw = json!({
+            "canonCandidates":[{"factId":"door"},{"factId":"hall"}],
+            "knowledgeCandidates":[{"factIndex":1}],
+            "continuityCandidates":[]
+        });
+        assign_audit_ids(&mut raw, "chap:1", &BTreeSet::new());
+        assert_eq!(raw["canonCandidates"][1]["modelLabel"], "hall");
+        assert!(raw["knowledgeCandidates"][0].get("factIndex").is_none());
+        raw["canonCandidates"].as_array_mut().unwrap().remove(0);
+        assign_audit_ids(&mut raw, "chap:1", &BTreeSet::new());
+        let hall = new_audit_item_id("canon", "chap:1", 1);
+        assert_eq!(raw["canonCandidates"][0]["factId"], hall);
+        assert_eq!(raw["canonCandidates"][0]["modelLabel"], "hall");
+        assert_eq!(raw["knowledgeCandidates"][0]["factId"], hall);
+    }
+
+    #[test]
+    fn ld1_one_new_thread_label_used_twice_is_one_thread() {
+        let mut raw =
+            json!({"continuityCandidates":[{"threadRef":"thread-1"},{"threadRef":"thread-1"}]});
+        assign_audit_ids(&mut raw, "chap:3", &BTreeSet::new());
         assert_eq!(
-            normalized["continuityCandidates"][1]["threadRef"],
-            "thread:existing"
+            raw["continuityCandidates"][0]["threadRef"],
+            raw["continuityCandidates"][1]["threadRef"]
+        );
+    }
+
+    #[test]
+    fn ld1_a_thread_ref_names_a_known_thread_or_else_a_new_system_thread() {
+        // Real audits on 2026-10-25 wrote `thread-1` in every chapter.
+        let known = BTreeSet::from(["thread:old-promise".to_string()]);
+        let mut raw = json!({"continuityCandidates":[
+            {"threadRef":"thread:old-promise"},
+            {"threadRef":"old-promise"},
+            {"threadRef":"thread-1"},
+            {"threadRef":"new_thread:sister_trace"},
+            {}
+        ]});
+        assign_audit_ids(&mut raw, "chap:2", &known);
+        let thread = |n: usize| new_audit_item_id("thread", "chap:2", n);
+        let refs = raw["continuityCandidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["threadRef"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs,
+            [
+                "thread:old-promise".to_string(),
+                "thread:old-promise".to_string(),
+                thread(1),
+                thread(2),
+                thread(3),
+            ]
         );
     }
 
@@ -6711,7 +6726,7 @@ mod tests {
         assert_eq!(kept["evidenceRanges"], json!([]));
         assert_eq!(
             dropped,
-            json!([{"field":"canonCandidates","id":"fact:plan","quote":"确立对抗的决心。"}])
+            json!([{"field":"canonCandidates","id":"fact:plan","label":null,"quote":"确立对抗的决心。"}])
         );
     }
 

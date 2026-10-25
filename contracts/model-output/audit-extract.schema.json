@@ -26,13 +26,31 @@
     "knowledgeCandidates": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "factIndex": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       }
     },
     "continuityCandidates": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "threadRef": {
+            "type": "string"
+          },
+          "sourceFactIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sourceEventId": {
+            "type": "string"
+          }
+        }
       }
     },
     "taskProgressCandidates": {

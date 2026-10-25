@@ -9,8 +9,8 @@ use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::generated::types::CommitBundle;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
-    reconciliation_for_actual_state, ProductionModelGateway, ProductionModelResponse,
-    ResolvedProviderProfile,
+    new_audit_item_id, reconciliation_for_actual_state, ProductionModelGateway,
+    ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
@@ -1469,6 +1469,15 @@ fn default_b08_gate_policy() -> Value {
             ]
         }
     })
+}
+
+/// The obligation id of the `n`th new thread an audit reports in a chapter
+/// (LD-1.2: the system names it).
+fn new_thread_obligation_id(chapter_id: &str, n: usize) -> String {
+    new_audit_item_id("thread", chapter_id, n)
+        .strip_prefix("thread:")
+        .unwrap()
+        .to_string()
 }
 
 fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
@@ -3582,7 +3591,16 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(volume_head_after, volume_head_before);
     assert!(connection.query_row::<i64,_,_>("SELECT json_extract(context.payload_json,'$.hardSourceCount') FROM canonical_heads h JOIN artifact_payloads plan ON plan.artifact_id=h.artifact_id AND plan.version=h.version JOIN artifact_payloads context ON context.artifact_id=json_extract(plan.payload_json,'$.contextManifestRef.artifactId') AND context.version=json_extract(plan.payload_json,'$.contextManifestRef.version') WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap() > 0);
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:door-open'", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
+                libsql_rusqlite::params![project_id, new_audit_item_id("canon", &chapter_id, 1)],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
@@ -4768,12 +4786,16 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
         .unwrap();
     let source_event_id: String = connection
         .query_row(
-            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id='promise:source-event'",
-            [],
+            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id=?1",
+            [new_thread_obligation_id(&chapter_id, 1)],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(source_event_id, "event:fact:actual:door-open");
+    // LD-1.2: the event follows its fact's system id.
+    assert_eq!(
+        source_event_id,
+        format!("event:{}", new_audit_item_id("canon", &chapter_id, 1))
+    );
 
     let continuity = ai_novel_production_system_core::commands::query_continuity_impl(
         &state,
@@ -4784,7 +4806,7 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|thread| thread["threadId"] == "thread:promise:source-event")
+        .find(|thread| thread["threadId"] == new_audit_item_id("thread", &chapter_id, 1))
         .unwrap();
     assert_eq!(thread["sourceEventRef"], format!("event:{source_event_id}"));
     let evidence_refs = thread["evidenceRefs"].as_array().unwrap();
@@ -4912,8 +4934,8 @@ fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks()
                 .open(&project_id, "B08 knowledge", NOW)
                 .unwrap();
             let (source, version): (Option<String>,Option<i64>) = connection.query_row(
-                "SELECT source_artifact_id,source_version FROM canon_knowledge WHERE knowledge_id='knowledge:actual:flashback'",
-                [], |row| Ok((row.get(0)?,row.get(1)?))
+                "SELECT source_artifact_id,source_version FROM canon_knowledge WHERE knowledge_id=?1",
+                [new_audit_item_id("know", &chapter_id, 1)], |row| Ok((row.get(0)?,row.get(1)?))
             ).unwrap();
             assert!(source.is_some());
             assert_eq!(version, Some(1));
@@ -5775,8 +5797,8 @@ fn canon_semantic_difference_with_disjoint_world_time_is_not_blocked() {
     assert_eq!(
         connection
             .query_row::<Option<String>, _, _>(
-                "SELECT story_time_from FROM canon_facts WHERE fact_id='fact:actual:future-location'",
-                [],
+                "SELECT story_time_from FROM canon_facts WHERE fact_id=?1",
+                [new_audit_item_id("canon", &chapter_id, 1)],
                 |row| row.get(0),
             )
             .unwrap()
@@ -6407,7 +6429,7 @@ fn fx6_quote_only_evidence_located_by_backend() {
             "expectedRevision":revision,
             "requestedAt":NOW,
             "payload":{
-                "threadRef":"thread:mystery:fx6-quote",
+                "threadRef":new_audit_item_id("thread", &chapter_id, 1),
                 "action":"UPGRADE",
                 "authorityLevel":"B",
                 "fulfillmentObject":"entity:actual:linzhou",
