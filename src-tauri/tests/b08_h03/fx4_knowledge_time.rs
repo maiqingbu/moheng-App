@@ -89,14 +89,20 @@ fn start_opening_knowledge_audit(
     )
 }
 
-fn assert_no_knowledge_production_write(state: &KernelState, project_id: &str, chapter_id: &str) {
+/// LD-1 step 2: the chapter committed and its knowledge was held back.
+fn assert_knowledge_held_back(
+    state: &KernelState,
+    project_id: &str,
+    chapter_id: &str,
+    reason: &str,
+) {
     let connection = state
         .manager
         .open(project_id, "FX-4 knowledge time", NOW)
-        .expect("reopen project after rejected audit");
+        .expect("reopen project after the audit");
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, chapter_id),
-        0
+        1
     );
     assert_eq!(
         connection
@@ -108,6 +114,7 @@ fn assert_no_knowledge_production_write(state: &KernelState, project_id: &str, c
             .unwrap(),
         0
     );
+    assert_held_back(&connection, project_id, reason);
 }
 
 #[test]
@@ -142,7 +149,7 @@ fn fx4_knowledge_time_compares_parsed_instants() {
 }
 
 #[test]
-fn fx4_knowledge_before_fact_blocks() {
+fn fx4_knowledge_before_fact_is_held_back() {
     let project_id = "p-fx4-knowledge-before-fact";
     let (_temp, state, chapter_id) = setup_opening_knowledge_project(
         project_id,
@@ -151,38 +158,48 @@ fn fx4_knowledge_before_fact_blocks() {
         false,
     );
 
-    let error = start_opening_knowledge_audit(
+    let result = start_opening_knowledge_audit(
         &state,
         project_id,
         &chapter_id,
         "cmd:fx4:knowledge-before-fact",
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION");
-    assert_no_knowledge_production_write(&state, project_id, &chapter_id);
+    assert_eq!(result["finalStatus"], "committed");
+    assert_knowledge_held_back(
+        &state,
+        project_id,
+        &chapter_id,
+        "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION",
+    );
 }
 
 #[test]
-fn fx4_unparseable_story_time_fails_closed() {
+fn fx4_unparseable_story_time_is_held_back() {
     let project_id = "p-fx4-unparseable-candidate-time";
     let (_temp, state, chapter_id) =
         setup_opening_knowledge_project(project_id, "第三年春", "2030-01-01T00:00:00Z", false);
 
-    let error = start_opening_knowledge_audit(
+    let result = start_opening_knowledge_audit(
         &state,
         project_id,
         &chapter_id,
         "cmd:fx4:unparseable-candidate-time",
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME");
-    assert_no_knowledge_production_write(&state, project_id, &chapter_id);
+    assert_eq!(result["finalStatus"], "committed");
+    assert_knowledge_held_back(
+        &state,
+        project_id,
+        &chapter_id,
+        "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME",
+    );
 }
 
 #[test]
-fn fx4_unparseable_historical_fact_time_fails_closed() {
+fn fx4_unparseable_historical_fact_time_is_held_back() {
     let project_id = "p-fx4-unparseable-historical-time";
     let (_temp, state, chapter_id) = setup_opening_knowledge_project(
         project_id,
@@ -202,14 +219,19 @@ fn fx4_unparseable_historical_fact_time_fails_closed() {
         .unwrap();
     drop(connection);
 
-    let error = start_opening_knowledge_audit(
+    let result = start_opening_knowledge_audit(
         &state,
         project_id,
         &chapter_id,
         "cmd:fx4:unparseable-historical-time",
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME");
-    assert_no_knowledge_production_write(&state, project_id, &chapter_id);
+    assert_eq!(result["finalStatus"], "committed");
+    assert_knowledge_held_back(
+        &state,
+        project_id,
+        &chapter_id,
+        "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME",
+    );
 }

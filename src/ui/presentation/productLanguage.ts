@@ -109,6 +109,7 @@ const errorLabels: Record<string, string> = {
   CONTINUITY_BRIDGE_REQUIRED: '当前剧情线缺少衔接说明，暂时不能继续提交。',
   EVIDENCE_QUOTE_NOT_UNIQUE: '没有在该责任的来源正文中找到唯一引文，请补充一段更长、更有辨识度的原文。',
   UNKNOWN_REMOTE_OUTCOME: '远程请求的结果尚未确认，请先核对现有记录，不要重复发起请求。',
+  AUDIT_REMINDER_NOT_OPEN: '这条提醒已经关闭，刷新后可以在“已处理”里查看。',
   PLAN_STALE: '当前规划已与最新内容不一致，需要重新确认或更新。',
   AUTHORIZATION_STALE: '作品状态已经变化，请重新确认修复方案。',
   EVIDENCE_GAP: '现有信息不足，暂时无法给出可靠结论。请补充对应章节或设定依据。',

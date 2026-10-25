@@ -980,14 +980,6 @@ fn execute_decision_submit(
         .pointer("/payload/choice")
         .and_then(Value::as_str)
         .unwrap_or("recommended");
-    let action = match choice {
-        "recommended" => "RETRY_REMOTE",
-        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
-        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
-    };
-    if action == "RETRY_REMOTE" {
-        state.production_gateway.resolve_profile()?;
-    }
     let spec = project_command_spec(
         project_id,
         project_id,
@@ -999,6 +991,32 @@ fn execute_decision_submit(
         requested_at,
         true,
     );
+    if choice == "ACKNOWLEDGE" {
+        let outcome = state
+            .manager
+            .commit_project_command(spec, |connection| {
+                crate::repositories::runtime::acknowledge_audit_reminder(
+                    connection,
+                    project_id,
+                    decision_id,
+                    requested_at,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut response = project_command_response(&outcome_receipt(outcome));
+        response["message"] = json!("提醒已关闭。");
+        response["result"] = json!({"action":"ACKNOWLEDGE"});
+        return Ok(response);
+    }
+    let action = match choice {
+        "recommended" => "RETRY_REMOTE",
+        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
+        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
+    };
+    if action == "RETRY_REMOTE" {
+        state.production_gateway.resolve_profile()?;
+    }
     let outcome = state
         .manager
         .commit_project_command(spec, |connection| {

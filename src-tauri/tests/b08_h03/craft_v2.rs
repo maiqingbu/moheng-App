@@ -94,9 +94,14 @@ impl ProductionModelGateway for CraftGateway {
         let writes = matches!(capability, "RENDER_CHAPTER" | "ADJUST_CHAPTER_LENGTH");
         let mut response =
             RecordingGateway.invoke(if writes { "RENDER_CHAPTER" } else { capability }, input)?;
-        if capability == "AUDIT_EXTRACT" && self.fail_first_audit && audits == 1 {
-            response.output["unresolvedHard"] = json!(true);
-            response.output["auditCompleteness"] = json!("UNRESOLVED_HARD");
+        // The first attempt's audit and its resend are off the output spec,
+        // which still fails the chapter (LD-1).
+        if capability == "AUDIT_EXTRACT" && self.fail_first_audit && audits <= 2 {
+            response
+                .output
+                .as_object_mut()
+                .unwrap()
+                .remove("canonCandidates");
         }
         match (capability, &self.rewrite_ending) {
             ("REVIEW_CHAPTER", Some(_)) => {
@@ -517,7 +522,7 @@ fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
     });
     let project_id = "p-craft-retry-audit";
     let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
-    assert_eq!(result.unwrap_err(), "B08_AUDIT_UNRESOLVED_HARD");
+    assert!(result.unwrap_err().starts_with("P01_MODEL_OUTPUT_SPEC"));
     let connection = state.manager.open(project_id, "Craft v2", NOW).unwrap();
     let failed_job: String = connection
         .query_row(
@@ -540,9 +545,10 @@ fn craft_v2_a_retry_with_new_prose_audits_the_new_prose() {
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"retryOfJobId":failed_job}
     }))
     .unwrap();
-    // The retry wrote the chapter again, so its prose gets its own audit.
+    // The retry wrote the chapter again, so its prose gets its own audit
+    // (after the first attempt's audit and its resend).
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 2);
-    assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 2);
+    assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 3);
 }
 
 #[test]

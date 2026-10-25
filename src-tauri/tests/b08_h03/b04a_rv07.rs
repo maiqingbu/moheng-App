@@ -143,7 +143,7 @@ fn fx17_unbound_knowledge_candidate_is_dropped_and_recorded() {
     assert_eq!(dropped[0]["factId"], "fact:unbound");
 }
 #[test]
-fn b08_unknown_knowledge_time_or_visibility_blocks_when_hard_scope_is_affected() {
+fn b08_unknown_knowledge_time_or_visibility_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-unknown-knowledge-metadata";
     let state = KernelState::with_production_gateway(
@@ -156,24 +156,30 @@ fn b08_unknown_knowledge_time_or_visibility_blocks_when_hard_scope_is_affected()
         .unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:unknown-knowledge-metadata",
         "idempotencyKey":"key:b08:unknown-knowledge-metadata","projectId":project_id,
         "expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
-    })).unwrap_err();
-    assert_eq!(error, "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME");
+    })).unwrap();
+    // LD-1 step 2: the chapter commits; the item is held back.
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME",
+    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
 }
 #[test]
-fn b08_knowledge_cannot_reference_an_event_from_a_later_narrative_chapter() {
+fn b08_knowledge_of_an_event_from_a_later_narrative_chapter_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-future-narrative-knowledge";
     let state = KernelState::with_production_gateway(
@@ -208,25 +214,31 @@ fn b08_knowledge_cannot_reference_an_event_from_a_later_narrative_chapter() {
         libsql_rusqlite::params![future_chapter_id, project_id],
     ).unwrap();
     drop(connection);
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:future-narrative-knowledge",
         "idempotencyKey":"key:b08:future-narrative-knowledge","projectId":project_id,
         "expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]}
-    })).unwrap_err();
-    assert_eq!(error, "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION");
+    })).unwrap();
+    // LD-1 step 2: the chapter commits; the item is held back.
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION",
+    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
 }
 
 #[test]
-fn fx17_unknown_world_time_still_blocks_knowledge_of_a_later_chapter_event() {
+fn fx17_unknown_world_time_still_holds_back_knowledge_of_a_later_chapter_event() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-fx17-future-narrative-unknown-time";
     let state = KernelState::with_production_gateway(
@@ -261,20 +273,26 @@ fn fx17_unknown_world_time_still_blocks_knowledge_of_a_later_chapter_event() {
         libsql_rusqlite::params![future_chapter_id, project_id],
     ).unwrap();
     drop(connection);
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:future-narrative-unknown-time",
         "idempotencyKey":"key:b08:future-narrative-unknown-time","projectId":project_id,
         "expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"volumeId":volume_id,"executionMode":"LONG_FORM","entityIds":["entity:actual:linzhou"],"references":[]}
-    })).unwrap_err();
-    assert_eq!(error, "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION");
+    })).unwrap();
+    // LD-1 step 2: the chapter commits; the item is held back.
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 knowledge", NOW)
         .unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION",
+    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
 }
 #[test]
@@ -464,8 +482,15 @@ fn craft_location_change_supersedes_every_equal_open_fact() {
 }
 
 #[test]
-fn craft_location_change_over_two_different_open_facts_stays_unresolved() {
-    let (_state, _temp, result) =
-        location_change_over_two_open_facts("p-craft-different-open-facts", "{\"place\":\"cave\"}");
-    assert_eq!(result.unwrap_err(), "B08_CANON_TIME_UNRESOLVED");
+fn craft_location_change_over_two_different_open_facts_is_held_back() {
+    let project_id = "p-craft-different-open-facts";
+    let (state, _temp, result) =
+        location_change_over_two_open_facts(project_id, "{\"place\":\"cave\"}");
+    // LD-1 step 2: the chapter commits; the unresolved location is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open(project_id, "B08 knowledge", NOW)
+        .unwrap();
+    assert_held_back(&connection, project_id, "B08_CANON_TIME_UNRESOLVED");
 }

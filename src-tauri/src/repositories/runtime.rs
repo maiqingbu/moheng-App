@@ -29,6 +29,8 @@ pub enum RuntimeError {
     LeaseHeld,
     #[error("UNKNOWN_REMOTE_OUTCOME requires explicit decision")]
     UnknownRemoteOutcome,
+    #[error("AUDIT_REMINDER_NOT_OPEN")]
+    AuditReminderNotOpen,
     #[error("BUDGET_EXCEEDED")]
     BudgetHardLimit,
     #[error("MODEL_PRICE_REQUIRED:请先填写该模型价格")]
@@ -120,6 +122,24 @@ pub struct DurableJobService;
 pub struct UnknownDecisionResolution {
     pub source_ref: String,
     pub capability: String,
+}
+
+/// Closes an open audit reminder (LD-1 step 2) once the user has read it.
+pub fn acknowledge_audit_reminder(
+    connection: &Connection,
+    project_id: &str,
+    decision_id: &str,
+    now: &str,
+) -> Result<(), RuntimeError> {
+    let changed = connection.execute(
+        "UPDATE decisions SET outcome='ACKNOWLEDGED', updated_at=?3 WHERE project_id=?1 AND decision_id=?2 AND decision_type='AUDIT_REMINDER' AND outcome='OPEN'",
+        libsql_rusqlite::params![project_id, decision_id, now],
+    )?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(RuntimeError::AuditReminderNotOpen)
+    }
 }
 
 pub fn resolve_unknown_decision(

@@ -3208,7 +3208,7 @@ fn run_chapter_production_inner(
         .chain(planned_continuity_refs(&plan_payload))
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
-    let check_audit = |mut raw: Value| -> Result<(Value, AuditExtraction), String> {
+    let prepare_audit = |mut raw: Value| -> Result<Value, String> {
         let assigned = assign_audit_ids(&mut raw, &chapter_id, &known_threads);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
         audit_payload["normalization"]["assignedIds"] = assigned;
@@ -3264,10 +3264,12 @@ fn run_chapter_production_inner(
         if !invented_reveals.is_empty() {
             audit_payload["normalization"]["droppedInventedReservations"] = json!(invented_reveals);
         }
-        let extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
+        Ok(audit_payload)
+    };
+    let validate_audit = |audit_payload: &Value| -> Result<AuditExtraction, String> {
+        let mut extraction: AuditExtraction = serde_json::from_value(audit_payload.clone())
             .map_err(|error| format!("B08_AUDIT_INCOMPLETE:{error}"))?;
-        validate_audit_completeness(&audit_payload, &extraction)?;
-        let mut extraction = extraction;
+        validate_audit_completeness(audit_payload, &extraction)?;
         validate_actual_extraction(
             connection,
             &project_id,
@@ -3277,6 +3279,11 @@ fn run_chapter_production_inner(
             &gate_policy_payload,
             &mut extraction,
         )?;
+        Ok(extraction)
+    };
+    let check_audit = |raw: Value| -> Result<(Value, AuditExtraction), String> {
+        let audit_payload = prepare_audit(raw)?;
+        let extraction = validate_audit(&audit_payload)?;
         Ok((audit_payload, extraction))
     };
     // Craft rule (2026-10-18): an audit whose evidence cannot be located in
@@ -3284,7 +3291,8 @@ fn run_chapter_production_inner(
     // unlocatable quotes; a second failure still blocks the chapter. Owner
     // decision (2026-10-19): so is an audit using an unregistered predicate,
     // with the registered ones; the policy itself stays fail-closed.
-    let (mut audit_payload, extraction) = match check_audit(raw_audit.clone()) {
+    let mut last_raw = raw_audit.clone();
+    let checked = match check_audit(last_raw.clone()) {
         Err(error)
             if !audit_reused
                 && (matches!(
@@ -3345,6 +3353,7 @@ fn run_chapter_production_inner(
             let rerun_raw = result
                 .parsed
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
+            last_raw = rerun_raw.clone();
             match check_audit(rerun_raw.clone()) {
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
                     // Ids first, so what is kept still names the facts it named.
@@ -3360,16 +3369,27 @@ fn run_chapter_production_inner(
                             .is_some_and(|items| !items.is_empty())
                     };
                     if has_canon(&rerun_raw) && !has_canon(&kept) {
-                        return Err(error);
+                        Err(error)
+                    } else {
+                        check_audit(kept).map(|(mut payload, extraction)| {
+                            payload["normalization"]["droppedUnlocatable"] = dropped;
+                            (payload, extraction)
+                        })
                     }
-                    let (mut payload, extraction) = check_audit(kept)?;
-                    payload["normalization"]["droppedUnlocatable"] = dropped;
-                    (payload, extraction)
                 }
-                other => other?,
+                other => other,
             }
         }
-        other => other?,
+        other => other,
+    };
+    // LD-1 step 2: what the ledger cannot take is held back and reported; the
+    // chapter commits with the rest.
+    let (mut audit_payload, extraction) = match checked {
+        Ok(checked) => checked,
+        Err(error) if error.starts_with("B08_") => {
+            hold_back_audit_items(prepare_audit(last_raw)?, &validate_audit)?
+        }
+        Err(other) => return Err(other),
     };
     if !extraction.dropped_unbound_knowledge.is_empty() {
         audit_payload["normalization"]["droppedUnboundKnowledge"] =
@@ -3461,6 +3481,18 @@ fn run_chapter_production_inner(
     let mut obligation_delta = Vec::new();
     let mut foreshadow_delta = Vec::new();
     let mut decision_updates = Vec::new();
+    if let Some(held) = audit_payload
+        .pointer("/normalization/heldBack")
+        .and_then(Value::as_array)
+        .filter(|held| !held.is_empty())
+    {
+        decision_updates.push(audit_reminder(
+            &final_id,
+            &chapter_id,
+            chapter_number,
+            held,
+        )?);
+    }
     let mut change_request_artifacts = Vec::new();
     let mut change_request_heads = Vec::new();
     let mut obligation_evidence_records = Vec::new();
@@ -4740,32 +4772,7 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
     if let Some(ranges) = normalized_ranges {
         payload["evidenceRanges"] = json!(ranges);
     }
-    // "Complete with delta" and "complete, no change" only summarize whether
-    // anything was extracted, so the label follows the candidates.
-    if matches!(
-        payload.get("auditCompleteness").and_then(Value::as_str),
-        Some("COMPLETE_NO_CHANGE" | "COMPLETE_WITH_DELTA")
-    ) {
-        let has_delta = [
-            "canonCandidates",
-            "knowledgeCandidates",
-            "continuityCandidates",
-            "taskProgressCandidates",
-            "revealedReservationRefs",
-        ]
-        .iter()
-        .any(|field| {
-            payload
-                .get(*field)
-                .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty())
-        });
-        payload["auditCompleteness"] = json!(if has_delta {
-            "COMPLETE_WITH_DELTA"
-        } else {
-            "COMPLETE_NO_CHANGE"
-        });
-    }
+    relabel_audit_completeness(&mut payload);
     payload["normalization"] = json!({
         "policy":"DROP_UNBOUND_AUTHORITY_CANDIDATES",
         "droppedCandidates":dropped,
@@ -4914,6 +4921,206 @@ fn planned_continuity_refs(plan: &Value) -> BTreeSet<&str> {
         .flatten()
         .filter_map(|action| action.get("threadRef").and_then(Value::as_str))
         .collect()
+}
+
+/// The audit lists a chapter's ledger changes are made of, in the order one
+/// may name another (knowledge and threads name facts).
+const AUDIT_LEDGER_LISTS: [&str; 5] = [
+    "canonCandidates",
+    "knowledgeCandidates",
+    "continuityCandidates",
+    "taskProgressCandidates",
+    "revealedReservationRefs",
+];
+
+/// "Complete with delta" and "complete, no change" only summarize whether
+/// anything was extracted, so the label follows the candidates.
+fn relabel_audit_completeness(payload: &mut Value) {
+    if matches!(
+        payload.get("auditCompleteness").and_then(Value::as_str),
+        Some("COMPLETE_NO_CHANGE" | "COMPLETE_WITH_DELTA")
+    ) {
+        let has_delta = AUDIT_LEDGER_LISTS.iter().any(|field| {
+            payload
+                .get(*field)
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        });
+        payload["auditCompleteness"] = json!(if has_delta {
+            "COMPLETE_WITH_DELTA"
+        } else {
+            "COMPLETE_NO_CHANGE"
+        });
+    }
+}
+
+/// LD-1 step 2 (owner decision 2026-10-25): an audit the ledger cannot take
+/// as a whole is taken item by item. Starting from no changes, each fact,
+/// knowledge, thread, task and reveal is added and kept only if the ledger
+/// still validates; an audit that reported itself incomplete counts as
+/// complete with what it has. What is left out is recorded as `heldBack`
+/// (the field, the item and why) for the chapter's reminder.
+fn hold_back_audit_items(
+    prepared: Value,
+    validate: &dyn Fn(&Value) -> Result<AuditExtraction, String>,
+) -> Result<(Value, AuditExtraction), String> {
+    let mut held = Vec::new();
+    let mut kept = prepared.clone();
+    for field in AUDIT_LEDGER_LISTS {
+        kept[field] = json!([]);
+    }
+    let completeness = kept["auditCompleteness"].clone();
+    if !matches!(
+        completeness.as_str(),
+        Some("COMPLETE_NO_CHANGE" | "COMPLETE_WITH_DELTA")
+    ) || kept["unresolvedHard"] == json!(true)
+    {
+        held.push(json!({"field":"auditCompleteness","item":completeness,"reason":"B08_AUDIT_UNRESOLVED_HARD"}));
+        kept["auditCompleteness"] = json!("COMPLETE_NO_CHANGE");
+        kept["unresolvedHard"] = json!(false);
+    }
+    // What normalization already left out (evidence it could not place) is
+    // reported here instead of failing the audit; evidence it could only
+    // place by the model's offsets is not trusted and its item is held back.
+    let counters = [
+        "droppedCandidates",
+        "droppedEvidenceRanges",
+        "invalidContinuityEvidence",
+        "reboundEvidence",
+    ];
+    let dropped = counters
+        .iter()
+        .filter(|key| {
+            let value = &kept["normalization"][**key];
+            value.as_u64().is_some_and(|count| count > 0)
+                || value.as_object().is_some_and(|counts| {
+                    counts.values().any(|count| count.as_u64().unwrap_or(0) > 0)
+                })
+        })
+        .map(|key| (key.to_string(), kept["normalization"][*key].clone()))
+        .collect::<serde_json::Map<_, _>>();
+    if !dropped.is_empty() {
+        held.push(
+            json!({"field":"evidence","item":dropped,"reason":"B08_AUDIT_INCOMPLETE_EVIDENCE"}),
+        );
+        for key in counters {
+            kept["normalization"][key] = json!(0);
+        }
+    }
+    let rebound = |item: &Value| item.pointer("/evidence/rebound") == Some(&json!(true));
+    if let Some(ranges) = kept["evidenceRanges"].as_array_mut() {
+        ranges.retain(|range| range.get("rebound") != Some(&json!(true)));
+    }
+    relabel_audit_completeness(&mut kept);
+    for field in AUDIT_LEDGER_LISTS {
+        for item in prepared[field].as_array().into_iter().flatten() {
+            if rebound(item) {
+                held.push(json!({"field":field,"item":item,"reason":"B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"}));
+                continue;
+            }
+            let mut trial = kept.clone();
+            trial[field]
+                .as_array_mut()
+                .into_iter()
+                .for_each(|items| items.push(item.clone()));
+            relabel_audit_completeness(&mut trial);
+            match validate(&trial) {
+                Ok(_) => kept = trial,
+                Err(reason) if reason.starts_with("B08_") => {
+                    held.push(json!({"field":field,"item":item,"reason":reason}));
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    }
+    // With nothing recorded, ranges stand alone only beside quality findings.
+    let nothing_kept = AUDIT_LEDGER_LISTS
+        .iter()
+        .all(|field| kept[*field].as_array().is_none_or(Vec::is_empty));
+    if nothing_kept && kept["qualityFindings"].as_array().is_none_or(Vec::is_empty) {
+        kept["evidenceRanges"] = json!([]);
+    }
+    let extraction = validate(&kept)?;
+    // Knowledge about a fact that was held back is dropped with it.
+    held.extend(extraction.dropped_unbound_knowledge.iter().map(
+        |item| json!({"field":"knowledgeCandidates","item":item,"reason":"B08_KNOWLEDGE_UNBOUND"}),
+    ));
+    kept["normalization"]["heldBack"] = json!(held);
+    Ok((kept, extraction))
+}
+
+/// Why an audit item was held back, for the reader of the reminder.
+fn held_back_reason(code: &str) -> &'static str {
+    match code {
+        "B08_KNOWLEDGE_UNBOUND" => "这条认知指向的事实没有记入档案",
+        code if code.starts_with("B08_CANON_CONFLICT") => "与已确认的事实冲突",
+        code if code.starts_with("B08_CANON_SEMANTICS") || code.starts_with("B08_CANON_TIME") => {
+            "按设定规则无法判断这条事实的类别、时间或范围"
+        }
+        code if code.starts_with("B08_KNOWLEDGE")
+            || code.starts_with("B08_AUDIT_INCOMPLETE_KNOWLEDGE") =>
+        {
+            "人物何时、在什么范围内知道这件事不清楚"
+        }
+        code if code.starts_with("B08_THREAD") => "剧情线索的推进不在本章计划内，或推进方式不对",
+        code if code.starts_with("B08_TASK") => "任务进度与本卷计划不符",
+        code if code.starts_with("B08_RESERVATION") => "提前揭示了后续章节预留的内容",
+        code if code.starts_with("B08_AUDIT_UNRESOLVED_HARD") => "审计自己报告有内容没能整理完",
+        code if code.contains("EVIDENCE") || code.contains("QUOTE") => "引用的原文在正文里找不到",
+        _ => "没有通过作品档案检查",
+    }
+}
+
+/// The chapter's one reminder about audit items that were not recorded.
+fn audit_reminder(
+    final_id: &str,
+    chapter_id: &str,
+    chapter_number: Option<u32>,
+    held: &[Value],
+) -> Result<Value, String> {
+    let field_label = |field: &str| match field {
+        "canonCandidates" => "事实",
+        "knowledgeCandidates" => "人物认知",
+        "continuityCandidates" => "剧情线索",
+        "taskProgressCandidates" => "任务进度",
+        "revealedReservationRefs" => "后续预留",
+        _ => "审计",
+    };
+    let lines = held
+        .iter()
+        .map(|entry| {
+            let quote = entry
+                .pointer("/item/evidence/quote")
+                .and_then(Value::as_str)
+                .map(|quote| format!("「{quote}」"))
+                .unwrap_or_default();
+            format!(
+                "{}{quote}：{}",
+                field_label(entry["field"].as_str().unwrap_or("")),
+                held_back_reason(entry["reason"].as_str().unwrap_or(""))
+            )
+        })
+        .collect::<Vec<_>>();
+    let chapter = chapter_number.map_or_else(|| "本章".to_owned(), |n| format!("第 {n} 章"));
+    let decision_id = StableIdentityFactory::from_command(
+        StableIdKind::Decision,
+        &format!("ld2-audit-reminder:{final_id}"),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "decisionId":decision_id,
+        "decisionType":"AUDIT_REMINDER",
+        "outcome":"OPEN",
+        "reason":lines.join("；"),
+        "sourceRef":chapter_id,
+        "payloadJson":{
+            "category":"审计提醒",
+            "title":format!("{chapter}有 {} 条内容没有记入作品档案", held.len()),
+            "chapterId":chapter_id,
+            "heldBack":held,
+            "allowedActions":["ACKNOWLEDGE"]
+        }
+    }))
 }
 
 /// LD-1.2: the system names everything new an audit reports, so a model's
@@ -6499,6 +6706,30 @@ mod tests {
             raw["continuityCandidates"][1]["sourceEventId"],
             format!("event:{}", fact(2))
         );
+    }
+
+    #[test]
+    fn ld2_rebound_evidence_and_dropped_counts_are_held_back_not_failed() {
+        let prepared = json!({
+            "qualityFindings":[],"knowledgeCandidates":[],"continuityCandidates":[],
+            "taskProgressCandidates":[],"revealedReservationRefs":[],"evidenceRanges":[],
+            "auditCompleteness":"COMPLETE_WITH_DELTA","unresolvedHard":false,
+            "canonCandidates":[
+                {"factId":"good","evidence":{"rebound":false}},
+                {"factId":"weak","evidence":{"rebound":true}}
+            ],
+            "normalization":{"droppedCandidates":{"canonCandidates":1},"reboundEvidence":1}
+        });
+        // Accepts anything but non-zero normalization counters.
+        let validate = |payload: &Value| -> Result<AuditExtraction, String> {
+            if payload["normalization"]["reboundEvidence"] != json!(0) {
+                return Err("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND".into());
+            }
+            Err(format!("kept {}", payload["canonCandidates"]))
+        };
+        let error = hold_back_audit_items(prepared, &validate).unwrap_err();
+        // Only the item with trusted evidence was tried and kept.
+        assert!(error.contains("good") && !error.contains("weak"), "{error}");
     }
 
     #[test]

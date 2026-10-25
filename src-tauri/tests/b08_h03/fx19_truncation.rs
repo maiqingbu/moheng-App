@@ -134,9 +134,12 @@ fn fx19_two_values_in_one_chapter_replace_each_other_in_reading_order() {
 
 #[test]
 fn fx19_two_values_with_overlapping_evidence_are_still_a_conflict() {
-    let (_temp, _state, result) = produce_in_chapter("推开石门，实际", "p-fx19-overlap");
-    let error = result.unwrap_err();
-    assert!(error.contains("B08_CANON_"), "{error}");
+    let project_id = "p-fx19-overlap";
+    let (_temp, state, result) = produce_in_chapter("推开石门，实际", project_id);
+    // LD-1 step 2: the chapter commits; the conflicting value is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
+    assert_held_back(&connection, project_id, "B08_CANON_");
 }
 
 /// The first AUDIT_EXTRACT reply is not JSON at all (a garbled reply seen on
@@ -305,7 +308,9 @@ impl ProductionModelGateway for AllCanonUnlocatableGateway {
 }
 
 #[test]
-fn a_chapter_whose_every_fact_stays_unlocatable_is_not_committed_without_canon() {
+fn a_chapter_whose_every_fact_stays_unlocatable_commits_and_reports_them() {
+    // Owner decision 2026-10-24 kept such a chapter out; LD-1.4 (2026-10-25)
+    // commits it and the reminder names every fact that was not recorded.
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path()),
@@ -315,21 +320,19 @@ fn a_chapter_whose_every_fact_stays_unlocatable_is_not_committed_without_canon()
     let connection = state.manager.create(project_id, "FX19", NOW).unwrap();
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:craft:audit-empty","idempotencyKey":"key:craft:audit-empty",
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
     }))
-    .unwrap_err();
-    assert!(
-        error.starts_with("B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"),
-        "{error}"
-    );
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "FX19", NOW).unwrap();
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
+    assert_held_back(&connection, project_id, "B08_AUDIT_INCOMPLETE_EVIDENCE");
 }
 
 /// The audit reports the reveal of a reservation the project never had, as

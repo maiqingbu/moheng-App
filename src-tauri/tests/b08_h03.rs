@@ -1471,6 +1471,34 @@ fn default_b08_gate_policy() -> Value {
     })
 }
 
+/// The reasons of the audit items a committed chapter held back (LD-1
+/// step 2: the chapter commits and its reminder names them).
+fn held_back_reasons(connection: &Connection, project_id: &str) -> Vec<String> {
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    payload["heldBack"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["reason"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The chapter committed and held back an audit item for `reason`.
+fn assert_held_back(connection: &Connection, project_id: &str, reason: &str) {
+    let reasons = held_back_reasons(connection, project_id);
+    assert!(
+        reasons.iter().any(|held| held.starts_with(reason)),
+        "{reason} not in {reasons:?}"
+    );
+}
+
 /// The obligation id of the `n`th new thread an audit reports in a chapter
 /// (LD-1.2: the system names it).
 fn new_thread_obligation_id(chapter_id: &str, n: usize) -> String {
@@ -2579,7 +2607,7 @@ fn b08_stale_gate_policy_ref_is_rejected_before_provider_calls() {
 }
 
 #[test]
-fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests_expansion() {
+fn b08_unknown_audit_predicate_is_held_back_even_if_candidate_text_requests_expansion() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-policy-injection";
     let gateway = CapturingAuditPolicyGateway {
@@ -2596,24 +2624,13 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:policy-injection","idempotencyKey":"key:b08:policy-injection",
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
-    })).unwrap_err();
-    assert_eq!(
-        error,
-        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE"
-    );
-    let production_center = query_production_center_impl(
-        &state,
-        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
-    )
-    .unwrap();
-    assert!(production_center["gate"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
+    })).unwrap();
+    // LD-1 step 2: the chapter commits; the unregistered fact stays out.
+    assert_eq!(result["finalStatus"], "committed");
     let request = gateway.audit_inputs.lock().unwrap()[0].clone();
     let contract = &request["auditPolicyContract"];
     assert_eq!(
@@ -2630,7 +2647,12 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
         .manager
         .open(project_id, "B08 policy injection", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE",
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -2664,7 +2686,9 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
 }
 
 #[test]
-fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_runs() {
+fn rv34_unknown_predicate_fact_is_held_back_and_the_chapter_commits() {
+    // Before LD-1 step 2 the chapter failed until the user added the rule and
+    // retried; now it commits and the fact waits in the reminder.
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-rv34-retry-unknown-predicate";
     let gateway = CapturingAuditPolicyGateway {
@@ -2681,20 +2705,23 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
-    let first_command = "cmd:b08:rv34-unknown-predicate";
-    let error = execute_command_impl(
+    let result = execute_command_impl(
         &state,
         json!({
-            "type":"production_start","commandId":first_command,
+            "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate",
             "idempotencyKey":"key:b08:rv34-unknown-predicate","projectId":project_id,
             "expectedRevision":0,"requestedAt":NOW,
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
         }),
     )
-    .unwrap_err();
-    assert!(error.contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
-    let old_job_id = StableIdentityFactory::from_command(StableIdKind::Job, first_command).unwrap();
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE",
+    );
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -2706,67 +2733,6 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
         // Render, audit and its one rerun with the registered predicates.
         4
     );
-    drop(connection);
-
-    let revision_before_rule = state.manager.project_revision(project_id).unwrap();
-    let updated = execute_command_impl(
-        &state,
-        json!({
-            "type":"gate_policy_update","commandId":"cmd:b08:rv34-add-predicate",
-            "idempotencyKey":"key:b08:rv34-add-predicate","projectId":project_id,
-            "expectedRevision":revision_before_rule,"requestedAt":NOW,
-            "payload":{"action":"UPSERT_RULE","rule":{"predicate":"UNREGISTERED_SYNTHETIC_PREDICATE","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}}
-        }),
-    )
-    .unwrap();
-    assert_eq!(updated["finalStatus"], "committed");
-    let revision_before_retry = state.manager.project_revision(project_id).unwrap();
-
-    let retry = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate-retry",
-            "idempotencyKey":"key:b08:rv34-unknown-predicate-retry","projectId":project_id,
-            "expectedRevision":revision_before_retry,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false,"retryOfJobId":old_job_id}
-        }),
-    )
-    .unwrap();
-    assert_eq!(retry["finalStatus"], "committed");
-
-    let connection = state.manager.open(project_id, "", NOW).unwrap();
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        4,
-        "retries after a Gate correction reuse completed model outputs"
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        gateway.capabilities.lock().unwrap().as_slice(),
-        [
-            "PLAN_STRATEGY",
-            "RENDER_CHAPTER",
-            "AUDIT_EXTRACT",
-            "AUDIT_EXTRACT"
-        ]
-    );
-    // The audit and its rerun ran once each; the retry reused them.
-    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -3757,7 +3723,7 @@ fn b08_long_form_planning_rejects_legacy_signing_head_before_model_calls() {
 }
 
 #[test]
-fn b08_opening_bootstrap_without_route_rejects_task_reality() {
+fn b08_opening_bootstrap_without_route_holds_back_task_reality() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-opening-no-route";
     let state = KernelState::with_production_gateway(
@@ -3788,48 +3754,18 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         .unwrap();
     drop(connection);
 
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:opening-no-route","idempotencyKey":"key:b08:opening-no-route",
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
     }))
-    .unwrap_err();
-    assert!(
-        error.contains("B08_TASK_SCOPE_VIOLATION"),
-        "actual error: {error}"
-    );
+    .unwrap();
+    // LD-1 step 2: the chapter commits; the task progress is held back and
+    // the task keeps its state.
+    assert_eq!(result["finalStatus"], "committed");
 
     let connection = state.manager.open(project_id, "B08 opening", NOW).unwrap();
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
+    assert_held_back(&connection, project_id, "B08_TASK_SCOPE_VIOLATION");
     assert_eq!(
         connection
             .query_row::<String, _, _>(
@@ -3840,7 +3776,6 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
             .unwrap(),
         task_state_before
     );
-    println!("B08_OPENING_TASK_SCOPE_RESULT rejected=PASS final=0 receipt=0 domain_receipt=0 task_state_unchanged=PASS");
 }
 
 #[test]
@@ -3929,7 +3864,39 @@ fn b1a_complete_no_change_audit_commits_final_and_receipt_without_reality_delta(
 }
 
 #[test]
-fn b1a_incomplete_unresolved_and_truncated_audits_fail_closed_before_final_commit() {
+fn b1a_audit_the_model_reports_unresolved_commits_with_a_reminder() {
+    // LD-1 step 2: an audit that says it could not express a change is
+    // taken with what it has, and the reminder says so.
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b1a-audit-unresolved";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "unresolved-hard",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B1-A audit failure", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b1a:unresolved","idempotencyKey":"key:b1a:unresolved",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open(project_id, "B1-A audit failure", NOW)
+        .unwrap();
+    assert_held_back(&connection, project_id, "B08_AUDIT_UNRESOLVED_HARD");
+}
+
+#[test]
+fn b1a_incomplete_and_truncated_audits_fail_closed_before_final_commit() {
     for (suffix, gateway, expected_error) in [
         (
             "missing",
@@ -3938,13 +3905,6 @@ fn b1a_incomplete_unresolved_and_truncated_audits_fail_closed_before_final_commi
             }) as Arc<dyn ProductionModelGateway>,
             // LD-1: a missing category is off the audit's output spec.
             "P01_MODEL_OUTPUT_SPEC",
-        ),
-        (
-            "unresolved",
-            Arc::new(AuditVariantGateway {
-                variant: "unresolved-hard",
-            }) as Arc<dyn ProductionModelGateway>,
-            "B08_AUDIT_UNRESOLVED_HARD",
         ),
         (
             "truncated",
@@ -4817,7 +4777,7 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
 }
 
 #[test]
-fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
+fn fx1_b08_holds_back_a_continuity_source_event_not_in_canon() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-source-event-invalid";
     let state = KernelState::with_production_gateway(
@@ -4854,7 +4814,7 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
         .unwrap();
     drop(connection);
 
-    let error = execute_command_impl(
+    let result = execute_command_impl(
         &state,
         json!({
             "type":"production_start",
@@ -4866,13 +4826,15 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
         }),
     )
-    .unwrap_err();
-    assert_eq!(error, "B08_THREAD_SOURCE_EVENT_INVALID");
+    .unwrap();
+    // LD-1 step 2: the chapter commits; the thread is held back.
+    assert_eq!(result["finalStatus"], "committed");
 
     let connection = state
         .manager
         .open(project_id, "B08 invalid source event", NOW)
         .unwrap();
+    assert_held_back(&connection, project_id, "B08_THREAD_SOURCE_EVENT_INVALID");
     let canon_events_after: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
@@ -4894,17 +4856,18 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(canon_events_after, canon_events_before);
-    assert_eq!(canon_facts_after, canon_facts_before);
+    // The chapter's own facts are recorded; the thread is not.
+    assert!(canon_events_after >= canon_events_before);
+    assert!(canon_facts_after >= canon_facts_before);
     assert_eq!(obligations_after, obligations_before);
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
 }
 
 #[test]
-fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks() {
+fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_is_held_back() {
     for (suffix, contradictory, should_pass) in [("valid", false, true), ("future", true, false)] {
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-b08-knowledge-{suffix}");
@@ -4940,15 +4903,28 @@ fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks()
             assert!(source.is_some());
             assert_eq!(version, Some(1));
         } else {
-            assert_eq!(
-                result.unwrap_err(),
-                "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION"
-            );
+            // LD-1 step 2: the chapter commits; the contradicting knowledge is
+            // held back.
+            assert_eq!(result.unwrap()["finalStatus"], "committed");
             let connection = state
                 .manager
                 .open(&project_id, "B08 knowledge", NOW)
                 .unwrap();
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
+            assert_held_back(
+                &connection,
+                &project_id,
+                "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION",
+            );
+            assert_eq!(
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0)
+                    )
+                    .unwrap(),
+                0
+            );
         }
     }
 }
@@ -5008,7 +4984,7 @@ fn b08_reconciliation_uses_actual_task_state() {
 }
 
 #[test]
-fn plan_foreshadow_actual_reveal_is_blocked() {
+fn plan_foreshadow_actual_reveal_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-actual-reveal";
     let paths = AppPaths::new(temp.path());
@@ -5108,43 +5084,23 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
                     "reservationRefs":["reservation:future:1"],"entityRefs":["entity:actual:linzhou"]}}
         }),
     );
-    assert_eq!(result.unwrap_err(), "B08_RESERVATION_VIOLATION");
+    // LD-1 step 2: the chapter commits; the reveal is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 actual reveal", NOW)
         .unwrap();
+    assert_held_back(&connection, project_id, "B08_RESERVATION_VIOLATION");
     let input = audit_inputs.lock().unwrap()[0].clone();
     assert!(input.get("existingCanonSemanticKeys").is_none());
     assert!(input
         .pointer("/authorityContext/state/facts")
         .and_then(Value::as_array)
         .is_some_and(|facts| !facts.is_empty()));
-    let heads_after: String = connection
-        .query_row(
-            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        heads_after,
-        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT revision FROM project_meta WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        revision_at_audit.lock().unwrap().unwrap()
-    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -5158,7 +5114,7 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
 }
 
 #[test]
-fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes() {
+fn b08_existing_canon_conflict_is_held_back_without_writing_the_fact() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-reported-canon-conflict";
     let paths = AppPaths::new(temp.path());
@@ -5192,10 +5148,8 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
         }),
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
-    );
+    // LD-1 step 2: the chapter commits; the conflicting fact is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
 
     let input = audit_inputs.lock().unwrap()[0].clone();
     assert!(input.get("existingCanonSemanticKeys").is_none());
@@ -5216,26 +5170,10 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
         .manager
         .open(project_id, "B08 canon conflict", NOW)
         .unwrap();
-    let heads_after: String = connection
-        .query_row(
-            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        heads_after,
-        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT revision FROM project_meta WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        revision_at_audit.lock().unwrap().unwrap()
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
     );
     assert_eq!(
         connection
@@ -5247,12 +5185,11 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             .unwrap(),
         1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
 }
 
 #[test]
-fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
+fn b1b_canon_semantic_policy_controls_what_b08_records() {
     let cases = [
         (
             "multi",
@@ -5596,24 +5533,12 @@ fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
             _ => "UNMAPPED_FIXTURE",
         };
         if let Some(expected) = expected_error {
-            let actual_error = result.unwrap_err();
-            assert!(actual_error.starts_with(expected));
-            assert_eq!(final_after, final_before);
-            assert_eq!(canon_after, canon_before);
-            assert_eq!(receipt_after, receipt_before);
-            assert_eq!(canonical_heads_at_audit, canonical_heads_after);
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
-            assert_eq!(
-                connection
-                    .query_row::<i64, _, _>(
-                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
-                        [&project_id],
-                        |row| row.get(0)
-                    )
-                    .unwrap(),
-                canon_before
-            );
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [&project_id], |row| row.get(0)).unwrap(), 0);
+            // LD-1 step 2: the chapter commits and the fact the policy rejects
+            // is held back, so the ledger never takes the conflict.
+            assert_eq!(result.unwrap()["finalStatus"], "committed");
+            assert_eq!(final_after, 1);
+            assert!(canon_after >= canon_before);
+            assert_held_back(&connection, &project_id, expected);
         } else {
             assert_eq!(result.unwrap()["finalStatus"], "committed");
             assert_eq!(final_after, 1);
@@ -5693,7 +5618,7 @@ fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
 }
 
 #[test]
-fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
+fn canon_semantic_conflict_with_new_fact_id_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-canon-semantic-conflict";
     let state = KernelState::with_production_gateway(
@@ -5717,15 +5642,18 @@ fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
         }),
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
-    );
+    // LD-1 step 2: the chapter commits; the item is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 canon conflict", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
 }
 
 #[test]
@@ -8782,3 +8710,5 @@ mod fx18_length;
 mod fx19_truncation;
 #[path = "b08_h03/fx4_knowledge_time.rs"]
 mod fx4_knowledge_time;
+#[path = "b08_h03/ld2_downgrade.rs"]
+mod ld2_downgrade;

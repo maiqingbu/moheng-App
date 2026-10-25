@@ -13,5 +13,6 @@ export const decisionWorkspaces: Record<DecisionCategory, { path: string; label:
   全局修改: { path: 'history', label: '去版本历史处理' },
   Retcon: { path: 'history', label: '去版本历史处理' },
   大规模修复: { path: 'production', label: '去创作页授权修复' },
-  完结冲突: { path: 'completion', label: '去完结准备处理' }
+  完结冲突: { path: 'completion', label: '去完结准备处理' },
+  审计提醒: { path: 'read', label: '去资料页阅读本章' }
 }

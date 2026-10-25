@@ -472,6 +472,7 @@ export type DecisionCategory =
   | 'Retcon'
   | '大规模修复'
   | '完结冲突'
+  | '审计提醒'
 
 export interface DecisionItem {
   id: string
@@ -484,7 +485,7 @@ export interface DecisionItem {
   createdAt: string
   recommendation?: string
   evidence?: string[]
-  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB'>
+  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB' | 'ACKNOWLEDGE'>
 }
 
 export interface ChapterListItem {
