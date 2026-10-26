@@ -988,9 +988,14 @@ fn configured_provider_writes_ten_chapters_and_evaluates_signing() {
         )
         .unwrap();
     assert_eq!(word_counts.len(), 10, "{word_counts:?}");
-    assert!(word_counts
-        .iter()
-        .all(|(_, count)| (2000..=3300).contains(count)));
+    // The work targets 番茄: 1800-2200, with the FX-18 allowance of 10% past
+    // the maximum.
+    assert!(
+        word_counts
+            .iter()
+            .all(|(_, count)| (1800..=2420).contains(count)),
+        "{word_counts:?}"
+    );
     if let Ok(out) = std::env::var("MOHENG_CRAFT_LAB_OUT") {
         write_ten_chapter_evidence(&connection, &project_id, std::path::Path::new(&out));
     }
