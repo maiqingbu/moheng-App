@@ -20,7 +20,12 @@
     "canonCandidates": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
       }
     },
     "knowledgeCandidates": {
@@ -31,6 +36,9 @@
           "factIndex": {
             "type": "integer",
             "minimum": 0
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
           }
         }
       }
@@ -49,6 +57,9 @@
           },
           "sourceEventId": {
             "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence"
           }
         }
       }
@@ -56,7 +67,12 @@
     "taskProgressCandidates": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
       }
     },
     "revealedReservationRefs": {
@@ -66,7 +82,10 @@
       }
     },
     "evidenceRanges": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
     },
     "auditCompleteness": {
       "enum": [
@@ -82,6 +101,18 @@
     },
     "continuityDetails": {
       "type": "array"
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "description": "QC-1.1: the evidence is the sentence of the body at this index of bodySentences.",
+      "type": "object",
+      "properties": {
+        "sentence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   }
 }

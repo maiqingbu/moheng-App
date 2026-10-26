@@ -288,7 +288,7 @@ fn sentences(body: &str) -> Vec<String> {
 }
 
 /// The byte spans of `sentences`, trimmed, in order.
-fn sentence_spans(body: &str) -> Vec<(usize, usize)> {
+pub(crate) fn sentence_spans(body: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut push = |start: usize, end: usize| {
         let text = &body[start..end];

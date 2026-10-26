@@ -3194,6 +3194,11 @@ fn run_chapter_production_inner(
     let candidate_ref = reference(&candidate);
     update_stage(manager, connection, &project_id, &job_id, "AUDIT", &now)?;
     let mut audit_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":audit_plan_view(&plan_payload),"contextManifestRef":context_ref,"authorityContext":authority_context.clone(),"auditPolicyContract":audit_contract.clone(),"candidateRef":candidate_ref.clone(),"body":body,"qualityReportRef":Value::Null});
+    // QC-1.1: evidence is cited by the number of its sentence.
+    audit_input["bodySentences"] = json!(body_sentences(&body)
+        .into_iter()
+        .map(|(_, _, text)| text)
+        .collect::<Vec<_>>());
     // CRAFT v3 (CRAFT_V3_DESIGN §4.3): the same audit call also records the
     // habits, looks and objects later chapters must keep consistent.
     if craft_writing.is_some() {
@@ -3369,8 +3374,9 @@ fn run_chapter_production_inner(
             input["auditFeedback"] = json!({
                 "rejectedFor":error,
                 "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
+                "unboundCitations":normalize_audit_model_output(raw_audit.clone(), &body)["normalization"]["unboundCitations"].take(),
                 "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
-                "instruction":"上次提取不完整：unlocatableQuotes 中的引文在正文 body 中找不到（可能引用了规划或改写了原文），incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，每条 evidence.quote 必须逐字复制正文中唯一出现的一句或一段。"
+                "instruction":"上次提取不完整：unboundCitations 中的条目指认的句子（sentence）或引文和条目内容对不上，unlocatableQuotes 中的引文在正文中找不到，incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，evidence.sentence 填写 bodySentences 中真正写到这件事的那一句的序号。"
             });
             if error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS") {
                 input["auditFeedback"]["registeredPredicates"] = json!(
@@ -4619,6 +4625,7 @@ fn validate_audit_completeness(
 }
 
 fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
+    let unbound_citations = bind_cited_evidence(&mut payload, body);
     let body_chars = body.chars().collect::<Vec<_>>();
     let mut rebound_evidence = 0_u64;
     let mut invalid_continuity_evidence = 0_u64;
@@ -4837,7 +4844,8 @@ fn normalize_audit_model_output(mut payload: Value, body: &str) -> Value {
         "droppedEvidenceRanges":dropped_ranges,
         "droppedWithoutEvidence":without_evidence,
         "reboundEvidence":rebound_evidence,
-        "invalidContinuityEvidence":invalid_continuity_evidence
+        "invalidContinuityEvidence":invalid_continuity_evidence,
+        "unboundCitations":unbound_citations
     });
     payload
 }
@@ -5362,6 +5370,7 @@ fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) 
         quote.is_some_and(|quote| !quote.is_empty() && locate_quote_span(body, quote).is_none())
     };
     let mut kept = raw.clone();
+    bind_cited_evidence(&mut kept, body);
     let mut dropped = Vec::new();
     for (field, id_key) in [
         ("canonCandidates", "factId"),
@@ -5372,7 +5381,9 @@ fn drop_unlocatable_audit_candidates(raw: &Value, body: &str) -> (Value, Value) 
         if let Some(items) = kept.get_mut(field).and_then(Value::as_array_mut) {
             items.retain(|item| {
                 let quote = item.pointer("/evidence/quote").and_then(Value::as_str);
-                if !unlocatable(quote) {
+                // QC-1.1: evidence `bind_cited_evidence` unbound.
+                let unbound = item["evidence"].get("unbound").is_some();
+                if !unbound && !unlocatable(quote) {
                     return true;
                 }
                 dropped.push(json!({"field":field,"id":item.get(id_key),"label":item.get("modelLabel"),"quote":quote}));
@@ -5414,6 +5425,161 @@ pub fn locate_unique_quote(body: &str, quote: &str) -> Option<(usize, usize)> {
         return None;
     }
     whitespace_insensitive_unique_span(&body.chars().collect::<Vec<_>>(), quote)
+}
+
+/// QC-1.1: the sentences of `body` the audit cites by number (their index),
+/// as character spans with their text.
+pub(crate) fn body_sentences(body: &str) -> Vec<(usize, usize, String)> {
+    crate::chapter_craft::sentence_spans(body)
+        .into_iter()
+        .map(|(start, end)| {
+            let from = body[..start].chars().count();
+            let text = body[start..end].to_owned();
+            (from, from + text.chars().count(), text)
+        })
+        .collect()
+}
+
+/// Characters too common to tie a passage to a fact.
+const COMMON_CHARACTERS: &str =
+    "的了着过在是有不没也都就还又和与及把被给让向对从到为他她它我你们这那个一上下里中正很再已";
+
+/// The pairs of adjacent Chinese characters in `text` that can tie a
+/// passage to it.
+fn telling_pairs(text: &str) -> BTreeSet<(char, char)> {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars
+        .windows(2)
+        .filter(|pair| {
+            pair.iter()
+                .all(|c| ('\u{4e00}'..='\u{9fff}').contains(c) && !COMMON_CHARACTERS.contains(*c))
+        })
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+/// What an audit item says, to check the passage cited for it: a fact's
+/// values, else the names it is about; a knowledge item, its fact's. Empty
+/// when the item says nothing a passage can be checked against.
+fn audit_item_words(field: &str, item: &Value, facts: &[Value]) -> String {
+    let fact_words = |fact: &Value| {
+        let mut parts = Vec::new();
+        crate::chapter_craft::collect_strings(&fact["objectJson"], &mut parts);
+        let mut words = parts.concat();
+        if telling_pairs(&words).is_empty() {
+            for key in ["canonicalName", "subjectId"] {
+                words.push_str(fact[key].as_str().unwrap_or(""));
+            }
+        }
+        words
+    };
+    match field {
+        "canonCandidates" => fact_words(item),
+        "knowledgeCandidates" => item["factIndex"]
+            .as_u64()
+            .and_then(|index| facts.get(index as usize))
+            .map(fact_words)
+            .unwrap_or_default(),
+        "continuityCandidates" => item["modelLabel"].as_str().unwrap_or("").to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// QC-1.1 (owner decision 2026-10-26): evidence cited by sentence number
+/// becomes that sentence, and a quote that only loosely matches is bound to
+/// its passage, when the passage or a sentence next to it shares a telling
+/// character pair with what the item says. Evidence that fails this is
+/// unbound, so the item cannot reach the ledger on a wrong passage; returns
+/// what was unbound, for the audit feedback.
+pub(crate) fn bind_cited_evidence(raw: &mut Value, body: &str) -> Vec<Value> {
+    let sentences = body_sentences(body);
+    let facts = raw["canonCandidates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let near = |start: usize, end: usize| {
+        let first = sentences
+            .iter()
+            .position(|sentence| sentence.1 > start)
+            .unwrap_or(sentences.len());
+        let last = sentences
+            .iter()
+            .rposition(|sentence| sentence.0 < end)
+            .unwrap_or(first);
+        sentences[first.saturating_sub(1)..(last + 2).min(sentences.len())]
+            .iter()
+            .map(|sentence| sentence.2.as_str())
+            .collect::<String>()
+    };
+    let mut unbound = Vec::new();
+    for range in raw
+        .get_mut("evidenceRanges")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some((start, end, text)) = range
+            .get("sentence")
+            .and_then(Value::as_u64)
+            .and_then(|number| sentences.get(number as usize))
+        {
+            *range = json!({"start":start,"end":end,"quote":text,"sentence":range["sentence"]});
+        }
+    }
+    for field in [
+        "canonCandidates",
+        "knowledgeCandidates",
+        "continuityCandidates",
+        "taskProgressCandidates",
+    ] {
+        let Some(items) = raw.get_mut(field).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let words = telling_pairs(&audit_item_words(field, item, &facts));
+            let about = item_label(item);
+            let fits = |start: usize, end: usize| {
+                words.is_empty() || !telling_pairs(&near(start, end)).is_disjoint(&words)
+            };
+            let Some(evidence) = item.get_mut("evidence").filter(|value| value.is_object()) else {
+                continue;
+            };
+            if let Some(number) = evidence.get("sentence").and_then(Value::as_u64) {
+                if let Some((start, end, text)) = sentences
+                    .get(number as usize)
+                    .filter(|(start, end, _)| fits(*start, *end))
+                {
+                    *evidence = json!({"start":start,"end":end,"quote":text,"sentence":number});
+                } else {
+                    unbound.push(json!({"field":field,"sentence":number,"about":about}));
+                    *evidence = json!({"unbound":number});
+                }
+                continue;
+            }
+            let Some(quote) = evidence.get("quote").and_then(Value::as_str) else {
+                continue;
+            };
+            if locate_unique_quote(body, quote).is_some() {
+                continue;
+            }
+            if let Some((start, end)) = locate_quote_span(body, quote) {
+                if !fits(start, end) {
+                    unbound.push(json!({"field":field,"quote":quote,"about":about}));
+                    *evidence = json!({"unbound":quote});
+                }
+            }
+        }
+    }
+    unbound
+}
+
+/// A short name for an audit item in feedback and reminders.
+fn item_label(item: &Value) -> Value {
+    ["modelLabel", "factId", "knowledgeId", "taskId", "threadRef"]
+        .iter()
+        .find_map(|key| item.get(*key))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 /// Where a quote from a model stands in `body`, in characters: verbatim
@@ -6805,6 +6971,78 @@ mod tests {
         assert_eq!(
             raw["continuityCandidates"][1]["sourceEventId"],
             format!("event:{}", fact(2))
+        );
+    }
+
+    const QC1_BODY: &str = "沈砚把搪瓷猫碗放回窗台。缺口和我的碗缺耳对得上。我记东西靠形状。\n他低头看右手，虎口那道划痕淡得快看不见了。林薇没说话。";
+
+    fn qc1_fact(evidence: Value) -> Value {
+        json!({"canonCandidates":[{
+            "factId":"canon:qc1:0","subjectId":"沈砚","entityId":"沈砚","canonicalName":"沈砚",
+            "entityType":"PERSON","predicate":"status","authorityLevel":"A",
+            "objectJson":{"value":"右手虎口划痕正在淡化"},"evidence":evidence
+        }]})
+    }
+
+    #[test]
+    fn qc1_evidence_cited_by_sentence_number_is_that_sentence() {
+        // QC-1.1: the model names the sentence; the system takes its text.
+        let mut raw = qc1_fact(json!({"sentence":3}));
+        let unbound = bind_cited_evidence(&mut raw, QC1_BODY);
+        assert!(unbound.is_empty(), "{unbound:?}");
+        let normalized = normalize_audit_model_output(raw, QC1_BODY);
+        let evidence = &normalized["canonCandidates"][0]["evidence"];
+        assert_eq!(
+            evidence["quote"],
+            "他低头看右手，虎口那道划痕淡得快看不见了。"
+        );
+        assert_eq!(evidence["rebound"], false);
+    }
+
+    #[test]
+    fn qc1_a_sentence_number_naming_nothing_of_the_fact_is_not_bound() {
+        // Acceptance 2026-10-26, chapter 5: 虎口 bound to the bowl sentence.
+        let mut raw = qc1_fact(json!({"sentence":1}));
+        let unbound = bind_cited_evidence(&mut raw, QC1_BODY);
+        assert_eq!(unbound.len(), 1, "{unbound:?}");
+        assert_eq!(unbound[0]["sentence"], 1);
+        let normalized = normalize_audit_model_output(raw, QC1_BODY);
+        assert_eq!(normalized["canonCandidates"], json!([]));
+    }
+
+    #[test]
+    fn qc1_a_near_quote_landing_on_an_unrelated_passage_is_not_bound() {
+        let mut raw = qc1_fact(json!({"start":12,"end":24,"quote":"缺口和我的碗缺耳对不上。"}));
+        let unbound = bind_cited_evidence(&mut raw, QC1_BODY);
+        assert_eq!(unbound.len(), 1, "{unbound:?}");
+        let normalized = normalize_audit_model_output(raw, QC1_BODY);
+        assert_eq!(normalized["canonCandidates"], json!([]));
+    }
+
+    #[test]
+    fn qc1_a_near_quote_of_the_fact_is_still_bound() {
+        let mut raw = qc1_fact(json!({"quote":"他低头看右手，虎口那道划痕淡得看不见了。"}));
+        assert!(bind_cited_evidence(&mut raw, QC1_BODY).is_empty());
+        let normalized = normalize_audit_model_output(raw, QC1_BODY);
+        assert_eq!(
+            normalized["canonCandidates"][0]["evidence"]["quote"],
+            "他低头看右手，虎口那道划痕淡得快看不见了。"
+        );
+    }
+
+    #[test]
+    fn qc1_the_audit_request_numbers_the_body_sentences() {
+        let sentences = body_sentences(QC1_BODY);
+        assert_eq!(sentences.len(), 5);
+        assert_eq!(sentences[1].2, "缺口和我的碗缺耳对得上。");
+        let (start, end, _) = sentences[3];
+        assert_eq!(
+            QC1_BODY
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect::<String>(),
+            "他低头看右手，虎口那道划痕淡得快看不见了。"
         );
     }
 

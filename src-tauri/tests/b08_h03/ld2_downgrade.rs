@@ -117,3 +117,62 @@ fn ld2_an_audit_reminder_is_closed_once_by_acknowledging_it() {
         .unwrap_err()
         .contains("AUDIT_REMINDER_NOT_OPEN"));
 }
+
+/// QC-1.1: the audit cites its evidence by sentence number only.
+struct SentenceCitingGateway;
+
+impl ProductionModelGateway for SentenceCitingGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = RecordingGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            let sentences = input["bodySentences"].as_array().expect("bodySentences");
+            for field in [
+                "canonCandidates",
+                "knowledgeCandidates",
+                "taskProgressCandidates",
+            ] {
+                for item in response.output[field].as_array_mut().into_iter().flatten() {
+                    let quote = item["evidence"]["quote"].as_str().unwrap_or("").to_owned();
+                    let number = sentences
+                        .iter()
+                        .position(|sentence| sentence.as_str().unwrap().contains(&quote))
+                        .expect("a sentence holding the quote");
+                    item["evidence"] = json!({"sentence":number});
+                }
+            }
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn qc1_evidence_cited_by_sentence_number_reaches_the_ledger_with_that_sentence() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(SentenceCitingGateway),
+    );
+    let project_id = "p-qc1-sentence";
+    let connection = state.manager.create(project_id, "QC1", NOW).unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:qc1:sentence","idempotencyKey":"key:qc1:sentence",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false,"entityIds":["entity:actual:linzhou"]}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state.manager.open(project_id, "QC1", NOW).unwrap();
+    let (evidence, reminders): (String, i64) = connection
+        .query_row(
+            "SELECT evidence_range_json, (SELECT COUNT(*) FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER') FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
+            libsql_rusqlite::params![project_id, new_audit_item_id("canon", &chapter_id, 1)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let evidence: Value = serde_json::from_str(&evidence).unwrap();
+    let quote = evidence["quote"].as_str().unwrap();
+    assert!(quote.ends_with('。') || quote.ends_with('”'), "{evidence}");
+    assert_eq!(reminders, 0);
+}
