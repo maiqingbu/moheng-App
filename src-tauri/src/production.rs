@@ -3390,11 +3390,17 @@ fn run_chapter_production_inner(
         .chain(planned_continuity_refs(&plan_payload))
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
+    // QC-1: the chapter's own people, whose facts the fact cap keeps first.
+    let chapter_people = craft_writing
+        .as_ref()
+        .map(|writing| writing.chapter_people(&plan_payload).0)
+        .unwrap_or_default();
     let prepare_audit = |mut raw: Value| -> Result<Value, String> {
         let assigned = assign_audit_ids(&mut raw, &chapter_id, &known_threads);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
         audit_payload["normalization"]["assignedIds"] = assigned;
         cap_new_threads(&mut audit_payload, &known_threads);
+        cap_new_facts(&mut audit_payload, &chapter_people);
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
             connection,
@@ -3496,7 +3502,7 @@ fn run_chapter_production_inner(
                 "unlocatableQuotes":unlocatable_audit_quotes(&raw_audit, &body),
                 "unboundCitations":normalize_audit_model_output(raw_audit.clone(), &body)["normalization"]["unboundCitations"].take(),
                 "incompleteCandidates":incomplete_audit_candidates(&raw_audit),
-                "instruction":"上次提取不完整：unboundCitations 中的条目指认的句子（sentence）或引文和条目内容对不上，unlocatableQuotes 中的引文在正文中找不到，incompleteCandidates 中的条目缺少必填字段或 evidence。请重新完整提取：每个条目都要写全必填字段，evidence.sentence 填写 bodySentences 中真正写到这件事的那一句的序号。"
+                "instruction":"上次提取不完整：unboundCitations 中的条目指认的句子（sentence）或引文和条目内容对不上，unlocatableQuotes 中的引文在正文中找不到，incompleteCandidates 中的条目缺少必填字段或 evidence。请只修正这些条目：补全缺的字段，evidence.sentence 改为 bodySentences 中真正写到这件事的那一句的序号；找不到这样一句的条目直接删掉。其余条目照上次返回，不要新增条目，canonCandidates 仍不超过 12 条。"
             });
             if error.starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS") {
                 input["auditFeedback"]["registeredPredicates"] = json!(
@@ -5234,10 +5240,15 @@ fn hold_back_audit_items(
         kept["evidenceRanges"] = json!([]);
     }
     let extraction = validate(&kept)?;
-    // Knowledge about a fact that was held back is dropped with it.
-    held.extend(extraction.dropped_unbound_knowledge.iter().map(
-        |item| json!({"field":"knowledgeCandidates","item":item,"reason":"B08_KNOWLEDGE_UNBOUND"}),
-    ));
+    // Knowledge about a fact that was held back is dropped with it, named
+    // once for all of them.
+    if !extraction.dropped_unbound_knowledge.is_empty() {
+        held.push(json!({
+            "field":"knowledgeCandidates",
+            "item":extraction.dropped_unbound_knowledge,
+            "reason":"B08_KNOWLEDGE_UNBOUND"
+        }));
+    }
     kept["normalization"]["heldBack"] = json!(held);
     Ok((kept, extraction))
 }
@@ -5272,26 +5283,86 @@ fn cap_new_threads(audit: &mut Value, known: &BTreeSet<String>) {
     if over.is_empty() {
         return;
     }
-    let (kept, held): (Vec<_>, Vec<_>) = std::mem::take(items)
+    let held = split_off_indices(items, &over).into_iter().map(
+        |item| json!({"field":"continuityCandidates","item":item,"reason":"QC1_THREAD_OVER_LIMIT"}),
+    );
+    hold_back(audit, held);
+}
+
+/// Takes the items at `indices` out of `items`, keeping the order of both.
+fn split_off_indices(items: &mut Vec<Value>, indices: &[usize]) -> Vec<Value> {
+    let (kept, taken): (Vec<_>, Vec<_>) = std::mem::take(items)
         .into_iter()
         .enumerate()
-        .partition(|(index, _)| !over.contains(index));
+        .partition(|(index, _)| !indices.contains(index));
     *items = kept.into_iter().map(|(_, item)| item).collect();
-    let held = held.into_iter().map(|(_, item)| {
-        json!({"field":"continuityCandidates","item":item,"reason":"QC1_THREAD_OVER_LIMIT"})
-    });
+    taken.into_iter().map(|(_, item)| item).collect()
+}
+
+/// Adds entries to what the audit holds back for the chapter's reminder.
+fn hold_back(audit: &mut Value, entries: impl IntoIterator<Item = Value>) {
     let list = &mut audit["normalization"]["heldBack"];
     if !list.is_array() {
         *list = json!([]);
     }
     if let Some(list) = list.as_array_mut() {
-        list.extend(held);
+        list.extend(entries);
     }
+}
+
+/// QC-1: how many new facts a chapter may record (the audit prompt, its
+/// feedback and the reminder text say 12 too).
+const MAX_NEW_FACTS: usize = 12;
+
+/// QC-1 (acceptance 2026-10-26: an audit rerun reported 66 facts for one
+/// chapter, and the next chapter's context overflowed): a chapter records
+/// at most `MAX_NEW_FACTS` facts, those about the chapter's own `people`
+/// first, then in the audit's order. The rest, and the knowledge about
+/// them, are left out with one summary entry for the reminder.
+fn cap_new_facts(audit: &mut Value, people: &[String]) {
+    let Some(facts) = audit["canonCandidates"].as_array_mut() else {
+        return;
+    };
+    if facts.len() <= MAX_NEW_FACTS {
+        return;
+    }
+    let mut order = (0..facts.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| {
+        !facts[*index]["subjectId"]
+            .as_str()
+            .is_some_and(|subject| people.iter().any(|person| person == subject))
+    });
+    let over = order.split_off(MAX_NEW_FACTS);
+    let dropped_ids = split_off_indices(facts, &over)
+        .iter()
+        .filter_map(|fact| fact["factId"].as_str().map(ToOwned::to_owned))
+        .collect::<BTreeSet<_>>();
+    let mut knowledge_dropped = 0;
+    if let Some(knowledge) = audit["knowledgeCandidates"].as_array_mut() {
+        let before = knowledge.len();
+        knowledge.retain(|item| {
+            !item["factId"]
+                .as_str()
+                .is_some_and(|fact| dropped_ids.contains(fact))
+        });
+        knowledge_dropped = before - knowledge.len();
+    }
+    hold_back(
+        audit,
+        [json!({
+            "field":"canonCandidates",
+            "item":{"facts":over.len(),"knowledge":knowledge_dropped},
+            "reason":"QC1_FACTS_OVER_LIMIT"
+        })],
+    );
 }
 
 /// Why an audit item was held back, for the reader of the reminder.
 fn held_back_reason(code: &str) -> &'static str {
     match code {
+        "QC1_FACTS_OVER_LIMIT" => {
+            "本章抽出的事实超过 12 条，本章人物以外的次要事实和相关认知没有记入档案"
+        }
         "QC1_CONTRADICTION" => "改写后这句仍和前面章节的内容矛盾，请确认是否要改",
         "QC1_CATCHPHRASE" => "改写后这个口头禅在本章仍出现不止一次",
         "QC1_THREAD_OVER_LIMIT" => {
@@ -7198,6 +7269,49 @@ mod tests {
             held_back_reason("QC1_THREAD_OVER_LIMIT"),
             "本章新开的伏笔超过 3 条，这条重要性靠后，只作为候选，没有记入档案"
         );
+    }
+
+    #[test]
+    fn qc1_a_chapter_keeps_twelve_facts_its_own_people_first_and_drops_their_knowledge_with_the_rest(
+    ) {
+        // Acceptance 2026-10-26 (second run): the audit's feedback rerun
+        // reported 66 facts and 59 knowledge items for chapter 1.
+        let fact = |index: usize, subject: &str| json!({"factId":format!("canon:qc1:{index}"),"subjectId":subject,"predicate":"status","objectJson":{"value":"甲"}});
+        let facts = (0..20)
+            .map(|index| {
+                fact(
+                    index,
+                    if index % 2 == 0 {
+                        "桂花糕"
+                    } else {
+                        "沈砚"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let knowledge = (0..20)
+            .map(|index| json!({"knowledgeId":format!("know:qc1:{index}"),"factId":format!("canon:qc1:{index}"),"knowerId":"沈砚"}))
+            .collect::<Vec<_>>();
+        let mut audit =
+            json!({"canonCandidates":facts,"knowledgeCandidates":knowledge,"normalization":{}});
+        cap_new_facts(&mut audit, &["沈砚".to_string()]);
+        let kept = audit["canonCandidates"].as_array().unwrap();
+        assert_eq!(kept.len(), MAX_NEW_FACTS);
+        assert_eq!(
+            kept.iter()
+                .filter(|fact| fact["subjectId"] == "沈砚")
+                .count(),
+            10
+        );
+        assert_eq!(
+            audit["knowledgeCandidates"].as_array().unwrap().len(),
+            MAX_NEW_FACTS
+        );
+        let held = audit["normalization"]["heldBack"].as_array().unwrap();
+        assert_eq!(held.len(), 1, "one summary entry: {held:?}");
+        assert_eq!(held[0]["reason"], "QC1_FACTS_OVER_LIMIT");
+        assert_eq!(held[0]["item"]["facts"], 8);
+        assert_eq!(held[0]["item"]["knowledge"], 8);
     }
 
     const QC1_BODY: &str = "沈砚把搪瓷猫碗放回窗台。缺口和我的碗缺耳对得上。我记东西靠形状。\n他低头看右手，虎口那道划痕淡得快看不见了。林薇没说话。";
