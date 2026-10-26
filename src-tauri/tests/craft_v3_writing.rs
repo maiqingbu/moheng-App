@@ -22,6 +22,9 @@ struct CraftGateway {
     calls: Mutex<Vec<(String, Value)>>,
     /// Chapters written so far, so each chapter's text differs.
     chapters_written: AtomicUsize,
+    /// The continuity check finds a contradiction in every chapter, also
+    /// after the rewrite.
+    contradiction_always: bool,
 }
 
 /// The inputs of every call to `capability`, in call order.
@@ -98,6 +101,15 @@ impl ProductionModelGateway for CraftGateway {
             "REWRITE_PASSAGES" => {
                 json!({"edits":[{"quote":TROPE_SENTENCE,"replacement":"林满没吭声，转身进了面馆。"}]})
             }
+            // QC-1.5: with `contradiction_always`, the first sentence
+            // contradicts chapter 1 however it is rewritten.
+            "CHECK_CONTINUITY" => {
+                let contradicting = self.contradiction_always.then_some(0);
+                json!({
+                    "contradictions":contradicting.map(|index| vec![json!({"sentence":index,"chapter":1,"established":"林满从不进面馆","conflict":"他转身进了面馆"})]).unwrap_or_default(),
+                    "catchphrases":[]
+                })
+            }
             "AUDIT_EXTRACT" => {
                 let mut audit = audit_no_change();
                 if input["continuityDetailsWanted"] == true {
@@ -118,8 +130,15 @@ impl ProductionModelGateway for CraftGateway {
 fn project_ready_to_write(
     prefix: &str,
 ) -> (tempfile::TempDir, KernelState, Arc<CraftGateway>, String) {
+    project_ready_to_write_with(prefix, CraftGateway::default())
+}
+
+fn project_ready_to_write_with(
+    prefix: &str,
+    gateway: CraftGateway,
+) -> (tempfile::TempDir, KernelState, Arc<CraftGateway>, String) {
     let temp = tempfile::tempdir().unwrap();
-    let gateway = Arc::new(CraftGateway::default());
+    let gateway = Arc::new(gateway);
     let state = KernelState::with_production_gateway(
         AppPaths::new(temp.path().to_path_buf()),
         gateway.clone(),
@@ -218,6 +237,11 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         .unwrap()
         .iter()
         .any(|finding| finding["code"] == "repeated_pattern"));
+    // QC-1.5: the body is checked once, by sentence; with nothing found
+    // there is no recheck.
+    let checks = inputs(&calls, "CHECK_CONTINUITY");
+    assert_eq!(checks.len(), 1);
+    assert!(checks[0]["bodySentences"].as_array().unwrap().len() > 40);
     drop(calls);
 
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
@@ -244,6 +268,37 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         receipt["craftSkills"]
     );
     assert_eq!(receipt["craftSkills"]["proseReview"]["editsApplied"], 1);
+    assert_eq!(
+        receipt["craftSkills"]["continuity"]["unresolved"],
+        json!([])
+    );
+}
+
+#[test]
+fn qc1_a_contradiction_the_rewrite_leaves_waits_in_the_chapter_reminder() {
+    let (_temp, state, gateway, project_id) = project_ready_to_write_with(
+        "qc15",
+        CraftGateway {
+            contradiction_always: true,
+            ..CraftGateway::default()
+        },
+    );
+    write_next_chapter(&state, &project_id, "qc15:production:1");
+    let calls = gateway.calls.lock().unwrap();
+    // The contradiction leads the findings, and the rewrite is checked again.
+    let rewrite = &inputs(&calls, "REWRITE_PASSAGES")[0];
+    assert_eq!(rewrite["findings"][0]["code"], "continuity_contradiction");
+    assert_eq!(inputs(&calls, "CHECK_CONTINUITY").len(), 2);
+    drop(calls);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='审计提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("QC1_CONTRADICTION"), "{payload}");
 }
 
 #[test]

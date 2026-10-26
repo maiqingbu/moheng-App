@@ -1765,6 +1765,9 @@ pub struct ChapterHistory {
     pub recent: Vec<serde_json::Value>,
     /// Newest first: the full bodies of the same chapters.
     pub bodies: Vec<String>,
+    /// QC-1.4: the catchphrases the continuity check named in these
+    /// chapters, for the writer to leave out.
+    pub catchphrases: Vec<String>,
 }
 
 impl ChapterHistory {
@@ -1795,10 +1798,12 @@ pub fn chapter_history(
             chapter_no,
             recent: Vec::new(),
             bodies: Vec::new(),
+            catchphrases: Vec::new(),
         });
     };
     let mut statement = connection.prepare(
-        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body'), json_extract(p.payload_json,'$.chapterRole'), (SELECT json_group_array(json_extract(scene.value,'$.sceneType')) FROM json_each(p.payload_json,'$.sceneExecution') scene) \
+        "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body'), json_extract(p.payload_json,'$.chapterRole'), (SELECT json_group_array(json_extract(scene.value,'$.sceneType')) FROM json_each(p.payload_json,'$.sceneExecution') scene), \
+         (SELECT json_extract(r.payload_json,'$.craftSkills.continuity.catchphrases') FROM artifacts ra JOIN artifact_payloads r ON r.artifact_id=ra.artifact_id AND r.version=ra.version WHERE ra.project_id=c.project_id AND ra.artifact_type='ProductionReceipt' AND json_extract(r.payload_json,'$.finalChapterRef.artifactId')=c.final_artifact_id LIMIT 1) \
          FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' ORDER BY c.chapter_no DESC LIMIT ?3",
@@ -1817,15 +1822,67 @@ pub fn chapter_history(
                         .unwrap_or_else(|| json!([]))
                 }),
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(6)?
+                    .and_then(|list| serde_json::from_str::<Vec<String>>(&list).ok())
+                    .unwrap_or_default(),
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let (recent, bodies) = rows.into_iter().unzip();
+    let mut catchphrases = Vec::new();
+    let mut recent = Vec::new();
+    let mut bodies = Vec::new();
+    for (summary, body, named) in rows {
+        recent.push(summary);
+        bodies.push(body);
+        for phrase in named {
+            if !catchphrases.contains(&phrase) {
+                catchphrases.push(phrase);
+            }
+        }
+    }
     Ok(ChapterHistory {
         chapter_no,
         recent,
         bodies,
+        catchphrases,
     })
+}
+
+/// QC-1.5: the ledger's current facts about `subjects`, newest chapter
+/// first, as `{chapter, subject, predicate, value}`.
+pub fn subject_facts(
+    connection: &Connection,
+    project_id: &str,
+    subjects: &[String],
+    limit: i64,
+) -> Result<Vec<serde_json::Value>, OpsError> {
+    if subjects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT c.chapter_no, f.subject_id, f.predicate, f.object_json FROM canon_facts f \
+         LEFT JOIN chapters c ON c.project_id=f.project_id AND c.chapter_id=f.source_chapter_id \
+         WHERE f.project_id=?1 AND f.superseded_by IS NULL AND f.subject_id IN (SELECT value FROM json_each(?2)) \
+         ORDER BY c.chapter_no DESC LIMIT ?3",
+    )?;
+    let subjects = serde_json::to_string(subjects).unwrap_or_else(|_| "[]".into());
+    let rows = statement
+        .query_map(
+            libsql_rusqlite::params![project_id, subjects, limit],
+            |row| {
+                Ok(json!({
+                    "chapter":row.get::<_, Option<i64>>(0)?,
+                    "subject":row.get::<_, String>(1)?,
+                    "predicate":row.get::<_, String>(2)?,
+                    "value":row
+                        .get::<_, String>(3)
+                        .ok()
+                        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                }))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Formal reader query for one chapter. It returns authority metadata and the

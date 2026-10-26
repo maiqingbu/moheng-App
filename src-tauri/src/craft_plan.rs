@@ -457,6 +457,24 @@ pub struct WritingContext {
 }
 
 impl WritingContext {
+    /// QC-1.4/1.5: the people of the chapter's scenes, and everyone the
+    /// story bible names besides.
+    pub fn chapter_people(&self, plan: &Value) -> (Vec<String>, Vec<String>) {
+        let present = scene_people(&plan["craft"])
+            .map(|person| text(&person["name"]).to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>();
+        let everyone = bible_people(&self.bible)
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .chain(present.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        (
+            present.into_iter().collect(),
+            everyone.into_iter().collect(),
+        )
+    }
+
     pub fn for_chapter(
         connection: &libsql_rusqlite::Connection,
         project_id: &str,

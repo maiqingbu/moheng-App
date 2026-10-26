@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter continuity check",
+  "description": "QC-1.4/1.5: sentences contradicting earlier chapters, and which phrase candidates are catchphrases.",
+  "type": "object",
+  "required": [
+    "contradictions",
+    "catchphrases"
+  ],
+  "properties": {
+    "contradictions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "sentence",
+          "chapter",
+          "established",
+          "conflict"
+        ],
+        "properties": {
+          "sentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "established": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conflict": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "catchphrases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

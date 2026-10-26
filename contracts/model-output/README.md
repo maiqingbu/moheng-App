@@ -14,5 +14,6 @@
 | `chapter-body.schema.json` | RENDER_CHAPTER_CRAFT、ADJUST_CHAPTER_LENGTH |
 | `rewrite-passages.schema.json` | REWRITE_PASSAGES |
 | `audit-extract.schema.json` | AUDIT_EXTRACT |
+| `check-continuity.schema.json` | CHECK_CONTINUITY |
 
 签约评估（OPENING_SIGNING_EVALUATION）沿用 S35 技能包自带的 outputSchema。

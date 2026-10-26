@@ -5,6 +5,7 @@
 use crate::chapter_length::ChapterLengthRange;
 use crate::skills_v2::StepSignals;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CHAPTER_ROLES: [&str; 7] = ["普通", "过渡", "重要", "升级", "回报", "高潮前", "高潮"];
 
@@ -796,16 +797,132 @@ pub fn repetition_findings(phrases: &[String], body: &str) -> Vec<Value> {
             let phrase = phrases
                 .iter()
                 .find(|phrase| uses_phrase(sentence, phrase))?;
-            let quote = (0..=index)
-                .rev()
-                .map(|from| &body[spans[from].0..end])
-                .find(|quote| body.matches(quote).nth(1).is_none())?;
+            let quote = unique_quote_ending_at(body, &spans, index)?;
             Some(rule_finding(
                 "word_repetition",
                 "MEDIUM",
                 quote,
                 format!("「{phrase}」在最近几章已经出现两次，这是第三次"),
                 "换一种说法写这句，意思和信息不变",
+            ))
+        })
+        .collect()
+}
+
+/// Sentence `index` of `body` (spans from `sentence_spans`), with the
+/// sentences before it until the quote occurs only once.
+fn unique_quote_ending_at<'a>(
+    body: &'a str,
+    spans: &[(usize, usize)],
+    index: usize,
+) -> Option<&'a str> {
+    let end = spans[index].1;
+    (0..=index)
+        .rev()
+        .map(|from| &body[spans[from].0..end])
+        .find(|quote| body.matches(quote).nth(1).is_none())
+}
+
+/// QC-1.4: how many chapters back catchphrases are looked for.
+const CATCHPHRASE_WINDOW: usize = 3;
+
+/// QC-1.4 (owner decision 2026-10-26): short phrases (3 to 6 Chinese
+/// characters) the chapter uses at least twice that also ran through the
+/// recent chapters (in at least 3 of the 4, at least 6 times in all), the
+/// longest of overlapping ones, never containing a name. Which of them are
+/// catchphrases rather than things the story names is for the continuity
+/// check to say. `{phrase, thisChapter, recentChapters}` each.
+pub fn catchphrase_candidates(history: &[String], body: &str, names: &[&str]) -> Vec<Value> {
+    let texts = history
+        .iter()
+        .take(CATCHPHRASE_WINDOW)
+        .map(String::as_str)
+        .chain([body])
+        .collect::<Vec<_>>();
+    let chars = body.chars().collect::<Vec<_>>();
+    let mut found = BTreeMap::<String, (usize, usize)>::new();
+    for size in 3..=6 {
+        for window in chars.windows(size) {
+            if !window.iter().all(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+                continue;
+            }
+            let phrase = window.iter().collect::<String>();
+            if found.contains_key(&phrase) || names.iter().any(|name| phrase.contains(name)) {
+                continue;
+            }
+            let counts = texts
+                .iter()
+                .map(|text| text.matches(phrase.as_str()).count())
+                .collect::<Vec<_>>();
+            let here = counts[counts.len() - 1];
+            let total = counts.iter().sum::<usize>();
+            if here >= 2 && counts.iter().filter(|count| **count > 0).count() >= 3 && total >= 6 {
+                found.insert(phrase, (here, total - here));
+            }
+        }
+    }
+    found
+        .iter()
+        .filter(|(phrase, (_, total))| {
+            !found.iter().any(|(longer, (_, longer_total))| {
+                longer.len() > phrase.len() && longer.contains(phrase.as_str()) && longer_total >= total
+            })
+        })
+        .map(|(phrase, (here, recent))| {
+            json!({"phrase":phrase,"thisChapter":here,"recentChapters":recent})
+        })
+        .collect()
+}
+
+/// QC-1.4: each sentence using one of `catchphrases` after the chapter's
+/// first use of it, for the rewrite to word differently.
+pub fn catchphrase_findings(catchphrases: &[String], body: &str) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    let mut seen = BTreeSet::new();
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(start, end))| {
+            let phrase = catchphrases
+                .iter()
+                .find(|phrase| body[start..end].contains(phrase.as_str()))?;
+            if seen.insert(phrase.clone()) {
+                return None;
+            }
+            Some(rule_finding(
+                "catchphrase",
+                "MEDIUM",
+                unique_quote_ending_at(body, &spans, index)?,
+                format!("「{phrase}」是这几章反复出现的口头禅，本章已经用过一次"),
+                "换一种说法写这句，或删掉这个词，意思和信息不变",
+            ))
+        })
+        .collect()
+}
+
+/// QC-1.5: a rewrite finding for each sentence the continuity check found
+/// contradicting an earlier chapter (`{sentence, chapter, established,
+/// conflict}`, `sentence` an index of `sentence_spans`).
+pub fn contradiction_findings(contradictions: &[Value], body: &str) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    contradictions
+        .iter()
+        .filter_map(|item| {
+            let index = usize::try_from(item["sentence"].as_u64()?).ok()?;
+            if index >= spans.len() {
+                return None;
+            }
+            Some(rule_finding(
+                "continuity_contradiction",
+                "HIGH",
+                unique_quote_ending_at(body, &spans, index)?,
+                format!(
+                    "和第 {} 章：{} 矛盾（{}）",
+                    item["chapter"],
+                    item["established"].as_str().unwrap_or(""),
+                    item["conflict"].as_str().unwrap_or("")
+                ),
+                "改写这句，让它和前文一致；如果情况确实变了，写出变化的原因",
             ))
         })
         .collect()

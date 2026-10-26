@@ -27,6 +27,10 @@ const SPECS: &[(&[&str], &str)] = &[
         &["AUDIT_EXTRACT"],
         include_str!("../../contracts/model-output/audit-extract.schema.json"),
     ),
+    (
+        &["CHECK_CONTINUITY"],
+        include_str!("../../contracts/model-output/check-continuity.schema.json"),
+    ),
 ];
 
 /// A spec and its compiled validator.
