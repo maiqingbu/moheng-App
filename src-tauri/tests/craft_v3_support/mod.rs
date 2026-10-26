@@ -45,7 +45,7 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
         json!({"place":place,"people":[person("林满"),person("老董")],"conflict":"两人对一笔账各执一词",
             "events":["一方拿出账本","另一方指出不对","两人争到最后各退一步"],"readerQuestion":format!("第{chapter}章这笔账到底是谁做的手脚")})
     };
-    json!({
+    let mut plan = json!({
         "payloadSchema":"chapter-plan.r2",
         "chapterId":input["chapterId"],
         "compiledFromProjectRevision":input["compiledFromProjectRevision"],
@@ -70,7 +70,13 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
             "newLosses":[format!("第{chapter}章失去一天的记忆")],
             "endHook":format!("第{chapter}章面馆门板上贴了一张新的借据")
         }
-    })
+    });
+    // QC-1.2: chapter 1 names the danger closing in on the protagonist.
+    if chapter == 1 {
+        plan["openingThreat"] =
+            json!({"danger":"彭三要收走姑妈的面馆抵债","deadline":"三天后的月底"});
+    }
+    plan
 }
 
 /// The story-directions fixture output.

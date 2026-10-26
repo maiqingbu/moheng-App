@@ -26,7 +26,7 @@ fn scene(place: &str) -> Value {
 
 /// A chapter-1 plan that passes every check against the fixture bible.
 fn plan() -> Value {
-    json!({"payloadSchema":"chapter-plan.r2","craft":{
+    let mut plan = json!({"payloadSchema":"chapter-plan.r2","craft":{
         "bigTurn":"林满发现货单是彭三的人连夜调包的",
         "smallDiscovery":"老董自己也欠着彭三一笔钱",
         "protagonistWin":"林满当着众人把调包的货单揪了出来",
@@ -37,7 +37,11 @@ fn plan() -> Value {
         "scenes":[scene("江边码头"),scene("姑妈的面馆")],
         "newLosses":["前一天的记忆"],
         "endHook":"面馆门板上贴了一张盖着红印的借据"
-    }})
+    }});
+    // QC-1.2: a first chapter carries its imminent threat.
+    plan["craft"]["scenes"][0]["conflict"] =
+        json!("货单上的箱数和船上对不上；迫近的威胁：债主要收走面馆抵债（期限：三天后）");
+    plan
 }
 
 fn has(problems: &[String], needle: &str) -> bool {

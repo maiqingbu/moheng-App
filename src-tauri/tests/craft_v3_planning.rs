@@ -26,6 +26,8 @@ struct CraftGateway {
     short_horizon_always: bool,
     /// Every plan has four scenes, the last with one person in it.
     four_scenes_always: bool,
+    /// No plan names chapter 1's imminent threat.
+    no_opening_threat: bool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -65,6 +67,9 @@ impl ProductionModelGateway for CraftGateway {
                     || self.short_horizon_always
                 {
                     plan["horizonPreview"].as_array_mut().unwrap().truncate(2);
+                }
+                if self.no_opening_threat {
+                    plan.as_object_mut().unwrap().remove("openingThreat");
                 }
                 if self.four_scenes_always {
                     let scenes = plan["craft"]["scenes"].as_array_mut().unwrap();
@@ -142,6 +147,9 @@ fn a_project_with_a_confirmed_story_bible_plans_r2_chapters_with_bible_and_ledge
         "the planner gets the bible content only"
     );
     assert_eq!(first["creationLedger"]["devices"], json!([]));
+    // QC-1.2: only chapter 1 is asked for its imminent threat.
+    assert_eq!(first["openingThreatWanted"], true);
+    assert!(inputs[2].get("openingThreatWanted").is_none());
     let feedback = &inputs[1]["planFeedback"];
     assert_eq!(feedback["rejectedFor"], "B08_PLAN_CRAFT");
     assert!(feedback["problems"][0]
@@ -450,4 +458,119 @@ fn a_plan_that_keeps_four_scenes_is_folded_to_three_and_written_with_a_plan_remi
         )
         .unwrap();
     assert!(payload.contains("并入"), "{payload}");
+}
+
+#[test]
+fn qc1_chapter_one_carries_its_imminent_threat_in_the_first_scene() {
+    // QC-1.2 (owner decision 2026-10-26): the danger and its deadline join
+    // the first scene's conflict, where the writer reads it.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway::default());
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "threat");
+    command(
+        &state,
+        &project_id,
+        "threat:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "threat:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "threat:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let conflict: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.craft.scenes[0].conflict') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterPlan' ORDER BY a.version DESC LIMIT 1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        conflict.contains("迫近的威胁：彭三要收走姑妈的面馆抵债（期限：三天后的月底）"),
+        "{conflict}"
+    );
+}
+
+#[test]
+fn qc1_chapter_one_without_an_imminent_threat_is_written_with_a_plan_reminder() {
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        no_opening_threat: true,
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "nothreat");
+    command(
+        &state,
+        &project_id,
+        "nothreat:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "nothreat:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "nothreat:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let inputs = gateway.plan_inputs.lock().unwrap();
+    assert!(inputs[1]["planFeedback"]["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|problem| problem.as_str().unwrap().contains("迫在眉睫的威胁")));
+    drop(inputs);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='计划提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("迫在眉睫的威胁"), "{payload}");
 }

@@ -39,6 +39,32 @@ pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 2..=3;
 pub(crate) const MIN_SCENE_PEOPLE: usize = 2;
 pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 3..=5;
 
+/// QC-1.2: what marks chapter 1's imminent threat in its first scene.
+const OPENING_THREAT_MARK: &str = "迫近的威胁：";
+
+/// QC-1.2 (owner decision 2026-10-26): the planner's `openingThreat` for
+/// chapter 1 (the danger and how soon it falls) joins the first scene's
+/// conflict, where the writer reads it, so the plan keeps its contract.
+pub fn fold_opening_threat(plan: &mut Value) {
+    let Some(threat) = plan
+        .as_object_mut()
+        .and_then(|object| object.remove("openingThreat"))
+    else {
+        return;
+    };
+    let (danger, deadline) = (text(&threat["danger"]), text(&threat["deadline"]));
+    if danger.is_empty() || deadline.is_empty() {
+        return;
+    }
+    if let Some(conflict) = plan.pointer_mut("/craft/scenes/0/conflict") {
+        let line = format!("{OPENING_THREAT_MARK}{danger}（期限：{deadline}）");
+        *conflict = json!(match text(conflict) {
+            "" => line,
+            before => format!("{before}；{line}"),
+        });
+    }
+}
+
 pub(crate) fn text(value: &Value) -> &str {
     value.as_str().unwrap_or("").trim()
 }
@@ -131,6 +157,16 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     // The plan shape, checked here rather than only by the contract so the
     // planner gets these back with the other problems.
     let scene_list = scenes(craft);
+    if chapter == 1
+        && !scene_list
+            .first()
+            .is_some_and(|scene| text(&scene["conflict"]).contains(OPENING_THREAT_MARK))
+    {
+        problems.push(
+            "第一章需要迫在眉睫的威胁：在 openingThreat 里写明什么危险、多久之内会落到主角身上"
+                .into(),
+        );
+    }
     if !SCENE_COUNT.contains(&scene_list.len()) {
         problems.push(format!(
             "需要 {} 到 {} 个场景，现在有 {} 个",
@@ -501,6 +537,9 @@ impl ChapterPlanner {
             input["creationLedger"] = prompt_ledger(&craft.ledger);
             input["establishedFacts"] = json!(craft.established_facts);
             input["chapterNumber"] = json!(self.chapter);
+            if self.chapter == 1 {
+                input["openingThreatWanted"] = json!(true);
+            }
         }
     }
 
