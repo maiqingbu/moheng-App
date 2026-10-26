@@ -6,11 +6,11 @@ pub mod runtime;
 pub use runtime::{
     build_continuity_threads, build_volume_progress, commit_context_manifest_owner,
     commit_opening_context_owner, compile_context_manifest, evaluate_plan_stale,
-    evaluate_resume_condition, measure_context_hard_budget, relevant_state_digest,
-    validate_context_hard_budget, validate_context_hard_completeness, ContextCompilerInput,
-    ContextHardBudgetUsage, ContextHardSource, ContinuityThreadView, CurrentNarrativeStateView,
-    PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
-    CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, CONTEXT_HARD_TOKEN_LIMIT,
+    evaluate_resume_condition, fit_context_hard_budget, measure_context_hard_budget,
+    relevant_state_digest, validate_context_hard_budget, validate_context_hard_completeness,
+    ContextCompilerInput, ContextHardBudgetUsage, ContextHardSource, ContinuityThreadView,
+    CurrentNarrativeStateView, PlanStaleStatus, ResumeContext, RuntimeBounds, VolumeProgressInput,
+    CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, CONTEXT_HARD_TOKEN_LIMIT, STATE_SOURCE_LIMIT,
 };
 pub use runtime::{project_applicable_future_reservations, ContextPlanTask, GoalContractField};
 

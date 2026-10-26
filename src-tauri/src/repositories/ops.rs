@@ -1848,6 +1848,27 @@ pub fn chapter_history(
     })
 }
 
+/// QC-1: the chapter number each fact, relation or knowledge item among
+/// `ids` was recorded in, for trimming a context oldest first.
+pub fn source_chapter_numbers(
+    connection: &Connection,
+    project_id: &str,
+    ids: &[&str],
+) -> Result<std::collections::BTreeMap<String, i64>, OpsError> {
+    let ids = serde_json::to_string(ids).unwrap_or_default();
+    let mut statement = connection.prepare(
+        "SELECT f.fact_id, c.chapter_no FROM canon_facts f JOIN chapters c ON c.project_id=f.project_id AND c.chapter_id=COALESCE(f.source_chapter_id, f.valid_from_chapter_id) WHERE f.project_id=?1 AND f.fact_id IN (SELECT value FROM json_each(?2)) \
+         UNION ALL SELECT r.relation_id, c.chapter_no FROM canon_relations r JOIN chapters c ON c.project_id=r.project_id AND c.chapter_id=r.valid_from_chapter_id WHERE r.project_id=?1 AND r.relation_id IN (SELECT value FROM json_each(?2)) \
+         UNION ALL SELECT k.knowledge_id, c.chapter_no FROM canon_knowledge k JOIN chapters c ON c.project_id=k.project_id AND c.chapter_id=k.from_chapter_id WHERE k.project_id=?1 AND k.knowledge_id IN (SELECT value FROM json_each(?2))",
+    )?;
+    let rows = statement
+        .query_map(libsql_rusqlite::params![project_id, ids], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// QC-1.5: the ledger's current facts about `subjects`, newest chapter
 /// first, as `{chapter, subject, predicate, value}`.
 pub fn subject_facts(

@@ -625,6 +625,13 @@ impl NarrativeRepository {
         limit.clamp(1, 100)
     }
 
+    /// QC-1 (owner decision 2026-10-26): the narrative state a context is
+    /// compiled from may hold up to `STATE_SOURCE_LIMIT` facts, relations
+    /// and knowledge items; the compiler trims them to its budget.
+    fn state_limit(limit: i64) -> i64 {
+        limit.clamp(1, crate::narrative::STATE_SOURCE_LIMIT)
+    }
+
     fn ids_json(ids: &[&str]) -> Result<String, NarrativeRepositoryError> {
         Ok(serde_json::to_string(ids)?)
     }
@@ -1026,7 +1033,7 @@ impl NarrativeRepository {
         entity_ids: &[&str],
         limit: i64,
     ) -> Result<(Vec<CanonFactRecord>, bool), NarrativeRepositoryError> {
-        let bound = Self::limit(limit);
+        let bound = Self::state_limit(limit);
         let entity_ids = Self::ids_json(entity_ids)?;
         let mut statement = connection.prepare(CURRENT_CANON_BOUNDED_SQL)?;
         let rows = statement.query_map(
@@ -1220,7 +1227,7 @@ impl NarrativeRepository {
         let ids = Self::ids_json(entity_ids)?;
         let mut statement = connection.prepare("SELECT relation_id, subject_id, predicate, object_id, authority_level FROM canon_relations WHERE project_id=?1 AND (subject_id IN (SELECT value FROM json_each(?2)) OR object_id IN (SELECT value FROM json_each(?2))) ORDER BY relation_id LIMIT ?3")?;
         let rows = statement.query_map(
-            libsql_rusqlite::params![project_id, ids, Self::limit(limit)],
+            libsql_rusqlite::params![project_id, ids, Self::state_limit(limit)],
             |row| {
                 Ok(RelationRecord {
                     relation_id: row.get(0)?,
@@ -1241,7 +1248,7 @@ impl NarrativeRepository {
         limit: i64,
     ) -> Result<bool, NarrativeRepositoryError> {
         let ids = Self::ids_json(entity_ids)?;
-        connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_relations WHERE project_id=?1 AND (subject_id IN (SELECT value FROM json_each(?2)) OR object_id IN (SELECT value FROM json_each(?2))) LIMIT 1 OFFSET ?3)", libsql_rusqlite::params![project_id, ids, Self::limit(limit)], |row| row.get(0)).map_err(Into::into)
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM canon_relations WHERE project_id=?1 AND (subject_id IN (SELECT value FROM json_each(?2)) OR object_id IN (SELECT value FROM json_each(?2))) LIMIT 1 OFFSET ?3)", libsql_rusqlite::params![project_id, ids, Self::state_limit(limit)], |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn canon_evidence_by_ref(
@@ -1289,7 +1296,7 @@ impl NarrativeRepository {
     ) -> Result<(Vec<KnowledgeRecord>, bool), NarrativeRepositoryError> {
         let mut statement = connection.prepare("SELECT k.knowledge_id, k.knower_id, k.fact_id, k.epistemic_state, k.visibility_scope, k.from_chapter_id, COALESCE((SELECT tp.story_time FROM canon_timepoints tp WHERE tp.project_id=k.project_id AND tp.chapter_id=k.from_chapter_id), (SELECT e.story_time FROM canon_evidence ce JOIN canon_events e ON e.project_id=ce.project_id AND e.event_id=ce.event_id WHERE ce.project_id=k.project_id AND ce.fact_id=k.fact_id ORDER BY e.event_ordinal, e.event_id, ce.evidence_id LIMIT 1)) FROM canon_knowledge k WHERE k.project_id=?1 AND k.knower_id IN (SELECT value FROM json_each(?2)) ORDER BY k.knowledge_id LIMIT ?3")?;
         let ids = serde_json::to_string(entity_ids)?;
-        let bound = Self::limit(limit);
+        let bound = Self::state_limit(limit);
         let rows = statement.query_map(
             libsql_rusqlite::params![project_id, ids, bound + 1],
             |row| {

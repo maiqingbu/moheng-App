@@ -1483,7 +1483,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1493,7 +1493,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1503,7 +1503,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Knowledge,
         &scope,
@@ -1525,7 +1525,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -3323,7 +3323,13 @@ pub(crate) fn context_input_from_authority(
         hard_tokens: 0,
         soft_tokens: 0,
     };
-    input.hard_tokens = crate::narrative::measure_context_hard_budget(&input)?.estimated_tokens;
+    // QC-1 (owner decision 2026-10-26): a context over budget leaves out the
+    // oldest and least binding facts instead of failing.
+    input.hard_tokens = crate::narrative::fit_context_hard_budget(&mut input, &|ids| {
+        crate::repositories::ops::source_chapter_numbers(connection, project_id, ids)
+            .map_err(|error| error.to_string())
+    })?
+    .estimated_tokens;
     crate::narrative::validate_context_hard_completeness(&input)?;
     Ok(input)
 }
