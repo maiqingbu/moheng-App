@@ -25,6 +25,10 @@ struct CraftGateway {
     /// The continuity check finds a contradiction in every chapter, also
     /// after the rewrite.
     contradiction_always: bool,
+    /// Every continuity check call fails.
+    check_fails: bool,
+    /// Every passage rewrite call fails.
+    rewrite_fails: bool,
 }
 
 /// The inputs of every call to `capability`, in call order.
@@ -37,6 +41,8 @@ fn inputs(calls: &[(String, Value)], capability: &str) -> Vec<Value> {
 }
 
 const TROPE_SENTENCE: &str = "林满倒吸一口凉气，转身进了面馆。";
+/// Clashes with chapter 1's detail that 林满 takes his soy milk unsweetened.
+const SUGAR_SENTENCE: &str = "林满往豆浆里加了两勺糖。";
 
 /// A chapter in the 番茄 range (1800–2200, LD-1.5) with one stock phrasing.
 fn long_body(chapter: usize) -> String {
@@ -44,6 +50,7 @@ fn long_body(chapter: usize) -> String {
         .map(|index| format!("货单第{index}页写着{index}箱桐油，老董按了第{chapter}个手印。"))
         .collect::<Vec<_>>();
     lines.insert(40, TROPE_SENTENCE.to_string());
+    lines.insert(10, SUGAR_SENTENCE.to_string());
     lines.join("\n")
 }
 
@@ -98,15 +105,26 @@ impl ProductionModelGateway for CraftGateway {
                 let chapter = self.chapters_written.fetch_add(1, Ordering::SeqCst) + 1;
                 json!({"body":long_body(chapter)})
             }
+            "REWRITE_PASSAGES" if self.rewrite_fails => {
+                return Err("P01_PROVIDER_HTTP_STATUS:503".into());
+            }
             "REWRITE_PASSAGES" => {
                 json!({"edits":[{"quote":TROPE_SENTENCE,"replacement":"林满没吭声，转身进了面馆。"}]})
             }
-            // QC-1.5: with `contradiction_always`, the first sentence
-            // contradicts chapter 1 however it is rewritten.
+            // QC-1.5: with `contradiction_always`, the sugar sentence
+            // contradicts chapter 1's first detail however it is rewritten.
+            "CHECK_CONTINUITY" if self.check_fails => {
+                return Err("P01_PROVIDER_HTTP_STATUS:503".into());
+            }
             "CHECK_CONTINUITY" => {
-                let contradicting = self.contradiction_always.then_some(0);
+                let contradicting = input["bodySentences"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|sentence| sentence == SUGAR_SENTENCE)
+                    .filter(|_| self.contradiction_always);
                 json!({
-                    "contradictions":contradicting.map(|index| vec![json!({"sentence":index,"chapter":1,"established":"林满从不进面馆","conflict":"他转身进了面馆"})]).unwrap_or_default(),
+                    "contradictions":contradicting.map(|index| vec![json!({"sentence":index,"fact":0,"conflict":"他往豆浆里加了糖","impossibleTogether":true})]).unwrap_or_default(),
                     "catchphrases":[]
                 })
             }
@@ -265,9 +283,10 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         receipt["craftSkills"]
     );
     assert_eq!(receipt["craftSkills"]["proseReview"]["editsApplied"], 1);
+    // The fixture's body never shows the planned threat in its first third.
     assert_eq!(
-        receipt["craftSkills"]["continuity"]["unresolved"],
-        json!([])
+        receipt["craftSkills"]["continuity"]["unresolved"][0]["reason"],
+        json!("QC1_OPENING_THREAT_LATE")
     );
 }
 
@@ -288,14 +307,14 @@ fn qc1_a_contradiction_the_rewrite_leaves_waits_in_the_chapter_reminder() {
     let checks = inputs(&calls, "CHECK_CONTINUITY");
     assert_eq!(checks.len(), 2, "a check and a recheck");
     assert!(checks[0]["bodySentences"].as_array().unwrap().len() > 40);
-    assert!(!checks[0]["establishedFacts"].as_array().unwrap().is_empty());
+    assert_eq!(checks[0]["earlierFacts"][0]["fact"], "喝豆浆不加糖");
     let rewrite = inputs(&calls, "REWRITE_PASSAGES").pop().unwrap();
     assert_eq!(rewrite["findings"][0]["code"], "continuity_contradiction");
     drop(calls);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let payload: String = connection
         .query_row(
-            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='审计提醒'",
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.title') LIKE '第 2 章%'",
             [&project_id],
             |row| row.get(0),
         )
@@ -325,4 +344,50 @@ fn habits_and_looks_from_the_audit_reach_the_next_chapter_as_established_facts()
     );
     let renders = inputs("RENDER_CHAPTER_CRAFT");
     assert_eq!(renders[1]["establishedFacts"][0]["detail"], "喝豆浆不加糖");
+}
+
+#[test]
+fn qc1_a_failed_continuity_check_never_stops_the_chapter() {
+    // The check only advises: its failure is recorded, the chapter commits.
+    let (_temp, state, _gateway, project_id) = project_ready_to_write_with(
+        "qcfail",
+        CraftGateway {
+            check_fails: true,
+            ..CraftGateway::default()
+        },
+    );
+    write_next_chapter(&state, &project_id, "qcfail:production:1");
+    write_next_chapter(&state, &project_id, "qcfail:production:2");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let errors: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.craftSkills.continuity.errors') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt' AND json_array_length(json_extract(p.payload_json,'$.craftSkills.continuity.errors'))>0",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(errors.contains("unavailable"), "{errors}");
+}
+
+#[test]
+fn qc1_a_failed_rewrite_never_stops_the_chapter() {
+    let (_temp, state, _gateway, project_id) = project_ready_to_write_with(
+        "rwfail",
+        CraftGateway {
+            rewrite_fails: true,
+            ..CraftGateway::default()
+        },
+    );
+    write_next_chapter(&state, &project_id, "rwfail:production:1");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let review: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.craftSkills.proseReview') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let review: Value = serde_json::from_str(&review).unwrap();
+    assert!(review["rewriteError"].is_string(), "{review}");
+    assert_eq!(review["editsApplied"], 0);
 }

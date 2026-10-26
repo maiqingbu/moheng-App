@@ -6,6 +6,7 @@
 //! deterministic local boundary used by the formal command path; a provider
 //! adapter can replace their transport without changing the commit protocol.
 
+use crate::chapter_craft::telling_pairs;
 use crate::commit::CommitService;
 use crate::generated::types::{
     ArtifactEnvelope, ArtifactEnvelopeProvenance, ArtifactRef, ArtifactStatus, ArtifactType,
@@ -3053,12 +3054,15 @@ fn run_chapter_production_inner(
         } else {
             let review_guidance = crate::chapter_craft::guidance("review", &craft_signals)?;
             craft_skills["review"] = json!(skill_ids(&review_guidance));
+            // The review only advises: when it fails, the chapter goes on
+            // with the rule findings and the failure is recorded.
             craft_step(
                 "review",
                 "REVIEW_CHAPTER",
                 &gateway.resolve_step_profile("REVIEW_CHAPTER")?,
                 json!({"chapterId":chapter_id,"chapterGoal":plan_payload.get("chapterGoal"),"sceneExecution":plan_payload.get("sceneExecution"),"body":body,"findingCodes":codes,"craftGuidance":review_guidance}),
-            )?
+            )
+            .unwrap_or_else(|error| json!({"reviewError":error}))
         };
         let findings = review
             .get("findings")
@@ -3102,67 +3106,111 @@ fn run_chapter_production_inner(
         // the sentences contradicting earlier chapters and which repeated
         // short phrases are catchphrases; both lead the findings too.
         let mut candidates = Vec::new();
+        let mut earlier_facts = Vec::new();
         let mut continuity_input = None;
         if let Some(writing) = &craft_writing {
             let (present, names) = writing.chapter_people(&plan_payload);
             let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+            let ledger_facts =
+                crate::repositories::ops::subject_facts(connection, &project_id, &present, 40)
+                    .map_err(|error| error.to_string())?;
+            earlier_facts = crate::chapter_craft::earlier_facts(&established_facts, &ledger_facts);
+            // What the story names (people, objects, places, devices) is
+            // never a catchphrase, however often it recurs.
+            let story_text = format!(
+                "{}{}{}",
+                writing.bible,
+                plan_payload["craft"],
+                json!(earlier_facts)
+            );
             candidates = crate::chapter_craft::catchphrase_candidates(
                 &chapter_history.bodies,
                 &body,
                 &names,
+                &story_text,
             );
-            let ledger_facts =
-                crate::repositories::ops::subject_facts(connection, &project_id, &present, 40)
-                    .map_err(|error| error.to_string())?;
-            let nothing_to_check = candidates.is_empty()
-                && ledger_facts.is_empty()
-                && established_facts.as_array().is_none_or(Vec::is_empty);
-            if !nothing_to_check {
+            if !candidates.is_empty() || !earlier_facts.is_empty() {
                 continuity_input = Some(json!({
                     "chapterNumber":chapter_number,
-                    "establishedFacts":established_facts,
-                    "ledgerFacts":ledger_facts
+                    "earlierFacts":earlier_facts
                 }));
             }
         }
         let continuity_profile = gateway.resolve_step_profile("CHECK_CONTINUITY")?;
-        // The check of `text`, with the phrase candidates when given.
+        let mut continuity_errors = Vec::new();
+        // The check's request for `text` (with the phrase candidates when
+        // given) and the body's sentences it cites by number.
         let continuity_request = |text: &str, candidates: &[Value]| {
             continuity_input.clone().map(|mut input| {
-                input["bodySentences"] = json!(body_sentences(text)
+                let sentences = body_sentences(text)
                     .into_iter()
                     .map(|(_, _, sentence)| sentence)
-                    .collect::<Vec<_>>());
+                    .collect::<Vec<_>>();
+                input["bodySentences"] = json!(sentences);
                 input["phraseCandidates"] = json!(candidates);
-                input
+                (input, sentences)
             })
         };
-        let checked = continuity_request(&body, &candidates)
-            .map(|input| craft_step("continuity", "CHECK_CONTINUITY", &continuity_profile, input))
-            .transpose()?
-            .unwrap_or_else(|| json!({}));
-        let contradictions = checked["contradictions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let catchphrases = checked["catchphrases"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter(|phrase| {
-                candidates
-                    .iter()
-                    .any(|candidate| candidate["phrase"] == *phrase)
-            })
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        // What a check reports that holds up. The check only advises: a
+        // failed call or an untrusted reply leaves the chapter as it is and
+        // is recorded.
+        let judge = |checked: Result<Value, String>,
+                     sentences: &[String],
+                     candidates: &[Value],
+                     errors: &mut Vec<String>|
+         -> (Vec<Value>, Vec<String>) {
+            let checked = match checked {
+                Ok(checked) => checked,
+                Err(error) => {
+                    errors.push(error);
+                    return (Vec::new(), Vec::new());
+                }
+            };
+            let contradictions = crate::chapter_craft::credible_contradictions(
+                checked["contradictions"]
+                    .as_array()
+                    .map_or(&[], Vec::as_slice),
+                &earlier_facts,
+                sentences,
+                chapter_number.map_or(1, i64::from),
+            )
+            .unwrap_or_else(|error| {
+                errors.push(error);
+                Vec::new()
+            });
+            let catchphrases = checked["catchphrases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|phrase| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate["phrase"] == *phrase)
+                })
+                .map(ToOwned::to_owned)
+                .collect();
+            (contradictions, catchphrases)
+        };
+        let (contradictions, catchphrases) = match continuity_request(&body, &candidates) {
+            Some((input, sentences)) => judge(
+                craft_step("continuity", "CHECK_CONTINUITY", &continuity_profile, input),
+                &sentences,
+                &candidates,
+                &mut continuity_errors,
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
         // A sentence the check flagged is fixed for that reason first; a
         // repeat already flagged by a rule keeps the rule's finding.
         let mut leading_findings =
             crate::chapter_craft::contradiction_findings(&contradictions, &body);
         leading_findings.extend(crate::chapter_craft::catchphrase_findings(
             &catchphrases,
+            &body,
+        ));
+        leading_findings.extend(crate::chapter_craft::copied_sentence_findings(
+            &chapter_history.bodies,
             &body,
         ));
         rules.retain(|rule| {
@@ -3202,6 +3250,7 @@ fn run_chapter_production_inner(
         let mut applied = 0;
         let mut in_range = true;
         let mut repeats_grew = false;
+        let mut rewrite_error = None;
         if !to_fix.is_empty() || !repeated.is_empty() {
             craft_signals.findings = to_fix
                 .iter()
@@ -3215,12 +3264,18 @@ fn run_chapter_production_inner(
             let rewrite_guidance = crate::chapter_craft::guidance("rewrite", &craft_signals)?;
             craft_skills["rewrite"] = json!(skill_ids(&rewrite_guidance));
             let rewrite_profile = gateway.resolve_step_profile("REWRITE_PASSAGES")?;
+            // The rewrite only improves the chapter: when it fails, the
+            // chapter goes on as written and the failure is recorded.
             let rewrite = craft_step(
                 "rewrite",
                 "REWRITE_PASSAGES",
                 &rewrite_profile,
                 json!({"chapterId":chapter_id,"body":body,"findings":to_fix,"repeatedPhrases":repeated,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
-            )?;
+            )
+            .unwrap_or_else(|error| {
+                rewrite_error = Some(error);
+                json!({"edits":[]})
+            });
             let (revised, count) = apply_unique_edits(&body, &rewrite);
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
@@ -3249,25 +3304,46 @@ fn run_chapter_production_inner(
             .filter(|phrase| body.matches(phrase.as_str()).count() > 1)
             .map(|phrase| json!({"field":"continuity","item":phrase,"reason":"QC1_CATCHPHRASE"}))
             .collect::<Vec<_>>();
-        if let Some(input) = continuity_request(&body, &[]).filter(|_| !contradictions.is_empty()) {
-            let rechecked = craft_step(
-                "continuity-recheck",
-                "CHECK_CONTINUITY",
-                &continuity_profile,
-                input,
-            )?;
-            unresolved.extend(
-                rechecked["contradictions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|item| json!({"field":"continuity","item":item,"reason":"QC1_CONTRADICTION"})),
-            );
+        // A rewritten chapter is checked again; one the rewrite left as it
+        // was still has what the first check found.
+        let rewritten = applied > 0 && in_range && !repeats_grew;
+        let left = match continuity_request(&body, &[]) {
+            Some((input, sentences)) if rewritten && !contradictions.is_empty() => {
+                judge(
+                    craft_step(
+                        "continuity-recheck",
+                        "CHECK_CONTINUITY",
+                        &continuity_profile,
+                        input,
+                    ),
+                    &sentences,
+                    &[],
+                    &mut continuity_errors,
+                )
+                .0
+            }
+            _ if rewritten => Vec::new(),
+            _ => contradictions.clone(),
+        };
+        unresolved
+            .extend(left.into_iter().map(
+                |item| json!({"field":"continuity","item":item,"reason":"QC1_CONTRADICTION"}),
+            ));
+        // QC-1.2: chapter 1's threat belongs near its start.
+        if chapter_number == Some(1)
+            && !crate::chapter_craft::opening_threat_on_page(&plan_payload, &body)
+        {
+            unresolved.push(json!({
+                "field":"opening",
+                "item":plan_payload.pointer("/craft/scenes/0/conflict"),
+                "reason":"QC1_OPENING_THREAT_LATE"
+            }));
         }
         craft_skills["continuity"] = json!({
             "contradictions":contradictions,
             "catchphrases":catchphrases,
-            "unresolved":unresolved
+            "unresolved":unresolved,
+            "errors":continuity_errors
         });
         continuity_held = unresolved;
         craft_skills["proseReview"] = json!({
@@ -3276,7 +3352,9 @@ fn run_chapter_production_inner(
             "repeatedPhrases":repeated.len(),
             "ruleCodes":rules.iter().map(|rule| rule["code"].clone()).collect::<Vec<_>>(),
             "editsApplied":if discarded.is_null() { applied } else { 0 },
-            "discarded":discarded
+            "discarded":discarded,
+            "rewriteError":rewrite_error,
+            "reviewError":review.get("reviewError")
         });
         if let Some(writing) = &craft_writing {
             craft_skills["proseReview"]["rhythmNotes"] = json!(writing
@@ -5363,6 +5441,9 @@ fn held_back_reason(code: &str) -> &'static str {
         "QC1_FACTS_OVER_LIMIT" => {
             "本章抽出的事实超过 12 条，本章人物以外的次要事实和相关认知没有记入档案"
         }
+        "QC1_OPENING_THREAT_LATE" => {
+            "第一章规划的迫近威胁没有在正文前三分之一写出来，开篇紧迫感不足"
+        }
         "QC1_CONTRADICTION" => "改写后这句仍和前面章节的内容矛盾，请确认是否要改",
         "QC1_CATCHPHRASE" => "改写后这个口头禅在本章仍出现不止一次",
         "QC1_THREAD_OVER_LIMIT" => {
@@ -5687,24 +5768,6 @@ pub(crate) fn body_sentences(body: &str) -> Vec<(usize, usize, String)> {
             let text = body[start..end].to_owned();
             (from, from + text.chars().count(), text)
         })
-        .collect()
-}
-
-/// Characters too common to tie a passage to a fact.
-const COMMON_CHARACTERS: &str =
-    "的了着过在是有不没也都就还又和与及把被给让向对从到为他她它我你们这那个一上下里中正很再已";
-
-/// The pairs of adjacent Chinese characters in `text` that can tie a
-/// passage to it.
-fn telling_pairs(text: &str) -> BTreeSet<(char, char)> {
-    let chars = text.chars().collect::<Vec<_>>();
-    chars
-        .windows(2)
-        .filter(|pair| {
-            pair.iter()
-                .all(|c| crate::chapter_craft::is_han(*c) && !COMMON_CHARACTERS.contains(*c))
-        })
-        .map(|pair| (pair[0], pair[1]))
         .collect()
 }
 

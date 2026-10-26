@@ -828,16 +828,202 @@ pub(crate) fn is_han(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 
+/// Characters too common to tie a passage to a fact.
+const COMMON_CHARACTERS: &str =
+    "的了着过在是有不没也都就还又和与及把被给让向对从到为他她它我你们这那个一上下里中正很再已";
+
+/// The pairs of adjacent Chinese characters in `text` that can tie a
+/// passage to it.
+pub(crate) fn telling_pairs(text: &str) -> BTreeSet<(char, char)> {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars
+        .windows(2)
+        .filter(|pair| {
+            pair.iter()
+                .all(|c| is_han(*c) && !COMMON_CHARACTERS.contains(*c))
+        })
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+/// QC-1.5: the most contradictions a chapter's check may keep, and the
+/// most it may report before the whole check is distrusted.
+const MAX_CONTRADICTIONS: usize = 5;
+const UNTRUSTED_CONTRADICTIONS: usize = 15;
+
+/// QC-1.5 (2026-10-26, third acceptance: 169 reported, nearly all
+/// restatements, omissions or facts of the same chapter): the reported
+/// contradictions that hold up, as `{sentence, chapter, established,
+/// conflict}`. The check cites a sentence and an `earlierFacts` entry by
+/// number; a report is kept only when both exist, the fact is from an
+/// earlier chapter than `chapter`, the check says the two cannot both be
+/// true, they share a telling character pair (the same matter), the
+/// sentence does not just restate the fact, and the sentence was not kept
+/// already; at most `MAX_CONTRADICTIONS`. A check reporting more than
+/// `UNTRUSTED_CONTRADICTIONS` is not trusted at all (`Err`).
+pub fn credible_contradictions(
+    reported: &[Value],
+    earlier_facts: &[Value],
+    sentences: &[String],
+    chapter: i64,
+) -> Result<Vec<Value>, String> {
+    if reported.len() > UNTRUSTED_CONTRADICTIONS {
+        return Err(format!("QC1_CONTINUITY_UNTRUSTED:{}", reported.len()));
+    }
+    let squeeze = |text: &str| text.chars().filter(|c| is_han(*c)).collect::<String>();
+    let mut kept = Vec::<Value>::new();
+    for item in reported {
+        if item["impossibleTogether"] != json!(true) {
+            continue;
+        }
+        let Some(number) = item["sentence"].as_u64() else {
+            continue;
+        };
+        let (Some(sentence), Some(fact)) = (
+            sentences.get(number as usize),
+            item["fact"]
+                .as_u64()
+                .and_then(|index| earlier_facts.get(index as usize)),
+        ) else {
+            continue;
+        };
+        let from = fact["chapter"].as_i64().unwrap_or(chapter);
+        let established = fact["fact"].as_str().unwrap_or("");
+        let (said, fixed) = (squeeze(sentence), squeeze(established));
+        let restates = said.contains(&fixed) || fixed.contains(&said);
+        if from >= chapter
+            || restates
+            || telling_pairs(sentence).is_disjoint(&telling_pairs(established))
+            || kept.iter().any(|other| other["sentence"] == json!(number))
+        {
+            continue;
+        }
+        kept.push(json!({
+            "sentence":number,
+            "chapter":from,
+            "established":established,
+            "conflict":item["conflict"]
+        }));
+        if kept.len() == MAX_CONTRADICTIONS {
+            break;
+        }
+    }
+    Ok(kept)
+}
+
+/// QC-1.5: what earlier chapters fixed, numbered for the continuity check
+/// to cite (`{n, chapter, subject, fact}`): the established details, then
+/// the ledger's facts that name the chapter they come from.
+pub fn earlier_facts(established: &Value, ledger: &[Value]) -> Vec<Value> {
+    let details = established.as_array().into_iter().flatten().map(|detail| {
+        (
+            detail["chapter"].clone(),
+            detail["subject"].clone(),
+            detail["detail"].as_str().unwrap_or("").to_owned(),
+        )
+    });
+    let facts = ledger
+        .iter()
+        .filter(|fact| fact["chapter"].is_i64())
+        .map(|fact| {
+            let mut parts = Vec::new();
+            collect_strings(&fact["value"], &mut parts);
+            (
+                fact["chapter"].clone(),
+                fact["subject"].clone(),
+                format!(
+                    "{}：{}",
+                    fact["predicate"].as_str().unwrap_or(""),
+                    parts.join("，")
+                ),
+            )
+        });
+    details
+        .chain(facts)
+        .filter(|(_, _, fact)| !fact.is_empty())
+        .enumerate()
+        .map(|(n, (chapter, subject, fact))| {
+            json!({"n":n,"chapter":chapter,"subject":subject,"fact":fact})
+        })
+        .collect()
+}
+
+/// QC-1: how long a sentence copied from a recent chapter must be to count,
+/// and how many chapters back copies are looked for.
+const COPIED_SENTENCE_CHARACTERS: usize = 15;
+const COPIED_SENTENCE_WINDOW: usize = 3;
+
+/// QC-1 (third acceptance: 14 sentences repeated word for word across
+/// chapters): each sentence of `body` of at least
+/// `COPIED_SENTENCE_CHARACTERS` characters that occurs word for word in one
+/// of the recent chapters, for the rewrite to word anew.
+pub fn copied_sentence_findings(history: &[String], body: &str) -> Vec<Value> {
+    let spans = sentence_spans(body);
+    spans
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(start, end))| {
+            let sentence = &body[start..end];
+            if sentence.chars().count() < COPIED_SENTENCE_CHARACTERS
+                || !history
+                    .iter()
+                    .take(COPIED_SENTENCE_WINDOW)
+                    .any(|text| text.contains(sentence))
+            {
+                return None;
+            }
+            Some(rule_finding(
+                "copied_sentence",
+                "MEDIUM",
+                unique_quote_ending_at(body, &spans, index)?,
+                "这句和最近几章里的一句一字不差".into(),
+                "换一种写法，或删去重复的交代，意思和信息不变",
+            ))
+        })
+        .collect()
+}
+
+/// QC-1.2: whether chapter 1's planned threat (the first scene's
+/// 迫近的威胁) shows within the first `OPENING_THREAT_WITHIN` characters of
+/// `body`, the place the writer is told to put it: at least `THREAT_PAIRS`
+/// telling character pairs of it are there. Without a planned threat there
+/// is nothing to check.
+pub fn opening_threat_on_page(plan: &Value, body: &str) -> bool {
+    const THREAT_PAIRS: usize = 3;
+    let Some((_, threat)) = plan
+        .pointer("/craft/scenes/0/conflict")
+        .and_then(Value::as_str)
+        .and_then(|conflict| conflict.split_once(crate::craft_plan::OPENING_THREAT_MARK))
+    else {
+        return true;
+    };
+    let opening = body
+        .chars()
+        .take(crate::craft_plan::OPENING_THREAT_WITHIN)
+        .collect::<String>();
+    telling_pairs(threat)
+        .intersection(&telling_pairs(&opening))
+        .count()
+        >= THREAT_PAIRS
+}
+
 /// QC-1.4: how many chapters back catchphrases are looked for.
 const CATCHPHRASE_WINDOW: usize = 3;
 
 /// QC-1.4 (owner decision 2026-10-26): short phrases (3 to 6 Chinese
 /// characters) the chapter uses at least twice that also ran through the
 /// recent chapters (in at least 3 of the 4, at least 6 times in all), the
-/// longest of overlapping ones, never containing a name. Which of them are
+/// longest of overlapping ones, never containing a name nor found in
+/// `story_text` (what the bible, the plan and earlier facts name: objects,
+/// places, devices). Which of them are
 /// catchphrases rather than things the story names is for the continuity
 /// check to say. `{phrase, thisChapter, recentChapters}` each.
-pub fn catchphrase_candidates(history: &[String], body: &str, names: &[&str]) -> Vec<Value> {
+pub fn catchphrase_candidates(
+    history: &[String],
+    body: &str,
+    names: &[&str],
+    story_text: &str,
+) -> Vec<Value> {
     let texts = history
         .iter()
         .take(CATCHPHRASE_WINDOW)
@@ -854,6 +1040,7 @@ pub fn catchphrase_candidates(history: &[String], body: &str, names: &[&str]) ->
             let phrase = window.iter().collect::<String>();
             if found.contains_key(&phrase)
                 || names.iter().any(|name| phrase.contains(name))
+                || story_text.contains(phrase.as_str())
                 || body.matches(phrase.as_str()).nth(1).is_none()
             {
                 continue;

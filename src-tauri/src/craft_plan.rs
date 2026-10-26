@@ -40,7 +40,10 @@ pub(crate) const MIN_SCENE_PEOPLE: usize = 2;
 pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 3..=5;
 
 /// QC-1.2: what marks chapter 1's imminent threat in its first scene.
-const OPENING_THREAT_MARK: &str = "迫近的威胁：";
+pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
+/// QC-1.2: within how many characters chapter 1 shows its threat (the
+/// writer's prompt says 600 too).
+pub(crate) const OPENING_THREAT_WITHIN: usize = 600;
 
 /// QC-1.2 (owner decision 2026-10-26): the planner's `openingThreat` for
 /// chapter 1 (the danger and how soon it falls) joins the first scene's
