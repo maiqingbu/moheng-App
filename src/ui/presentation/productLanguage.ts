@@ -78,6 +78,7 @@ const errorLabels: Record<string, string> = {
   STYLE_SAMPLE_REQUIRED: '请先粘贴范文再保存。',
   CRAFT_CANDIDATE_NOT_SELECTABLE: '这一版候选已不可选，请刷新后重新选择。',
   B11_STORY_SETUP_REQUIRED: '请先保存故事核心，再生成故事底稿。',
+  B11_PLATFORM_REQUIRED: '请先选择目标平台：每章字数按平台确定。',
   COMMAND_RESULT_UNCONFIRMED: '正式回执已返回，结果待确认。请重新读取结果，不要重复提交。',
   REVISION_CONFLICT: '作品记录在提交前发生变化，请重新读取并检查本次操作。',
   PROJECT_BUSY: '项目正在处理后台任务，请稍后再试。',

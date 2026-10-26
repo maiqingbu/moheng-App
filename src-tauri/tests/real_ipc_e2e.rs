@@ -323,7 +323,7 @@ fn real_ipc_live_market_refresh_uses_registered_tauri_command_and_survives_app_r
             "idempotencyKey":"r2-04a-real-ipc-create:key",
             "requestedAt":"2026-10-03T09:00:00Z",
             "expectedRevision":0,
-            "payload":{"title":"真实来源 Tauri IPC 验证","idea":"只验证公开市场来源正式链。"}
+            "payload":{"title":"真实来源 Tauri IPC 验证","idea":"只验证公开市场来源正式链。","platform":"番茄小说"}
         }}),
     );
     assert_eq!(created["finalStatus"], "committed", "{created}");
@@ -2285,7 +2285,7 @@ fn r2_registered_async_production_and_export_keep_runtime_canary_private() {
         json!({"request":{
             "type":"project_create_from_idea","commandId":"r2:project:create",
             "idempotencyKey":"r2:project:create:key","requestedAt":R2_PROVIDER_NOW,
-            "payload":{"title":"R2 异步 Provider 正式链","idea":"林舟在石门后发现可验证线索。","platform":"本地验收","mode":"DIRECTOR"}
+            "payload":{"title":"R2 异步 Provider 正式链","idea":"林舟在石门后发现可验证线索。","platform":"番茄小说","mode":"DIRECTOR"}
         }}),
         Duration::from_secs(5),
     );
@@ -2780,7 +2780,7 @@ fn r2_registered_next_chapter_prepare_then_compile_uses_real_async_provider() {
         json!({"request":{
             "type":"project_create_from_idea","commandId":"r2:planning:project:create",
             "idempotencyKey":"r2:planning:project:create:key","requestedAt":R2_PROVIDER_NOW,
-            "payload":{"title":"R2 下一章规划","idea":"林舟核对石门后继续追查。","platform":"本地验收","mode":"DIRECTOR"}
+            "payload":{"title":"R2 下一章规划","idea":"林舟核对石门后继续追查。","platform":"番茄小说","mode":"DIRECTOR"}
         }}),
         Duration::from_secs(5),
     );

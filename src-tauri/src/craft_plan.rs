@@ -33,7 +33,13 @@ const SKILL_FIELDS: &[(&str, &[&str])] = &[
     ("S47", &["warmth"]),
 ];
 
-fn text(value: &Value) -> &str {
+/// The plan's scene shape, as chapter-plan-r2 states it: the checks report
+/// a plan off it and the last lenient pass fits a plan to it.
+pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 2..=3;
+pub(crate) const MIN_SCENE_PEOPLE: usize = 2;
+pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 3..=5;
+
+pub(crate) fn text(value: &Value) -> &str {
     value.as_str().unwrap_or("").trim()
 }
 
@@ -125,25 +131,29 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     // The plan shape, checked here rather than only by the contract so the
     // planner gets these back with the other problems.
     let scene_list = scenes(craft);
-    if !(2..=3).contains(&scene_list.len()) {
+    if !SCENE_COUNT.contains(&scene_list.len()) {
         problems.push(format!(
-            "需要 2 到 3 个场景，现在有 {} 个",
+            "需要 {} 到 {} 个场景，现在有 {} 个",
+            SCENE_COUNT.start(),
+            SCENE_COUNT.end(),
             scene_list.len()
         ));
     }
     for (index, scene) in scene_list.iter().enumerate() {
         let people = scene["people"].as_array().map_or(0, Vec::len);
-        if people < 2 {
+        if people < MIN_SCENE_PEOPLE {
             problems.push(format!(
                 "第 {} 场只有 {people} 个人物，每场至少两人在场且有冲突",
                 index + 1
             ));
         }
         let events = scene["events"].as_array().map_or(0, Vec::len);
-        if !(3..=5).contains(&events) {
+        if !SCENE_EVENTS.contains(&events) {
             problems.push(format!(
-                "第 {} 场有 {events} 条事件，每场写 3 到 5 条",
-                index + 1
+                "第 {} 场有 {events} 条事件，每场写 {} 到 {} 条",
+                index + 1,
+                SCENE_EVENTS.start(),
+                SCENE_EVENTS.end()
             ));
         }
     }

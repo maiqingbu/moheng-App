@@ -2493,10 +2493,14 @@ pub fn horizon_slot_range(remaining_chapter_capacity: i64) -> (usize, usize) {
     (if capacity >= 3 { 3 } else { 0 }, capacity)
 }
 
-/// LD-1 step 2: a plan written anyway with too short a preview gets
-/// tentative slots up to the minimum, so its contract holds; the short
-/// preview itself is reported as a plan problem.
-pub fn pad_chapter_plan_horizon(plan: &mut Value, remaining_chapter_capacity: i64) {
+/// LD-1 step 2: the last lenient pass fits a plan its planner could not fix
+/// to its contract, and returns what it changed for the plan reminder. A
+/// short preview gets tentative slots up to the minimum; a scene beyond the
+/// third, or with fewer than two people, is folded into its neighbour; a
+/// scene keeps at most five events, its first four and its last (the shape
+/// in `craft_plan`). The
+/// changes come back as one plan-craft problem.
+pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64) -> Option<String> {
     let (minimum, _) = horizon_slot_range(remaining_chapter_capacity);
     if let Some(horizon) = plan.get_mut("horizonPreview").and_then(Value::as_array_mut) {
         while horizon.len() < minimum {
@@ -2504,6 +2508,74 @@ pub fn pad_chapter_plan_horizon(plan: &mut Value, remaining_chapter_capacity: i6
             horizon.push(json!({"slotNo":slot,"objective":"待后续规划确定","tentative":true}));
         }
     }
+    use crate::craft_plan::{text, MIN_SCENE_PEOPLE, SCENE_COUNT, SCENE_EVENTS};
+    let mut notes = Vec::new();
+    let scenes = plan
+        .pointer_mut("/craft/scenes")
+        .and_then(Value::as_array_mut)?;
+    let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
+    while scenes.len() > 1 {
+        let Some(from) = scenes
+            .iter()
+            .position(|scene| people(scene) < MIN_SCENE_PEOPLE)
+            .or((scenes.len() > *SCENE_COUNT.end()).then(|| scenes.len() - 1))
+        else {
+            break;
+        };
+        let mut scene = scenes.remove(from);
+        let into = &mut scenes[from.saturating_sub(1)];
+        notes.push(format!(
+            "系统把场景「{}」并入「{}」",
+            text(&scene["place"]),
+            text(&into["place"])
+        ));
+        into["conflict"] = json!(format!(
+            "{}；{}",
+            text(&into["conflict"]),
+            text(&scene["conflict"])
+        ));
+        if from > 0 {
+            into["readerQuestion"] = scene["readerQuestion"].take();
+        }
+        if let (Value::Array(people), Some(list)) =
+            (scene["people"].take(), into["people"].as_array_mut())
+        {
+            let names = list
+                .iter()
+                .map(|person| person["name"].clone())
+                .collect::<Vec<_>>();
+            list.extend(
+                people
+                    .into_iter()
+                    .filter(|person| !names.contains(&person["name"])),
+            );
+        }
+        if let (Value::Array(events), Some(list)) =
+            (scene["events"].take(), into["events"].as_array_mut())
+        {
+            list.extend(events);
+        }
+    }
+    let most = *SCENE_EVENTS.end();
+    for scene in scenes.iter_mut() {
+        let count = scene["events"].as_array().map_or(0, Vec::len);
+        if count > most {
+            notes.push(format!(
+                "系统把场景「{}」的事件从 {count} 条删到 {most} 条",
+                text(&scene["place"])
+            ));
+            if let Some(events) = scene["events"].as_array_mut() {
+                events.drain(most - 1..count - 1);
+            }
+        }
+    }
+    (!notes.is_empty()).then(|| {
+        format!(
+            "{}:{}",
+            crate::craft_plan::PLAN_CRAFT_ERROR,
+            notes.join("；")
+        )
+    })
 }
 
 pub fn validate_chapter_plan_horizon(

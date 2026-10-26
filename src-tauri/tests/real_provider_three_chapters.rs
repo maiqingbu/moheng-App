@@ -352,7 +352,7 @@ fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (Strin
             "payload":{
                 "title":title,
                 "idea":"一名负责修复城市记忆档案的年轻调查员，发现每修复一段被篡改的记忆，现实中就会失去一个与自己有关的真实痕迹。前三章必须完成首次委托、发现代价、主动追查幕后来源。",
-                "platform":"长篇网络小说",
+                "platform":"番茄小说",
                 "mode":"DIRECTOR",
                 "tags":["都市悬疑","成长","记忆谜案"],
                 "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不提前揭露幕后真凶"

@@ -4,12 +4,21 @@ import { createApp, nextTick, ref, h } from 'vue'
 import fs from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CHAPTER_LENGTH_PRESETS, DEFAULT_CHAPTER_LENGTH_RANGE, chapterLengthLabel, isValidChapterLengthRange, withChapterLengthRange } from '../../src/ui/presentation/chapterLength'
+import { CHAPTER_LENGTH_PRESETS, DEFAULT_CHAPTER_LENGTH_RANGE, PLATFORM_CHAPTER_TARGETS, chapterLengthLabel, isValidChapterLengthRange, withChapterLengthRange } from '../../src/ui/presentation/chapterLength'
 
 const page = (name: string) => fs.readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), `../../src/ui/pages/${name}.vue`), 'utf8')
 import { productErrorMessage } from '../../src/ui/presentation/productLanguage'
 
 describe('FX-18 章节字数区间', () => {
+  it('Given 新建作品的平台下拉 When 对照后端平台字数表 Then 每个平台的目标字数一致', () => {
+    const rust = fs.readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../src-tauri/src/chapter_length.rs'), 'utf8')
+    for (const { name, target } of PLATFORM_CHAPTER_TARGETS) {
+      const row = rust.split('\n').find(line => line.includes(`"${name.slice(0, 2)}"`) && line.includes('_000'))
+      expect(row, name).toBeDefined()
+      expect(Number(row!.match(/(\d)_(\d{3})/)!.slice(1).join('')), name).toBe(target)
+    }
+  })
+
   it('Given 预设与自定义区间 When 校验 Then 与后端规则一致', () => {
     expect(DEFAULT_CHAPTER_LENGTH_RANGE).toEqual({ min: 2000, max: 3000 })
     expect(CHAPTER_LENGTH_PRESETS.map(chapterLengthLabel)).toEqual(['2000–3000 字', '3000–4000 字', '4000–5000 字'])

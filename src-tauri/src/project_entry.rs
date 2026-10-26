@@ -533,16 +533,23 @@ fn initial_input(request: &Value, kind: EntryKind) -> Result<(String, String, St
     }
 }
 
+/// A new work names one target platform whose chapter length is known (owner
+/// decision 2026-10-26), so its first chapter is written to that length.
 pub fn validate_initial_request(request: &Value, kind: EntryKind) -> Result<(), String> {
-    if kind == EntryKind::Market
+    let from_opportunity = kind == EntryKind::Market
         && request
             .pointer("/payload/marketOpportunityId")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Ok(());
+            .is_some_and(|value| !value.trim().is_empty());
+    if !from_opportunity {
+        initial_input(request, kind)?;
     }
-    initial_input(request, kind).map(|_| ())
+    request
+        .pointer("/payload/platform")
+        .and_then(Value::as_str)
+        .and_then(crate::chapter_length::ChapterLengthRange::for_platform)
+        .map(|_| ())
+        .ok_or_else(|| "B11_PLATFORM_REQUIRED".into())
 }
 
 fn payload_string(payload: &Value, key: &str) -> String {

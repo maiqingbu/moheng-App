@@ -7175,11 +7175,15 @@ fn compile_current_chapter_plan(
         // Checked here, not only at commit, so the planner gets the reason
         // and one more try.
         let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
-        let mut soft = |result| crate::production::note_if_lenient(lenient, &mut problems, result);
-        soft(planner.check_craft(&plan, horizon_capacity))?;
+        let craft = planner.check_craft(&plan, horizon_capacity);
+        crate::production::note_if_lenient(lenient, &mut problems, craft)?;
         if lenient {
-            crate::planning::pad_chapter_plan_horizon(&mut plan, horizon_capacity);
+            problems.extend(crate::planning::fit_lenient_plan_shape(
+                &mut plan,
+                horizon_capacity,
+            ));
         }
+        let mut soft = |result| crate::production::note_if_lenient(lenient, &mut problems, result);
         // r2 plans had their horizon checked with the craft problems; r1 here.
         soft(crate::planning::validate_chapter_plan_horizon(
             &plan,

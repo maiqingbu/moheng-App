@@ -24,6 +24,8 @@ struct CraftGateway {
     short_horizon_once: AtomicBool,
     /// Every plan previews only two later chapters.
     short_horizon_always: bool,
+    /// Every plan has four scenes, the last with one person in it.
+    four_scenes_always: bool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -63,6 +65,15 @@ impl ProductionModelGateway for CraftGateway {
                     || self.short_horizon_always
                 {
                     plan["horizonPreview"].as_array_mut().unwrap().truncate(2);
+                }
+                if self.four_scenes_always {
+                    let scenes = plan["craft"]["scenes"].as_array_mut().unwrap();
+                    let mut third = scenes[0].clone();
+                    third["place"] = json!("锅炉房检修平台");
+                    let mut alone = scenes[1].clone();
+                    alone["place"] = json!("远处天台");
+                    alone["people"].as_array_mut().unwrap().truncate(1);
+                    scenes.extend([third, alone]);
                 }
                 plan
             }
@@ -382,4 +393,61 @@ fn a_plan_whose_horizon_stays_short_is_written_with_a_plan_reminder() {
         )
         .unwrap();
     assert!(payload.contains("horizonPreview"), "{payload}");
+}
+
+#[test]
+fn a_plan_that_keeps_four_scenes_is_folded_to_three_and_written_with_a_plan_reminder() {
+    // Acceptance 2026-10-26, chapter 10: the planner kept a fourth scene with
+    // one person in it through its replans. The last lenient pass folds the
+    // extra scene into the one before, so the plan holds its contract, and
+    // says so in the reminder.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        four_scenes_always: true,
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "four");
+    command(
+        &state,
+        &project_id,
+        "four:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "four:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "four:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='计划提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("并入"), "{payload}");
 }

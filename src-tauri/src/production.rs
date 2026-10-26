@@ -2675,7 +2675,10 @@ fn run_chapter_production_inner(
                     planner.check_craft(&plan, horizon_capacity),
                 )?;
                 if lenient {
-                    crate::planning::pad_chapter_plan_horizon(&mut plan, horizon_capacity);
+                    problems.extend(crate::planning::fit_lenient_plan_shape(
+                        &mut plan,
+                        horizon_capacity,
+                    ));
                 }
                 crate::planning::validate_chapter_plan(&plan)
                     .map_err(|e| format!("B08_PLANNING_CONTRACT:{e}"))?;

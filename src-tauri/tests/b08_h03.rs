@@ -3021,7 +3021,7 @@ fn rv10_story_direction_generation_stops_after_project_budget_is_exhausted() {
         json!({
             "type":"project_create_from_idea","commandId":"cmd:rv10:direction-project",
             "idempotencyKey":"key:rv10:direction-project","requestedAt":NOW,
-            "payload":{"title":"RV-10 directions budget","idea":"账本线索"}
+            "payload":{"title":"RV-10 directions budget","idea":"账本线索","platform":"番茄小说"}
         }),
     )
     .unwrap();

@@ -419,7 +419,7 @@ fn story_bible_generation_requires_a_saved_story_core() {
     );
     let created = execute_command_impl(&state, json!({
         "type":"project_create_from_idea","commandId":"craft:bare","idempotencyKey":"craft:bare:key",
-        "requestedAt":NOW,"payload":{"title":"空项目","idea":"一个想法。","mode":"DIRECTOR"}
+        "requestedAt":NOW,"payload":{"title":"空项目","idea":"一个想法。","platform":"番茄小说","mode":"DIRECTOR"}
     })).unwrap();
     let error = execute_command_impl(&state, json!({
         "type":"story_bible_generate","commandId":"craft:bare:bible","idempotencyKey":"craft:bare:bible:key",

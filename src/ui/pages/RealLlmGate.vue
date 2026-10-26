@@ -82,7 +82,7 @@ async function run() {
     const created = await command('project_create_from_idea', {
       title: `真实 UI 闭环验收 ${Date.now()}`,
       idea: '城市记忆档案调查员发现每次修复记忆都会失去自身现实痕迹，必须追查被抹除的姐姐线索。',
-      mode: 'DIRECTOR', platform: '长篇网络小说', length: '长篇',
+      mode: 'DIRECTOR', platform: '番茄小说', length: '长篇',
       forbidden: '前三章不揭露幕后者，不用梦境推翻前文', tags: ['都市悬疑', '成长'],
     }) as Record<string, unknown>
     projectId.value = String(created.resultProjectId ?? created.projectId)
