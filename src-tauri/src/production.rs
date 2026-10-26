@@ -3275,6 +3275,7 @@ fn run_chapter_production_inner(
         let assigned = assign_audit_ids(&mut raw, &chapter_id, &known_threads);
         let mut audit_payload = normalize_audit_model_output(raw, &body);
         audit_payload["normalization"]["assignedIds"] = assigned;
+        cap_new_threads(&mut audit_payload, &known_threads);
         let unplanned_task_ids = unplanned_task_candidate_ids(&audit_payload, &plan_payload);
         let known_task_ids = crate::repositories::narrative::NarrativeRepository::known_task_ids(
             connection,
@@ -5030,7 +5031,10 @@ fn hold_back_audit_items(
     prepared: Value,
     validate: &dyn Fn(&Value) -> Result<AuditExtraction, String>,
 ) -> Result<(Value, AuditExtraction), String> {
-    let mut held = Vec::new();
+    let mut held = prepared["normalization"]["heldBack"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let mut kept = prepared.clone();
     for field in AUDIT_LEDGER_LISTS {
         kept[field] = json!([]);
@@ -5115,9 +5119,74 @@ fn hold_back_audit_items(
     Ok((kept, extraction))
 }
 
+/// QC-1.3: how many new threads a chapter may open.
+const MAX_NEW_THREADS: usize = 3;
+
+/// QC-1.3 (owner decision 2026-10-26): a chapter opens at most
+/// `MAX_NEW_THREADS` threads, those with the most reasons for later chapters
+/// to pay them off (promotion signals for, less those against); the others
+/// are held back as candidates for the reminder. Threads already known are
+/// advanced or resolved without limit.
+fn cap_new_threads(audit: &mut Value, known: &BTreeSet<String>) {
+    const AGAINST: [&str; 3] = [
+        "ambientDescription",
+        "completedTrivialEvent",
+        "nonContinuingSceneDetail",
+    ];
+    let Some(items) = audit["continuityCandidates"].as_array_mut() else {
+        return;
+    };
+    let is_new = |item: &Value| {
+        item["threadRef"]
+            .as_str()
+            .is_some_and(|thread| !known.contains(thread))
+    };
+    let weight = |item: &Value| {
+        item["promotionSignals"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| value.as_bool() == Some(true))
+            .map(|(name, _)| {
+                if AGAINST.contains(&name.as_str()) {
+                    -1
+                } else {
+                    1
+                }
+            })
+            .sum::<i64>()
+    };
+    let mut new = (0..items.len())
+        .filter(|index| is_new(&items[*index]))
+        .collect::<Vec<_>>();
+    new.sort_by_key(|index| -weight(&items[*index]));
+    let over = new.split_off(new.len().min(MAX_NEW_THREADS));
+    if over.is_empty() {
+        return;
+    }
+    let mut index = 0;
+    let mut held = Vec::new();
+    items.retain(|item| {
+        let keep = !over.contains(&index);
+        if !keep {
+            held.push(json!({"field":"continuityCandidates","item":item,"reason":"QC1_THREAD_OVER_LIMIT"}));
+        }
+        index += 1;
+        keep
+    });
+    if let Some(list) = audit["normalization"]["heldBack"].as_array_mut() {
+        list.extend(held);
+    } else {
+        audit["normalization"]["heldBack"] = json!(held);
+    }
+}
+
 /// Why an audit item was held back, for the reader of the reminder.
 fn held_back_reason(code: &str) -> &'static str {
     match code {
+        "QC1_THREAD_OVER_LIMIT" => {
+            "本章新开的伏笔超过 3 条，这条重要性靠后，只作为候选，没有记入档案"
+        }
         "B08_KNOWLEDGE_UNBOUND" => "这条认知指向的事实没有记入档案",
         code if code.starts_with("B08_CANON_CONFLICT") => "与已确认的事实冲突",
         code if code.starts_with("B08_CANON_SEMANTICS") || code.starts_with("B08_CANON_TIME") => {
@@ -6971,6 +7040,53 @@ mod tests {
         assert_eq!(
             raw["continuityCandidates"][1]["sourceEventId"],
             format!("event:{}", fact(2))
+        );
+    }
+
+    fn qc1_thread(id: &str, signals: &[&str]) -> Value {
+        let mut promotion = serde_json::Map::new();
+        for signal in signals {
+            promotion.insert((*signal).into(), json!(true));
+        }
+        json!({"threadRef":id,"disposition":"ADVANCE","promotionSignals":promotion})
+    }
+
+    #[test]
+    fn qc1_a_chapter_keeps_its_three_strongest_new_threads_and_holds_back_the_rest() {
+        // QC-1.3 (owner decision 2026-10-26): only threads the story needs.
+        let known = BTreeSet::from(["thread:known".to_string()]);
+        let mut audit = json!({"continuityCandidates":[
+            qc1_thread("thread:new:1", &["ambientDescription"]),
+            qc1_thread("thread:known", &[]),
+            qc1_thread("thread:new:2", &["explicitPromise", "mysteryOrRevealResponsibility"]),
+            qc1_thread("thread:new:3", &["unresolvedMajorConflict"]),
+            qc1_thread("thread:new:4", &["keyFutureUseObjectOrInformation", "explicitPromise", "goalContractResponsibility"]),
+            qc1_thread("thread:new:5", &["majorRelationshipTransition"])
+        ],"normalization":{}});
+        cap_new_threads(&mut audit, &known);
+        let kept = audit["continuityCandidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["threadRef"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            [
+                "thread:known",
+                "thread:new:2",
+                "thread:new:3",
+                "thread:new:4"
+            ]
+        );
+        let held = audit["normalization"]["heldBack"].as_array().unwrap();
+        assert_eq!(held.len(), 2);
+        assert!(held
+            .iter()
+            .all(|entry| entry["reason"] == "QC1_THREAD_OVER_LIMIT"));
+        assert_eq!(
+            held_back_reason("QC1_THREAD_OVER_LIMIT"),
+            "本章新开的伏笔超过 3 条，这条重要性靠后，只作为候选，没有记入档案"
         );
     }
 
