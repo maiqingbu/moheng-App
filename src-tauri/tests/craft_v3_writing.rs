@@ -237,11 +237,8 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         .unwrap()
         .iter()
         .any(|finding| finding["code"] == "repeated_pattern"));
-    // QC-1.5: the body is checked once, by sentence; with nothing found
-    // there is no recheck.
-    let checks = inputs(&calls, "CHECK_CONTINUITY");
-    assert_eq!(checks.len(), 1);
-    assert!(checks[0]["bodySentences"].as_array().unwrap().len() > 40);
+    // QC-1.4/1.5: chapter 1 has no earlier facts or phrases to check.
+    assert!(inputs(&calls, "CHECK_CONTINUITY").is_empty());
     drop(calls);
 
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
@@ -284,11 +281,16 @@ fn qc1_a_contradiction_the_rewrite_leaves_waits_in_the_chapter_reminder() {
         },
     );
     write_next_chapter(&state, &project_id, "qc15:production:1");
+    write_next_chapter(&state, &project_id, "qc15:production:2");
     let calls = gateway.calls.lock().unwrap();
-    // The contradiction leads the findings, and the rewrite is checked again.
-    let rewrite = &inputs(&calls, "REWRITE_PASSAGES")[0];
+    // Chapter 2 is checked against chapter 1's details by sentence; the
+    // contradiction leads the findings and the rewrite is checked again.
+    let checks = inputs(&calls, "CHECK_CONTINUITY");
+    assert_eq!(checks.len(), 2, "a check and a recheck");
+    assert!(checks[0]["bodySentences"].as_array().unwrap().len() > 40);
+    assert!(!checks[0]["establishedFacts"].as_array().unwrap().is_empty());
+    let rewrite = inputs(&calls, "REWRITE_PASSAGES").pop().unwrap();
     assert_eq!(rewrite["findings"][0]["code"], "continuity_contradiction");
-    assert_eq!(inputs(&calls, "CHECK_CONTINUITY").len(), 2);
     drop(calls);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let payload: String = connection

@@ -823,6 +823,11 @@ fn unique_quote_ending_at<'a>(
         .find(|quote| body.matches(quote).nth(1).is_none())
 }
 
+/// A Chinese character of the common block.
+pub(crate) fn is_han(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
 /// QC-1.4: how many chapters back catchphrases are looked for.
 const CATCHPHRASE_WINDOW: usize = 3;
 
@@ -843,11 +848,14 @@ pub fn catchphrase_candidates(history: &[String], body: &str, names: &[&str]) ->
     let mut found = BTreeMap::<String, (usize, usize)>::new();
     for size in 3..=6 {
         for window in chars.windows(size) {
-            if !window.iter().all(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+            if !window.iter().all(|c| is_han(*c)) {
                 continue;
             }
             let phrase = window.iter().collect::<String>();
-            if found.contains_key(&phrase) || names.iter().any(|name| phrase.contains(name)) {
+            if found.contains_key(&phrase)
+                || names.iter().any(|name| phrase.contains(name))
+                || body.matches(phrase.as_str()).nth(1).is_none()
+            {
                 continue;
             }
             let counts = texts

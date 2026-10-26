@@ -2845,7 +2845,13 @@ fn run_chapter_production_inner(
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
     }
-    let avoid_tics = crate::chapter_craft::overused_tics(&chapter_history.bodies);
+    let mut avoid_tics = crate::chapter_craft::overused_tics(&chapter_history.bodies);
+    // QC-1.4: and the catchphrases the continuity check named recently.
+    for phrase in &chapter_history.catchphrases {
+        if !avoid_tics.contains(phrase) {
+            avoid_tics.push(phrase.clone());
+        }
+    }
     if !avoid_tics.is_empty() {
         render_input["avoidTics"] = json!(avoid_tics);
     }
@@ -2888,26 +2894,14 @@ fn run_chapter_production_inner(
         .transpose()?;
     if let Some(writing) = &craft_writing {
         writing.extend_render_input(&mut render_input, &chapter_history.recent);
-        // QC-1.4: catchphrases the continuity check named in recent chapters.
-        if !chapter_history.catchphrases.is_empty() {
-            let mut tics = render_input["avoidTics"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            tics.extend(
-                chapter_history
-                    .catchphrases
-                    .iter()
-                    .map(|phrase| json!(phrase)),
-            );
-            render_input["avoidTics"] = json!(tics);
-        }
     }
     // QC-1.5: what earlier chapters fixed, for the continuity check.
     let established_facts = render_input
         .get("establishedFacts")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    // QC-1.4/1.5: what the rewrite left for the chapter's reminder.
+    let mut continuity_held = Vec::new();
     let render_capability = if craft_writing.is_some() {
         "RENDER_CHAPTER_CRAFT"
     } else {
@@ -3107,48 +3101,52 @@ fn run_chapter_production_inner(
         // QC-1.4/1.5 (owner decision 2026-10-26): the continuity check names
         // the sentences contradicting earlier chapters and which repeated
         // short phrases are catchphrases; both lead the findings too.
-        let check_continuity = |craft_step: &mut CraftStep,
-                                suffix: &str,
-                                text: &str,
-                                candidates: &[Value]|
-         -> Result<Option<Value>, String> {
-            let Some(writing) = &craft_writing else {
-                return Ok(None);
-            };
-            let (present, _) = writing.chapter_people(&plan_payload);
+        let mut candidates = Vec::new();
+        let mut continuity_input = None;
+        if let Some(writing) = &craft_writing {
+            let (present, names) = writing.chapter_people(&plan_payload);
+            let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+            candidates = crate::chapter_craft::catchphrase_candidates(
+                &chapter_history.bodies,
+                &body,
+                &names,
+            );
             let ledger_facts =
                 crate::repositories::ops::subject_facts(connection, &project_id, &present, 40)
                     .map_err(|error| error.to_string())?;
-            craft_step(
-                suffix,
-                "CHECK_CONTINUITY",
-                &gateway.resolve_step_profile("CHECK_CONTINUITY")?,
-                json!({
+            let nothing_to_check = candidates.is_empty()
+                && ledger_facts.is_empty()
+                && established_facts.as_array().is_none_or(Vec::is_empty);
+            if !nothing_to_check {
+                continuity_input = Some(json!({
                     "chapterNumber":chapter_number,
-                    "bodySentences":body_sentences(text).into_iter().map(|(_, _, sentence)| sentence).collect::<Vec<_>>(),
                     "establishedFacts":established_facts,
-                    "ledgerFacts":ledger_facts,
-                    "phraseCandidates":candidates
-                }),
-            )
-            .map(Some)
-        };
-        let candidates = match &craft_writing {
-            Some(writing) => {
-                let (_, names) = writing.chapter_people(&plan_payload);
-                let names = names.iter().map(String::as_str).collect::<Vec<_>>();
-                crate::chapter_craft::catchphrase_candidates(&chapter_history.bodies, &body, &names)
+                    "ledgerFacts":ledger_facts
+                }));
             }
-            None => Vec::new(),
+        }
+        let continuity_profile = gateway.resolve_step_profile("CHECK_CONTINUITY")?;
+        // The check of `text`, with the phrase candidates when given.
+        let continuity_request = |text: &str, candidates: &[Value]| {
+            continuity_input.clone().map(|mut input| {
+                input["bodySentences"] = json!(body_sentences(text)
+                    .into_iter()
+                    .map(|(_, _, sentence)| sentence)
+                    .collect::<Vec<_>>());
+                input["phraseCandidates"] = json!(candidates);
+                input
+            })
         };
-        let checked = check_continuity(&mut craft_step, "continuity", &body, &candidates)?;
-        let contradictions = checked
-            .as_ref()
-            .and_then(|checked| checked["contradictions"].as_array().cloned())
+        let checked = continuity_request(&body, &candidates)
+            .map(|input| craft_step("continuity", "CHECK_CONTINUITY", &continuity_profile, input))
+            .transpose()?
+            .unwrap_or_else(|| json!({}));
+        let contradictions = checked["contradictions"]
+            .as_array()
+            .cloned()
             .unwrap_or_default();
-        let catchphrases = checked
-            .as_ref()
-            .and_then(|checked| checked["catchphrases"].as_array())
+        let catchphrases = checked["catchphrases"]
+            .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
@@ -3251,12 +3249,16 @@ fn run_chapter_production_inner(
             .filter(|phrase| body.matches(phrase.as_str()).count() > 1)
             .map(|phrase| json!({"field":"continuity","item":phrase,"reason":"QC1_CATCHPHRASE"}))
             .collect::<Vec<_>>();
-        if !contradictions.is_empty() {
-            let rechecked = check_continuity(&mut craft_step, "continuity-recheck", &body, &[])?;
+        if let Some(input) = continuity_request(&body, &[]).filter(|_| !contradictions.is_empty()) {
+            let rechecked = craft_step(
+                "continuity-recheck",
+                "CHECK_CONTINUITY",
+                &continuity_profile,
+                input,
+            )?;
             unresolved.extend(
-                rechecked
-                    .as_ref()
-                    .and_then(|checked| checked["contradictions"].as_array())
+                rechecked["contradictions"]
+                    .as_array()
                     .into_iter()
                     .flatten()
                     .map(|item| json!({"field":"continuity","item":item,"reason":"QC1_CONTRADICTION"})),
@@ -3267,6 +3269,7 @@ fn run_chapter_production_inner(
             "catchphrases":catchphrases,
             "unresolved":unresolved
         });
+        continuity_held = unresolved;
         craft_skills["proseReview"] = json!({
             "findings":findings.len(),
             "codes":findings.iter().map(|finding| finding["code"].clone()).collect::<Vec<_>>(),
@@ -3667,14 +3670,8 @@ fn run_chapter_production_inner(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .chain(
-            craft_skills
-                .pointer("/continuity/unresolved")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten(),
-        )
         .cloned()
+        .chain(continuity_held)
         .collect::<Vec<_>>();
     if !held.is_empty() {
         decision_updates.push(audit_reminder(
@@ -5245,11 +5242,6 @@ fn hold_back_audit_items(
     Ok((kept, extraction))
 }
 
-/// One model call of a craft prose step: suffix, capability, profile and
-/// input to the parsed reply.
-type CraftStep<'a> =
-    dyn FnMut(&str, &str, &ResolvedProviderProfile, Value) -> Result<Value, String> + 'a;
-
 /// QC-1.3: how many new threads a chapter may open.
 const MAX_NEW_THREADS: usize = 3;
 
@@ -5639,7 +5631,7 @@ fn telling_pairs(text: &str) -> BTreeSet<(char, char)> {
         .windows(2)
         .filter(|pair| {
             pair.iter()
-                .all(|c| ('\u{4e00}'..='\u{9fff}').contains(c) && !COMMON_CHARACTERS.contains(*c))
+                .all(|c| crate::chapter_craft::is_han(*c) && !COMMON_CHARACTERS.contains(*c))
         })
         .map(|pair| (pair[0], pair[1]))
         .collect()
