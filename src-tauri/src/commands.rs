@@ -7202,6 +7202,9 @@ fn compile_current_chapter_plan(
                 Ok(())
             }
         }))?;
+        // The contract is checked here too, not only at commit, so a
+        // violation goes back to the planner (QC-1).
+        crate::planning::validate_chapter_plan(&plan)?;
         Ok((plan, problems))
     };
     let (plan, planning_run_id, plan_problems) = crate::production::plan_chapter_with_feedback(

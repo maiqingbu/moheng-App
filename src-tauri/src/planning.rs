@@ -2510,10 +2510,25 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
         }
     }
     use crate::craft_plan::{text, MIN_SCENE_PEOPLE, SCENE_COUNT, SCENE_EVENTS};
-    let mut notes = Vec::new();
-    let scenes = plan
+    let mut notes = crate::craft_plan::complete_plan_fields(plan)
+        .into_iter()
+        .map(|field| format!("系统补上了{field}"))
+        .collect::<Vec<_>>();
+    let as_problem = |notes: Vec<String>| {
+        (!notes.is_empty()).then(|| {
+            format!(
+                "{}:{}",
+                crate::craft_plan::PLAN_CRAFT_ERROR,
+                notes.join("；")
+            )
+        })
+    };
+    let Some(scenes) = plan
         .pointer_mut("/craft/scenes")
-        .and_then(Value::as_array_mut)?;
+        .and_then(Value::as_array_mut)
+    else {
+        return as_problem(notes);
+    };
     let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
     while scenes.len() > 1 {
         let Some(from) = scenes
@@ -2570,13 +2585,7 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
             }
         }
     }
-    (!notes.is_empty()).then(|| {
-        format!(
-            "{}:{}",
-            crate::craft_plan::PLAN_CRAFT_ERROR,
-            notes.join("；")
-        )
-    })
+    as_problem(notes)
 }
 
 pub fn validate_chapter_plan_horizon(

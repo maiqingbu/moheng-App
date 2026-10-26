@@ -173,11 +173,36 @@ pub fn plan_feedback(code: &str) -> Option<Value> {
             "problems":problems.split('；').collect::<Vec<_>>()
         }));
     }
+    // QC-1 (fourth acceptance run): any contract violation the checks above
+    // missed is sent back too, so a new schema rule never fails a chapter
+    // without a replan. Validator messages can quote the whole plan; the end
+    // says what is wrong.
+    if let Some(violation) = ["B08_PLANNING_CONTRACT:", "CHAPTER_PLAN_CONTRACT:"]
+        .iter()
+        .find_map(|prefix| code.strip_prefix(prefix))
+    {
+        let violation = violation
+            .strip_prefix("CHAPTER_PLAN_CONTRACT:")
+            .unwrap_or(violation);
+        let count = violation.chars().count();
+        let tail = violation
+            .chars()
+            .skip(count.saturating_sub(PLAN_VIOLATION_CHARACTERS))
+            .collect::<String>();
+        return Some(json!({
+            "rejectedFor":"CHAPTER_PLAN_CONTRACT",
+            "instruction":"上一版计划不符合计划格式：按 problems 修正，返回完整的新计划。",
+            "problems":[if count > PLAN_VIOLATION_CHARACTERS { format!("…{tail}") } else { tail }]
+        }));
+    }
     REPLANNABLE
         .iter()
         .find(|(known, _)| *known == code)
         .map(|(_, instruction)| json!({"rejectedFor":code,"instruction":instruction}))
 }
+
+/// How much of a plan contract violation goes back to the planner.
+const PLAN_VIOLATION_CHARACTERS: usize = 160;
 
 /// Adds the craft planning inputs to a planner request.
 pub fn extend_planning_input(

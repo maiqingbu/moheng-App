@@ -4,7 +4,7 @@
 
 use ai_novel_production_system_core::chapter_craft::{
     catchphrase_candidates, catchphrase_findings, contradiction_findings, copied_sentence_findings,
-    credible_contradictions, opening_threat_on_page,
+    credible_contradictions, opening_threat_on_page, plan_feedback,
 };
 use serde_json::json;
 
@@ -171,5 +171,26 @@ fn qc1_what_the_story_names_is_never_a_catchphrase_candidate() {
             .iter()
             .any(|candidate| candidate["phrase"] == "理论上"),
         "{candidates:?}"
+    );
+}
+
+#[test]
+fn qc1_any_plan_contract_violation_goes_back_to_the_planner() {
+    let long = format!(
+        "B08_PLANNING_CONTRACT:CHAPTER_PLAN_CONTRACT:[{}] has more than 3 items",
+        "{}".repeat(200)
+    );
+    let feedback = plan_feedback(&long).expect("replannable");
+    assert_eq!(feedback["rejectedFor"], "CHAPTER_PLAN_CONTRACT");
+    let problem = feedback["problems"][0].as_str().unwrap();
+    assert!(
+        problem.ends_with("has more than 3 items") && problem.chars().count() <= 161,
+        "{problem}"
+    );
+    let short =
+        plan_feedback("CHAPTER_PLAN_CONTRACT:\"readerQuestion\" is a required property").unwrap();
+    assert_eq!(
+        short["problems"][0],
+        "\"readerQuestion\" is a required property"
     );
 }

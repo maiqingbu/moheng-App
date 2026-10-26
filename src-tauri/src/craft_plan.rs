@@ -45,6 +45,108 @@ pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
 /// writer's prompt says 600 too).
 pub(crate) const OPENING_THREAT_WITHIN: usize = 600;
 
+/// QC-1 (acceptance 2026-10-26, fourth run: a scene without its
+/// readerQuestion failed the plan contract): the text fields the plan
+/// contract requires besides those `plan_problems` judges for substance,
+/// each as `(pointer, what it is)`, scene and person fields included.
+fn required_plan_texts(plan: &Value) -> Vec<(String, String)> {
+    let mut fields = vec![
+        (
+            "/chapterGoal".to_string(),
+            "本章目标（chapterGoal）".to_string(),
+        ),
+        (
+            "/craft/device/name".into(),
+            "异常手法的名字（device.name）".into(),
+        ),
+    ];
+    for (index, scene) in scenes(&plan["craft"]).iter().enumerate() {
+        let at = |field: &str| format!("/craft/scenes/{index}/{field}");
+        let number = index + 1;
+        fields.push((at("place"), format!("第 {number} 场的地点")));
+        fields.push((at("conflict"), format!("第 {number} 场的冲突")));
+        fields.push((
+            at("readerQuestion"),
+            format!("第 {number} 场留给读者的问题"),
+        ));
+        for (person_index, person) in scene["people"].as_array().into_iter().flatten().enumerate() {
+            let name = text(&person["name"]);
+            let who = if name.is_empty() {
+                "一个人物".to_string()
+            } else {
+                format!("人物「{name}」")
+            };
+            for (field, label) in [
+                ("name", "名字"),
+                ("wants", "想要的"),
+                ("hides", "隐瞒的"),
+                ("whyHere", "在场理由"),
+            ] {
+                fields.push((
+                    at(&format!("people/{person_index}/{field}")),
+                    format!("第 {number} 场{who}的{label}"),
+                ));
+            }
+        }
+    }
+    fields
+}
+
+/// Whether the plan's text at `pointer` is missing or empty.
+fn blank(plan: &Value, pointer: &str) -> bool {
+    plan.pointer(pointer).map(text).unwrap_or("").is_empty()
+}
+
+/// The required plan fields the planner left out or empty, as problems.
+fn missing_plan_fields(plan: &Value) -> Vec<String> {
+    let mut missing = required_plan_texts(plan)
+        .into_iter()
+        .filter(|(pointer, _)| blank(plan, pointer))
+        .map(|(_, label)| format!("{label}没写"))
+        .collect::<Vec<_>>();
+    if !plan["craft"]["newLosses"].is_array() {
+        missing.push("失去的东西（newLosses）没写，没有就写空列表".into());
+    }
+    missing
+}
+
+/// QC-1: the last lenient pass fills what the planner left out, so the
+/// plan keeps its contract; returns what it filled, for the plan reminder.
+pub(crate) fn complete_plan_fields(plan: &mut Value) -> Vec<String> {
+    // Only an r2 plan has craft decisions to complete; indexing an r1 plan
+    // mutably would add a `craft: null` its contract refuses.
+    if !plan.get("craft").is_some_and(Value::is_object) {
+        return Vec::new();
+    }
+    let mut filled = Vec::new();
+    for (pointer, label) in required_plan_texts(plan) {
+        if !blank(plan, &pointer) {
+            continue;
+        }
+        let (parent, field) = pointer.rsplit_once('/').expect("a pointer has a parent");
+        let fallback = match field {
+            "chapterGoal" => text(&plan["craft"]["bigTurn"]),
+            "readerQuestion" => text(&plan["craft"]["endHook"]),
+            _ => "",
+        };
+        let value = Some(fallback)
+            .filter(|fallback| !fallback.is_empty())
+            .unwrap_or("（规划未写明）")
+            .to_owned();
+        if let Some(object) = plan.pointer_mut(parent).and_then(Value::as_object_mut) {
+            object.insert(field.to_string(), json!(value));
+            filled.push(label);
+        }
+    }
+    if let Some(craft) = plan["craft"].as_object_mut() {
+        if !craft.get("newLosses").is_some_and(Value::is_array) {
+            craft.insert("newLosses".into(), json!([]));
+            filled.push("失去的东西（newLosses）".into());
+        }
+    }
+    filled
+}
+
 /// QC-1.2 (owner decision 2026-10-26): the planner's `openingThreat` for
 /// chapter 1 (the danger and how soon it falls) joins the first scene's
 /// conflict, where the writer reads it, so the plan keeps its contract.
@@ -160,6 +262,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     }
     // The plan shape, checked here rather than only by the contract so the
     // planner gets these back with the other problems.
+    problems.extend(missing_plan_fields(plan));
     let scene_list = scenes(craft);
     if chapter == 1
         && !scene_list

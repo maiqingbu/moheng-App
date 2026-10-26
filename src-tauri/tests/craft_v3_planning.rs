@@ -28,6 +28,8 @@ struct CraftGateway {
     four_scenes_always: bool,
     /// No plan names chapter 1's imminent threat.
     no_opening_threat: bool,
+    /// Every plan leaves required fields out.
+    missing_fields_always: bool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -67,6 +69,20 @@ impl ProductionModelGateway for CraftGateway {
                     || self.short_horizon_always
                 {
                     plan["horizonPreview"].as_array_mut().unwrap().truncate(2);
+                }
+                if self.missing_fields_always {
+                    let craft = &mut plan["craft"];
+                    craft["scenes"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("readerQuestion");
+                    craft["scenes"][1]["people"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("hides");
+                    craft["device"].as_object_mut().unwrap().remove("name");
+                    craft.as_object_mut().unwrap().remove("newLosses");
+                    plan.as_object_mut().unwrap().remove("chapterGoal");
                 }
                 if self.no_opening_threat {
                     plan.as_object_mut().unwrap().remove("openingThreat");
@@ -570,4 +586,71 @@ fn qc1_chapter_one_without_an_imminent_threat_is_written_with_a_plan_reminder() 
         )
         .unwrap();
     assert!(payload.contains("迫在眉睫的威胁"), "{payload}");
+}
+
+#[test]
+fn qc1_a_plan_missing_required_fields_is_sent_back_then_completed_with_a_plan_reminder() {
+    // Acceptance 2026-10-26 (fourth run), chapter 7: a scene without its
+    // readerQuestion failed the plan contract with no replan.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        missing_fields_always: true,
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "missing");
+    command(
+        &state,
+        &project_id,
+        "missing:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "missing:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "missing:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let inputs = gateway.plan_inputs.lock().unwrap();
+    let problems = inputs[1]["planFeedback"]["problems"].to_string();
+    for missing in [
+        "留给读者的问题",
+        "隐瞒",
+        "异常手法的名字",
+        "失去的东西",
+        "本章目标",
+    ] {
+        assert!(problems.contains(missing), "{missing}: {problems}");
+    }
+    drop(inputs);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='计划提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("系统补上"), "{payload}");
 }

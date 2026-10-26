@@ -26,7 +26,7 @@ fn scene(place: &str) -> Value {
 
 /// A chapter-1 plan that passes every check against the fixture bible.
 fn plan() -> Value {
-    let mut plan = json!({"payloadSchema":"chapter-plan.r2","craft":{
+    let mut plan = json!({"payloadSchema":"chapter-plan.r2","chapterGoal":"林满揪出调包货单","craft":{
         "bigTurn":"林满发现货单是彭三的人连夜调包的",
         "smallDiscovery":"老董自己也欠着彭三一笔钱",
         "protagonistWin":"林满当着众人把调包的货单揪了出来",
