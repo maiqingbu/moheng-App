@@ -147,9 +147,6 @@ fn a_project_with_a_confirmed_story_bible_plans_r2_chapters_with_bible_and_ledge
         "the planner gets the bible content only"
     );
     assert_eq!(first["creationLedger"]["devices"], json!([]));
-    // QC-1.2: only chapter 1 is asked for its imminent threat.
-    assert_eq!(first["openingThreatWanted"], true);
-    assert!(inputs[2].get("openingThreatWanted").is_none());
     let feedback = &inputs[1]["planFeedback"];
     assert_eq!(feedback["rejectedFor"], "B08_PLAN_CRAFT");
     assert!(feedback["problems"][0]

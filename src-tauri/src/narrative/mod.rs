@@ -68,6 +68,29 @@ impl PromotionSignal {
             ..Self::default()
         }
     }
+
+    /// QC-1.3: how much later chapters owe a thread, the signals that make
+    /// it a responsibility less those that make it scenery.
+    pub fn weight(&self) -> i64 {
+        let owed = [
+            self.explicit_promise,
+            self.unresolved_major_conflict,
+            self.major_relationship_transition,
+            self.mystery_or_reveal_responsibility,
+            self.foreshadow_recovery_responsibility,
+            self.key_future_use_object_or_information,
+            self.goal_contract_responsibility,
+            self.hard_authority_responsibility,
+            self.future_reservation_responsibility,
+        ];
+        let scenery = [
+            self.ambient_description,
+            self.completed_trivial_event,
+            self.non_continuing_scene_detail,
+        ];
+        let count = |signals: &[bool]| signals.iter().filter(|signal| **signal).count() as i64;
+        count(&owed) - count(&scenery)
+    }
 }
 
 pub fn decide_thread_promotion(signal: PromotionSignal) -> ThreadPromotionDecision {

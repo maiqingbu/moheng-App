@@ -5128,56 +5128,41 @@ const MAX_NEW_THREADS: usize = 3;
 /// are held back as candidates for the reminder. Threads already known are
 /// advanced or resolved without limit.
 fn cap_new_threads(audit: &mut Value, known: &BTreeSet<String>) {
-    const AGAINST: [&str; 3] = [
-        "ambientDescription",
-        "completedTrivialEvent",
-        "nonContinuingSceneDetail",
-    ];
     let Some(items) = audit["continuityCandidates"].as_array_mut() else {
         return;
     };
-    let is_new = |item: &Value| {
-        item["threadRef"]
-            .as_str()
-            .is_some_and(|thread| !known.contains(thread))
-    };
-    let weight = |item: &Value| {
-        item["promotionSignals"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(_, value)| value.as_bool() == Some(true))
-            .map(|(name, _)| {
-                if AGAINST.contains(&name.as_str()) {
-                    -1
-                } else {
-                    1
-                }
-            })
-            .sum::<i64>()
-    };
     let mut new = (0..items.len())
-        .filter(|index| is_new(&items[*index]))
+        .filter(|index| {
+            items[*index]["threadRef"]
+                .as_str()
+                .is_some_and(|thread| !known.contains(thread))
+        })
         .collect::<Vec<_>>();
-    new.sort_by_key(|index| -weight(&items[*index]));
+    new.sort_by_cached_key(|index| {
+        -serde_json::from_value::<crate::narrative::PromotionSignal>(
+            items[*index]["promotionSignals"].clone(),
+        )
+        .unwrap_or_default()
+        .weight()
+    });
     let over = new.split_off(new.len().min(MAX_NEW_THREADS));
     if over.is_empty() {
         return;
     }
-    let mut index = 0;
-    let mut held = Vec::new();
-    items.retain(|item| {
-        let keep = !over.contains(&index);
-        if !keep {
-            held.push(json!({"field":"continuityCandidates","item":item,"reason":"QC1_THREAD_OVER_LIMIT"}));
-        }
-        index += 1;
-        keep
+    let (kept, held): (Vec<_>, Vec<_>) = std::mem::take(items)
+        .into_iter()
+        .enumerate()
+        .partition(|(index, _)| !over.contains(index));
+    *items = kept.into_iter().map(|(_, item)| item).collect();
+    let held = held.into_iter().map(|(_, item)| {
+        json!({"field":"continuityCandidates","item":item,"reason":"QC1_THREAD_OVER_LIMIT"})
     });
-    if let Some(list) = audit["normalization"]["heldBack"].as_array_mut() {
+    let list = &mut audit["normalization"]["heldBack"];
+    if !list.is_array() {
+        *list = json!([]);
+    }
+    if let Some(list) = list.as_array_mut() {
         list.extend(held);
-    } else {
-        audit["normalization"]["heldBack"] = json!(held);
     }
 }
 

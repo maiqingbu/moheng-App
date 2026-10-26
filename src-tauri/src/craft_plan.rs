@@ -53,7 +53,8 @@ pub fn fold_opening_threat(plan: &mut Value) {
         return;
     };
     let (danger, deadline) = (text(&threat["danger"]), text(&threat["deadline"]));
-    if danger.is_empty() || deadline.is_empty() {
+    // A vague danger is left out, so the check sends the plan back for it.
+    if danger.chars().count() < MIN_DECISION_CHARS || deadline.is_empty() {
         return;
     }
     if let Some(conflict) = plan.pointer_mut("/craft/scenes/0/conflict") {
@@ -537,9 +538,6 @@ impl ChapterPlanner {
             input["creationLedger"] = prompt_ledger(&craft.ledger);
             input["establishedFacts"] = json!(craft.established_facts);
             input["chapterNumber"] = json!(self.chapter);
-            if self.chapter == 1 {
-                input["openingThreatWanted"] = json!(true);
-            }
         }
     }
 
