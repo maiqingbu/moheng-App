@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "story direction candidates",
+  "description": "Three story directions, every field filled in.",
+  "type": "object",
+  "required": [
+    "pitches"
+  ],
+  "properties": {
+    "pitches": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "promise",
+          "protagonistDesire",
+          "mechanism",
+          "worldConflict",
+          "longArc",
+          "openingHook",
+          "volumeGoal",
+          "commercialEdge",
+          "originality",
+          "difficulty",
+          "failureRisk"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "promise": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "protagonistDesire": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "mechanism": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "worldConflict": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "longArc": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "openingHook": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "volumeGoal": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "commercialEdge": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "originality": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "difficulty": {
+            "$ref": "#/$defs/nonBlank"
+          },
+          "failureRisk": {
+            "$ref": "#/$defs/nonBlank"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonBlank": {
+      "type": "string",
+      "pattern": "\\S"
+    }
+  }
+}

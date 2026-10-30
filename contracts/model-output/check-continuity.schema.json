@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chapter continuity check",
+  "description": "QC-1.4/1.5: sentences contradicting an earlier fact, cited by number, and which phrase candidates are catchphrases.",
+  "type": "object",
+  "required": [
+    "contradictions",
+    "catchphrases"
+  ],
+  "properties": {
+    "contradictions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "sentence",
+          "fact",
+          "conflict",
+          "impossibleTogether"
+        ],
+        "properties": {
+          "sentence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fact": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "conflict": {
+            "type": "string",
+            "minLength": 1
+          },
+          "impossibleTogether": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "catchphrases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

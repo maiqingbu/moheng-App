@@ -1,0 +1,67 @@
+/* Waiting and running feedback shared by every page. */
+
+/* A ring that turns while something is being sent or read; a button whose
+   command is in flight shows one before its label. */
+.spinner,.btn[aria-busy="true"]::before { display:inline-block; width:14px; height:14px; flex:none; border-radius:50%; border:2px solid color-mix(in srgb,currentColor 25%,transparent); border-top-color:currentColor; animation:spin .8s linear infinite; }
+.spinner { vertical-align:-2px; }
+.btn[aria-busy="true"] { cursor:progress; }
+.btn[aria-busy="true"]::before { content:''; width:13px; height:13px; }
+.btn[aria-disabled="true"][aria-busy="true"] { opacity:.8; cursor:progress; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* A bar that keeps moving while a job runs and its length is unknown. */
+.progress-running { position:relative; height:6px; overflow:hidden; border-radius:999px; background:var(--pine-50); }
+.progress-running::after { content:''; position:absolute; inset:0 auto 0 0; width:38%; border-radius:inherit; background:linear-gradient(90deg,var(--pine-300),var(--pine-500)); animation:progress-slide 1.3s var(--ease) infinite; }
+@keyframes progress-slide { 0% { transform:translateX(-110%); } 100% { transform:translateX(280%); } }
+
+/* A dot that breathes next to a live status. */
+.live-dot { display:inline-block; width:9px; height:9px; flex:none; border-radius:50%; background:var(--pine-500); box-shadow:0 0 0 0 color-mix(in srgb,var(--pine-500) 55%,transparent); animation:live-pulse 1.6s ease-out infinite; }
+.live-dot.warning { background:var(--amber); box-shadow:0 0 0 0 color-mix(in srgb,var(--amber) 55%,transparent); }
+@keyframes live-pulse { to { box-shadow:0 0 0 10px transparent; } }
+
+/* Command feedback while a command is on its way: a moving strip on top. */
+.command-feedback { position:relative; overflow:hidden; display:flex; flex-wrap:wrap; align-items:center; gap:6px; transition:background .2s var(--ease), color .2s var(--ease); animation:feedback-in .22s var(--ease); }
+.command-feedback.submitting,.command-feedback.accepted,.command-feedback.processing { padding-top:12px; background:var(--blue-soft); color:var(--blue); }
+.command-feedback.submitting::before,.command-feedback.accepted::before,.command-feedback.processing::before { content:''; position:absolute; top:0; left:0; width:35%; height:3px; background:currentColor; animation:progress-slide 1.2s var(--ease) infinite; }
+.command-feedback > ul { flex-basis:100%; }
+@keyframes feedback-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+
+/* The run status at the top of a page. */
+.run-status { display:grid; gap:12px; padding:18px 20px; border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:var(--shadow-1); }
+.run-status.success { border-color:color-mix(in srgb,var(--success) 30%,var(--line)); background:linear-gradient(180deg,var(--success-soft),var(--surface) 70%); }
+.run-status.warning { border-color:color-mix(in srgb,var(--amber) 30%,var(--line)); background:linear-gradient(180deg,var(--amber-soft),var(--surface) 70%); }
+.run-status.danger { border-color:color-mix(in srgb,var(--red) 30%,var(--line)); background:linear-gradient(180deg,var(--red-soft),var(--surface) 70%); }
+.run-status.info { border-color:color-mix(in srgb,var(--blue) 25%,var(--line)); }
+.run-status-head { display:flex; align-items:center; gap:10px; }
+.run-status .banner-title { font-size:17px; }
+.run-status .banner-copy { color:var(--ink-3); font-size:13px; }
+.run-status-step { display:flex; align-items:center; gap:8px; color:var(--pine-700); font-size:13px; font-weight:650; }
+.run-status-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.run-status-actions:empty { display:none; }
+
+/* Under the top bar while anything runs: a moving bar and a short label. */
+.prototype-window { position:relative; }
+.shell-activity { position:absolute; z-index:60; top:57px; left:0; right:0; height:0; }
+.shell-activity .progress-running { height:3px; border-radius:0; background:transparent; }
+/* Reads that finish quickly never flash the bar. */
+.shell-activity.loading { animation:appear-late .2s .4s both; }
+@keyframes appear-late { from { opacity:0; } to { opacity:1; } }
+.shell-activity-label { position:absolute; top:10px; left:50%; transform:translateX(-50%); display:inline-flex; align-items:center; gap:7px; padding:5px 12px; border-radius:999px; background:var(--pine-700); color:#fff; font-size:12px; font-weight:650; box-shadow:var(--shadow-1); animation:feedback-in .2s var(--ease); }
+
+/* Loading placeholders while a page reads its data. */
+.loading-block { display:grid; gap:12px; }
+.loading-block .skeleton { height:16px; }
+.loading-block .skeleton.tall { height:88px; }
+.loading-block .skeleton.short { width:42%; }
+.loading-caption { display:flex; align-items:center; gap:8px; color:var(--ink-3); font-size:13px; }
+
+/* Pages ease in when they open. */
+.page { animation:page-in .28s var(--ease); }
+@keyframes page-in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .page,.command-feedback { animation:none; }
+  .spinner,.btn[aria-busy="true"]::before { animation-duration:2.4s; }
+  .progress-running::after,.command-feedback.submitting::before,.command-feedback.accepted::before,.command-feedback.processing::before { animation:none; width:100%; opacity:.45; }
+  .live-dot { animation:none; }
+}

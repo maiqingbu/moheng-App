@@ -1,0 +1,333 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "m0a://schemas/narrative/chapter-plan.r2.schema.json",
+ "title": "ChapterPlanR2",
+ "type": "object",
+ "properties": {
+  "payloadSchema": {
+   "const": "chapter-plan.r2"
+  },
+  "chapterId": {
+   "type": "string",
+   "minLength": 1
+  },
+  "compiledFromProjectRevision": {
+   "type": "integer",
+   "minimum": 0
+  },
+  "compiledFromStateDigest": {
+   "type": "string",
+   "pattern": "^[a-f0-9]{64}$"
+  },
+  "contextManifestRef": {
+   "$ref": "../artifact/artifact-ref.schema.json"
+  },
+  "chapterGoal": {
+   "type": "string",
+   "minLength": 1
+  },
+  "chapterRole": {
+   "type": "string",
+   "enum": [
+    "普通",
+    "过渡",
+    "重要",
+    "升级",
+    "回报",
+    "高潮前",
+    "高潮"
+   ]
+  },
+  "activeTaskRefs": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "entityRefs": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "hardScope": {
+   "type": "object",
+   "properties": {
+    "taskRefs": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "responsibilityRefs": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "reservationRefs": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "entityRefs": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "required": [
+    "taskRefs",
+    "responsibilityRefs",
+    "reservationRefs",
+    "entityRefs"
+   ],
+   "additionalProperties": false
+  },
+  "continuityActions": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "threadRef": {
+      "type": "string",
+      "minLength": 1
+     },
+     "disposition": {
+      "type": "string",
+      "enum": [
+       "ADVANCE",
+       "RESOLVE",
+       "DEFER_WITH_BRIDGE",
+       "NO_LONGER_APPLICABLE_CHANGE_REQUEST"
+      ]
+     },
+     "bridge": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "threadRef",
+     "disposition"
+    ],
+    "additionalProperties": false
+   }
+  },
+  "requiredStateOutcomes": {
+   "type": "array",
+   "items": {
+    "$ref": "narrative-definitions.schema.json#/$defs/Condition"
+   }
+  },
+  "forbiddenTransitions": {
+   "type": "array",
+   "items": {
+    "$ref": "narrative-definitions.schema.json#/$defs/Condition"
+   }
+  },
+  "knowledgeBoundaries": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "reservationRefs": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "horizonPreview": {
+   "type": "array",
+   "items": {
+    "$ref": "narrative-definitions.schema.json#/$defs/HorizonSlot"
+   }
+  },
+  "craft": {
+   "type": "object",
+   "properties": {
+    "bigTurn": {
+     "type": "string",
+     "minLength": 1
+    },
+    "smallDiscovery": {
+     "type": "string",
+     "minLength": 1
+    },
+    "protagonistWin": {
+     "type": "string",
+     "minLength": 1
+    },
+    "device": {
+     "type": "object",
+     "properties": {
+      "name": {
+       "type": "string",
+       "minLength": 1
+      },
+      "status": {
+       "type": "string",
+       "enum": [
+        "NEW",
+        "ESCALATED"
+       ]
+      },
+      "howUsed": {
+       "type": "string",
+       "minLength": 1
+      }
+     },
+     "required": [
+      "name",
+      "status",
+      "howUsed"
+     ],
+     "additionalProperties": false
+    },
+    "warmth": {
+     "type": "string",
+     "minLength": 1
+    },
+    "emotionalBeat": {
+     "type": "string",
+     "minLength": 1
+    },
+    "situationChange": {
+     "type": "object",
+     "properties": {
+      "before": {
+       "type": "string",
+       "minLength": 1
+      },
+      "after": {
+       "type": "string",
+       "minLength": 1
+      }
+     },
+     "required": [
+      "before",
+      "after"
+     ],
+     "additionalProperties": false
+    },
+    "scenes": {
+     "type": "array",
+     "minItems": 2,
+     "maxItems": 3,
+     "items": {
+      "type": "object",
+      "properties": {
+       "place": {
+        "type": "string",
+        "minLength": 1
+       },
+       "people": {
+        "type": "array",
+        "minItems": 2,
+        "items": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string",
+           "minLength": 1
+          },
+          "wants": {
+           "type": "string",
+           "minLength": 1
+          },
+          "hides": {
+           "type": "string",
+           "minLength": 1
+          },
+          "whyHere": {
+           "type": "string",
+           "minLength": 1
+          }
+         },
+         "required": [
+          "name",
+          "wants",
+          "hides",
+          "whyHere"
+         ],
+         "additionalProperties": false
+        }
+       },
+       "conflict": {
+        "type": "string",
+        "minLength": 1
+       },
+       "events": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 5,
+        "items": {
+         "type": "string",
+         "minLength": 1
+        }
+       },
+       "readerQuestion": {
+        "type": "string",
+        "minLength": 1
+       }
+      },
+      "required": [
+       "place",
+       "people",
+       "conflict",
+       "events",
+       "readerQuestion"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "newLosses": {
+     "type": "array",
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    },
+    "endHook": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "bigTurn",
+    "smallDiscovery",
+    "protagonistWin",
+    "device",
+    "warmth",
+    "emotionalBeat",
+    "situationChange",
+    "scenes",
+    "newLosses",
+    "endHook"
+   ],
+   "additionalProperties": false
+  }
+ },
+ "required": [
+  "payloadSchema",
+  "chapterId",
+  "compiledFromProjectRevision",
+  "compiledFromStateDigest",
+  "contextManifestRef",
+  "chapterGoal",
+  "activeTaskRefs",
+  "continuityActions",
+  "requiredStateOutcomes",
+  "forbiddenTransitions",
+  "knowledgeBoundaries",
+  "reservationRefs",
+  "horizonPreview",
+  "craft"
+ ],
+ "additionalProperties": false
+}

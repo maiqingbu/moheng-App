@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import BaseModal from '../components/BaseModal.vue'
 import CommandFeedback from '../components/CommandFeedback.vue'
+import LoadingBlock from '../components/LoadingBlock.vue'
+import { isInFlight } from '../presentation/productLanguage'
 import { useProjectStore } from '../stores/projectStore'
 
 const store = useProjectStore()
@@ -35,16 +37,18 @@ onMounted(async()=>{
 const commandState = computed(()=>store.commandState(commandKey))
 const regenerateState = computed(()=>store.commandState(regenerateKey))
 const bookPlanState = computed(()=>store.commandState('book-plan-revise'))
+const busy = (state: { status: string }) => isInFlight(state.status)
+const generating = computed(()=>busy(regenerateState.value) || busy(initialGenerationState.value))
 
 function choose(id:string){ selected.value=[id] }
 function toggleCombine(id:string){ selected.value = selected.value.includes(id) ? selected.value.filter(x=>x!==id) : [...selected.value,id].slice(0,2) }
 async function regenerate(){
-  if (['submitting','accepted','processing'].includes(regenerateState.value.status)) return
+  if (busy(regenerateState.value)) return
   await store.runCommand(regenerateKey,{type:'pitch_regenerate',projectId:store.project?.id,payload:{adjustment:newConstraint.value,regeneratePitches:true}}); constraintsOpen.value=false
 }
 async function reviseBookPlan(){ await store.runCommand('book-plan-revise',{type:'book_plan_revise',payload:{reason:'用户从故事方向页请求重新审视书级战略'}}) }
 async function confirm(){
-  if (!selected.value.length || ['submitting','accepted','processing'].includes(commandState.value.status)) return
+  if (!selected.value.length || busy(commandState.value)) return
   await store.runCommand(commandKey,{type:'pitch_select',projectId:store.project?.id,payload:{pitchIds:selected.value,mode:selected.value.length>1?'combine':'single'}})
   setTimeout(()=>router.push(`/projects/${store.currentProjectId ?? ''}/setup`),350)
 }
@@ -53,17 +57,17 @@ async function confirm(){
 <template>
   <div class="page">
     <PageHeader title="规划 · 故事方向" subtitle="先明确作品方向与故事承诺，再进入故事核心和当前卷规划。">
-      <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" @click="regenerate">{{ persistedGenerationFailure ? '重试生成故事方向' : '重新推荐' }}</button>
+      <button class="btn" @click="constraintsOpen=true">修改约束后重生成</button><button class="btn soft" :aria-busy="generating" :aria-disabled="generating" @click="regenerate">{{ persistedGenerationFailure ? '重试生成故事方向' : '重新推荐' }}</button>
     </PageHeader>
 
     <div class="pitch-toolbar">
       <div><strong>当前选择：{{ selected.length ? pitches.filter(p=>selected.includes(p.id)).map(p=>p.name).join(' + ') : '尚未选择' }}</strong><div class="muted" style="font-size:11px">组合方案最多选择两份，系统会重新检查故事承诺、主角欲望、核心机制和主要冲突是否一致。</div></div>
-      <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :aria-disabled="!selected.length || ['submitting','accepted','processing'].includes(commandState.status)" @click="confirm">确认故事方向</button></div>
+      <div class="actions"><button class="btn" @click="combineOpen=true">组合方案</button><button class="btn primary" :aria-disabled="!selected.length || busy(commandState)" :aria-busy="busy(commandState)" @click="confirm">确认故事方向</button></div>
     </div>
     <CommandFeedback :state="commandState" /><CommandFeedback :state="initialGenerationState" /><CommandFeedback :state="regenerateState" /><div v-if="persistedGenerationFailure && regenerateState.status === 'idle' && initialGenerationState.status === 'idle'" class="command-feedback failed" role="status"> <strong>未完成</strong><span> · 上次生成未完成，可以重试故事方向。</span></div>
 
     <section v-if="store.directions" class="card pad section" style="margin-top:14px">
-      <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示会影响创作的核心内容，详细检查由系统自动完成。</p></div><button class="btn" @click="reviseBookPlan">修订书级战略</button></div>
+      <div class="card-head"><div><span class="eyebrow">书级战略摘要</span><h2 class="card-title" style="margin-top:6px">全书战略 / 全书约束</h2><p class="card-subtitle">这里只展示会影响创作的核心内容，详细检查由系统自动完成。</p></div><button class="btn" :aria-busy="busy(bookPlanState)" @click="reviseBookPlan">修订书级战略</button></div>
       <CommandFeedback :state="bookPlanState" />
       <dl class="pitch-kv" style="margin-top:12px">
         <div><dt>全书承诺</dt><dd>{{ store.directions.strategy.storyPromise }}</dd></div>
@@ -75,7 +79,10 @@ async function confirm(){
       </dl>
     </section>
 
-    <section class="pitch-grid section" style="margin-top:14px">
+    <section v-if="generating" class="pitch-grid section" style="margin-top:14px" aria-label="正在生成故事方向">
+      <LoadingBlock v-for="slot in 3" :key="slot" class="pitch-card" style="padding:18px" :caption="`正在生成第 ${slot} 份故事方向…`" />
+    </section>
+    <section v-else class="pitch-grid section" style="margin-top:14px">
       <article v-for="pitch in pitches" :key="pitch.id" class="pitch-card" :class="{selected:selected.includes(pitch.id),recommended:pitch.recommended}">
         <div class="pitch-card-head">
           <span class="badge">{{ pitch.variant }}</span>
@@ -115,7 +122,7 @@ async function confirm(){
 
     <BaseModal :open="constraintsOpen" title="修改约束后重新生成" subtitle="只改你关心的部分，其他已经确认的意图保持不变。" @close="constraintsOpen=false">
       <label class="field"><span class="field-label">补充或修改约束</span><textarea v-model="newConstraint" class="textarea" /></label>
-      <CommandFeedback :state="regenerateState" /><template #footer><button class="btn" @click="constraintsOpen=false">取消</button><button class="btn primary" :aria-disabled="['submitting','accepted','processing'].includes(regenerateState.status)" @click="regenerate">重新生成三份方向</button></template>
+      <CommandFeedback :state="regenerateState" /><template #footer><button class="btn" @click="constraintsOpen=false">取消</button><button class="btn primary" :aria-disabled="generating" :aria-busy="generating" @click="regenerate">重新生成三份方向</button></template>
     </BaseModal>
   </div>
 </template>

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { BlockReason, RunState } from '../../application/contracts'
-const props = defineProps<{ state: RunState; reason: BlockReason }>()
+const props = defineProps<{ state: RunState; reason: BlockReason; step?: string }>()
 const view = computed(() => {
   const reasonMap: Record<string,string> = {
     USER_PAUSE:'你主动暂停了制作。已正式提交的内容保持不变。', BUDGET_LIMIT:'预算已经达到当前上限，需要调整后继续。', DECISION_REQUIRED:'有一项关键选择需要你确认，系统不会在不确定方向上继续写。',
     POLICY_EXPIRED:'目标平台规则已经更新，需要重新确认适用版本。', SIGNING_REQUIRED:'前三章尚未通过开篇评估，第四章保持锁定。', SIGNING_INVALIDATED:'核心设定发生变化，原开篇评估回执已经失效。',
-    CONTRACT_FAILURE:'当前内容与已确认创作规则冲突。', CANON_CONFLICT:'制作结果与正式作品事实发生冲突。', RETRY_EXHAUSTED:'自动修复次数已经用尽，需要你的决定。', PERSISTENCE_FAILURE:'本机数据提交失败，系统已停止继续生产以保护正式状态。'
+    CONTRACT_FAILURE:'当前内容与已确认创作规则冲突。', CANON_CONFLICT:'制作结果与正式作品事实发生冲突。', RETRY_EXHAUSTED:'自动修复次数已经用尽，需要你的决定。', PERSISTENCE_FAILURE:'本机数据提交失败，系统已停止继续生产以保护正式状态。',
+    UNKNOWN_REMOTE_OUTCOME:'远端请求结果未知，等待处理决定。'
   }
   const map: Record<RunState,{title:string,tone:string,copy:string}> = {
     IDLE:{title:'等待开始',tone:'info',copy:'项目已准备好，尚未启动新的生产任务。'}, ACTIVE:{title:'制作正在进行',tone:'success',copy:'系统正在按已确认规则继续生产。'},
@@ -17,4 +18,16 @@ const view = computed(() => {
   return map[props.state]
 })
 </script>
-<template><div class="banner" :class="view.tone"><div><div class="banner-title">{{ view.title }}</div><div class="banner-copy">{{ view.copy }}</div></div><slot /></div></template>
+<template>
+  <div class="run-status" :class="view.tone" data-run-status role="status" aria-live="polite">
+    <div class="run-status-head">
+      <span v-if="state === 'ACTIVE' || state === 'WAITING_DECISION'" class="live-dot" :class="{ warning: state === 'WAITING_DECISION' }" aria-hidden="true" />
+      <div><div class="banner-title">{{ view.title }}</div><div class="banner-copy">{{ view.copy }}</div></div>
+    </div>
+    <template v-if="state === 'ACTIVE'">
+      <div class="progress-running" role="progressbar" aria-label="正在制作" />
+      <div v-if="step" class="run-status-step"><span class="spinner" aria-hidden="true" />{{ step }}</div>
+    </template>
+    <div class="run-status-actions"><slot /></div>
+  </div>
+</template>

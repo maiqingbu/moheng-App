@@ -28,6 +28,7 @@ export type BlockReason =
   | 'CANON_CONFLICT'
   | 'RETRY_EXHAUSTED'
   | 'PERSISTENCE_FAILURE'
+  | 'UNKNOWN_REMOTE_OUTCOME'
 
 export type SigningStatus = 'NOT_STARTED' | 'IN_REVIEW' | 'REVISE' | 'REJECTED' | 'PASS' | 'FAIL' | 'NOT_VERIFIED' | 'STALE'
 export type CommandStatus = 'idle' | 'submitting' | 'accepted' | 'processing' | 'committed' | 'blocked' | 'failed'
@@ -132,6 +133,26 @@ export interface SupportSessionProjection {
   finding: Record<string, unknown>
   receipt: Record<string, unknown>
   evidenceLedger?: Record<string, unknown>[]
+  /** FX-21: how the question was understood. */
+  intent?: AssistantIntentResolution
+}
+/** FX-22: one backup of a work; revision is the one it was taken at. */
+export interface BackupEntry {
+  backupName: string
+  checksumSha256: string
+  createdAt: string
+  revision: number | null
+  sizeBytes: number | null
+  available: boolean
+}
+/** FX-21: how the project assistant understood a question. */
+export interface AssistantIntentResolution {
+  intent: string
+  source: 'MODEL' | 'KEYWORD'
+  subjects?: string[]
+  attribute?: string | null
+  modelRunId?: string | null
+  fallbackReason?: string | null
 }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
 
@@ -143,6 +164,18 @@ export interface StorySetupProjection {
   storyCore: Record<string, unknown> | null
   openingReady: boolean
   provenance?: Record<string, unknown>
+}
+
+/** CRAFT v3 opening craft setup: story bible and style card candidates. */
+export interface CraftStageProjection {
+  candidates: Array<Record<string, any> & { id: string }>
+  confirmed: (Record<string, any> & { id: string }) | null
+}
+export interface CraftSetupProjection {
+  storyBible: CraftStageProjection
+  styleCard: CraftStageProjection
+  sample: { text: string; digest: string; savedAt: string; metrics: Record<string, number>; minChars: number } | null
+  archetypes: Array<{ id: string; name: string; genres: string[] }>
 }
 
 export interface OpeningReadyProjection {
@@ -167,6 +200,8 @@ export interface OpeningProgressProjection {
 
 export interface AssistantRepairPlan {
   action?: 'EXECUTABLE' | 'PROPOSAL_ONLY' | 'NO_ACTION'
+  /** FX-21: how the repair request was understood. */
+  intent?: AssistantIntentResolution
   repairPlanId: string
   projectId: string
   basedOnProjectRevision: number
@@ -437,6 +472,8 @@ export type DecisionCategory =
   | 'Retcon'
   | '大规模修复'
   | '完结冲突'
+  | '审计提醒'
+  | '计划提醒'
 
 export interface DecisionItem {
   id: string
@@ -449,7 +486,7 @@ export interface DecisionItem {
   createdAt: string
   recommendation?: string
   evidence?: string[]
-  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB'>
+  allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB' | 'ACKNOWLEDGE'>
 }
 
 export interface ChapterListItem {
@@ -702,6 +739,7 @@ export interface ProductionCenterProjection {
     title: string
     volumeId: string
     executionMode: 'OPENING_BOOTSTRAP' | 'LONG_FORM'
+    quota?: { used: number; limit: number; allowance: number } | null
   } | null
   chapterPlan?: {
     ref: { artifactId: string; version: number; payloadHash: string }
@@ -822,11 +860,17 @@ export interface SettingsProjection {
   }
   privacyMode: 'local-first' | 'balanced'
   sendDraftOnly: boolean
+  /** FX-18: the work's default chapter length range (project settings only). */
+  chapterLengthRange?: { min: number; max: number }
   exportFormat: 'DOCX' | 'Markdown' | 'TXT' | 'EPUB'
   platform: string
   theme: 'light' | 'system' | 'dark'
   providerId?: string
   modelId?: string
+  /** Optional model used only for writing chapter prose; blank uses modelId. */
+  renderModelId?: string
+  /** Optional model used only for the audit extraction; blank uses modelId. */
+  auditModelId?: string
   enabled?: boolean
   timeoutMs?: number
   secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'
@@ -1025,6 +1069,11 @@ export type CommandType =
   | 'pitch_regenerate'
   | 'pitch_select'
   | 'story_setup_save'
+  | 'story_bible_generate'
+  | 'story_bible_confirm'
+  | 'style_card_generate'
+  | 'style_card_confirm'
+  | 'style_sample_save'
   | 'opening_ready'
   | 'opening_start_creating'
   | 'book_plan_create'
@@ -1037,6 +1086,7 @@ export type CommandType =
   | 'production_pause'
   | 'production_resume'
   | 'production_cancel'
+  | 'production_reset_chapter_quota'
   | 'repair_plan_create'
   | 'repair_authorize'
   | 'repair_execute'
@@ -1064,6 +1114,7 @@ export type CommandType =
   | 'opening_evaluate'
   | 'signing_confirm'
   | 'backup_create'
+  | 'backup_restore'
   | 'integrity_check_run'
   | 'endgame_contract_create'
   | 'complete_book'
@@ -1092,8 +1143,11 @@ export interface FrontendPort {
   queryMarketStrategy(request: ProjectQueryRequest): Promise<MarketStrategyProjection>
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
+  queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
+  queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>
+  classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>
   queryVolumeDetail(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeDetailProjection>

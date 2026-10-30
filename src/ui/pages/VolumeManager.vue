@@ -98,6 +98,7 @@ async function build() {
 
     <div v-if="!signingPassed" class="banner warning section">
       <div><div class="banner-title">卷级生产尚未解锁</div><div class="banner-copy">开篇评估通过并生成正式回执后，才能建立详细卷计划和启动后续长篇生产。</div></div>
+      <button class="btn" @click="router.push(`/projects/${store.currentProjectId}/production`)">去开篇评估</button>
     </div>
 
     <div class="section" style="display:grid;gap:12px">

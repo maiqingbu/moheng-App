@@ -29,6 +29,8 @@ pub enum RuntimeError {
     LeaseHeld,
     #[error("UNKNOWN_REMOTE_OUTCOME requires explicit decision")]
     UnknownRemoteOutcome,
+    #[error("AUDIT_REMINDER_NOT_OPEN")]
+    AuditReminderNotOpen,
     #[error("BUDGET_EXCEEDED")]
     BudgetHardLimit,
     #[error("MODEL_PRICE_REQUIRED:请先填写该模型价格")]
@@ -120,6 +122,24 @@ pub struct DurableJobService;
 pub struct UnknownDecisionResolution {
     pub source_ref: String,
     pub capability: String,
+}
+
+/// Closes an open audit reminder (LD-1 step 2) once the user has read it.
+pub fn acknowledge_audit_reminder(
+    connection: &Connection,
+    project_id: &str,
+    decision_id: &str,
+    now: &str,
+) -> Result<(), RuntimeError> {
+    let changed = connection.execute(
+        "UPDATE decisions SET outcome='ACKNOWLEDGED', updated_at=?3 WHERE project_id=?1 AND decision_id=?2 AND decision_type='AUDIT_REMINDER' AND outcome='OPEN'",
+        libsql_rusqlite::params![project_id, decision_id, now],
+    )?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(RuntimeError::AuditReminderNotOpen)
+    }
 }
 
 pub fn resolve_unknown_decision(
@@ -381,6 +401,29 @@ impl DurableJobService {
         Self::update_stage(connection, project_id, job_id, "COMPLETED", now)?;
         Self::transition_for_worker(connection, project_id, job_id, "COMPLETED", worker_id, now)?;
         Self::release_lease_for_holder(connection, project_id, job_id, worker_id, now)
+    }
+
+    /// A B02 phase job whose model reply was not JSON is failed by the parse
+    /// record; it runs again for the one resend (FX-19).
+    pub fn reopen_b02_phase_job_for_resend(
+        connection: &Connection,
+        project_id: &str,
+        job_id: &str,
+        worker_id: &str,
+        now: &str,
+    ) -> Result<(), RuntimeError> {
+        connection.execute(
+            "UPDATE jobs SET status='RUNNING',error_code=NULL,updated_at=?1 WHERE project_id=?2 AND job_id=?3 AND status='FAILED'",
+            libsql_rusqlite::params![now, project_id, job_id],
+        )?;
+        Self::acquire_lease(
+            connection,
+            project_id,
+            job_id,
+            worker_id,
+            &lease_expiry(now),
+            now,
+        )
     }
 
     pub fn fail_b02_phase_job(
@@ -1055,6 +1098,10 @@ impl DurableJobService {
                 "BLOCKED" => ("BLOCKED", error_code),
                 "FAILED" => ("FAILED", error_code),
                 "COMPLETED" => ("COMPLETED", None),
+                "CANCELLED" => (
+                    "IDLE",
+                    error_code.filter(|reason| !reason.starts_with("UNKNOWN_REMOTE_OUTCOME")),
+                ),
                 _ => ("IDLE", error_code),
             },
             None => ("IDLE", None),
@@ -1215,6 +1262,20 @@ pub struct TransportUsage {
     pub provider_request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTransportDiagnostic {
+    pub provider_send_started_at_unix_ms: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub client_timeout_ms: Option<u64>,
+    pub phase: String,
+    pub provider_error_code: Option<String>,
+    pub http_status: Option<u16>,
+    pub response_read: String,
+    pub response_bytes: Option<u64>,
+    pub provider_request_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransportResponse {
     pub raw_response: String,
@@ -1222,6 +1283,20 @@ pub struct TransportResponse {
 }
 
 pub trait ModelTransport {
+    /// Configured transports opt into best-effort, redacted lifecycle events.
+    fn diagnostics_enabled(&self) -> bool {
+        false
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// Returns provider metadata without changing the transport outcome.
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        None
+    }
+
     /// Test transports may inspect the database at the exact send boundary.
     /// Production transports keep the default no-op implementation.
     fn before_send(
@@ -1547,28 +1622,105 @@ impl DurableModelRunner {
             return Err(error);
         }
         let credential = transport.credential().to_owned();
+        let diagnostics_enabled = transport.diagnostics_enabled();
+        let transport_started_at = diagnostics_enabled.then(|| diagnostic_utc_now(connection, now));
+        if let Some(transport_started_at) = transport_started_at.as_deref() {
+            record_model_request_started(
+                connection,
+                spec,
+                transport_started_at,
+                transport.diagnostic_timeout_ms(),
+            );
+        }
         let response = match transport.send(spec, &credential) {
             Ok(response) => response,
-            Err(TransportFailure::Timeout | TransportFailure::UnknownRemoteOutcome) => {
-                mark_unknown_remote_outcome(connection, spec, now)?;
-                return Err(RuntimeError::UnknownRemoteOutcome);
-            }
             Err(error) => {
-                mark_confirmed_failure(connection, spec, now)?;
-                return Err(RuntimeError::Transport(error));
+                let diagnostic = transport.take_diagnostic();
+                let transport_failure = error.to_string();
+                if diagnostics_enabled {
+                    record_model_transport_result(
+                        connection,
+                        spec,
+                        ModelTransportResultEvent {
+                            transport_started_at: transport_started_at.as_deref(),
+                            configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                            diagnostic: diagnostic.as_ref(),
+                            raw_response_persisted: false,
+                            transport_failure: Some(&transport_failure),
+                            persistence_failure_code: None,
+                            fallback_created_at: now,
+                        },
+                    );
+                }
+                match error {
+                    TransportFailure::Timeout | TransportFailure::UnknownRemoteOutcome => {
+                        mark_unknown_remote_outcome(connection, spec, now)?;
+                        return Err(RuntimeError::UnknownRemoteOutcome);
+                    }
+                    TransportFailure::Unavailable => {
+                        mark_confirmed_failure(connection, spec, now)?;
+                        return Err(RuntimeError::Transport(TransportFailure::Unavailable));
+                    }
+                }
             }
         };
+        let diagnostic = transport.take_diagnostic();
         let defer_usage_until_raw_persist = transport.defer_usage_until_raw_persist();
         if !defer_usage_until_raw_persist {
             settle_remote_usage(connection, spec, &response.usage, now)?;
         }
         if let Err(error) = transport.before_raw_persist(connection, spec) {
+            if diagnostics_enabled {
+                record_model_transport_result(
+                    connection,
+                    spec,
+                    ModelTransportResultEvent {
+                        transport_started_at: transport_started_at.as_deref(),
+                        configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                        diagnostic: diagnostic.as_ref(),
+                        raw_response_persisted: false,
+                        transport_failure: None,
+                        persistence_failure_code: Some("RAW_RESPONSE_PERSIST_FAILED"),
+                        fallback_created_at: now,
+                    },
+                );
+            }
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(error);
         }
         if persist_raw_response(connection, spec, &response.raw_response, now).is_err() {
+            if diagnostics_enabled {
+                record_model_transport_result(
+                    connection,
+                    spec,
+                    ModelTransportResultEvent {
+                        transport_started_at: transport_started_at.as_deref(),
+                        configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                        diagnostic: diagnostic.as_ref(),
+                        raw_response_persisted: false,
+                        transport_failure: None,
+                        persistence_failure_code: Some("RAW_RESPONSE_PERSIST_FAILED"),
+                        fallback_created_at: now,
+                    },
+                );
+            }
             mark_raw_persistence_failure(connection, spec, now)?;
             return Err(RuntimeError::RawResponsePersistenceFailed);
+        }
+        if diagnostics_enabled {
+            record_model_transport_result(
+                connection,
+                spec,
+                ModelTransportResultEvent {
+                    transport_started_at: transport_started_at.as_deref(),
+                    configured_timeout_ms: transport.diagnostic_timeout_ms(),
+                    diagnostic: diagnostic.as_ref(),
+                    raw_response_persisted: true,
+                    transport_failure: None,
+                    persistence_failure_code: None,
+                    fallback_created_at: now,
+                },
+            );
         }
         if defer_usage_until_raw_persist {
             let usage = transport.usage_after_raw_persist(
@@ -1804,6 +1956,28 @@ fn existing_model_status(
         .optional()?)
 }
 
+/// Model runs a chapter budget has used: the larger of the runs of the
+/// chapter's jobs and the runs that reserved against the budget. The runtime
+/// budget, the commit gate and the production projection all count with it.
+pub fn chapter_model_runs_used(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    budget_id: &str,
+) -> Result<i64, libsql_rusqlite::Error> {
+    let runs: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM model_runs AS model_run JOIN jobs ON jobs.job_id=model_run.job_id WHERE model_run.project_id=?1 AND jobs.chapter_id=?2",
+        libsql_rusqlite::params![project_id, chapter_id],
+        |row| row.get(0),
+    )?;
+    let reserved: i64 = connection.query_row(
+        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+        libsql_rusqlite::params![project_id, budget_id],
+        |row| row.get(0),
+    )?;
+    Ok(runs.max(reserved))
+}
+
 fn enforce_budget(
     connection: &Connection,
     spec: &ModelRunSpec,
@@ -1877,11 +2051,14 @@ fn enforce_budget(
         mark_budget_blocked(connection, spec, now)?;
         return Err(RuntimeError::BudgetHardLimit);
     }
-    let used: i64 = connection.query_row(
-        "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
-        libsql_rusqlite::params![project_id, budget_id],
-        |row| row.get(0),
-    )?;
+    let used = match &chapter_id {
+        Some(chapter_id) => chapter_model_runs_used(connection, &project_id, chapter_id, budget_id)?,
+        None => connection.query_row(
+            "SELECT COUNT(DISTINCT model_run_id) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','SETTLED','OVER_LIMIT')",
+            libsql_rusqlite::params![project_id, budget_id],
+            |row| row.get(0),
+        )?,
+    };
     let active_reserved_cost: i64 = connection.query_row(
         "SELECT COALESCE(SUM(reserved_cents), 0) FROM budget_reservations WHERE project_id=?1 AND budget_ref=?2 AND status IN ('RESERVED','OVER_LIMIT')",
         libsql_rusqlite::params![project_id, budget_id],
@@ -2158,6 +2335,161 @@ fn mark_confirmed_failure(
     Ok(())
 }
 
+fn diagnostic_utc_now(connection: &Connection, fallback: &str) -> String {
+    connection
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or_else(|_| fallback.to_string())
+}
+
+fn record_model_request_started(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    transport_started_at: &str,
+    timeout_ms: Option<u64>,
+) {
+    let payload = json!({
+        "modelRunId": spec.model_run_id,
+        "jobId": spec.job_id,
+        "provider": spec.provider,
+        "model": spec.model,
+        "capability": spec.capability,
+        "attempt": spec.attempt_no,
+        "configuredTimeoutMs": timeout_ms,
+        "transportStartedAt": transport_started_at,
+    });
+    persist_model_diagnostic_event(
+        connection,
+        spec,
+        &format!(
+            "event:model-request-started:{}:{}",
+            spec.model_run_id, spec.attempt_no
+        ),
+        "MODEL_REQUEST_STARTED",
+        &payload,
+        transport_started_at,
+    );
+}
+
+struct ModelTransportResultEvent<'a> {
+    transport_started_at: Option<&'a str>,
+    configured_timeout_ms: Option<u64>,
+    diagnostic: Option<&'a ModelTransportDiagnostic>,
+    raw_response_persisted: bool,
+    transport_failure: Option<&'a str>,
+    persistence_failure_code: Option<&'a str>,
+    fallback_created_at: &'a str,
+}
+
+fn record_model_transport_result(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    event: ModelTransportResultEvent<'_>,
+) {
+    let diagnostic = event
+        .diagnostic
+        .cloned()
+        .unwrap_or_else(|| ModelTransportDiagnostic {
+            provider_send_started_at_unix_ms: None,
+            elapsed_ms: None,
+            timeout_ms: None,
+            client_timeout_ms: None,
+            phase: "unreported".into(),
+            provider_error_code: None,
+            http_status: None,
+            response_read: "not_reported".into(),
+            response_bytes: None,
+            provider_request_id: None,
+        });
+    let created_at = diagnostic_utc_now(connection, event.fallback_created_at);
+    let payload = json!({
+        "modelRunId": spec.model_run_id,
+        "jobId": spec.job_id,
+        "provider": spec.provider,
+        "model": spec.model,
+        "capability": spec.capability,
+        "attempt": spec.attempt_no,
+        "transportStartedAt": event.transport_started_at,
+        "diagnostic": {
+            "providerSendStartedAtUnixMs": diagnostic.provider_send_started_at_unix_ms,
+            "elapsedMs": diagnostic.elapsed_ms,
+            "timeoutMs": diagnostic.timeout_ms.or(event.configured_timeout_ms),
+            "httpClientTimeoutMs": diagnostic.client_timeout_ms,
+            "phase": diagnostic.phase,
+            "providerErrorCode": diagnostic.provider_error_code,
+            "httpStatus": diagnostic.http_status,
+            "responseRead": diagnostic.response_read,
+            "responseBytes": diagnostic.response_bytes,
+            "providerRequestId": diagnostic.provider_request_id,
+            "rawResponsePersisted": event.raw_response_persisted,
+            "transportFailure": event.transport_failure,
+            "persistenceFailureCode": event.persistence_failure_code,
+        }
+    });
+    persist_model_diagnostic_event(
+        connection,
+        spec,
+        &format!(
+            "event:model-transport-result:{}:{}",
+            spec.model_run_id, spec.attempt_no
+        ),
+        "MODEL_TRANSPORT_RESULT",
+        &payload,
+        &created_at,
+    );
+}
+
+fn persist_model_diagnostic_event(
+    connection: &Connection,
+    spec: &ModelRunSpec,
+    event_id: &str,
+    event_type: &str,
+    payload: &Value,
+    created_at: &str,
+) {
+    let project_id =
+        connection.query_row("SELECT project_id FROM project_meta LIMIT 1", [], |row| {
+            row.get::<_, String>(0)
+        });
+    let Ok(project_id) = project_id else {
+        eprintln!(
+            "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+            event_type, spec.model_run_id
+        );
+        return;
+    };
+    let payload = match serde_json::to_string(payload) {
+        Ok(payload) => payload,
+        Err(_) => {
+            eprintln!(
+                "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+                event_type, spec.model_run_id
+            );
+            return;
+        }
+    };
+    if connection
+        .execute(
+            "INSERT OR IGNORE INTO production_events(event_id, project_id, job_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql_rusqlite::params![
+                event_id,
+                project_id,
+                spec.job_id,
+                event_type,
+                payload,
+                created_at,
+            ],
+        )
+        .is_err()
+    {
+        eprintln!(
+            "P01_DIAGNOSTIC_PERSIST_FAILED event_type={} model_run_id={}",
+            event_type, spec.model_run_id
+        );
+    }
+}
+
 fn mark_unknown_remote_outcome(
     connection: &Connection,
     spec: &ModelRunSpec,
@@ -2410,6 +2742,18 @@ impl<T, S> SecretBackedTransport<T, S> {
 }
 
 impl<T: ModelTransport, S: SecretStore> ModelTransport for SecretBackedTransport<T, S> {
+    fn diagnostics_enabled(&self) -> bool {
+        self.inner.diagnostics_enabled()
+    }
+
+    fn diagnostic_timeout_ms(&self) -> Option<u64> {
+        self.inner.diagnostic_timeout_ms()
+    }
+
+    fn take_diagnostic(&mut self) -> Option<ModelTransportDiagnostic> {
+        self.inner.take_diagnostic()
+    }
+
     fn before_send(
         &mut self,
         connection: &Connection,

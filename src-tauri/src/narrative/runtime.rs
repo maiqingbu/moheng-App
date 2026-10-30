@@ -522,11 +522,16 @@ pub fn context_hard_scope(input: &ContextCompilerInput) -> Value {
     })
 }
 
-pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 4096;
-pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 32768;
-pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r7";
+pub const CONTEXT_HARD_TOKEN_LIMIT: i64 = 8192;
+pub const CONTEXT_HARD_SERIALIZED_BYTE_LIMIT: usize = 65536;
+pub const CONTEXT_COMPILER_VERSION: &str = "b06-context-compiler.r8";
 pub const CONTEXT_DIGEST_ALGORITHM_VERSION: &str = "sha256-canonical.r2";
-pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r2";
+pub const CONTEXT_HARD_BUDGET_POLICY_VERSION: &str = "b06-hard-budget.r4";
+/// QC-1: how many facts, relations and knowledge items a context's state
+/// may load before `fit_context_hard_budget` trims them to the budget.
+pub const STATE_SOURCE_LIMIT: i64 = 1_000;
+/// Why a fact, relation or knowledge item was left out of a context.
+const TRIMMED_REASON: &str = "上下文预算：较旧或较次要的设定这次不带入，仍在作品档案里。";
 pub const CONTEXT_TOKEN_ESTIMATOR_VERSION: &str = "unicode-scalar-ascii-triplets.r1";
 pub const CONTEXT_HARD_CONTRACT_CLASSIFICATION_VERSION: &str = "b06-contract-hard-fields.r3";
 pub const OPENING_HARD_CONTRACT_FIELDS: &[&str] = &[
@@ -940,6 +945,160 @@ fn context_hard_source_sizes(
     Ok(sizes)
 }
 
+/// The chapter number each of the given source ids was recorded in.
+pub type SourceChapters<'a> = dyn Fn(&[&str]) -> Result<BTreeMap<String, i64>, String> + 'a;
+
+/// QC-1 (owner decision 2026-10-26: works aim at 20 million characters, so
+/// the facts and knowledge of a person outgrow any context): a context over
+/// the HARD budget leaves out adjustable facts, relations and knowledge
+/// instead of failing, and records each in `omitted_soft_sources`; the ledger
+/// keeps them. What goes first: knowledge of a fact not in the context, then
+/// facts superseded in kind by a newer one (same person and predicate), then
+/// knowledge, then the newest of each kind by authority C, B, A; within a
+/// rank, the oldest chapter (from `chapters`, by source id) first.
+pub fn fit_context_hard_budget(
+    input: &mut ContextCompilerInput,
+    chapters: &SourceChapters<'_>,
+) -> Result<ContextHardBudgetUsage, String> {
+    let mut chapters_known = None;
+    loop {
+        let usage = measure_context_hard_budget(input)?;
+        let mut excess_tokens = usage.estimated_tokens - CONTEXT_HARD_TOKEN_LIMIT;
+        let mut excess_bytes =
+            usage.serialized_bytes as i64 - CONTEXT_HARD_SERIALIZED_BYTE_LIMIT as i64;
+        if excess_tokens <= 0 && excess_bytes <= 0 {
+            return Ok(usage);
+        }
+        // Only a context over budget needs the chapters its sources are from.
+        if chapters_known.is_none() {
+            let ids = input
+                .state
+                .source_refs
+                .iter()
+                .map(|source| source.ref_.as_str())
+                .collect::<Vec<_>>();
+            chapters_known = Some(chapters(&ids)?);
+        }
+        let known = chapters_known.as_ref().expect("loaded above");
+        let sizes = usage
+            .source_sizes
+            .iter()
+            .filter(|size| size.adjustable)
+            .map(|size| {
+                (
+                    size.source_ref.as_str(),
+                    (size.estimated_tokens, size.serialized_bytes as i64),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut dropped = BTreeSet::new();
+        for (kind, source) in trim_order(&input.state, known) {
+            if excess_tokens <= 0 && excess_bytes <= 0 {
+                break;
+            }
+            // Knowledge of a fact left out goes with it.
+            let with_knowledge = input
+                .state
+                .knowledge
+                .iter()
+                .filter(|item| item.fact_id.as_deref() == Some(source.as_str()))
+                .map(|item| ("KNOWLEDGE", item.knowledge_id.clone()))
+                .collect::<Vec<_>>();
+            for (kind, id) in std::iter::once((kind, source)).chain(with_knowledge) {
+                if !dropped.insert(id.clone()) {
+                    continue;
+                }
+                let (tokens, bytes) = sizes.get(id.as_str()).copied().unwrap_or((0, 0));
+                excess_tokens -= tokens;
+                excess_bytes -= bytes;
+                input.omitted_soft_sources.push(OmittedSource {
+                    source_ref: SourceRef {
+                        kind: kind.into(),
+                        ref_: id,
+                    },
+                    reason: TRIMMED_REASON.into(),
+                });
+            }
+        }
+        if dropped.is_empty() {
+            // Nothing adjustable is left; the budget check reports it.
+            return Ok(usage);
+        }
+        let state = &mut input.state;
+        state.facts.retain(|fact| !dropped.contains(&fact.fact_id));
+        state
+            .relations
+            .retain(|relation| !dropped.contains(&relation.relation_id));
+        state
+            .knowledge
+            .retain(|item| !dropped.contains(&item.knowledge_id));
+        state
+            .source_refs
+            .retain(|source| !dropped.contains(&source.ref_));
+    }
+}
+
+/// The adjustable sources of `state` in the order `fit_context_hard_budget`
+/// leaves them out, as `(kind, id)`.
+fn trim_order(
+    state: &CurrentNarrativeStateView,
+    chapters: &BTreeMap<String, i64>,
+) -> Vec<(&'static str, String)> {
+    let chapter = |id: &str| chapters.get(id).copied().unwrap_or(i64::MIN);
+    let authority = |level: &str| match level {
+        "A" => 5,
+        "B" => 4,
+        _ => 3,
+    };
+    let mut newest = HashMap::<(&str, &str), (i64, &str)>::new();
+    for fact in &state.facts {
+        let key = (fact.subject_id.as_str(), fact.predicate.as_str());
+        let candidate = (chapter(&fact.fact_id), fact.fact_id.as_str());
+        let entry = newest.entry(key).or_insert(candidate);
+        *entry = (*entry).max(candidate);
+    }
+    let fact_ids = state
+        .facts
+        .iter()
+        .map(|fact| fact.fact_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut ranked = Vec::new();
+    for fact in &state.facts {
+        let key = (fact.subject_id.as_str(), fact.predicate.as_str());
+        let rank = if newest[&key].1 == fact.fact_id {
+            authority(&fact.authority_level)
+        } else {
+            1
+        };
+        ranked.push((rank, chapter(&fact.fact_id), "CANON", fact.fact_id.clone()));
+    }
+    for relation in &state.relations {
+        ranked.push((
+            authority(&relation.authority_level),
+            chapter(&relation.relation_id),
+            "CANON",
+            relation.relation_id.clone(),
+        ));
+    }
+    for item in &state.knowledge {
+        let about_absent = item
+            .fact_id
+            .as_deref()
+            .is_some_and(|fact| !fact_ids.contains(fact));
+        ranked.push((
+            if about_absent { 0 } else { 2 },
+            chapter(&item.knowledge_id),
+            "KNOWLEDGE",
+            item.knowledge_id.clone(),
+        ));
+    }
+    ranked.sort();
+    ranked
+        .into_iter()
+        .map(|(_, _, kind, id)| (kind, id))
+        .collect()
+}
+
 pub fn validate_context_hard_budget(
     input: &ContextCompilerInput,
 ) -> Result<ContextHardBudgetUsage, String> {
@@ -1342,6 +1501,92 @@ mod b2_context_tests {
         }
     }
 
+    fn qc1_fact(id: &str, predicate: &str, value: &str, authority: &str) -> CanonFactRecord {
+        CanonFactRecord {
+            fact_id: id.into(),
+            subject_id: "沈砚".into(),
+            predicate: predicate.into(),
+            object_json: json!({"value":value}),
+            authority_level: authority.into(),
+        }
+    }
+
+    #[test]
+    fn qc1_a_context_over_budget_drops_the_oldest_of_each_kind_and_keeps_the_newest() {
+        // Owner decision 2026-10-26: works aim at 20 million characters, so a
+        // person's facts outgrow the context; the compiler trims instead of
+        // failing and records what it left out.
+        let mut facts = (1..=300)
+            .map(|chapter| {
+                qc1_fact(
+                    &format!("canon:own:{chapter:03}"),
+                    "owns_item",
+                    &format!("第{chapter}章得到的一件旧物，带着当时的来历和用途说明"),
+                    "C",
+                )
+            })
+            .collect::<Vec<_>>();
+        facts.push(qc1_fact(
+            "canon:status",
+            "status",
+            "左手小指触觉永久消失",
+            "A",
+        ));
+        let mut chapters = (1..=300)
+            .map(|chapter| (format!("canon:own:{chapter:03}"), chapter))
+            .collect::<BTreeMap<_, _>>();
+        chapters.insert("canon:status".into(), 1);
+        let knowledge = vec![KnowledgeRecord {
+            knowledge_id: "know:own:001".into(),
+            knower_id: "沈砚".into(),
+            fact_id: Some("canon:own:001".into()),
+            epistemic_state: "KNOWS".into(),
+            visibility_scope: None,
+            from_chapter_id: None,
+            from_story_time: None,
+        }];
+        let mut input = empty_input();
+        input.state = CurrentNarrativeStateView::from_records(
+            input.state.bounds.clone(),
+            facts,
+            Vec::new(),
+            knowledge,
+            Vec::new(),
+            Vec::new(),
+            false,
+        );
+        assert!(validate_context_hard_budget(&input).is_err());
+        fit_context_hard_budget(&mut input, &|_| Ok(chapters.clone())).unwrap();
+        assert!(validate_context_hard_budget(&input).is_ok());
+        let kept = input
+            .state
+            .facts
+            .iter()
+            .map(|fact| fact.fact_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(kept.contains(&"canon:status"));
+        assert!(
+            kept.contains(&"canon:own:300"),
+            "the newest of its kind stays"
+        );
+        assert!(!kept.contains(&"canon:own:001"), "the oldest goes first");
+        assert!(
+            input.state.knowledge.is_empty(),
+            "knowledge of a dropped fact goes with it"
+        );
+        assert!(!input
+            .state
+            .source_refs
+            .iter()
+            .any(|source| source.ref_ == "canon:own:001"));
+        let omitted = input
+            .omitted_soft_sources
+            .iter()
+            .find(|source| source.source_ref.ref_ == "canon:own:001")
+            .expect("the dropped fact is recorded");
+        assert_eq!(omitted.source_ref.kind, "CANON");
+    }
+
     #[test]
     fn rv14_same_revision_digest_change_requires_recompile() {
         assert_eq!(
@@ -1351,11 +1596,21 @@ mod b2_context_tests {
     }
 
     #[test]
+    fn craft_hard_context_budget_r4_allows_8192_tokens_and_trims_to_them() {
+        // Owner decision (2026-10-18): facts accumulate across chapters, so
+        // the hard budget doubles until relevance selection (FX-13) lands;
+        // r4 (2026-10-26) trims adjustable sources to it instead of failing.
+        assert_eq!(CONTEXT_HARD_TOKEN_LIMIT, 8192);
+        assert_eq!(CONTEXT_HARD_SERIALIZED_BYTE_LIMIT, 65536);
+        assert_eq!(CONTEXT_HARD_BUDGET_POLICY_VERSION, "b06-hard-budget.r4");
+    }
+
+    #[test]
     fn rv14_digest_changes_when_hard_budget_policy_version_changes() {
         let input = empty_input();
         let original = relevant_state_digest(&input).unwrap();
         let next_policy = ContextDigestConfig {
-            hard_budget_policy_version: "b06-hard-budget.r3",
+            hard_budget_policy_version: "b06-hard-budget.r5",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let updated = relevant_state_digest_with_config(&input, next_policy).unwrap();
@@ -1376,7 +1631,7 @@ mod b2_context_tests {
         assert_ne!(original, reclassified);
 
         let next_compiler = ContextDigestConfig {
-            compiler_version: "b06-context-compiler.r8",
+            compiler_version: "b06-context-compiler.r9",
             ..CURRENT_CONTEXT_DIGEST_CONFIG
         };
         let recompiled = relevant_state_digest_with_config(&input, next_compiler).unwrap();

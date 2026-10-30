@@ -107,6 +107,7 @@ export const demoBundle: ProjectBundle = {
   ],
   decisions: [
     { id: 'dec-opening', title: '第三章是否按推荐方向进入修复？', summary: '审核认为雨夜来客已经制造身份悬念，但主角的反应偏被动。推荐增强主角主动试探和一次明确反击。', category: '样章反馈', priority: 'blocking', status: 'pending', createdAt: '23:19', recommendation: '保持剧情不变，增强冲突与主角主动性。', evidence: ['主角连续两段只在回答问题', '玉符异动出现后没有立即行动', '章末钩子成立，不建议改动身份信息'] },
+    { id: 'dec-audit-reminder', title: '第 2 章有 2 条内容没有记入作品档案', summary: '事实「沈无悔将断剑交给守门弟子」：与已确认的事实冲突；剧情线索「答应三日后再来」：剧情线索的推进不在本章计划内，或推进方式不对', category: '审计提醒', priority: 'normal', status: 'pending', createdAt: '23:21', allowedActions: ['ACKNOWLEDGE'] },
     { id: 'dec-infer', title: '确认 AI 推断的篇幅与平台', summary: '系统推断目标平台为番茄小说，目标篇幅 120–180 万字。', category: 'AI 推断确认', priority: 'normal', status: 'pending', createdAt: '22:35' },
     { id: 'dec-budget', title: '是否保留当前单章预算上限？', summary: '当前单章预算 ¥3.00；前三章平均 ¥2.41。', category: '预算', priority: 'normal', status: 'pending', createdAt: '22:38' }
   ],

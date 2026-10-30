@@ -55,7 +55,7 @@ fn bounded_text(value: &str, max_chars: usize) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-fn project_scope() -> Value {
+pub(crate) fn project_scope() -> Value {
     json!({"level":"PROJECT"})
 }
 
@@ -63,7 +63,7 @@ fn market_scope() -> Value {
     json!({"level":"MARKET"})
 }
 
-fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
+pub(crate) fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
     ArtifactRef {
         artifact_id: artifact.artifact_id.clone(),
         version: artifact.version,
@@ -72,7 +72,7 @@ fn artifact_ref(artifact: &ArtifactEnvelope) -> ArtifactRef {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn artifact(
+pub(crate) fn artifact(
     project_id: &str,
     artifact_id: String,
     artifact_type: &str,
@@ -103,7 +103,7 @@ fn artifact(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn bundle(
+pub(crate) fn bundle(
     project_id: &str,
     command_id: &str,
     idempotency_key: &str,
@@ -234,7 +234,7 @@ fn normalize_story_direction_output(
         .collect()
 }
 
-fn fail_entry_job(
+pub(crate) fn fail_entry_job(
     connection: &ProjectHandle,
     project_id: &str,
     job_id: &str,
@@ -245,43 +245,44 @@ fn fail_entry_job(
         .map_err(|error| error.to_string())
 }
 
+/// One model job of the project-entry stage: job, retry lineage, model run.
+pub(crate) struct EntryModelRun {
+    pub parsed: Option<Value>,
+    pub job_id: String,
+    pub profile: crate::production::ResolvedProviderProfile,
+    pub model_run_id: String,
+}
+
+/// Starts an entry job for `capability` and runs its model call. Ids and the
+/// idempotency key derive from `suffix`, so a replayed command maps to the
+/// same job and model run. A reply `accept` rejects is generated again once
+/// in the same job (owner decision 2026-10-25), the rejected run staying
+/// recorded; a second rejection fails the job.
 #[allow(clippy::too_many_arguments)]
-fn generate_story_directions(
+pub(crate) fn run_entry_model_job<T>(
     connection: &ProjectHandle,
     project_id: &str,
     command_id: &str,
     idempotency_key: &str,
     now: &str,
-    kind: EntryKind,
-    source_text: &str,
-    source_digest: &str,
-    payload: &Value,
+    capability: &str,
+    suffix: &str,
+    worker: &str,
+    request: Value,
     generation: i64,
     gateway: &dyn ProductionModelGateway,
-) -> Result<
-    (
-        Vec<Value>,
-        String,
-        crate::production::ResolvedProviderProfile,
-        String,
-    ),
-    String,
-> {
-    let job_id = StableIdentityFactory::from_command(
-        StableIdKind::Job,
-        &format!("{command_id}:story-directions"),
-    )?;
+    accept: &dyn Fn(&EntryModelRun) -> Result<T, String>,
+) -> Result<(EntryModelRun, T), String> {
+    let job_id =
+        StableIdentityFactory::from_command(StableIdKind::Job, &format!("{command_id}:{suffix}"))?;
     let model_run_id = StableIdentityFactory::from_command(
         StableIdKind::ModelRun,
-        &format!("{command_id}:story-directions:model"),
+        &format!("{command_id}:{suffix}:model"),
     )?;
     let profile = gateway.resolve_profile()?;
-    let retry_of_job_id = DurableJobService::latest_failed_job_for_capability(
-        connection,
-        project_id,
-        GENERATE_STORY_DIRECTIONS,
-    )
-    .map_err(|error| error.to_string())?;
+    let retry_of_job_id =
+        DurableJobService::latest_failed_job_for_capability(connection, project_id, capability)
+            .map_err(|error| error.to_string())?;
     DurableJobService::start_job(
         connection,
         &JobSpec {
@@ -310,14 +311,122 @@ fn generate_story_directions(
         .map_err(|error| error.to_string())?;
     }
     DurableJobService::transition_for_worker(
-        connection,
-        project_id,
-        &job_id,
-        "RUNNING",
-        "b11-project-entry",
-        now,
+        connection, project_id, &job_id, "RUNNING", worker, now,
     )
     .map_err(|error| error.to_string())?;
+    let spec = ModelRunSpec {
+        model_run_id: model_run_id.clone(),
+        job_id: Some(job_id.clone()),
+        step_id: None,
+        provider: profile.provider.clone(),
+        model: profile.model.clone(),
+        idempotency_key: format!("{idempotency_key}:{suffix}:{generation}"),
+        capability: capability.into(),
+        prompt_ref: None,
+        context_manifest_ref: None,
+        budget_id: Some(DurableModelRunner::project_budget_id(project_id)),
+        predicted_cost_cents: 0,
+        cost_snapshot: None,
+        attempt_no: 1,
+        repair_round: 0,
+    };
+    let run = |spec: &ModelRunSpec| -> Result<EntryModelRun, String> {
+        let result = execute_production_model_with_profile(
+            connection,
+            gateway,
+            &profile,
+            spec,
+            capability,
+            request.clone(),
+            now,
+        )?;
+        Ok(EntryModelRun {
+            parsed: result.parsed,
+            job_id: job_id.clone(),
+            profile: profile.clone(),
+            model_run_id: spec.model_run_id.clone(),
+        })
+    };
+    let first = run(&spec)?;
+    let (last, accepted) = match accept(&first) {
+        Ok(accepted) => (first, Ok(accepted)),
+        Err(_) => {
+            let again = run(&crate::production::follow_up_spec(&spec, ":regenerate", 1)?)?;
+            let accepted = accept(&again);
+            (again, accepted)
+        }
+    };
+    match accepted {
+        Ok(accepted) => Ok((last, accepted)),
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                &job_id,
+                "MODEL_CONTRACT_INVALID",
+                now,
+            )?;
+            Err(error)
+        }
+    }
+}
+
+/// Commits an entry bundle that also completes `job_id`, failing the job
+/// when the commit is refused, then releases its lease.
+pub(crate) fn commit_entry_job_bundle(
+    connection: &ProjectHandle,
+    project_id: &str,
+    bundle: CommitBundle,
+    job_id: &str,
+    now: &str,
+) -> Result<crate::generated::types::CommitReceipt, String> {
+    let mut value = serde_json::to_value(bundle).map_err(|error| error.to_string())?;
+    value["jobUpdates"] =
+        json!([{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}]);
+    let bundle: CommitBundle = serde_json::from_value(value)
+        .map_err(|error| format!("B11_ENTRY_BUNDLE_INVALID:{error}"))?;
+    let receipt = match CommitService::commit(connection, &bundle, now) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            fail_entry_job(
+                connection,
+                project_id,
+                job_id,
+                "PROJECT_ENTRY_COMMIT_FAILED",
+                now,
+            )?;
+            return Err(error.to_string());
+        }
+    };
+    DurableJobService::release_lease(connection, project_id, job_id, now)
+        .map_err(|error| error.to_string())?;
+    DurableJobService::reconcile_runtime_projection(connection, project_id, now)
+        .map_err(|error| error.to_string())?;
+    Ok(receipt)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_story_directions(
+    connection: &ProjectHandle,
+    project_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    now: &str,
+    kind: EntryKind,
+    source_text: &str,
+    source_digest: &str,
+    payload: &Value,
+    generation: i64,
+    gateway: &dyn ProductionModelGateway,
+) -> Result<
+    (
+        Vec<Value>,
+        String,
+        crate::production::ResolvedProviderProfile,
+        String,
+    ),
+    String,
+> {
     let prompt = json!({
         "task":"GENERATE_STORY_DIRECTIONS",
         "inputKind":kind.as_str(),
@@ -331,64 +440,45 @@ fn generate_story_directions(
         "adjustment":payload.get("adjustment").cloned().unwrap_or_else(|| json!("")),
         "generation":generation
     });
-    let spec = ModelRunSpec {
-        model_run_id: model_run_id.clone(),
-        job_id: Some(job_id.clone()),
-        step_id: None,
-        provider: profile.provider.clone(),
-        model: profile.model.clone(),
-        idempotency_key: format!("{idempotency_key}:story-directions:{generation}"),
-        capability: GENERATE_STORY_DIRECTIONS.into(),
-        prompt_ref: None,
-        context_manifest_ref: None,
-        budget_id: Some(DurableModelRunner::project_budget_id(project_id)),
-        predicted_cost_cents: 0,
-        cost_snapshot: None,
-        attempt_no: 1,
-        repair_round: 0,
-    };
     let input = json!({
-        "prompt":format!("Generate exactly three substantially different long-form story direction candidates from this JSON input. Return only the required JSON object. Input: {}", prompt),
+        // The data follows the instruction once, as the `input` field.
+        "prompt":"Generate exactly three substantially different long-form story direction candidates from the JSON field input below. Return only the required JSON object.",
         "capability":GENERATE_STORY_DIRECTIONS,
         "input":prompt
     });
-    let result = execute_production_model_with_profile(
+    let adjustment = payload
+        .get("adjustment")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (run, normalized) = run_entry_model_job(
         connection,
-        gateway,
-        &profile,
-        &spec,
+        project_id,
+        command_id,
+        idempotency_key,
+        now,
         GENERATE_STORY_DIRECTIONS,
+        "story-directions",
+        "b11-project-entry",
         input,
-        now,
-    )?;
-    let parsed = result
-        .parsed
-        .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_MISSING".to_string())?;
-    let normalized = match normalize_story_direction_output(
-        parsed,
-        source_digest,
-        payload
-            .get("adjustment")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
         generation,
-        &model_run_id,
-        &profile,
-        now,
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            fail_entry_job(
-                connection,
-                project_id,
-                &job_id,
-                "MODEL_CONTRACT_INVALID",
+        gateway,
+        &|run| {
+            let parsed = run
+                .parsed
+                .clone()
+                .ok_or_else(|| "B11_STORY_DIRECTION_OUTPUT_MISSING".to_string())?;
+            normalize_story_direction_output(
+                parsed,
+                source_digest,
+                adjustment,
+                generation,
+                &run.model_run_id,
+                &run.profile,
                 now,
-            )?;
-            return Err(error);
-        }
-    };
-    Ok((normalized, job_id, profile, model_run_id))
+            )
+        },
+    )?;
+    Ok((normalized, run.job_id, run.profile, run.model_run_id))
 }
 
 fn initial_input(request: &Value, kind: EntryKind) -> Result<(String, String, String), String> {
@@ -443,16 +533,23 @@ fn initial_input(request: &Value, kind: EntryKind) -> Result<(String, String, St
     }
 }
 
+/// A new work names one target platform whose chapter length is known (owner
+/// decision 2026-10-26), so its first chapter is written to that length.
 pub fn validate_initial_request(request: &Value, kind: EntryKind) -> Result<(), String> {
-    if kind == EntryKind::Market
+    let from_opportunity = kind == EntryKind::Market
         && request
             .pointer("/payload/marketOpportunityId")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Ok(());
+            .is_some_and(|value| !value.trim().is_empty());
+    if !from_opportunity {
+        initial_input(request, kind)?;
     }
-    initial_input(request, kind).map(|_| ())
+    request
+        .pointer("/payload/platform")
+        .and_then(Value::as_str)
+        .and_then(crate::chapter_length::ChapterLengthRange::for_platform)
+        .map(|_| ())
+        .ok_or_else(|| "B11_PLATFORM_REQUIRED".into())
 }
 
 fn payload_string(payload: &Value, key: &str) -> String {
@@ -1190,7 +1287,7 @@ pub fn commit_regenerate(
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let mut final_bundle_value = serde_json::to_value(bundle(
+    let final_bundle = bundle(
         project_id,
         &directions_command_id,
         &format!("{idempotency_key}:directions-commit"),
@@ -1201,30 +1298,8 @@ pub fn commit_regenerate(
         None,
         "B11_PITCH_REGENERATION",
         receipt_payload,
-    )?)
-    .map_err(|error| error.to_string())?;
-    final_bundle_value["jobUpdates"] =
-        json!([{"jobId":job_id,"status":"COMPLETED","currentStage":"COMPLETED","attemptNo":1}]);
-    let final_bundle: CommitBundle = serde_json::from_value(final_bundle_value)
-        .map_err(|error| format!("B11_ENTRY_BUNDLE_INVALID:{error}"))?;
-    let receipt = match CommitService::commit(connection, &final_bundle, now) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            fail_entry_job(
-                connection,
-                project_id,
-                &job_id,
-                "PROJECT_ENTRY_COMMIT_FAILED",
-                now,
-            )?;
-            return Err(error.to_string());
-        }
-    };
-    DurableJobService::release_lease(connection, project_id, &job_id, now)
-        .map_err(|error| error.to_string())?;
-    DurableJobService::reconcile_runtime_projection(connection, project_id, now)
-        .map_err(|error| error.to_string())?;
-    Ok(receipt)
+    )?;
+    commit_entry_job_bundle(connection, project_id, final_bundle, &job_id, now)
 }
 
 pub fn commit_selection(
@@ -2007,7 +2082,7 @@ fn explicit_repair_requested(question: &str) -> bool {
     )
 }
 
-fn repair_question_kind(question: &str) -> &'static str {
+pub(crate) fn repair_question_kind(question: &str) -> &'static str {
     let lower = question.to_lowercase();
     if contains_any_text(
         &lower,
@@ -2107,12 +2182,28 @@ pub fn assistant_repair_plan(
     question: &str,
     now: &str,
 ) -> Result<Value, String> {
+    assistant_repair_plan_for_kind(
+        connection,
+        project_id,
+        question,
+        repair_question_kind(question),
+        now,
+    )
+}
+
+/// FX-21: the repair plan for a kind already resolved from the question.
+pub fn assistant_repair_plan_for_kind(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+    question: &str,
+    kind: &str,
+    now: &str,
+) -> Result<Value, String> {
     let revision = crate::repositories::narrative::NarrativeRepository::project_revision(
         connection, project_id,
     )
     .map_err(|error| error.to_string())?;
     let source_refs = assistant_authority_refs(connection, project_id)?;
-    let kind = repair_question_kind(question);
     match kind {
         "REBUILD_PROJECTION" => {
             let healthy =

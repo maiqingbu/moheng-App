@@ -3,10 +3,9 @@ use crate::commit::CommitService;
 use crate::generated::types::ProjectCommandReceipt;
 use crate::generated::types::{ArtifactEnvelope, CommitBundle};
 use crate::harness::{
-    grounded_finding, plan_support, registry_digest_map, resolve_project_scope,
-    BoundedCapabilityExecutor, CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine,
-    EvidenceLedgerEntry, ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint,
-    SupportSessionReceipt,
+    grounded_finding, registry_digest_map, resolve_project_scope, BoundedCapabilityExecutor,
+    CapabilityCallEnvelope, CapabilityRegistry, DiagnosticEngine, EvidenceLedgerEntry,
+    ReadCapabilityAdapter, RequestedBounds, SupportCheckpoint, SupportSessionReceipt,
 };
 use crate::hash::sha256_canonical;
 use crate::narrative::{
@@ -655,6 +654,18 @@ pub fn query_story_setup_impl(state: &KernelState, request: Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+pub fn query_craft_setup_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::craft_setup::query_craft_setup(connection, project_id)
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
 pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let request = request.get("request").cloned().unwrap_or(request);
     let project_id = required_string(&request, "projectId")?;
@@ -678,13 +689,60 @@ pub fn query_assistant_repair_plan_impl(
         .get("requestedAt")
         .and_then(Value::as_str)
         .unwrap_or("2026-01-01T00:00:00Z");
-    state
+    let intent = crate::assistant_intent::resolve_intent(
+        state,
+        project_id,
+        crate::assistant_intent::AssistantEntry::Repair,
+        question,
+        now,
+    );
+    let mut plan = state
         .manager
         .with_read_connection(project_id, now, |connection| {
-            crate::project_entry::assistant_repair_plan(connection, project_id, question, now)
-                .map_err(ManagerError::ProjectCommand)
+            crate::project_entry::assistant_repair_plan_for_kind(
+                connection,
+                project_id,
+                question,
+                &intent.intent,
+                now,
+            )
+            .map_err(ManagerError::ProjectCommand)
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    plan["intent"] = intent.to_json();
+    Ok(plan)
+}
+
+/// FX-22: the work's backups, newest first, with the revision each was taken
+/// at (read from the backup file itself; a restore expects it).
+pub fn query_backups_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let backups = state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::ops::list_backups(connection, project_id, 50)
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(json!({"projectId":project_id,"backups":backups}))
+}
+
+/// FX-21: how the project assistant understands a question for one entry.
+pub fn classify_assistant_intent_impl(
+    state: &KernelState,
+    request: Value,
+) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let entry =
+        crate::assistant_intent::AssistantEntry::from_code(required_string(&request, "entry")?)?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    Ok(crate::assistant_intent::resolve_intent(state, project_id, entry, question, now).to_json())
 }
 
 /// B08 production projection.  This is a bounded read projection assembled
@@ -922,14 +980,6 @@ fn execute_decision_submit(
         .pointer("/payload/choice")
         .and_then(Value::as_str)
         .unwrap_or("recommended");
-    let action = match choice {
-        "recommended" => "RETRY_REMOTE",
-        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
-        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
-    };
-    if action == "RETRY_REMOTE" {
-        state.production_gateway.resolve_profile()?;
-    }
     let spec = project_command_spec(
         project_id,
         project_id,
@@ -941,6 +991,32 @@ fn execute_decision_submit(
         requested_at,
         true,
     );
+    if choice == "ACKNOWLEDGE" {
+        let outcome = state
+            .manager
+            .commit_project_command(spec, |connection| {
+                crate::repositories::runtime::acknowledge_audit_reminder(
+                    connection,
+                    project_id,
+                    decision_id,
+                    requested_at,
+                )
+                .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut response = project_command_response(&outcome_receipt(outcome));
+        response["message"] = json!("提醒已关闭。");
+        response["result"] = json!({"action":"ACKNOWLEDGE"});
+        return Ok(response);
+    }
+    let action = match choice {
+        "recommended" => "RETRY_REMOTE",
+        "RETRY_REMOTE" | "MARK_FAILED" | "CANCEL_JOB" => choice,
+        _ => return Err("UNKNOWN_REMOTE_OUTCOME requires an explicit supported action".into()),
+    };
+    if action == "RETRY_REMOTE" {
+        state.production_gateway.resolve_profile()?;
+    }
     let outcome = state
         .manager
         .commit_project_command(spec, |connection| {
@@ -1407,7 +1483,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1417,7 +1493,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -1427,7 +1503,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Knowledge,
         &scope,
@@ -1449,7 +1525,7 @@ fn narrative_state_from_request(
             connection,
             project_id,
             &entity_refs,
-            100,
+            crate::narrative::STATE_SOURCE_LIMIT,
         ),
         ContextHardSource::Canon,
         &scope,
@@ -3247,7 +3323,13 @@ pub(crate) fn context_input_from_authority(
         hard_tokens: 0,
         soft_tokens: 0,
     };
-    input.hard_tokens = crate::narrative::measure_context_hard_budget(&input)?.estimated_tokens;
+    // QC-1 (owner decision 2026-10-26): a context over budget leaves out the
+    // oldest and least binding facts instead of failing.
+    input.hard_tokens = crate::narrative::fit_context_hard_budget(&mut input, &|ids| {
+        crate::repositories::ops::source_chapter_numbers(connection, project_id, ids)
+            .map_err(|error| error.to_string())
+    })?
+    .estimated_tokens;
     crate::narrative::validate_context_hard_completeness(&input)?;
     Ok(input)
 }
@@ -5184,7 +5266,19 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         .project_revision(project_id)
         .map_err(|e| e.to_string())?;
     let scope = resolve_project_scope(project_id, revision, question, mode, requested_scope)?;
-    let mut plan = plan_support(&scope, question, requested_at)?;
+    let intent = crate::assistant_intent::resolve_intent(
+        state,
+        project_id,
+        crate::assistant_intent::AssistantEntry::Diagnose,
+        question,
+        requested_at,
+    );
+    let mut plan = crate::harness::plan_support_for_context(
+        &scope,
+        &intent.intent,
+        request.get("chapterId").and_then(Value::as_str).is_some(),
+        requested_at,
+    )?;
     let registry = CapabilityRegistry::read_only_r1();
     let executor = BoundedCapabilityExecutor {
         registry: registry.clone(),
@@ -5440,7 +5534,7 @@ pub fn support_session_impl(state: &KernelState, request: Value) -> Result<Value
         finished_at: requested_at.into(),
     };
     Ok(
-        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt}),
+        json!({"plan":plan,"calls":calls,"evidenceLedger":evidence_ledger,"finding":finding,"receipt":receipt,"intent":intent.to_json()}),
     )
 }
 
@@ -6924,10 +7018,20 @@ fn compile_current_chapter_plan(
         requested_at,
     )?;
     let planning_revision = context_receipt.after_revision;
-    let profile = state.production_gateway.resolve_profile()?;
     let planning_run_id =
         StableIdentityFactory::from_command(StableIdKind::ModelRun, &format!("{command_id}:plan"))?;
     let state_digest = crate::narrative::relevant_state_digest(&context_input)?;
+    let history = crate::repositories::ops::chapter_history(&handle, project_id, chapter_id, 3)
+        .map_err(|error| error.to_string())?;
+    let planner = crate::craft_plan::ChapterPlanner::for_chapter(
+        &handle,
+        project_id,
+        chapter_id,
+        history.number(),
+    )?;
+    let profile = state
+        .production_gateway
+        .resolve_step_profile(planner.capability())?;
     let planning_spec = crate::repositories::runtime::ModelRunSpec {
         model_run_id: planning_run_id.clone(),
         job_id: None,
@@ -6935,7 +7039,7 @@ fn compile_current_chapter_plan(
         provider: profile.provider.clone(),
         model: profile.model.clone(),
         idempotency_key: format!("{idempotency_key}:plan"),
-        capability: "PLAN_STRATEGY".into(),
+        capability: planner.capability().into(),
         prompt_ref: None,
         context_manifest_ref: Some(context_ref.artifact_id.clone()),
         budget_id: Some(budget_id),
@@ -6960,6 +7064,34 @@ fn compile_current_chapter_plan(
                 .is_some_and(|task_id| selected_task_refs.contains(task_id))
         });
     }
+    // FX-18: long-form chapters are sized for their length range when planned.
+    let project_settings = crate::repositories::provider::ProviderSettingsRepository::read_project(
+        &handle, project_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let chosen_range = crate::chapter_length::ChapterLengthRange::from_payload(
+        request.get("payload").unwrap_or(&Value::Null),
+    )?;
+    let length_range = crate::chapter_length::ChapterLengthRange::resolve(
+        chosen_range,
+        crate::repositories::provider::ProviderSettingsRepository::chapter_length_range(
+            &handle, project_id, chapter_id,
+        )
+        .map_err(|error| error.to_string())?
+        .as_ref(),
+        project_settings.get("chapterLengthRange"),
+        crate::chapter_length::work_platform(&handle, project_id, &project_settings)?.as_deref(),
+    )?;
+    if let Some(range) = chosen_range {
+        crate::repositories::provider::ProviderSettingsRepository::save_chapter_length_range(
+            &handle,
+            project_id,
+            chapter_id,
+            &range.to_json(),
+            requested_at,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let planning_input = json!({
         "projectId":project_id,
         "chapterId":chapter_id,
@@ -6971,46 +7103,137 @@ fn compile_current_chapter_plan(
         "authorityContext":serde_json::to_value(&context_input).map_err(|error| error.to_string())?,
         "volumePlanRoute":scoped_route_payload,
         "horizonPreviewCapacity":crate::planning::horizon_capacity_after_chapter(&handle, project_id, chapter_id)?,
+        "chapterLengthRange":length_range.to_json(),
         "chapterGoalHint":request.pointer("/payload/chapterGoalHint").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).unwrap_or("推进当前卷任务，并让真实选择产生可核对后果。")
     });
-    let planning_result = crate::production::execute_production_model_with_profile(
-        &handle,
-        state.production_gateway.as_ref(),
-        &profile,
-        &planning_spec,
-        "PLAN_STRATEGY",
-        planning_input.clone(),
-        requested_at,
+    // Craft v2: the planner sees what the recent chapters did and the
+    // selected planning skills.
+    let mut planning_input = planning_input;
+    crate::chapter_craft::extend_planning_input(
+        &mut planning_input,
+        history.number(),
+        &history.recent,
+        length_range,
     )?;
-    let raw_plan = planning_result
-        .parsed
-        .ok_or_else(|| "B05_PLANNING_OUTPUT_INVALID".to_string())?;
+    planner.extend_input(&mut planning_input);
     let bindings = json!({
         "chapterId":chapter_id,
         "compiledFromProjectRevision":planning_revision,
         "compiledFromStateDigest":state_digest,
-        "contextManifestRef":context_ref
+        "contextManifestRef":context_ref,
+        "horizonPreviewCapacity":planning_input["horizonPreviewCapacity"]
     });
-    let mut plan = crate::planning::normalize_chapter_plan_model_output(
-        raw_plan,
-        &context_input
-            .continuity_threads
-            .iter()
-            .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
-            .map(|thread| thread.thread_id.clone())
-            .collect::<Vec<_>>(),
-        &bindings,
-    );
-    plan["compiledFromProjectRevision"] = json!(planning_revision);
-    plan["compiledFromStateDigest"] = json!(state_digest);
-    plan["contextManifestRef"] =
-        serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+    let triggered_threads = context_input
+        .continuity_threads
+        .iter()
+        .filter(|thread| matches!(thread.authority_level.as_str(), "A" | "B"))
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+    let enforces_length = state.production_gateway.enforces_chapter_length();
     let hard_scope = crate::narrative::context_hard_scope(&context_input);
-    plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
-    plan["entityRefs"] = hard_scope["entityRefs"].clone();
-    plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
-    plan["hardScope"] = hard_scope;
-    let receipt = crate::planning::recompile_chapter_plan_owner(
+    let explicit_scope = request
+        .pointer("/payload/scopeSelection")
+        .is_some_and(|value| !value.is_null());
+    let task_states = context_input
+        .task_states
+        .iter()
+        .map(|state| {
+            (
+                state.state_id.as_str(),
+                state
+                    .value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NOT_STARTED"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let accept = |raw: Value, lenient: bool| -> Result<(Value, Vec<String>), String> {
+        let mut problems = Vec::new();
+        let mut plan = crate::planning::normalize_chapter_plan_model_output(
+            raw,
+            &triggered_threads,
+            &bindings,
+        );
+        plan["compiledFromProjectRevision"] = json!(planning_revision);
+        plan["compiledFromStateDigest"] = json!(state_digest);
+        plan["contextManifestRef"] =
+            serde_json::to_value(&context_ref).map_err(|error| error.to_string())?;
+        plan["activeTaskRefs"] = hard_scope["taskRefs"].clone();
+        plan["entityRefs"] = hard_scope["entityRefs"].clone();
+        plan["reservationRefs"] = hard_scope["reservationRefs"].clone();
+        plan["hardScope"] = hard_scope.clone();
+        if !explicit_scope {
+            // Without a chosen scope the chapter works only on the tasks it
+            // can work on now; later tasks wait for their dependencies.
+            let ready = json!(hard_scope["taskRefs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|task_ref| {
+                    crate::planning::task_ready(task_ref, &route_payload, &task_states).is_ok()
+                })
+                .collect::<Vec<_>>());
+            plan["activeTaskRefs"] = ready.clone();
+            plan["hardScope"]["taskRefs"] = ready;
+        }
+        // Checked here, not only at commit, so the planner gets the reason
+        // and one more try.
+        let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
+        let craft = planner.check_craft(&plan, horizon_capacity);
+        crate::production::note_if_lenient(lenient, &mut problems, craft)?;
+        if lenient {
+            problems.extend(crate::planning::fit_lenient_plan_shape(
+                &mut plan,
+                horizon_capacity,
+            ));
+        }
+        let mut soft = |result| crate::production::note_if_lenient(lenient, &mut problems, result);
+        // r2 plans had their horizon checked with the craft problems; r1 here.
+        soft(crate::planning::validate_chapter_plan_horizon(
+            &plan,
+            horizon_capacity,
+        ))?;
+        soft(planner.check_r1(|| {
+            if enforces_length {
+                crate::chapter_craft::check_plan(&plan, length_range, &history.recent)
+            } else {
+                Ok(())
+            }
+        }))?;
+        // The contract is checked here too, not only at commit, so a
+        // violation goes back to the planner (QC-1).
+        crate::planning::validate_chapter_plan(&plan)?;
+        Ok((plan, problems))
+    };
+    let (plan, planning_run_id, plan_problems) = crate::production::plan_chapter_with_feedback(
+        &handle,
+        state.production_gateway.as_ref(),
+        &profile,
+        &planning_spec,
+        planning_input.clone(),
+        requested_at,
+        &accept,
+    )?;
+    // The plan's own scope (its tasks and entities) selects state that the
+    // context compiled before planning did not hold; the plan binds the
+    // digest of that state, as the owner and production recompute it.
+    let mut plan = plan;
+    let mut plan_authority = authority.clone();
+    plan_authority["executionMode"] = json!(execution_mode);
+    plan_authority["chapterPlan"] = plan.clone();
+    let plan_context =
+        context_input_from_authority(&handle, &plan_authority, project_id, planning_revision)?;
+    plan["compiledFromStateDigest"] =
+        json!(crate::narrative::relevant_state_digest(&plan_context)?);
+    let decisions = crate::production::plan_reminder_decision(
+        command_id,
+        chapter_id,
+        history.number(),
+        &plan_problems,
+    )?;
+    let receipt = crate::planning::recompile_chapter_plan_owner_with_decisions(
         &handle,
         project_id,
         chapter_id,
@@ -7021,6 +7244,7 @@ fn compile_current_chapter_plan(
         planning_revision,
         requested_at,
         Some(&planning_run_id),
+        &decisions,
     )?;
     let plan_ref = receipt
         .committed_artifact_refs
@@ -8310,6 +8534,19 @@ fn execute_b11_command(
         response["startCreating"] = start;
         return Ok(response);
     }
+    if command_type == "style_sample_save" {
+        // Local-only: the sample is not an artifact and has no revision.
+        let handle = state
+            .manager
+            .open(project_id, "", requested_at)
+            .map_err(|error| error.to_string())?;
+        let digest =
+            crate::craft_setup::save_style_sample(&handle, project_id, requested_at, request)?;
+        return Ok(json!({
+            "commandId":command_id,"projectId":project_id,"resultProjectId":project_id,
+            "finalStatus":"committed","message":"范文已保存在本机，只用于测量写法指标。","sampleDigest":digest
+        }));
+    }
     let expected_revision = expected_revision
         .ok_or_else(|| "IPC_INVALID:expectedRevision required for B11 command".to_string())?;
     let handle = state
@@ -8355,6 +8592,43 @@ fn execute_b11_command(
             requested_at,
             request,
         ),
+        "story_bible_generate" => crate::craft_setup::commit_story_bible_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+            state.production_gateway.as_ref(),
+        ),
+        "story_bible_confirm" => crate::craft_setup::commit_story_bible_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_generate" => crate::craft_setup::commit_style_card_candidates(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
+        "style_card_confirm" => crate::craft_setup::commit_style_card_confirmation(
+            &handle,
+            project_id,
+            command_id,
+            idempotency_key,
+            expected_revision,
+            requested_at,
+            request,
+        ),
         "opening_ready" => crate::project_entry::commit_opening_ready(
             &handle,
             project_id,
@@ -8373,7 +8647,7 @@ fn execute_b11_command(
         "projectId":project_id,
         "resultProjectId":project_id,
         "finalStatus":"committed",
-        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
+        "message":match command_type { "story_directions_generate" => "故事方向已生成，请选择。", "pitch_regenerate" => "新的故事方向已生成，请由你选择。", "pitch_select" => "故事方向已由你确认，进入故事核心。", "story_setup_save" => "故事核心已保存，等待你批准开篇准备。", "story_bible_generate" => "已生成 3 版故事底稿，请选择并编辑。", "story_bible_confirm" => "故事底稿已由你确认。", "style_card_generate" => "已生成 3 版风格卡，请选择并编辑。", "style_card_confirm" => "风格卡已由你确认。", "opening_ready" => "开篇准备已完成，已生成第一章的最小规划。", _ => "B11 操作已完成。" },
         "receiptId":receipt["receiptId"],
         "beforeRevision":receipt["beforeRevision"],
         "afterRevision":receipt["afterRevision"],
@@ -8434,6 +8708,43 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
             requested_at,
             &digest,
         ),
+        "production_reset_chapter_quota" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            let chapter_id = request
+                .pointer("/payload/chapterId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "B08_CHAPTER_REQUIRED".to_string())?;
+            let spec = project_command_spec(
+                id,
+                id,
+                command_id,
+                idempotency_key,
+                command_type,
+                &digest,
+                expected_revision,
+                requested_at,
+                true,
+            );
+            let outcome = state
+                .manager
+                .commit_project_command(spec, |connection| {
+                    crate::repositories::production::ProductionRepository::reset_chapter_quota(
+                        connection,
+                        id,
+                        chapter_id,
+                        requested_at,
+                    )
+                    .map_err(|error| ManagerError::ProjectCommand(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
+            let (quota, receipt) = match outcome {
+                ProjectCommandOutcome::Committed { value, receipt } => (value, receipt),
+                ProjectCommandOutcome::Replayed(receipt) => (Value::Null, receipt),
+            };
+            let mut response = project_command_response(&receipt);
+            response["result"] = json!({"chapterQuota":quota});
+            Ok(response)
+        }
         "decision_submit" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             execute_decision_submit(
@@ -8494,6 +8805,11 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
         | "pitch_regenerate"
         | "pitch_select"
         | "story_setup_save"
+        | "story_bible_generate"
+        | "story_bible_confirm"
+        | "style_card_generate"
+        | "style_card_confirm"
+        | "style_sample_save"
         | "opening_ready"
         | "opening_start_creating" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
@@ -8651,7 +8967,6 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 return crate::production::run_chapter_production(
                     &state.manager,
                     state.production_gateway.as_ref(),
-                    &state.skill_bundle_loader,
                     &request,
                 );
             }
@@ -9280,16 +9595,41 @@ pub fn query_story_setup(state: State<'_, KernelState>, request: Value) -> Resul
 }
 
 #[tauri::command]
+pub fn query_craft_setup(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_craft_setup_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_opening_ready_impl(&state, request)
 }
 
 #[tauri::command]
-pub fn query_assistant_repair_plan(
+pub async fn query_assistant_repair_plan(
     state: State<'_, KernelState>,
     request: Value,
 ) -> Result<Value, String> {
-    query_assistant_repair_plan_impl(&state, request)
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || query_assistant_repair_plan_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
+pub fn query_backups(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
+    query_backups_impl(&state, request)
+}
+
+#[tauri::command]
+pub async fn classify_assistant_intent(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || classify_assistant_intent_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9551,8 +9891,15 @@ pub fn query_volume_lifecycle(
 }
 
 #[tauri::command]
-pub fn support_session(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
-    support_session_impl(&state, request)
+pub async fn support_session(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    // FX-21: may wait for the model that classifies the question.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || support_session_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
 }
 
 #[tauri::command]
@@ -9825,6 +10172,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_market_strategy,
         query_story_directions,
         query_story_setup,
+        query_craft_setup,
         query_opening_ready,
         query_assistant_repair_plan,
         query_production_center,
@@ -9857,6 +10205,8 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_plan_route,
         query_volume_lifecycle,
         support_session,
+        classify_assistant_intent,
+        query_backups,
         support_checkpoint_resume,
         query_endgame_status,
         query_completion_status,

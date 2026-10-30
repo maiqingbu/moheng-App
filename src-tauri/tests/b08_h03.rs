@@ -9,16 +9,13 @@ use ai_novel_production_system_core::commit::CommitService;
 use ai_novel_production_system_core::generated::types::CommitBundle;
 use ai_novel_production_system_core::hash::sha256_canonical;
 use ai_novel_production_system_core::production::{
-    reconciliation_for_actual_state, ProductionModelGateway, ProductionModelResponse,
-    ResolvedProviderProfile,
+    new_audit_item_id, reconciliation_for_actual_state, ProductionModelGateway,
+    ProductionModelResponse, ResolvedProviderProfile,
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use ai_novel_production_system_core::repair::{
     operation_digest_with_postconditions, OwnerExecution, RepairAuthorization, RepairOperation,
     RepairPlan, TypedRepairOwner,
-};
-use ai_novel_production_system_core::runtime::{
-    DurableModelRunner, FakeModelTransport, ModelRunSpec,
 };
 use ai_novel_production_system_core::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
@@ -30,6 +27,14 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 const NOW: &str = "2026-08-30T12:00:00Z";
+
+/// `length` characters of filler prose with no repeated phrase, so the
+/// writer's repetition check never fires on test bodies.
+fn varied_prose(length: usize) -> String {
+    (0..length)
+        .map(|n| char::from_u32(0x4E00 + n as u32).unwrap())
+        .collect()
+}
 
 struct RecordingGateway;
 
@@ -64,105 +69,6 @@ impl ProductionModelGateway for CapturingAuditPolicyGateway {
             }
         }
         Ok(response)
-    }
-}
-
-struct GoodQualityGateway;
-
-#[derive(Clone, Default)]
-struct S40RepairGateway {
-    capabilities: Arc<Mutex<Vec<String>>>,
-    repair_inputs: Arc<Mutex<Vec<Value>>>,
-    audit_inputs: Arc<Mutex<Vec<Value>>>,
-}
-
-impl ProductionModelGateway for S40RepairGateway {
-    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        self.capabilities
-            .lock()
-            .map_err(|error| error.to_string())?
-            .push(capability.to_string());
-        match capability {
-            "PLAN_STRATEGY" => RecordingGateway.invoke(capability, input),
-            "RENDER_CHAPTER" => Ok(ProductionModelResponse::deterministic(json!({
-                "body":"林舟被迫等待。门后传来脚步声。"
-            }))),
-            "REPAIR_CANDIDATE" => {
-                self.repair_inputs
-                    .lock()
-                    .map_err(|error| error.to_string())?
-                    .push(input.clone());
-                let body = input
-                    .pointer("/candidate/body")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "repair candidate body missing".to_string())?;
-                let target = "被迫等待。";
-                let start = body
-                    .find(target)
-                    .ok_or_else(|| "repair finding span missing".to_string())?;
-                let end = start + target.len();
-                let start = body[..start].chars().count();
-                let end = body[..end].chars().count();
-                let body_len = body.chars().count();
-                let mut protected_spans = Vec::new();
-                if start > 0 {
-                    protected_spans.push(json!({"start":0,"end":start}));
-                }
-                if end < body_len {
-                    protected_spans.push(json!({"start":end,"end":body_len}));
-                }
-                let context_refs = input["skillTaskContext"]["boundedRefs"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|reference| reference["reference"].clone())
-                    .collect::<Vec<_>>();
-                Ok(ProductionModelResponse::deterministic(json!({
-                    "skillId":input["skill"]["skillId"],
-                    "skillVersion":input["skill"]["skillVersion"],
-                    "bundleDigest":input["skill"]["bundleDigest"],
-                    "taskId":input["skillTaskContext"]["taskId"],
-                    "status":"OK",
-                    "sourceRefs":[],
-                    "assumptions":[],
-                    "payload":{
-                        "repair_plan":"只修复当前 agency、pacing、dialogue 证据对应的局部段落。",
-                        "target_spans":[{"start":start,"end":end}],
-                        "protected_spans":protected_spans,
-                        "changes":[{
-                            "start":start,
-                            "end":end,
-                            "replacement":"决定推开石门。“我必须找到出口。”“石门后有人。”"
-                        }],
-                        "recheck_dimensions":input["affectedDimensions"],
-                        "escalation_if_failed":"ADVISORY_ESCALATION"
-                    },
-                    "findings":[],
-                    "contextRefs":context_refs,
-                    "runtimeCheckRequests":[],
-                    "confidence":0.9,
-                    "nextSkillHints":[]
-                })))
-            }
-            "AUDIT_EXTRACT" => {
-                self.audit_inputs
-                    .lock()
-                    .map_err(|error| error.to_string())?
-                    .push(input.clone());
-                Ok(ProductionModelResponse::deterministic(json!({
-                    "qualityFindings":[],
-                    "canonCandidates":[],
-                    "knowledgeCandidates":[],
-                    "continuityCandidates":[],
-                    "taskProgressCandidates":[],
-                    "revealedReservationRefs":[],
-                    "evidenceRanges":[],
-                    "auditCompleteness":"COMPLETE_NO_CHANGE",
-                    "unresolvedHard":false
-                })))
-            }
-            other => Err(format!("unexpected capability: {other}")),
-        }
     }
 }
 
@@ -243,6 +149,8 @@ impl ProductionModelGateway for RecordingGateway {
                 "confidence":0.5,
                 "nextSkillHints":[]
             }),
+            "REVIEW_CHAPTER" => json!({"findings":[]}),
+            "REWRITE_PASSAGES" => json!({"edits":[]}),
             "AUDIT_EXTRACT" => json!({
                 "qualityFindings":[],
                 "canonCandidates":[{
@@ -270,6 +178,7 @@ impl ProductionModelGateway for RecordingGateway {
 }
 
 struct TaskProgressCandidateGateway;
+struct InventedTaskGateway;
 struct TaskSatisfiedGateway;
 
 #[derive(Default)]
@@ -345,6 +254,17 @@ impl ProductionModelGateway for TaskProgressCandidateGateway {
     }
 }
 
+impl ProductionModelGateway for InventedTaskGateway {
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        let mut response = TaskProgressCandidateGateway.invoke(capability, input)?;
+        if capability == "AUDIT_EXTRACT" {
+            response.output["taskProgressCandidates"][0]["taskId"] =
+                json!("task:first_memory_repair");
+        }
+        Ok(response)
+    }
+}
+
 impl ProductionModelGateway for TaskSatisfiedGateway {
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
         let mut response = RecordingGateway.invoke(capability, input)?;
@@ -357,24 +277,6 @@ impl ProductionModelGateway for TaskSatisfiedGateway {
             {
                 candidate["status"] = json!("SATISFIED");
             }
-        }
-        Ok(response)
-    }
-}
-
-impl ProductionModelGateway for GoodQualityGateway {
-    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
-        let mut response = RecordingGateway.invoke(capability, input)?;
-        if capability == "RENDER_CHAPTER" {
-            response.output["body"] = json!("林舟终于决定推门，必须亲自面对门后的秘密。“你来了。”他说。“我一直在等你。”对方回答。门后传来一声轻响，谁在那里？");
-        }
-        if capability == "AUDIT_EXTRACT" {
-            response.output = json!({
-                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
-                "continuityCandidates":[],"taskProgressCandidates":[],
-                "revealedReservationRefs":[],"evidenceRanges":[],
-                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
-            });
         }
         Ok(response)
     }
@@ -836,10 +738,6 @@ impl ProductionModelGateway for AuditVariantGateway {
                         "storyTime":"2030-01-01T00:00:00Z",
                         "evidence":{"start":0,"end":6,"quote":"林舟推开石门"}
                     }])
-                }
-                "reservation" => {
-                    response.output["revealedReservationRefs"] =
-                        json!(["reservation:not-authorized"])
                 }
                 "blocked" => {
                     response.output["taskProgressCandidates"] = json!([{
@@ -1571,6 +1469,43 @@ fn default_b08_gate_policy() -> Value {
             ]
         }
     })
+}
+
+/// The reasons of the audit items a committed chapter held back (LD-1
+/// step 2: the chapter commits and its reminder names them).
+fn held_back_reasons(connection: &Connection, project_id: &str) -> Vec<String> {
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER'",
+            [project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    payload["heldBack"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["reason"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The chapter committed and held back an audit item for `reason`.
+fn assert_held_back(connection: &Connection, project_id: &str, reason: &str) {
+    let reasons = held_back_reasons(connection, project_id);
+    assert!(
+        reasons.iter().any(|held| held.starts_with(reason)),
+        "{reason} not in {reasons:?}"
+    );
+}
+
+/// The obligation id of the `n`th new thread an audit reports in a chapter
+/// (LD-1.2: the system names it).
+fn new_thread_obligation_id(chapter_id: &str, n: usize) -> String {
+    new_audit_item_id("thread", chapter_id, n)
+        .strip_prefix("thread:")
+        .unwrap()
+        .to_string()
 }
 
 fn seed_chapter_and_gate(connection: &Connection, project_id: &str) -> String {
@@ -2672,7 +2607,7 @@ fn b08_stale_gate_policy_ref_is_rejected_before_provider_calls() {
 }
 
 #[test]
-fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests_expansion() {
+fn b08_unknown_audit_predicate_is_held_back_even_if_candidate_text_requests_expansion() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-policy-injection";
     let gateway = CapturingAuditPolicyGateway {
@@ -2689,24 +2624,13 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:policy-injection","idempotencyKey":"key:b08:policy-injection",
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
-    })).unwrap_err();
-    assert_eq!(
-        error,
-        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE"
-    );
-    let production_center = query_production_center_impl(
-        &state,
-        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
-    )
-    .unwrap();
-    assert!(production_center["gate"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
+    })).unwrap();
+    // LD-1 step 2: the chapter commits; the unregistered fact stays out.
+    assert_eq!(result["finalStatus"], "committed");
     let request = gateway.audit_inputs.lock().unwrap()[0].clone();
     let contract = &request["auditPolicyContract"];
     assert_eq!(
@@ -2723,7 +2647,12 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
         .manager
         .open(project_id, "B08 policy injection", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE",
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -2742,16 +2671,24 @@ fn b08_unknown_audit_predicate_stays_fail_closed_even_if_candidate_text_requests
                 |row| row.get(0)
             )
             .unwrap(),
-        3
+        // Plan, render, audit and its one rerun with the registered predicates.
+        4
     );
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
+        [
+            "PLAN_STRATEGY",
+            "RENDER_CHAPTER",
+            "AUDIT_EXTRACT",
+            "AUDIT_EXTRACT"
+        ]
     );
 }
 
 #[test]
-fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_runs() {
+fn rv34_unknown_predicate_fact_is_held_back_and_the_chapter_commits() {
+    // Before LD-1 step 2 the chapter failed until the user added the rule and
+    // retried; now it commits and the fact waits in the reminder.
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-rv34-retry-unknown-predicate";
     let gateway = CapturingAuditPolicyGateway {
@@ -2768,20 +2705,23 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
     let chapter_id = seed_chapter_and_gate(&connection, project_id);
     drop(connection);
 
-    let first_command = "cmd:b08:rv34-unknown-predicate";
-    let error = execute_command_impl(
+    let result = execute_command_impl(
         &state,
         json!({
-            "type":"production_start","commandId":first_command,
+            "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate",
             "idempotencyKey":"key:b08:rv34-unknown-predicate","projectId":project_id,
             "expectedRevision":0,"requestedAt":NOW,
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
         }),
     )
-    .unwrap_err();
-    assert!(error.contains("predicate=UNREGISTERED_SYNTHETIC_PREDICATE"));
-    let old_job_id = StableIdentityFactory::from_command(StableIdKind::Job, first_command).unwrap();
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
     let connection = state.manager.open(project_id, "", NOW).unwrap();
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS:predicate=UNREGISTERED_SYNTHETIC_PREDICATE",
+    );
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -2790,63 +2730,9 @@ fn rv34_adding_unknown_predicate_rule_retries_without_repeating_completed_model_
                 |row| row.get(0),
             )
             .unwrap(),
-        3
+        // Render, audit and its one rerun with the registered predicates.
+        4
     );
-    drop(connection);
-
-    let revision_before_rule = state.manager.project_revision(project_id).unwrap();
-    let updated = execute_command_impl(
-        &state,
-        json!({
-            "type":"gate_policy_update","commandId":"cmd:b08:rv34-add-predicate",
-            "idempotencyKey":"key:b08:rv34-add-predicate","projectId":project_id,
-            "expectedRevision":revision_before_rule,"requestedAt":NOW,
-            "payload":{"action":"UPSERT_RULE","rule":{"predicate":"UNREGISTERED_SYNTHETIC_PREDICATE","cardinality":"MULTI","scope":{"kind":"FIXED","value":"PROJECT"}}}
-        }),
-    )
-    .unwrap();
-    assert_eq!(updated["finalStatus"], "committed");
-    let revision_before_retry = state.manager.project_revision(project_id).unwrap();
-
-    let retry = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b08:rv34-unknown-predicate-retry",
-            "idempotencyKey":"key:b08:rv34-unknown-predicate-retry","projectId":project_id,
-            "expectedRevision":revision_before_retry,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false,"retryOfJobId":old_job_id}
-        }),
-    )
-    .unwrap();
-    assert_eq!(retry["finalStatus"], "committed");
-
-    let connection = state.manager.open(project_id, "", NOW).unwrap();
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM model_runs WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        3,
-        "retries after a Gate correction reuse completed model outputs"
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        gateway.capabilities.lock().unwrap().as_slice(),
-        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
-    );
-    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -3135,7 +3021,7 @@ fn rv10_story_direction_generation_stops_after_project_budget_is_exhausted() {
         json!({
             "type":"project_create_from_idea","commandId":"cmd:rv10:direction-project",
             "idempotencyKey":"key:rv10:direction-project","requestedAt":NOW,
-            "payload":{"title":"RV-10 directions budget","idea":"账本线索"}
+            "payload":{"title":"RV-10 directions budget","idea":"账本线索","platform":"番茄小说"}
         }),
     )
     .unwrap();
@@ -3646,7 +3532,9 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
                 |row| row.get(0)
             )
             .unwrap(),
-        4
+        // Plan, render and audit; S40 repair is retired from production
+        // (owner decision 2026-10-24).
+        3
     );
     assert_eq!(
         connection
@@ -3669,18 +3557,22 @@ fn b08_plan_expected_satisfied_but_actual_active_keeps_reality_active() {
     assert_eq!(volume_head_after, volume_head_before);
     assert!(connection.query_row::<i64,_,_>("SELECT json_extract(context.payload_json,'$.hardSourceCount') FROM canonical_heads h JOIN artifact_payloads plan ON plan.artifact_id=h.artifact_id AND plan.version=h.version JOIN artifact_payloads context ON context.artifact_id=json_extract(plan.payload_json,'$.contextManifestRef.artifactId') AND context.version=json_extract(plan.payload_json,'$.contextManifestRef.version') WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap() > 0);
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(a.provenance_json,'$.createdBy') FROM canonical_heads h JOIN artifacts a ON a.artifact_id=h.artifact_id AND a.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan'", [project_id], |row| row.get(0)).unwrap(), "B07::PlanningOwner");
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id='fact:actual:door-open'", [project_id], |row| row.get(0)).unwrap(), 1);
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND fact_id=?2",
+                libsql_rusqlite::params![project_id, new_audit_item_id("canon", &chapter_id, 1)],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(value_json,'$.status') FROM state_deltas WHERE project_id=?1 AND state_id='task:actual'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].plannedExpected') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "TASK_SATISFIED");
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.reality[0].actualObserved') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), "ACTIVE");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        [
-            "PLAN_STRATEGY",
-            "RENDER_CHAPTER",
-            "REPAIR_CANDIDATE",
-            "AUDIT_EXTRACT"
-        ]
+        ["PLAN_STRATEGY", "RENDER_CHAPTER", "AUDIT_EXTRACT"]
     );
     drop(connection);
     let replay = execute_command_impl(&state, json!({
@@ -3714,7 +3606,7 @@ fn b08_valid_existing_plan_uses_render_and_audit_without_a_plan_stage() {
     assert_eq!(result["finalStatus"], "committed");
     assert_eq!(
         gateway.capabilities.lock().unwrap().as_slice(),
-        ["RENDER_CHAPTER", "REPAIR_CANDIDATE", "AUDIT_EXTRACT"]
+        ["RENDER_CHAPTER", "AUDIT_EXTRACT"]
     );
 }
 
@@ -3831,7 +3723,7 @@ fn b08_long_form_planning_rejects_legacy_signing_head_before_model_calls() {
 }
 
 #[test]
-fn b08_opening_bootstrap_without_route_rejects_task_reality() {
+fn b08_opening_bootstrap_without_route_holds_back_task_reality() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-opening-no-route";
     let state = KernelState::with_production_gateway(
@@ -3862,48 +3754,18 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
         .unwrap();
     drop(connection);
 
-    let error = execute_command_impl(&state, json!({
+    let result = execute_command_impl(&state, json!({
         "type":"production_start","commandId":"cmd:b08:opening-no-route","idempotencyKey":"key:b08:opening-no-route",
         "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
         "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
     }))
-    .unwrap_err();
-    assert!(
-        error.contains("B08_TASK_SCOPE_VIOLATION"),
-        "actual error: {error}"
-    );
+    .unwrap();
+    // LD-1 step 2: the chapter commits; the task progress is held back and
+    // the task keeps its state.
+    assert_eq!(result["finalStatus"], "committed");
 
     let connection = state.manager.open(project_id, "B08 opening", NOW).unwrap();
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        0
-    );
+    assert_held_back(&connection, project_id, "B08_TASK_SCOPE_VIOLATION");
     assert_eq!(
         connection
             .query_row::<String, _, _>(
@@ -3914,7 +3776,51 @@ fn b08_opening_bootstrap_without_route_rejects_task_reality() {
             .unwrap(),
         task_state_before
     );
-    println!("B08_OPENING_TASK_SCOPE_RESULT rejected=PASS final=0 receipt=0 domain_receipt=0 task_state_unchanged=PASS");
+}
+
+#[test]
+fn fx17_opening_audit_with_invented_task_id_is_not_a_scope_violation() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-fx17-invented-task";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(InventedTaskGateway),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "FX17 invented task", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate_opening_without_volume_plan(&connection, project_id);
+    drop(connection);
+
+    let result = execute_command_impl(
+        &state,
+        json!({
+            "type":"production_start","commandId":"cmd:fx17:invented-task","idempotencyKey":"key:fx17:invented-task",
+            "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
+        }),
+    );
+    if let Err(error) = &result {
+        assert!(
+            !error.contains("TASK_SCOPE_VIOLATION"),
+            "actual error: {error}"
+        );
+    }
+    let connection = state
+        .manager
+        .open(project_id, "FX17 invented task", NOW)
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM state_deltas WHERE project_id=?1 AND state_id='task:first_memory_repair'",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -3958,21 +3864,47 @@ fn b1a_complete_no_change_audit_commits_final_and_receipt_without_reality_delta(
 }
 
 #[test]
-fn b1a_incomplete_unresolved_and_truncated_audits_fail_closed_before_final_commit() {
+fn b1a_audit_the_model_reports_unresolved_commits_with_a_reminder() {
+    // LD-1 step 2: an audit that says it could not express a change is
+    // taken with what it has, and the reminder says so.
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = "p-b1a-audit-unresolved";
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path()),
+        Arc::new(AuditVariantGateway {
+            variant: "unresolved-hard",
+        }),
+    );
+    let connection = state
+        .manager
+        .create(project_id, "B1-A audit failure", NOW)
+        .unwrap();
+    let chapter_id = seed_chapter_and_gate(&connection, project_id);
+    drop(connection);
+    let result = execute_command_impl(&state, json!({
+        "type":"production_start","commandId":"cmd:b1a:unresolved","idempotencyKey":"key:b1a:unresolved",
+        "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
+        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillsEnabled":false}
+    }))
+    .unwrap();
+    assert_eq!(result["finalStatus"], "committed");
+    let connection = state
+        .manager
+        .open(project_id, "B1-A audit failure", NOW)
+        .unwrap();
+    assert_held_back(&connection, project_id, "B08_AUDIT_UNRESOLVED_HARD");
+}
+
+#[test]
+fn b1a_incomplete_and_truncated_audits_fail_closed_before_final_commit() {
     for (suffix, gateway, expected_error) in [
         (
             "missing",
             Arc::new(AuditVariantGateway {
                 variant: "missing-category",
             }) as Arc<dyn ProductionModelGateway>,
-            "B08_AUDIT_INCOMPLETE",
-        ),
-        (
-            "unresolved",
-            Arc::new(AuditVariantGateway {
-                variant: "unresolved-hard",
-            }) as Arc<dyn ProductionModelGateway>,
-            "B08_AUDIT_UNRESOLVED_HARD",
+            // LD-1: a missing category is off the audit's output spec.
+            "P01_MODEL_OUTPUT_SPEC",
         ),
         (
             "truncated",
@@ -4184,7 +4116,7 @@ fn b08_long_form_reuses_exact_current_plan_and_bound_context_in_same_runtime() {
                 |row| row.get(0)
             )
             .unwrap(),
-        3
+        2
     );
     assert_eq!(connection.query_row::<String,_,_>("SELECT json_extract(p.payload_json,'$.contextManifestRef.artifactId') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id='p-b08-long' AND h.artifact_type='FinalChapter'", [], |row| row.get(0)).unwrap(), context_id);
     let volume_head_after: (String,i64,String) = connection.query_row(
@@ -4510,173 +4442,6 @@ fn rv23_command_receipt_read_uses_project_and_original_idempotency_key() {
 }
 
 #[test]
-fn b10_skill_quality_stays_on_the_existing_b08_production_root() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(RecordingGateway),
-    );
-    let connection = state.manager.create("p-b10-root", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-root");
-    drop(connection);
-
-    let result = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b10:root","idempotencyKey":"key:b10:root",
-            "projectId":"p-b10-root","expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","skillResourcePaths":["resources/operating_method.md"]}
-        }),
-    )
-    .unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-root", "B10", NOW).unwrap();
-    let expected_render_body = "林舟推开石门，实际只推进了任务，没有完成它。";
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-root' AND artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.creativeEnrichment.packageVersion') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate'",
-        [], |row| row.get(0)
-    ).unwrap(), "1.2.0");
-    let quality_payload: Value = serde_json::from_str(&connection.query_row::<String, _, _>(
-        "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap()).unwrap();
-    let candidate_payload: Value = serde_json::from_str(&connection.query_row::<String, _, _>(
-        "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",
-        [], |row| row.get(0)
-    ).unwrap()).unwrap();
-    assert_eq!(quality_payload["invocationProvenance"], json!([]));
-    let injections = quality_payload["methodInjectionProvenance"]
-        .as_array()
-        .expect("quality report must record method text injected into RENDER");
-    assert_eq!(injections.len(), 2);
-    assert_eq!(
-        candidate_payload["creativeEnrichment"]["methodInjectionProvenance"],
-        quality_payload["methodInjectionProvenance"]
-    );
-    let render_model_run_id = candidate_payload
-        .pointer("/renderer/modelRunId")
-        .and_then(Value::as_str)
-        .expect("candidate must reference the successful RENDER ModelRun");
-    for injection in injections {
-        assert!(injection["skillId"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        assert!(injection["version"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty()));
-        assert!(injection["bundleDigest"]
-            .as_str()
-            .and_then(|digest| digest.strip_prefix("sha256:"))
-            .is_some_and(|digest| digest.len() == 64));
-        assert_eq!(injection["renderModelRunId"], render_model_run_id);
-        assert!(injection["loadedResources"]
-            .as_array()
-            .is_some_and(|resources| {
-                resources.iter().any(|resource| {
-                    resource["reference"]
-                        .as_str()
-                        .is_some_and(|value| value.ends_with("/SKILL.md"))
-                        && resource["digest"]
-                            .as_str()
-                            .is_some_and(|value| value.len() == 64)
-                })
-            }));
-    }
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NULL LIMIT 1",
-        [], |row| row.get(0)
-    ).unwrap(), expected_render_body);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.body') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='FinalChapter'",
-        [], |row| row.get(0)
-    ).unwrap(), expected_render_body);
-    let projection =
-        query_production_center_impl(&state, json!({"projectId":"p-b10-root"})).unwrap();
-    assert_eq!(projection["creativeSkills"]["packageVersion"], "1.2.0");
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["selectedFullTextLoads"],
-        2
-    );
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["unselectedFullTextLoads"],
-        0
-    );
-    assert_eq!(
-        projection["creativeSkills"]["loading"]["selectedResourceLoads"],
-        2
-    );
-    assert_eq!(projection["creativeSkills"]["invocations"], json!([]));
-    assert_eq!(
-        projection["creativeSkills"]["methodInjectionProvenance"],
-        quality_payload["methodInjectionProvenance"]
-    );
-    assert_eq!(projection["quality"]["softOnly"], true);
-    assert_eq!(
-        projection["quality"]["modelProvenance"]["evaluatorCalls"],
-        0
-    );
-    assert_eq!(projection["quality"]["evaluatorKind"], "HEURISTIC_KEYWORD");
-    assert_eq!(
-        projection["quality"]["repair"]["status"],
-        "ADVISORY_ESCALATION"
-    );
-    assert_eq!(projection["quality"]["repair"]["transportCalls"], 1);
-    assert_eq!(projection["quality"]["recheckedDimensions"], json!([]));
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch.status')='CANDIDATE'",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT json_extract(p.payload_json,'$.candidateRef.version') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-root' AND a.artifact_type='ReviewReport'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT CASE WHEN json_extract(qp.payload_json,'$.repair.candidateAfter.artifactId') = json_extract(ap.payload_json,'$.candidateRef.artifactId') THEN 'BOUND' ELSE 'MISMATCH' END FROM artifacts q JOIN artifact_payloads qp ON qp.artifact_id=q.artifact_id AND qp.version=q.version JOIN artifacts a ON a.project_id=q.project_id AND a.artifact_type='ReviewReport' JOIN artifact_payloads ap ON ap.artifact_id=a.artifact_id AND ap.version=a.version WHERE q.project_id='p-b10-root' AND q.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "BOUND");
-}
-
-#[test]
-fn b10_formal_selected_method_content_changes_b08_enrichment_semantics() {
-    let run = |project_id: &str, primary: &str, support: &[&str]| {
-        let temp = tempfile::tempdir().unwrap();
-        let state = KernelState::with_production_gateway(
-            AppPaths::new(temp.path()),
-            Arc::new(RecordingGateway),
-        );
-        let connection = state.manager.create(project_id, "B10", NOW).unwrap();
-        let chapter_id = seed_chapter_and_gate(&connection, project_id);
-        drop(connection);
-        execute_command_impl(
-            &state,
-            json!({
-                "type":"production_start","commandId":format!("cmd:{project_id}:method"),"idempotencyKey":format!("key:{project_id}:method"),
-                "projectId":project_id,"expectedRevision":0,"requestedAt":NOW,
-                "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","primarySkillId":primary,"supportSkillIds":support}
-            }),
-        )
-        .unwrap();
-        let connection = state.manager.open(project_id, "B10", NOW).unwrap();
-        connection
-            .query_row::<String, _, _>(
-                "SELECT json_extract(p.payload_json,'$.creativeEnrichment.methodGuidance') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id LIMIT 1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    let ending = run("p-b10-method-ending", "S14", &["S10"]);
-    let pacing = run("p-b10-method-pacing", "S21", &["S23"]);
-    assert_ne!(ending, pacing);
-    assert!(ending.contains("methodDigest=") && ending.contains("/SKILL.md"));
-    assert!(pacing.contains("methodDigest=") && pacing.contains("/SKILL.md"));
-}
-
-#[test]
 fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
     let temp = tempfile::tempdir().unwrap();
     let state = KernelState::with_production_gateway(
@@ -4710,360 +4475,6 @@ fn b10_runtime_without_skill_keeps_the_same_b08_commit_root() {
         "SELECT COUNT(*) FROM canonical_heads WHERE project_id='p-b10-no-skill' AND artifact_type='FinalChapter'",
         [], |row| row.get(0)
     ).unwrap(), 1);
-}
-
-#[test]
-fn b10_production_no_repair_path_is_explicit_and_does_not_create_a_patch() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(GoodQualityGateway),
-    );
-    let connection = state.manager.create("p-b10-no-repair", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-no-repair");
-    drop(connection);
-
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b10:no-repair","idempotencyKey":"key:b10:no-repair",
-        "projectId":"p-b10-no-repair","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP"}
-    })).unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-no-repair", "B10", NOW).unwrap();
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "NO_REPAIR");
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-no-repair' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-no-repair' AND artifact_type='FinalChapter' AND artifact_status='COMMITTED'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-}
-
-#[test]
-fn b10_production_repair_limit_marks_advisory_and_keeps_rendered_body() {
-    let temp = tempfile::tempdir().unwrap();
-    let state = KernelState::with_production_gateway(
-        AppPaths::new(temp.path()),
-        Arc::new(RecordingGateway),
-    );
-    let connection = state.manager.create("p-b10-limit", "B10", NOW).unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, "p-b10-limit");
-    drop(connection);
-
-    let result = execute_command_impl(&state, json!({
-        "type":"production_start","commandId":"cmd:b10:limit","idempotencyKey":"key:b10:limit",
-        "projectId":"p-b10-limit","expectedRevision":0,"requestedAt":NOW,
-        "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":1}
-    })).unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    let connection = state.manager.open("p-b10-limit", "B10", NOW).unwrap();
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts WHERE project_id='p-b10-limit' AND artifact_type='FinalChapter'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-    assert_eq!(connection.query_row::<String, _, _>(
-        "SELECT json_extract(p.payload_json,'$.repair.status') FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='NarrativeQualityReport'",
-        [], |row| row.get(0)
-    ).unwrap(), "ADVISORY_ESCALATION");
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id='p-b10-limit' AND a.artifact_type='ChapterCandidate' AND json_extract(p.payload_json,'$.candidatePatch') IS NOT NULL",
-        [], |row| row.get(0)
-    ).unwrap(), 0);
-    assert_eq!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT status FROM jobs WHERE project_id='p-b10-limit'",
-                [],
-                |row| row.get(0)
-            )
-            .unwrap(),
-        "COMPLETED"
-    );
-    assert_eq!(connection.query_row::<i64, _, _>(
-        "SELECT COUNT(*) FROM model_runs WHERE project_id='p-b10-limit' AND capability='RENDER_CHAPTER'",
-        [], |row| row.get(0)
-    ).unwrap(), 1);
-}
-
-#[test]
-fn rv02_s40_repairs_candidate_through_durable_runner_then_audits_and_certifies_new_candidate() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_id = "p-b5b-s40-repair";
-    let gateway = S40RepairGateway::default();
-    let state =
-        KernelState::with_production_gateway(AppPaths::new(temp.path()), Arc::new(gateway.clone()));
-    let connection = state
-        .manager
-        .create(project_id, "B5-B S40 repair", NOW)
-        .unwrap();
-    let chapter_id = seed_chapter_and_gate(&connection, project_id);
-    let prior_job_id =
-        StableIdentityFactory::from_command(StableIdKind::Job, "cmd:b5b:prior-audit").unwrap();
-    connection
-        .execute(
-            "INSERT INTO jobs(job_id,project_id,job_type,chapter_id,status,current_stage,attempt_no,repair_round,created_at,updated_at) VALUES (?1,?2,'CHAPTER',?3,'FAILED','AUDIT',1,0,?4,?4)",
-            libsql_rusqlite::params![prior_job_id, project_id, chapter_id, NOW],
-        )
-        .unwrap();
-    let prior_audit_id =
-        StableIdentityFactory::from_command(StableIdKind::ModelRun, "cmd:b5b:prior-audit:model")
-            .unwrap();
-    let mut prior_audit = FakeModelTransport::success(json!({
-        "qualityFindings":[],
-        "canonCandidates":[],
-        "knowledgeCandidates":[],
-        "continuityCandidates":[],
-        "taskProgressCandidates":[],
-        "revealedReservationRefs":[],
-        "evidenceRanges":[],
-        "auditCompleteness":"COMPLETE_NO_CHANGE",
-        "unresolvedHard":false
-    }));
-    DurableModelRunner::execute(
-        &connection,
-        &mut prior_audit,
-        &ModelRunSpec {
-            model_run_id: prior_audit_id.clone(),
-            job_id: Some(prior_job_id.clone()),
-            step_id: None,
-            provider: "prior-audit-provider".into(),
-            model: "prior-audit-model".into(),
-            idempotency_key: "key:b5b:prior-audit:model".into(),
-            capability: "AUDIT_EXTRACT".into(),
-            prompt_ref: None,
-            context_manifest_ref: None,
-            budget_id: Some(format!("budget:b08:{project_id}")),
-            predicted_cost_cents: 0,
-            cost_snapshot: None,
-            attempt_no: 1,
-            repair_round: 0,
-        },
-        NOW,
-    )
-    .unwrap();
-    assert_eq!(prior_audit.send_calls(), 1);
-    assert!(DurableModelRunner::completed_result_for_job(
-        &connection,
-        project_id,
-        &prior_job_id,
-        "AUDIT_EXTRACT"
-    )
-    .unwrap()
-    .is_some());
-    drop(connection);
-
-    let result = execute_command_impl(
-        &state,
-        json!({
-            "type":"production_start","commandId":"cmd:b5b:s40-repair",
-            "idempotencyKey":"key:b5b:s40-repair","projectId":project_id,
-            "expectedRevision":0,"requestedAt":NOW,
-            "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","repairRunLimit":2,"retryOfJobId":prior_job_id}
-        }),
-    )
-    .unwrap();
-    assert_eq!(result["finalStatus"], "committed");
-    assert_eq!(
-        gateway.capabilities.lock().unwrap().as_slice(),
-        [
-            "PLAN_STRATEGY",
-            "RENDER_CHAPTER",
-            "REPAIR_CANDIDATE",
-            "AUDIT_EXTRACT"
-        ]
-    );
-    assert_eq!(gateway.repair_inputs.lock().unwrap().len(), 1);
-    assert_eq!(
-        gateway.repair_inputs.lock().unwrap()[0]["candidate"]["body"],
-        "林舟被迫等待。门后传来脚步声。"
-    );
-    assert_eq!(gateway.audit_inputs.lock().unwrap().len(), 1);
-    let connection = state
-        .manager
-        .open(project_id, "B5-B S40 repair", NOW)
-        .unwrap();
-    assert_ne!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT model_run_id FROM model_runs WHERE project_id=?1 AND capability='AUDIT_EXTRACT' AND model_run_id!=?2 ORDER BY created_at DESC LIMIT 1",
-                libsql_rusqlite::params![project_id, prior_audit_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        prior_audit_id,
-        "repaired candidate requires a fresh audit ModelRun"
-    );
-    assert_eq!(
-        connection
-            .query_row::<String, _, _>(
-                "SELECT status FROM model_runs WHERE project_id=?1 AND model_run_id=?2",
-                libsql_rusqlite::params![project_id, prior_audit_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        "COMPLETED",
-        "the historical audit remains intact"
-    );
-    let repaired_body = "林舟决定推开石门。“我必须找到出口。”“石门后有人。”门后传来脚步声。";
-    assert_eq!(
-        gateway.audit_inputs.lock().unwrap()[0]["body"],
-        repaired_body
-    );
-
-    let candidates = {
-        let mut statement = connection
-            .prepare("SELECT a.artifact_id,p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ChapterCandidate' ORDER BY a.created_at,a.artifact_id")
-            .unwrap();
-        statement
-            .query_map([project_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .map(|row| {
-                let (artifact_id, payload) = row.unwrap();
-                let mut payload = serde_json::from_str::<Value>(&payload).unwrap();
-                payload["artifactId"] = json!(artifact_id);
-                payload
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        candidates.len(),
-        2,
-        "the source and repaired candidates remain traceable"
-    );
-    let original = candidates
-        .iter()
-        .find(|candidate| candidate["candidatePatch"].is_null())
-        .unwrap();
-    let repaired = candidates
-        .iter()
-        .find(|candidate| !candidate["candidatePatch"].is_null())
-        .unwrap();
-    assert_eq!(original["body"], "林舟被迫等待。门后传来脚步声。");
-    assert_eq!(repaired["body"], repaired_body);
-    assert_eq!(repaired["candidatePatch"]["start"], 2);
-    assert_eq!(repaired["candidatePatch"]["end"], 7);
-    assert!(repaired_body.ends_with("门后传来脚步声。"));
-    assert_eq!(repaired["candidatePatch"]["kind"], "CandidatePatch");
-    assert_eq!(repaired["candidatePatch"]["status"], "CANDIDATE");
-    assert_eq!(repaired["candidatePatch"]["repairRun"], 1);
-
-    let quality_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='NarrativeQualityReport'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(quality_payload["repair"]["status"], "REPAIRED");
-    assert_eq!(quality_payload["repair"]["run"], 1);
-    assert_eq!(
-        quality_payload["repair"]["candidateBefore"]["artifactId"],
-        original["artifactId"]
-    );
-    assert_eq!(
-        quality_payload["repair"]["candidateAfter"]["artifactId"],
-        repaired["artifactId"]
-    );
-    assert!(quality_payload["recheckedDimensions"]
-        .as_array()
-        .is_some_and(|dimensions| dimensions.iter().any(|dimension| dimension == "agency")));
-
-    let audit_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ReviewReport'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        audit_payload["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-    assert_eq!(
-        gateway.audit_inputs.lock().unwrap()[0]["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-    let final_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='FinalChapter'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        final_payload["candidateRef"]["artifactId"],
-        repaired["artifactId"]
-    );
-
-    let repair_run: (String, String, String) = connection
-        .query_row(
-            "SELECT m.model_run_id,r.budget_ref,m.status FROM model_runs m JOIN budget_reservations r ON r.reservation_id=m.budget_reservation_id WHERE m.project_id=?1 AND m.capability='REPAIR_CANDIDATE'",
-            [project_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert_eq!(repair_run.2, "COMPLETED");
-    assert_eq!(repair_run.1, format!("budget:b08:{project_id}"));
-    assert_eq!(repaired["candidatePatch"]["modelRunId"], repair_run.0);
-
-    let receipt_payload: Value = serde_json::from_str(
-        &connection
-            .query_row::<String, _, _>(
-                "SELECT p.payload_json FROM artifacts a JOIN artifact_payloads p ON p.artifact_id=a.artifact_id AND p.version=a.version WHERE a.project_id=?1 AND a.artifact_type='ProductionReceipt'",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(receipt_payload["modelRunRefs"]
-        .as_array()
-        .is_some_and(|runs| runs.iter().any(|run| run == &repair_run.0)));
-    let certificate_evidence: String = connection
-        .query_row(
-            "SELECT evidence_refs_json FROM gate_certificates WHERE project_id=?1 ORDER BY passed_at DESC LIMIT 1",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let evidence: Value = serde_json::from_str(&certificate_evidence).unwrap();
-    let audit_artifact_id: String = connection
-        .query_row(
-            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='ReviewReport'",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let quality_artifact_id: String = connection
-        .query_row(
-            "SELECT artifact_id FROM artifacts WHERE project_id=?1 AND artifact_type='NarrativeQualityReport'",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(evidence.as_array().is_some_and(|refs| {
-        refs.iter()
-            .any(|reference| reference["artifactId"] == audit_artifact_id)
-            && refs
-                .iter()
-                .any(|reference| reference["artifactId"] == quality_artifact_id)
-    }));
 }
 
 #[test]
@@ -5145,7 +4556,7 @@ fn rv35_post_gate_unrelated_canon_conflict_blocks_without_final_or_extra_model_r
                 |row| row.get(0),
             )
             .unwrap(),
-        4,
+        3,
         "post-Gate retry must not make additional model calls"
     );
     assert_eq!(
@@ -5335,12 +4746,16 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
         .unwrap();
     let source_event_id: String = connection
         .query_row(
-            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id='promise:source-event'",
-            [],
+            "SELECT source_event_id FROM narrative_obligations WHERE obligation_id=?1",
+            [new_thread_obligation_id(&chapter_id, 1)],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(source_event_id, "event:fact:actual:door-open");
+    // LD-1.2: the event follows its fact's system id.
+    assert_eq!(
+        source_event_id,
+        format!("event:{}", new_audit_item_id("canon", &chapter_id, 1))
+    );
 
     let continuity = ai_novel_production_system_core::commands::query_continuity_impl(
         &state,
@@ -5351,7 +4766,7 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|thread| thread["threadId"] == "thread:promise:source-event")
+        .find(|thread| thread["threadId"] == new_audit_item_id("thread", &chapter_id, 1))
         .unwrap();
     assert_eq!(thread["sourceEventRef"], format!("event:{source_event_id}"));
     let evidence_refs = thread["evidenceRefs"].as_array().unwrap();
@@ -5362,7 +4777,7 @@ fn fx1_b08_promise_thread_exposes_source_event_and_exact_evidence() {
 }
 
 #[test]
-fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
+fn fx1_b08_holds_back_a_continuity_source_event_not_in_canon() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-source-event-invalid";
     let state = KernelState::with_production_gateway(
@@ -5399,7 +4814,7 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
         .unwrap();
     drop(connection);
 
-    let error = execute_command_impl(
+    let result = execute_command_impl(
         &state,
         json!({
             "type":"production_start",
@@ -5411,13 +4826,15 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
         }),
     )
-    .unwrap_err();
-    assert_eq!(error, "B08_THREAD_SOURCE_EVENT_INVALID");
+    .unwrap();
+    // LD-1 step 2: the chapter commits; the thread is held back.
+    assert_eq!(result["finalStatus"], "committed");
 
     let connection = state
         .manager
         .open(project_id, "B08 invalid source event", NOW)
         .unwrap();
+    assert_held_back(&connection, project_id, "B08_THREAD_SOURCE_EVENT_INVALID");
     let canon_events_after: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM canon_events WHERE project_id=?1",
@@ -5439,17 +4856,18 @@ fn fx1_b08_rejects_continuity_source_event_not_in_canon() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(canon_events_after, canon_events_before);
-    assert_eq!(canon_facts_after, canon_facts_before);
+    // The chapter's own facts are recorded; the thread is not.
+    assert!(canon_events_after >= canon_events_before);
+    assert!(canon_facts_after >= canon_facts_before);
     assert_eq!(obligations_after, obligations_before);
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
 }
 
 #[test]
-fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks() {
+fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_is_held_back() {
     for (suffix, contradictory, should_pass) in [("valid", false, true), ("future", true, false)] {
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-b08-knowledge-{suffix}");
@@ -5479,36 +4897,50 @@ fn b08_flashback_knowledge_persists_provenance_and_future_contradiction_blocks()
                 .open(&project_id, "B08 knowledge", NOW)
                 .unwrap();
             let (source, version): (Option<String>,Option<i64>) = connection.query_row(
-                "SELECT source_artifact_id,source_version FROM canon_knowledge WHERE knowledge_id='knowledge:actual:flashback'",
-                [], |row| Ok((row.get(0)?,row.get(1)?))
+                "SELECT source_artifact_id,source_version FROM canon_knowledge WHERE knowledge_id=?1",
+                [new_audit_item_id("know", &chapter_id, 1)], |row| Ok((row.get(0)?,row.get(1)?))
             ).unwrap();
             assert!(source.is_some());
             assert_eq!(version, Some(1));
         } else {
-            assert_eq!(
-                result.unwrap_err(),
-                "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION"
-            );
+            // LD-1 step 2: the chapter commits; the contradicting knowledge is
+            // held back.
+            assert_eq!(result.unwrap()["finalStatus"], "committed");
             let connection = state
                 .manager
                 .open(&project_id, "B08 knowledge", NOW)
                 .unwrap();
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
+            assert_held_back(
+                &connection,
+                &project_id,
+                "B08_KNOWLEDGE_FUTURE_EVENT_CONTRADICTION",
+            );
+            assert_eq!(
+                connection
+                    .query_row::<i64, _, _>(
+                        "SELECT COUNT(*) FROM canon_knowledge WHERE project_id=?1",
+                        [&project_id],
+                        |row| row.get(0)
+                    )
+                    .unwrap(),
+                0
+            );
         }
     }
 }
 
+/// A reveal of a reservation the project never declared is an audit
+/// invention and is dropped (fx19); a declared reservation revealed outside
+/// the plan still blocks (`plan_foreshadow_actual_reveal_is_blocked`).
 #[test]
-fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
-    for (suffix, variant, expected_error, expected_reconciliation) in [
-        (
-            "reservation",
-            "reservation",
-            Some("B08_RESERVATION_VIOLATION"),
-            None,
-        ),
-        ("blocked", "blocked", None, Some("REPLAN_VOLUME_ROUTE")),
-    ] {
+fn b08_reconciliation_uses_actual_task_state() {
+    {
+        let (suffix, variant, expected_error, expected_reconciliation) = (
+            "blocked",
+            "blocked",
+            None::<&str>,
+            Some("REPLAN_VOLUME_ROUTE"),
+        );
         let temp = tempfile::tempdir().unwrap();
         let project_id = format!("p-b08-audit-{suffix}");
         let state = KernelState::with_production_gateway(
@@ -5552,7 +4984,7 @@ fn b08_reservation_gate_blocks_and_reconciliation_uses_actual_task_state() {
 }
 
 #[test]
-fn plan_foreshadow_actual_reveal_is_blocked() {
+fn plan_foreshadow_actual_reveal_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-actual-reveal";
     let paths = AppPaths::new(temp.path());
@@ -5652,43 +5084,23 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
                     "reservationRefs":["reservation:future:1"],"entityRefs":["entity:actual:linzhou"]}}
         }),
     );
-    assert_eq!(result.unwrap_err(), "B08_RESERVATION_VIOLATION");
+    // LD-1 step 2: the chapter commits; the reveal is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 actual reveal", NOW)
         .unwrap();
+    assert_held_back(&connection, project_id, "B08_RESERVATION_VIOLATION");
     let input = audit_inputs.lock().unwrap()[0].clone();
     assert!(input.get("existingCanonSemanticKeys").is_none());
     assert!(input
         .pointer("/authorityContext/state/facts")
         .and_then(Value::as_array)
         .is_some_and(|facts| !facts.is_empty()));
-    let heads_after: String = connection
-        .query_row(
-            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        heads_after,
-        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT revision FROM project_meta WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        revision_at_audit.lock().unwrap().unwrap()
-    );
     assert_eq!(
         b08_committed_final_count_for_chapter(&connection, project_id, &chapter_id),
-        0
+        1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
     assert_eq!(
         connection
             .query_row::<i64, _, _>(
@@ -5702,7 +5114,7 @@ fn plan_foreshadow_actual_reveal_is_blocked() {
 }
 
 #[test]
-fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes() {
+fn b08_existing_canon_conflict_is_held_back_without_writing_the_fact() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-reported-canon-conflict";
     let paths = AppPaths::new(temp.path());
@@ -5736,10 +5148,8 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"],"skillsEnabled":false}
         }),
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
-    );
+    // LD-1 step 2: the chapter commits; the conflicting fact is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
 
     let input = audit_inputs.lock().unwrap()[0].clone();
     assert!(input.get("existingCanonSemanticKeys").is_none());
@@ -5760,26 +5170,10 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
         .manager
         .open(project_id, "B08 canon conflict", NOW)
         .unwrap();
-    let heads_after: String = connection
-        .query_row(
-            "SELECT COALESCE(group_concat(head,'|'),'') FROM (SELECT artifact_type||':'||artifact_id||':'||version||':'||payload_hash AS head FROM canonical_heads WHERE project_id=?1 ORDER BY artifact_type,scope_key)",
-            [project_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        heads_after,
-        canonical_heads_at_audit.lock().unwrap().clone().unwrap()
-    );
-    assert_eq!(
-        connection
-            .query_row::<i64, _, _>(
-                "SELECT revision FROM project_meta WHERE project_id=?1",
-                [project_id],
-                |row| row.get(0),
-            )
-            .unwrap(),
-        revision_at_audit.lock().unwrap().unwrap()
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
     );
     assert_eq!(
         connection
@@ -5791,12 +5185,11 @@ fn b08_existing_canon_conflict_is_reported_and_blocked_without_canonical_writes(
             .unwrap(),
         1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='ProductionReceipt'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
 }
 
 #[test]
-fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
+fn b1b_canon_semantic_policy_controls_what_b08_records() {
     let cases = [
         (
             "multi",
@@ -6140,24 +5533,12 @@ fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
             _ => "UNMAPPED_FIXTURE",
         };
         if let Some(expected) = expected_error {
-            let actual_error = result.unwrap_err();
-            assert!(actual_error.starts_with(expected));
-            assert_eq!(final_after, final_before);
-            assert_eq!(canon_after, canon_before);
-            assert_eq!(receipt_after, receipt_before);
-            assert_eq!(canonical_heads_at_audit, canonical_heads_after);
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [&project_id], |row| row.get(0)).unwrap(), 0);
-            assert_eq!(
-                connection
-                    .query_row::<i64, _, _>(
-                        "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1",
-                        [&project_id],
-                        |row| row.get(0)
-                    )
-                    .unwrap(),
-                canon_before
-            );
-            assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM domain_receipts WHERE project_id=?1 AND domain='B08_CHAPTER_PRODUCTION'", [&project_id], |row| row.get(0)).unwrap(), 0);
+            // LD-1 step 2: the chapter commits and the fact the policy rejects
+            // is held back, so the ledger never takes the conflict.
+            assert_eq!(result.unwrap()["finalStatus"], "committed");
+            assert_eq!(final_after, 1);
+            assert!(canon_after >= canon_before);
+            assert_held_back(&connection, &project_id, expected);
         } else {
             assert_eq!(result.unwrap()["finalStatus"], "committed");
             assert_eq!(final_after, 1);
@@ -6237,7 +5618,7 @@ fn b1b_canon_semantic_policy_controls_b08_commit_and_side_effects() {
 }
 
 #[test]
-fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
+fn canon_semantic_conflict_with_new_fact_id_is_held_back() {
     let temp = tempfile::tempdir().unwrap();
     let project_id = "p-b08-canon-semantic-conflict";
     let state = KernelState::with_production_gateway(
@@ -6261,15 +5642,18 @@ fn canon_semantic_conflict_with_new_fact_id_is_blocked() {
             "payload":{"chapterId":chapter_id,"executionMode":"OPENING_BOOTSTRAP","entityIds":["entity:actual:linzhou"]}
         }),
     );
-    assert_eq!(
-        result.unwrap_err(),
-        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED"
-    );
+    // LD-1 step 2: the chapter commits; the item is held back.
+    assert_eq!(result.unwrap()["finalStatus"], "committed");
     let connection = state
         .manager
         .open(project_id, "B08 canon conflict", NOW)
         .unwrap();
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 0);
+    assert_held_back(
+        &connection,
+        project_id,
+        "B08_CANON_CONFLICT_CHANGE_REQUEST_REQUIRED",
+    );
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM artifacts WHERE project_id=?1 AND artifact_type='FinalChapter'", [project_id], |row| row.get(0)).unwrap(), 1);
 }
 
 #[test]
@@ -6341,8 +5725,8 @@ fn canon_semantic_difference_with_disjoint_world_time_is_not_blocked() {
     assert_eq!(
         connection
             .query_row::<Option<String>, _, _>(
-                "SELECT story_time_from FROM canon_facts WHERE fact_id='fact:actual:future-location'",
-                [],
+                "SELECT story_time_from FROM canon_facts WHERE fact_id=?1",
+                [new_audit_item_id("canon", &chapter_id, 1)],
                 |row| row.get(0),
             )
             .unwrap()
@@ -6973,7 +6357,7 @@ fn fx6_quote_only_evidence_located_by_backend() {
             "expectedRevision":revision,
             "requestedAt":NOW,
             "payload":{
-                "threadRef":"thread:mystery:fx6-quote",
+                "threadRef":new_audit_item_id("thread", &chapter_id, 1),
                 "action":"UPGRADE",
                 "authorityLevel":"B",
                 "fulfillmentObject":"entity:actual:linzhou",
@@ -9316,7 +8700,15 @@ mod b04b_rv08;
 mod b04b_rv15;
 #[path = "b08_h03/b04b_rv33.rs"]
 mod b04b_rv33;
+#[path = "b08_h03/craft_v2.rs"]
+mod craft_v2;
 #[path = "b08_h03/fx15_production_control.rs"]
 mod fx15_production_control;
+#[path = "b08_h03/fx18_length.rs"]
+mod fx18_length;
+#[path = "b08_h03/fx19_truncation.rs"]
+mod fx19_truncation;
 #[path = "b08_h03/fx4_knowledge_time.rs"]
 mod fx4_knowledge_time;
+#[path = "b08_h03/ld2_downgrade.rs"]
+mod ld2_downgrade;

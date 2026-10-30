@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "post-b14-ui-r4-bridge"
-path = "src/bin/post_b14_ui_r4_bridge.rs"
+path = "test-support/post_b14_ui_r4_bridge.rs"
 required-features = ["e2e-test"]
 
 [dependencies]

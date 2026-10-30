@@ -1,6 +1,6 @@
 {
   "foreign_key_violations": 0,
-  "index_count": 223,
+  "index_count": 224,
   "indexes": [
     "idx_arcs_volume",
     "idx_artifact_schemas_project",
@@ -209,6 +209,7 @@
     "sqlite_autoindex_stale_queue_2",
     "sqlite_autoindex_state_deltas_1",
     "sqlite_autoindex_state_deltas_2",
+    "sqlite_autoindex_style_samples_1",
     "sqlite_autoindex_support_checkpoints_1",
     "sqlite_autoindex_table_family_registry_1",
     "sqlite_autoindex_vacuum_reports_1",
@@ -227,7 +228,7 @@
     "sqlite_autoindex_wal_governance_reports_1"
   ],
   "quick_check": "ok",
-  "table_count": 104,
+  "table_count": 105,
   "tables": [
     "arc_plan_index",
     "arcs",
@@ -322,6 +323,7 @@
     "search_documents_fts_idx",
     "stale_queue",
     "state_deltas",
+    "style_samples",
     "support_checkpoints",
     "table_family_registry",
     "vacuum_reports",
