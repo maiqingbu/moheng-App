@@ -254,7 +254,12 @@ fn story_bible_candidates_with_ready_sentences_are_rejected_without_writes() {
     )
     .unwrap_err();
 
-    assert!(error.contains("STORY_BIBLE_READY_SENTENCE"), "{error}");
+    // Since 2026-10-30 the reply spec catches the quoted line (and asks once
+    // more) before the setup check would.
+    assert!(
+        error.contains("P01_MODEL_OUTPUT_SPEC") && error.contains("innerVoiceStyle"),
+        "{error}"
+    );
     assert_eq!(
         fixture.gateway.bible_inputs.lock().unwrap().len(),
         2,

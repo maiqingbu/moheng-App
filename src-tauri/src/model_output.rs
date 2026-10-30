@@ -16,7 +16,7 @@ const REPORTED_VIOLATIONS: usize = 5;
 /// Each spec and the model steps it covers.
 const SPECS: &[(&[&str], &str)] = &[
     (
-        &["RENDER_CHAPTER_CRAFT", "ADJUST_CHAPTER_LENGTH"],
+        &["RENDER_CHAPTER_CRAFT", "ADJUST_CHAPTER_LENGTH", "RENDER_CHAPTER"],
         include_str!("../../contracts/model-output/chapter-body.schema.json"),
     ),
     (
@@ -30,6 +30,14 @@ const SPECS: &[(&[&str], &str)] = &[
     (
         &["CHECK_CONTINUITY"],
         include_str!("../../contracts/model-output/check-continuity.schema.json"),
+    ),
+    (
+        &["GENERATE_STORY_BIBLE"],
+        include_str!("../../contracts/model-output/story-bible.schema.json"),
+    ),
+    (
+        &["GENERATE_STORY_DIRECTIONS"],
+        include_str!("../../contracts/model-output/story-directions.schema.json"),
     ),
 ];
 
@@ -92,6 +100,55 @@ pub fn prompt_section(capability: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Model steps without an output spec, and why their replies cannot
+    /// fail a run unnoticed.
+    const UNSPECIFIED_STEPS: [(&str, &str); 7] = [
+        ("PLAN_STRATEGY", "r1 plans: the plan contract sends a reply back to the planner"),
+        ("PLAN_CHAPTER_CRAFT", "the plan checks and contract send a reply back to the planner"),
+        ("REPAIR_CANDIDATE", "retired from production (owner decision 2026-10-24)"),
+        ("CLASSIFY_ASSISTANT_INTENT", "a failed reply falls back to keyword routing"),
+        ("OPENING_SIGNING_EVALUATION", "checked against the S35 skill's own outputSchema"),
+        ("REVIEW_CHAPTER", "advisory: a failed review is recorded, the chapter goes on"),
+        ("TEST_PROVIDER", "a connection test, never part of production"),
+    ];
+
+    #[test]
+    fn every_model_step_has_an_output_spec_or_a_reason_for_none() {
+        // QC-1 (2026-10-30, sixth acceptance run): a step without a spec
+        // failed a whole run on one missing field.
+        let source = include_str!("provider.rs");
+        let steps = source
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix('"')?;
+                let (step, after) = rest.split_once('"')?;
+                let prompt = after.trim_start().strip_prefix("=>")?.trim_start();
+                (step.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                    && (prompt.starts_with("\"Return JSON") || prompt.starts_with("concat!(")))
+                .then_some(step)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(steps.len() >= 15, "{steps:?}");
+        for step in steps {
+            assert!(
+                spec(step).is_some() || UNSPECIFIED_STEPS.iter().any(|(name, _)| *name == step),
+                "{step} has no output spec and no reason for none"
+            );
+        }
+    }
+
+    #[test]
+    fn the_story_bible_spec_refuses_the_quote_marks_the_setup_refuses() {
+        let pattern = spec("GENERATE_STORY_BIBLE").unwrap().schema["properties"]["bibles"]
+            ["items"]["properties"]["protagonist"]["properties"]["innerVoiceStyle"]["pattern"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for mark in crate::craft_setup::QUOTE_MARKS {
+            assert!(pattern.contains(*mark), "{mark}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

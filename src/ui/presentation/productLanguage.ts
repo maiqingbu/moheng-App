@@ -134,6 +134,7 @@ const errorLabels: Record<string, string> = {
   P01_PROVIDER_EMPTY_CONTENT: '模型服务返回内容为空，请重试。',
   P01_MALFORMED_RESPONSE: '模型服务连接成功，但响应内容不是预期的 {"ok":true} JSON。',
   P01_MODEL_JSON_INVALID: '模型服务返回的内容不是有效的结构化结果，请重试。',
+  P01_MODEL_OUTPUT_SPEC: '模型返回的内容缺少必填项或格式不对，已自动重试一次仍不合格，请重试。',
   P01_MODEL_PAYLOAD_INVALID: '模型服务返回的内容无法识别，请重试。',
   B11_STORY_DIRECTION_OUTPUT_INVALID: '模型返回的故事方向格式不完整，请重试。',
   B11_STORY_DIRECTION_COUNT_INVALID: '模型没有返回完整的三个故事方向，请重试。',
