@@ -41,6 +41,9 @@ pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 3..=5;
 
 /// QC-1.2: what marks chapter 1's imminent threat in its first scene.
 pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
+/// QC-1.2: what marks the threat's deadline and how the opening shows it.
+pub(crate) const THREAT_DEADLINE: &str = "期限：";
+pub(crate) const THREAT_ON_PAGE: &str = "开头写法：";
 /// QC-1.2: within how many characters chapter 1 shows its threat (the
 /// writer's prompt says 600 too).
 pub(crate) const OPENING_THREAT_WITHIN: usize = 600;
@@ -147,9 +150,29 @@ pub(crate) fn complete_plan_fields(plan: &mut Value) -> Vec<String> {
     filled
 }
 
-/// QC-1.2 (owner decision 2026-10-26): the planner's `openingThreat` for
-/// chapter 1 (the danger and how soon it falls) joins the first scene's
-/// conflict, where the writer reads it, so the plan keeps its contract.
+/// Words that make a deadline a point in story time on their own.
+const DEADLINE_WORDS: [&str; 16] = [
+    "今晚", "今天", "今夜", "明天", "明早", "明晚", "后天", "天亮", "天黑", "午夜", "凌晨", "黄昏",
+    "月底", "周末", "日落", "日出",
+];
+
+/// Whether `deadline` names a point in story time: a number of days, hours
+/// or the like (三天后, 十二点前, 两小时内) or a word such as 今晚.
+fn names_a_time(deadline: &str) -> bool {
+    let chars = deadline.chars().collect::<Vec<_>>();
+    chars.windows(2).any(|pair| {
+        crate::chapter_craft::is_numeral(pair[0]) && "天日时点分秒周月年刻小个".contains(pair[1])
+    }) || DEADLINE_WORDS.iter().any(|word| deadline.contains(word))
+}
+
+/// QC-1.2 (owner decision 2026-10-26; fifth acceptance run: a threat that
+/// was a state, "失去现实存在感", never reached the page): the planner's
+/// `openingThreat` for chapter 1 is what happens to the protagonist
+/// (`event`, or `danger` in earlier plans), by when (`deadline`, a point in
+/// story time) and how the opening shows it (`onPage`: a notice, a call,
+/// someone saying it). It joins the first scene's conflict, where the
+/// writer reads it, so the plan keeps its contract; a threat missing any of
+/// the three is left out, so the check sends the plan back for it.
 pub fn fold_opening_threat(plan: &mut Value) {
     let Some(threat) = plan
         .as_object_mut()
@@ -157,13 +180,21 @@ pub fn fold_opening_threat(plan: &mut Value) {
     else {
         return;
     };
-    let (danger, deadline) = (text(&threat["danger"]), text(&threat["deadline"]));
-    // A vague danger is left out, so the check sends the plan back for it.
-    if danger.chars().count() < MIN_DECISION_CHARS || deadline.is_empty() {
+    let event = match text(&threat["event"]) {
+        "" => text(&threat["danger"]),
+        event => event,
+    };
+    let (deadline, on_page) = (text(&threat["deadline"]), text(&threat["onPage"]));
+    if event.chars().count() < MIN_DECISION_CHARS
+        || on_page.chars().count() < MIN_DECISION_CHARS
+        || !names_a_time(deadline)
+    {
         return;
     }
     if let Some(conflict) = plan.pointer_mut("/craft/scenes/0/conflict") {
-        let line = format!("{OPENING_THREAT_MARK}{danger}（期限：{deadline}）");
+        let line = format!(
+            "{OPENING_THREAT_MARK}{event}（{THREAT_DEADLINE}{deadline}；{THREAT_ON_PAGE}{on_page}）"
+        );
         *conflict = json!(match text(conflict) {
             "" => line,
             before => format!("{before}；{line}"),
@@ -270,7 +301,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             .is_some_and(|scene| text(&scene["conflict"]).contains(OPENING_THREAT_MARK))
     {
         problems.push(
-            "第一章需要迫在眉睫的威胁：在 openingThreat 里写明什么危险、多久之内会落到主角身上"
+            "第一章需要迫在眉睫的威胁：openingThreat 写明 event（外面发生、落到主角身上的具体事，谁要对他做什么，不是身体或心里的状态）、deadline（具体到故事里的时间，如今晚十二点前、三天后）、onPage（开头怎么写出来：一则通知、一通电话或某人当面说出）"
                 .into(),
         );
     }

@@ -255,6 +255,13 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         .unwrap()
         .iter()
         .any(|finding| finding["code"] == "repeated_pattern"));
+    // QC-1.2: the opening never shows the planned threat, so the rewrite is
+    // asked to put it after the first sentence before anything else.
+    assert_eq!(rewrite["findings"][0]["code"], "opening_threat");
+    assert!(rewrite["findings"][0]["problem"]
+        .as_str()
+        .unwrap()
+        .contains("彭三的伙计把催债单拍在面馆柜台上"));
     // QC-1.4/1.5: chapter 1 has no earlier facts or phrases to check.
     assert!(inputs(&calls, "CHECK_CONTINUITY").is_empty());
     drop(calls);

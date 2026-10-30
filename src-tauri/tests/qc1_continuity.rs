@@ -194,3 +194,13 @@ fn qc1_any_plan_contract_violation_goes_back_to_the_planner() {
         "\"readerQuestion\" is a required property"
     );
 }
+
+#[test]
+fn qc1_the_props_of_how_the_threat_shows_are_not_the_threat() {
+    let plan = json!({"craft":{"scenes":[{"conflict":"争键盘；迫近的威胁：档案局要清除王女士的全部记忆档案（期限：今晚十二点前；开头写法：伙计把催债单拍在柜台上骂骂咧咧）"}]}});
+    let props_only = format!(
+        "伙计把催债单拍在柜台上骂骂咧咧。{}",
+        "他低头记账。".repeat(120)
+    );
+    assert!(!opening_threat_on_page(&plan, &props_only));
+}

@@ -73,8 +73,11 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
     });
     // QC-1.2: chapter 1 names the danger closing in on the protagonist.
     if chapter == 1 {
-        plan["openingThreat"] =
-            json!({"danger":"彭三要收走姑妈的面馆抵债","deadline":"三天后的月底"});
+        plan["openingThreat"] = json!({
+            "event":"彭三要收走姑妈的面馆抵债",
+            "deadline":"三天后的月底",
+            "onPage":"彭三的伙计把催债单拍在面馆柜台上"
+        });
     }
     plan
 }

@@ -382,7 +382,7 @@ const MEASURE_UNITS: [&str; 10] = [
     "毫米", "厘米", "公分", "赫兹", "分钟", "公里", "秒", "步", "米", "度",
 ];
 
-fn is_numeral(character: char) -> bool {
+pub(crate) fn is_numeral(character: char) -> bool {
     character.is_ascii_digit() || "零〇一二两三四五六七八九十百千万".contains(character)
 }
 
@@ -848,6 +848,27 @@ fn unique_quote_ending_at<'a>(
         .find(|quote| body.matches(quote).nth(1).is_none())
 }
 
+/// QC-1.2 (fifth acceptance run): when chapter 1's opening does not show
+/// its planned threat, a finding on the first sentence asks the rewrite to
+/// add it right after, once; what the rewrite leaves is reported.
+pub fn opening_threat_finding(plan: &Value, body: &str) -> Option<Value> {
+    if opening_threat_on_page(plan, body) {
+        return None;
+    }
+    let threat = threat_as_planned(plan)?;
+    let spans = sentence_spans(body);
+    if spans.is_empty() {
+        return None;
+    }
+    Some(rule_finding(
+        "opening_threat",
+        "HIGH",
+        unique_quote_ending_at(body, &spans, 0)?,
+        format!("开头 600 字内没有写出迫近的威胁：{threat}"),
+        "保留这句原文，紧接着用一两句写出这件事和期限（按开头写法：通知、电话或有人当面说出），其余不变",
+    ))
+}
+
 /// A Chinese character of the common block.
 pub(crate) fn is_han(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
@@ -1008,6 +1029,26 @@ pub fn copied_sentence_findings(history: &[String], body: &str) -> Vec<Value> {
         .collect()
 }
 
+/// All that follows 迫近的威胁 in chapter 1's first scene.
+fn threat_as_planned(plan: &Value) -> Option<&str> {
+    let (_, threat) = plan
+        .pointer("/craft/scenes/0/conflict")
+        .and_then(Value::as_str)?
+        .split_once(crate::craft_plan::OPENING_THREAT_MARK)?;
+    Some(threat)
+}
+
+/// Chapter 1's planned threat: the event and its deadline that follow
+/// 迫近的威胁 in its first scene, without how the opening shows it (whose
+/// props alone would not show the threat).
+fn planned_threat(plan: &Value) -> Option<String> {
+    let threat = threat_as_planned(plan)?;
+    let threat = threat
+        .split_once(crate::craft_plan::THREAT_ON_PAGE)
+        .map_or(threat, |(before, _)| before);
+    Some(threat.replace(crate::craft_plan::THREAT_DEADLINE, ""))
+}
+
 /// QC-1.2: whether chapter 1's planned threat (the first scene's
 /// 迫近的威胁) shows within the first `OPENING_THREAT_WITHIN` characters of
 /// `body`, the place the writer is told to put it: at least `THREAT_PAIRS`
@@ -1015,18 +1056,14 @@ pub fn copied_sentence_findings(history: &[String], body: &str) -> Vec<Value> {
 /// is nothing to check.
 pub fn opening_threat_on_page(plan: &Value, body: &str) -> bool {
     const THREAT_PAIRS: usize = 3;
-    let Some((_, threat)) = plan
-        .pointer("/craft/scenes/0/conflict")
-        .and_then(Value::as_str)
-        .and_then(|conflict| conflict.split_once(crate::craft_plan::OPENING_THREAT_MARK))
-    else {
+    let Some(threat) = planned_threat(plan) else {
         return true;
     };
     let opening = body
         .chars()
         .take(crate::craft_plan::OPENING_THREAT_WITHIN)
         .collect::<String>();
-    telling_pairs(threat)
+    telling_pairs(&threat)
         .intersection(&telling_pairs(&opening))
         .count()
         >= THREAT_PAIRS

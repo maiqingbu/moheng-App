@@ -3203,8 +3203,24 @@ fn run_chapter_production_inner(
         };
         // A sentence the check flagged is fixed for that reason first; a
         // repeat already flagged by a rule keeps the rule's finding.
-        let mut leading_findings =
-            crate::chapter_craft::contradiction_findings(&contradictions, &body);
+        // QC-1.2: chapter 1's missing threat leads them all.
+        let mut leading_findings = Vec::new();
+        if chapter_number == Some(1) {
+            leading_findings.extend(crate::chapter_craft::opening_threat_finding(
+                &plan_payload,
+                &body,
+            ));
+        }
+        // Its edit adds an event and a deadline, which the habit check would
+        // otherwise refuse as a new measure.
+        let additions = leading_findings
+            .iter()
+            .filter_map(|finding| finding["quote"].as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+        leading_findings.extend(crate::chapter_craft::contradiction_findings(
+            &contradictions,
+            &body,
+        ));
         leading_findings.extend(crate::chapter_craft::catchphrase_findings(
             &catchphrases,
             &body,
@@ -3276,7 +3292,7 @@ fn run_chapter_production_inner(
                 rewrite_error = Some(error);
                 json!({"edits":[]})
             });
-            let (revised, count) = apply_unique_edits(&body, &rewrite);
+            let (revised, count) = apply_unique_edits(&body, &rewrite, &additions);
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
             in_range = (length_range.min..=length_range.ceiling()).contains(&length);
@@ -5141,7 +5157,9 @@ fn whitespace_insensitive_unique_span(body: &[char], quote: &str) -> Option<(usi
 /// Applies the rewrite's `edits` whose passage occurs once in `body` and
 /// whose replacement adds no model habit, each spliced at its own span;
 /// returns the new body and how many applied.
-fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
+/// Applies the rewrite's edits whose quote occurs once; an edit of a quote
+/// in `additions` may add what the habit check would refuse.
+fn apply_unique_edits(body: &str, rewrite: &Value, additions: &[String]) -> (String, usize) {
     let mut revised = body.to_string();
     let mut applied = 0;
     for edit in rewrite
@@ -5159,8 +5177,9 @@ fn apply_unique_edits(body: &str, rewrite: &Value) -> (String, usize) {
         };
         // A rewrite must not trade one model habit for another.
         if replacement.trim().is_empty()
-            || crate::chapter_craft::habit_count(replacement)
+            || (crate::chapter_craft::habit_count(replacement)
                 > crate::chapter_craft::habit_count(quote)
+                && !additions.iter().any(|addition| addition == quote))
         {
             continue;
         }
@@ -7811,7 +7830,7 @@ mod tests {
             {"quote":"他没点保存键。","replacement":"指尖悬在保存键上方，像被磁石吸住。"},
             {"quote":"门开了。","replacement":"门轴吱呀一声，冷风灌进来。"}
         ]});
-        let (revised, applied) = apply_unique_edits(body, &rewrite);
+        let (revised, applied) = apply_unique_edits(body, &rewrite, &[]);
         assert_eq!(applied, 1);
         assert_eq!(revised, "他没点保存键。门轴吱呀一声，冷风灌进来。");
     }

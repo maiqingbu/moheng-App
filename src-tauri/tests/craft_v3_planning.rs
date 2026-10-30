@@ -30,6 +30,8 @@ struct CraftGateway {
     no_opening_threat: bool,
     /// Every plan leaves required fields out.
     missing_fields_always: bool,
+    /// Chapter 1's threat is a state with no deadline or opening.
+    vague_threat: bool,
 }
 
 impl ProductionModelGateway for CraftGateway {
@@ -83,6 +85,9 @@ impl ProductionModelGateway for CraftGateway {
                     craft["device"].as_object_mut().unwrap().remove("name");
                     craft.as_object_mut().unwrap().remove("newLosses");
                     plan.as_object_mut().unwrap().remove("chapterGoal");
+                }
+                if self.vague_threat && plan.get("openingThreat").is_some() {
+                    plan["openingThreat"] = json!({"event":"沈砚正在失去存在感","deadline":"很快"});
                 }
                 if self.no_opening_threat {
                     plan.as_object_mut().unwrap().remove("openingThreat");
@@ -523,7 +528,7 @@ fn qc1_chapter_one_carries_its_imminent_threat_in_the_first_scene() {
         )
         .unwrap();
     assert!(
-        conflict.contains("迫近的威胁：彭三要收走姑妈的面馆抵债（期限：三天后的月底）"),
+        conflict.contains("迫近的威胁：彭三要收走姑妈的面馆抵债（期限：三天后的月底；开头写法：彭三的伙计把催债单拍在面馆柜台上）"),
         "{conflict}"
     );
 }
@@ -653,4 +658,57 @@ fn qc1_a_plan_missing_required_fields_is_sent_back_then_completed_with_a_plan_re
         )
         .unwrap();
     assert!(payload.contains("系统补上"), "{payload}");
+}
+
+#[test]
+fn qc1_a_vague_opening_threat_is_sent_back_for_an_event_a_deadline_and_an_opening() {
+    // Acceptance 2026-10-26 (fifth run): "失去现实存在感，今晚十二点前"
+    // never reached the page; the threat must be something that happens,
+    // by a time, shown in the opening.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway {
+        vague_threat: true,
+        ..CraftGateway::default()
+    });
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "vague");
+    command(
+        &state,
+        &project_id,
+        "vague:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "vague:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    let center = query_production_center_impl(
+        &state,
+        json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+    )
+    .unwrap();
+    let result = command(
+        &state,
+        &project_id,
+        "vague:production",
+        "production_start",
+        json!({
+            "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+            "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+        }),
+    );
+    assert_eq!(result["finalStatus"], "committed", "{result}");
+    let inputs = gateway.plan_inputs.lock().unwrap();
+    let problems = inputs[1]["planFeedback"]["problems"].to_string();
+    assert!(
+        problems.contains("onPage") && problems.contains("deadline"),
+        "{problems}"
+    );
 }
