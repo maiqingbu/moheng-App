@@ -1768,6 +1768,9 @@ pub struct ChapterHistory {
     /// QC-1.4: the catchphrases the continuity check named in these
     /// chapters, for the writer to leave out.
     pub catchphrases: Vec<String>,
+    /// QC-1 (2026-10-30): the details these chapters kept writing, for the
+    /// writer to mention sparingly.
+    pub overused_details: Vec<String>,
 }
 
 impl ChapterHistory {
@@ -1799,11 +1802,12 @@ pub fn chapter_history(
             recent: Vec::new(),
             bodies: Vec::new(),
             catchphrases: Vec::new(),
+            overused_details: Vec::new(),
         });
     };
     let mut statement = connection.prepare(
         "SELECT c.chapter_no, substr(json_extract(f.payload_json,'$.body'), -200), json_extract(p.payload_json,'$.chapterGoal'), json_extract(f.payload_json,'$.body'), json_extract(p.payload_json,'$.chapterRole'), (SELECT json_group_array(json_extract(scene.value,'$.sceneType')) FROM json_each(p.payload_json,'$.sceneExecution') scene), \
-         (SELECT json_extract(r.payload_json,'$.craftSkills.continuity.catchphrases') FROM artifacts ra JOIN artifact_payloads r ON r.artifact_id=ra.artifact_id AND r.version=ra.version WHERE ra.project_id=c.project_id AND ra.artifact_type='ProductionReceipt' AND json_extract(r.payload_json,'$.finalChapterRef.artifactId')=c.final_artifact_id LIMIT 1) \
+         (SELECT json_array(json_extract(r.payload_json,'$.craftSkills.continuity.catchphrases'), json_extract(r.payload_json,'$.craftSkills.proseReview.overusedDetails')) FROM artifacts ra JOIN artifact_payloads r ON r.artifact_id=ra.artifact_id AND r.version=ra.version WHERE ra.project_id=c.project_id AND ra.artifact_type='ProductionReceipt' AND json_extract(r.payload_json,'$.finalChapterRef.artifactId')=c.final_artifact_id LIMIT 1) \
          FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          LEFT JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.chapter_no<?2 AND c.status='COMMITTED' ORDER BY c.chapter_no DESC LIMIT ?3",
@@ -1823,20 +1827,26 @@ pub fn chapter_history(
                 }),
                 row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(6)?
-                    .and_then(|list| serde_json::from_str::<Vec<String>>(&list).ok())
+                    .and_then(|lists| serde_json::from_str::<[Option<Vec<String>>; 2]>(&lists).ok())
                     .unwrap_or_default(),
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut catchphrases = Vec::new();
+    let mut overused_details = Vec::new();
     let mut recent = Vec::new();
     let mut bodies = Vec::new();
-    for (summary, body, named) in rows {
+    for (summary, body, [named, overused]) in rows {
         recent.push(summary);
         bodies.push(body);
-        for phrase in named {
-            if !catchphrases.contains(&phrase) {
-                catchphrases.push(phrase);
+        for (list, phrases) in [
+            (&mut catchphrases, named),
+            (&mut overused_details, overused),
+        ] {
+            for phrase in phrases.unwrap_or_default() {
+                if !list.contains(&phrase) {
+                    list.push(phrase);
+                }
             }
         }
     }
@@ -1845,6 +1855,7 @@ pub fn chapter_history(
         recent,
         bodies,
         catchphrases,
+        overused_details,
     })
 }
 

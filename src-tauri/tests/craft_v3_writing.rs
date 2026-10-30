@@ -290,6 +290,9 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
         receipt["craftSkills"]
     );
     assert_eq!(receipt["craftSkills"]["proseReview"]["editsApplied"], 1);
+    // QC-1 (2026-10-30): the fixture writes 桐油 on every line, past the
+    // detail allowance, and the rewrite is asked to word it differently.
+    assert_eq!(receipt["craftSkills"]["proseReview"]["detailFindings"], 6);
     // The fixture's body never shows the planned threat in its first third.
     assert_eq!(
         receipt["craftSkills"]["continuity"]["unresolved"][0]["reason"],

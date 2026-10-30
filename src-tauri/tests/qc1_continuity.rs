@@ -4,7 +4,7 @@
 
 use ai_novel_production_system_core::chapter_craft::{
     catchphrase_candidates, catchphrase_findings, contradiction_findings, copied_sentence_findings,
-    credible_contradictions, opening_threat_on_page, plan_feedback,
+    credible_contradictions, detail_repetition_findings, opening_threat_on_page, plan_feedback,
 };
 use serde_json::json;
 
@@ -203,4 +203,70 @@ fn qc1_the_props_of_how_the_threat_shows_are_not_the_threat() {
         "他低头记账。".repeat(120)
     );
     assert!(!opening_threat_on_page(&plan, &props_only));
+}
+
+#[test]
+fn qc1_an_object_mentioned_past_three_times_in_a_chapter_is_reworded_from_the_fourth() {
+    // Owner decision 2026-10-30; fifth acceptance run: 存钱罐 eleven times in
+    // one chapter. The rewrite words the excess differently or leaves it
+    // out; the object stays.
+    let body =
+        "他拿起存钱罐。存钱罐很旧。林薇看着存钱罐。他把存钱罐放下。存钱罐里有响声。窗外下雨。";
+    let (findings, _) = detail_repetition_findings(&[], body, &["林薇"], &[]);
+    let quotes = findings
+        .iter()
+        .map(|finding| finding["quote"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(quotes, ["他把存钱罐放下。", "存钱罐里有响声。"]);
+    assert!(findings
+        .iter()
+        .all(|finding| finding["code"] == "detail_repetition"));
+}
+
+#[test]
+fn qc1_a_detail_running_through_four_chapters_is_kept_twice() {
+    // Fifth acceptance run: 左手小指第一节 in every chapter.
+    let earlier = "他看了看左手小指第一节。左手小指第一节很凉。左手小指第一节透明。".to_string();
+    let history = vec![earlier.clone(), earlier.clone(), earlier];
+    let body = "左手小指第一节发麻。左手小指第一节发烫。他把左手小指第一节藏进口袋。";
+    let (findings, running) = detail_repetition_findings(&history, body, &[], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0]["quote"], "他把左手小指第一节藏进口袋。");
+    // The next writer hears which details ran through the chapters.
+    assert!(
+        running.iter().any(|phrase| phrase.contains("小指第一")),
+        "{running:?}"
+    );
+}
+
+#[test]
+fn qc1_actions_and_grammar_fragments_are_not_details() {
+    let body =
+        "他伸手。他伸手。他伸手。他伸手。他把纤维捏住。他把纤维放下。他把纤维收好。他把纤维扔掉。";
+    assert!(detail_repetition_findings(&[], body, &[], &[]).0.is_empty());
+}
+
+#[test]
+fn qc1_names_of_people_are_never_capped() {
+    let body = "林薇说话。林薇走了。林薇回来。林薇笑了。林薇哭了。";
+    assert!(detail_repetition_findings(&[], body, &["林薇"], &[])
+        .0
+        .is_empty());
+}
+
+#[test]
+fn qc1_detail_slots_go_round_the_phrases_and_skip_catchphrases() {
+    let body = "存钱罐。存钱罐。存钱罐。存钱罐。存钱罐。存钱罐。存钱罐。存钱罐。帆布包。帆布包。帆布包。帆布包。一模一样。一模一样。一模一样。一模一样。";
+    let (findings, _) = detail_repetition_findings(&[], body, &[], &["一模一样".to_string()]);
+    let problems = findings
+        .iter()
+        .map(|finding| finding["problem"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(findings.len() <= 6, "{problems:?}");
+    // 帆布包 gets its turn right after 存钱罐's first, not after all of them.
+    assert!(problems[1].contains("帆布包"), "{problems:?}");
+    assert!(
+        !problems.iter().any(|problem| problem.contains("模一样")),
+        "{problems:?}"
+    );
 }

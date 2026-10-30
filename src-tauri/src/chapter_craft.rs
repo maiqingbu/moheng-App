@@ -994,6 +994,111 @@ pub fn earlier_facts(established: &Value, ledger: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// QC-1 (owner decision 2026-10-30): how often one object or detail may be
+/// written: in a chapter (as the writer is told), and in a chapter of a run
+/// of four that all write it more than `DETAIL_WINDOW_TOTAL` times in all.
+const DETAIL_PER_CHAPTER: usize = 3;
+const DETAIL_PER_CHAPTER_IN_A_RUN: usize = 2;
+const DETAIL_WINDOW_TOTAL: usize = 10;
+/// Characters that make a phrase an action or a grammar fragment (把纤维,
+/// 他伸手, 了一下) rather than an object or a detail. Not `COMMON_CHARACTERS`:
+/// that set holds 一, 上, 下 and 里, which details such as 左手小指第一节 use.
+const NOT_A_DETAIL: &str = "把被给让了着过他她它我你们的地得在是";
+/// The most detail findings a chapter sends to the rewrite, so they leave
+/// room for the others.
+const MAX_DETAIL_FINDINGS: usize = 6;
+
+/// QC-1 (owner decision 2026-10-30; fifth acceptance run: 存钱罐 eleven
+/// times in a chapter, 左手小指第一节 in every chapter): each sentence of
+/// `body` that writes an object or detail (3 to 6 Chinese characters, never
+/// a person's name, an action or one of `catchphrases`, which keep a
+/// stricter rule) past its allowance (`DETAIL_PER_CHAPTER`, or
+/// `DETAIL_PER_CHAPTER_IN_A_RUN` when the last three chapters and this one
+/// all write it and more than `DETAIL_WINDOW_TOTAL` times together), for the
+/// rewrite to word it differently or leave it out; the object stays. At most
+/// `MAX_DETAIL_FINDINGS`, taken from the phrases in turn. Also returns the
+/// details that ran through the four chapters, for the next writer.
+pub fn detail_repetition_findings(
+    history: &[String],
+    body: &str,
+    names: &[&str],
+    catchphrases: &[String],
+) -> (Vec<Value>, Vec<String>) {
+    let skip = |phrase: &str| {
+        phrase.chars().any(|c| NOT_A_DETAIL.contains(c))
+            || names
+                .iter()
+                .any(|name| phrase.contains(name) || name.contains(phrase))
+            || catchphrases.iter().any(|catchphrase| {
+                catchphrase.contains(phrase) || phrase.contains(catchphrase.as_str())
+            })
+    };
+    let mut over = Vec::new();
+    for (phrase, here, earlier) in repeated_han_phrases(history, body, skip) {
+        let in_a_run = earlier.len() == CATCHPHRASE_WINDOW
+            && earlier.iter().all(|count| *count > 0)
+            && earlier.iter().sum::<usize>() + here > DETAIL_WINDOW_TOTAL;
+        let allowed = if in_a_run {
+            DETAIL_PER_CHAPTER_IN_A_RUN
+        } else {
+            DETAIL_PER_CHAPTER
+        };
+        if here > allowed {
+            over.push((phrase, allowed, in_a_run));
+        }
+    }
+    // The longest phrase speaks for those inside it.
+    over.sort_by_key(|(phrase, _, _)| std::cmp::Reverse(phrase.chars().count()));
+    let mut chosen = Vec::<(String, usize, bool)>::new();
+    for item in over {
+        if !chosen
+            .iter()
+            .any(|(longer, _, _)| longer.contains(item.0.as_str()))
+        {
+            chosen.push(item);
+        }
+    }
+    let allowances = chosen
+        .iter()
+        .map(|(phrase, allowed, in_a_run)| {
+            let problem = if *in_a_run {
+                format!("「{phrase}」最近几章每章都在写，本章写 {allowed} 次就够")
+            } else {
+                format!("「{phrase}」本章已经写了 {allowed} 次")
+            };
+            (phrase.clone(), *allowed, problem)
+        })
+        .collect::<Vec<_>>();
+    let mut per_phrase = excess_use_findings(
+        &allowances,
+        body,
+        "detail_repetition",
+        "换个说法提到它（代称、动作或干脆省去），物件本身和信息不变",
+    )
+    .into_iter()
+    .map(Vec::into_iter)
+    .collect::<Vec<_>>();
+    // The slots go round the phrases, so one cannot take them all.
+    let mut findings = Vec::new();
+    while findings.len() < MAX_DETAIL_FINDINGS {
+        let before = findings.len();
+        for phrase_findings in &mut per_phrase {
+            if findings.len() < MAX_DETAIL_FINDINGS {
+                findings.extend(phrase_findings.next());
+            }
+        }
+        if findings.len() == before {
+            break;
+        }
+    }
+    let running = chosen
+        .into_iter()
+        .filter(|(_, _, in_a_run)| *in_a_run)
+        .map(|(phrase, _, _)| phrase)
+        .collect();
+    (findings, running)
+}
+
 /// QC-1: how long a sentence copied from a recent chapter must be to count,
 /// and how many chapters back copies are looked for.
 const COPIED_SENTENCE_CHARACTERS: usize = 15;
@@ -1086,36 +1191,14 @@ pub fn catchphrase_candidates(
     names: &[&str],
     story_text: &str,
 ) -> Vec<Value> {
-    let texts = history
-        .iter()
-        .take(CATCHPHRASE_WINDOW)
-        .map(String::as_str)
-        .chain([body])
-        .collect::<Vec<_>>();
-    let chars = body.chars().collect::<Vec<_>>();
     let mut found = BTreeMap::<String, (usize, usize)>::new();
-    for size in 3..=6 {
-        for window in chars.windows(size) {
-            if !window.iter().all(|c| is_han(*c)) {
-                continue;
-            }
-            let phrase = window.iter().collect::<String>();
-            if found.contains_key(&phrase)
-                || names.iter().any(|name| phrase.contains(name))
-                || story_text.contains(phrase.as_str())
-                || body.matches(phrase.as_str()).nth(1).is_none()
-            {
-                continue;
-            }
-            let counts = texts
-                .iter()
-                .map(|text| text.matches(phrase.as_str()).count())
-                .collect::<Vec<_>>();
-            let here = counts[counts.len() - 1];
-            let total = counts.iter().sum::<usize>();
-            if here >= 2 && counts.iter().filter(|count| **count > 0).count() >= 3 && total >= 6 {
-                found.insert(phrase, (here, total - here));
-            }
+    for (phrase, here, earlier) in repeated_han_phrases(history, body, |phrase| {
+        names.iter().any(|name| phrase.contains(name)) || story_text.contains(phrase)
+    }) {
+        let total = here + earlier.iter().sum::<usize>();
+        let chapters = 1 + earlier.iter().filter(|count| **count > 0).count();
+        if chapters >= 3 && total >= 6 {
+            found.insert(phrase, (here, total - here));
         }
     }
     found
@@ -1134,25 +1217,91 @@ pub fn catchphrase_candidates(
 /// QC-1.4: each sentence using one of `catchphrases` after the chapter's
 /// first use of it, for the rewrite to word differently.
 pub fn catchphrase_findings(catchphrases: &[String], body: &str) -> Vec<Value> {
-    let spans = sentence_spans(body);
-    let mut seen = BTreeSet::new();
-    spans
+    let allowances = catchphrases
         .iter()
-        .enumerate()
-        .filter_map(|(index, &(start, end))| {
-            let phrase = catchphrases
-                .iter()
-                .find(|phrase| body[start..end].contains(phrase.as_str()))?;
-            if seen.insert(phrase.clone()) {
-                return None;
-            }
-            Some(rule_finding(
-                "catchphrase",
-                "MEDIUM",
-                unique_quote_ending_at(body, &spans, index)?,
+        .map(|phrase| {
+            (
+                phrase.clone(),
+                1,
                 format!("「{phrase}」是这几章反复出现的口头禅，本章已经用过一次"),
-                "换一种说法写这句，或删掉这个词，意思和信息不变",
-            ))
+            )
+        })
+        .collect::<Vec<_>>();
+    excess_use_findings(
+        &allowances,
+        body,
+        "catchphrase",
+        "换一种说法写这句，或删掉这个词，意思和信息不变",
+    )
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The distinct runs of 3 to 6 Chinese characters `body` uses at least
+/// twice that `skip` does not refuse, each with its count in `body` and in
+/// each of the recent chapters of `history` (newest first).
+fn repeated_han_phrases(
+    history: &[String],
+    body: &str,
+    skip: impl Fn(&str) -> bool,
+) -> Vec<(String, usize, Vec<usize>)> {
+    let chars = body.chars().collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    let mut phrases = Vec::new();
+    for size in 3..=6 {
+        for window in chars.windows(size) {
+            if !window.iter().all(|c| is_han(*c)) {
+                continue;
+            }
+            let phrase = window.iter().collect::<String>();
+            if !seen.insert(phrase.clone()) || skip(&phrase) {
+                continue;
+            }
+            let here = body.matches(phrase.as_str()).count();
+            if here < 2 {
+                continue;
+            }
+            let earlier = history
+                .iter()
+                .take(CATCHPHRASE_WINDOW)
+                .map(|text| text.matches(phrase.as_str()).count())
+                .collect();
+            phrases.push((phrase, here, earlier));
+        }
+    }
+    phrases
+}
+
+/// For each `(phrase, allowed, problem)`, a finding on each sentence of
+/// `body` using the phrase past its first `allowed` uses, one finding a
+/// sentence across all phrases; the findings of each phrase in order.
+fn excess_use_findings(
+    allowances: &[(String, usize, String)],
+    body: &str,
+    code: &str,
+    fix: &str,
+) -> Vec<Vec<Value>> {
+    let spans = sentence_spans(body);
+    let mut flagged = BTreeSet::new();
+    allowances
+        .iter()
+        .map(|(phrase, allowed, problem)| {
+            let mut uses = 0;
+            let mut findings = Vec::new();
+            for (index, &(start, end)) in spans.iter().enumerate() {
+                if !body[start..end].contains(phrase.as_str()) {
+                    continue;
+                }
+                uses += 1;
+                if uses <= *allowed || !flagged.insert(index) {
+                    continue;
+                }
+                if let Some(quote) = unique_quote_ending_at(body, &spans, index) {
+                    findings.push(rule_finding(code, "MEDIUM", quote, problem.clone(), fix));
+                }
+            }
+            findings
         })
         .collect()
 }

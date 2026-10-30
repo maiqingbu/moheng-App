@@ -2856,6 +2856,10 @@ fn run_chapter_production_inner(
     if !avoid_tics.is_empty() {
         render_input["avoidTics"] = json!(avoid_tics);
     }
+    // QC-1 (2026-10-30): details the recent chapters kept writing.
+    if !chapter_history.overused_details.is_empty() {
+        render_input["avoidDetails"] = json!(chapter_history.overused_details);
+    }
     let mut craft_signals = crate::chapter_craft::plan_signals(&plan_payload, chapter_number);
     render_input["craftGuidance"] = crate::chapter_craft::guidance("render", &craft_signals)?;
     // The skills each step received, for the receipt. Chapter planning
@@ -3229,6 +3233,32 @@ fn run_chapter_production_inner(
             &chapter_history.bodies,
             &body,
         ));
+        // QC-1 (owner decision 2026-10-30): an object or detail written past
+        // its allowance is worded differently from there on.
+        let (detail_findings, running_details) = match &craft_writing {
+            Some(writing) => {
+                let (_, names) = writing.chapter_people(&plan_payload);
+                let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+                crate::chapter_craft::detail_repetition_findings(
+                    &chapter_history.bodies,
+                    &body,
+                    &names,
+                    &catchphrases,
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        // A sentence already flagged keeps its first finding.
+        let detail_findings = detail_findings
+            .into_iter()
+            .filter(|finding| {
+                !leading_findings
+                    .iter()
+                    .any(|other| other["quote"] == finding["quote"])
+            })
+            .collect::<Vec<_>>();
+        let detail_count = detail_findings.len();
+        leading_findings.extend(detail_findings);
         rules.retain(|rule| {
             !leading_findings
                 .iter()
@@ -3370,6 +3400,8 @@ fn run_chapter_production_inner(
             "editsApplied":if discarded.is_null() { applied } else { 0 },
             "discarded":discarded,
             "rewriteError":rewrite_error,
+            "detailFindings":detail_count,
+            "overusedDetails":running_details,
             "reviewError":review.get("reviewError")
         });
         if let Some(writing) = &craft_writing {
