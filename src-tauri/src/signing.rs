@@ -353,6 +353,50 @@ fn model_item_result(
     json!({"itemId":item_id,"result":result,"reason":reason,"evidence":checked_evidence})
 }
 
+/// What S35 puts in its payload for signing.
+const S35_PAYLOAD_FIELDS: [&str; 7] = [
+    "quality_vector",
+    "findings",
+    "promise_coverage",
+    "desire_state",
+    "repetition",
+    "signing_recommendation",
+    "signingEvaluationItems",
+];
+
+/// Payload lists signing never reads: a left-out one is empty.
+const S35_OPTIONAL_PAYLOAD_LISTS: [&str; 1] = ["repair_scope"];
+
+/// QC-1 (acceptance 2026-10-30, sixth run): payload fields the model put
+/// beside the payload instead of in it are moved in, word for word; a field
+/// already in the payload stays. A tolerance for a misplaced level only:
+/// anything else still fails the envelope and is asked for again.
+fn lift_misplaced_payload_fields(value: &mut Value) {
+    let Some(envelope) = value.as_object_mut() else {
+        return;
+    };
+    let mut payload = match envelope.remove("payload") {
+        Some(Value::Object(payload)) => payload,
+        _ => serde_json::Map::new(),
+    };
+    for field in S35_PAYLOAD_FIELDS.iter().chain(&S35_OPTIONAL_PAYLOAD_LISTS) {
+        if !payload.contains_key(*field) {
+            if let Some(moved) = envelope.remove(*field) {
+                payload.insert((*field).to_string(), moved);
+            }
+        }
+    }
+    envelope.insert("payload".into(), Value::Object(payload));
+}
+
+/// What a reply's payload lacks of `S35_PAYLOAD_FIELDS`.
+fn missing_payload_fields(value: &Value) -> Vec<&'static str> {
+    S35_PAYLOAD_FIELDS
+        .into_iter()
+        .filter(|field| value.pointer(&format!("/payload/{field}")).is_none())
+        .collect()
+}
+
 fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
     value.get("skillId").and_then(Value::as_str) == Some("S35")
         && value.get("skillVersion") == expected_input.get("skillVersion")
@@ -372,19 +416,10 @@ fn valid_s35_signing_envelope(value: &Value, expected_input: &Value) -> bool {
         .iter()
         .all(|field| value.get(*field).is_none_or(Value::is_array))
         && value.get("confidence").and_then(Value::as_f64).is_some()
-        && [
-            "quality_vector",
-            "findings",
-            "promise_coverage",
-            "desire_state",
-            "repetition",
-            "signing_recommendation",
-            "signingEvaluationItems",
-        ]
-        .iter()
-        .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
-        // Payload lists signing never reads: a left-out one is empty.
-        && ["repair_scope"]
+        && S35_PAYLOAD_FIELDS
+            .iter()
+            .all(|field| value.pointer(&format!("/payload/{field}")).is_some())
+        && S35_OPTIONAL_PAYLOAD_LISTS
             .iter()
             .all(|field| {
                 value
@@ -1571,7 +1606,11 @@ pub fn execute_opening_evaluation_with_observer(
             "bundleDigest":input["bundleDigest"],
             "taskContext":{"taskId":input.pointer("/taskContext/taskId")}
         });
-        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec, _| {
+        // QC-1 (sixth acceptance run): a reply whose envelope is off the
+        // S35 schema, after misplaced payload fields are moved in, is asked
+        // for once more with what was wrong; a second one is evaluated as
+        // it is (its model items NOT_VERIFIED).
+        let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec, off_spec| {
             if spec.attempt_no > 1 {
                 DurableJobService::reopen_b02_phase_job_for_resend(
                     &handle,
@@ -1582,14 +1621,40 @@ pub fn execute_opening_evaluation_with_observer(
                 )
                 .map_err(|error| error.to_string())?;
             }
-            execute_production_model(
+            let mut input = input.clone();
+            if let Some(error) = off_spec {
+                input["outputFeedback"] = json!({
+                    "rejectedFor":error,
+                    "instruction":format!(
+                        "上一次回复不符合 S35 输出信封：skillId、skillVersion、bundleDigest、taskId、status、confidence 放在最外层，{} 放进 payload，返回完整回复。",
+                        S35_PAYLOAD_FIELDS.join("、")
+                    )
+                });
+            }
+            let mut outcome = execute_production_model(
                 &handle,
                 gateway,
                 spec,
                 SIGNING_EVALUATION_CAPABILITY,
-                input.clone(),
+                input,
                 &now,
-            )
+            )?;
+            if let Some(parsed) = outcome.parsed.as_mut() {
+                lift_misplaced_payload_fields(parsed);
+                if spec.attempt_no == 1 && !valid_s35_signing_envelope(parsed, &expected_s35) {
+                    let error = format!(
+                        "{}:S35 envelope off its schema; payload lacks {:?}",
+                        crate::model_output::OFF_SPEC,
+                        missing_payload_fields(parsed)
+                    );
+                    DurableModelRunner::mark_model_payload_parse_failure(
+                        &handle, spec, &error, &now,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    return Err(error);
+                }
+            }
+            Ok(outcome)
         })?;
         Ok((
             model_results(
@@ -2293,6 +2358,32 @@ mod tests {
         assert_eq!(repeated_phrase_count(&[coded]), 0);
         let prose = fixture_chapter(1, &"他把那张泛黄的旧照片翻过来看了很久。".repeat(3));
         assert!(repeated_phrase_count(&[prose]) > 0);
+    }
+
+    #[test]
+    fn qc1_payload_fields_put_beside_the_payload_are_moved_into_it() {
+        // Acceptance 2026-10-30 (sixth run): the evaluation put
+        // signingEvaluationItems and five other payload fields at the top
+        // level, and every model item came back NOT_VERIFIED.
+        let expected = json!({"skillVersion":"1.2.0","bundleDigest":"sha256:x","taskContext":{"taskId":"task:1"}});
+        let mut envelope = json!({
+            "skillId":"S35","skillVersion":"1.2.0","bundleDigest":"sha256:x","taskId":"task:1",
+            "status":"OK","confidence":0.9,"findings":[],
+            "payload":{"quality_vector":{},"findings":[]},
+            "promise_coverage":{},"desire_state":{},"repetition":{},
+            "signing_recommendation":"PASS","signingEvaluationItems":[{"itemId":"E3-1"}]
+        });
+        assert!(!valid_s35_signing_envelope(&envelope, &expected));
+        lift_misplaced_payload_fields(&mut envelope);
+        assert!(valid_s35_signing_envelope(&envelope, &expected));
+        assert_eq!(
+            envelope["payload"]["signingEvaluationItems"][0]["itemId"],
+            "E3-1"
+        );
+        assert!(envelope.get("signingEvaluationItems").is_none());
+        assert!(missing_payload_fields(&envelope).is_empty());
+        // A field already in the payload is left as it is.
+        assert_eq!(envelope["payload"]["findings"], json!([]));
     }
 
     #[test]

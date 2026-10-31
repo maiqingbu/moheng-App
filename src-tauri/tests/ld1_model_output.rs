@@ -111,19 +111,30 @@ fn a_story_bible_reply_off_the_spec_is_caught_for_a_resend() {
     // Acceptance 2026-10-30 (sixth run): one of three bibles left an
     // openingArc protagonistWin out and the whole setup failed unresent.
     use ai_novel_production_system_core::model_output::check;
-    assert!(check("GENERATE_STORY_BIBLE", &json!({"bibles":[bible(), bible(), bible()]})).is_ok());
+    assert!(check(
+        "GENERATE_STORY_BIBLE",
+        &json!({"bibles":[bible(), bible(), bible()]})
+    )
+    .is_ok());
     let mut missing = bible();
     missing["openingArc"][0]
         .as_object_mut()
         .unwrap()
         .remove("protagonistWin");
-    let error = check("GENERATE_STORY_BIBLE", &json!({"bibles":[missing, bible(), bible()]}))
-        .unwrap_err();
+    let error = check(
+        "GENERATE_STORY_BIBLE",
+        &json!({"bibles":[missing, bible(), bible()]}),
+    )
+    .unwrap_err();
     assert!(error.contains("protagonistWin"), "{error}");
     // A quoted line in a style description is copied into chapters.
     let mut quoted = bible();
     quoted["protagonist"]["innerVoiceStyle"] = json!("常说“理论上”");
-    assert!(check("GENERATE_STORY_BIBLE", &json!({"bibles":[quoted, bible(), bible()]})).is_err());
+    assert!(check(
+        "GENERATE_STORY_BIBLE",
+        &json!({"bibles":[quoted, bible(), bible()]})
+    )
+    .is_err());
 }
 
 #[test]
@@ -144,8 +155,8 @@ fn the_story_bible_reply_spec_follows_the_story_bible_contract() {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     };
     let contract = read("../contracts/schemas/narrative/story-bible-r1.schema.json");
-    let mut item = read("../contracts/model-output/story-bible.schema.json")["properties"]["bibles"]
-        ["items"]
+    let mut item = read("../contracts/model-output/story-bible.schema.json")["properties"]
+        ["bibles"]["items"]
         .clone();
     without_patterns(&mut item);
     let mut properties = contract["properties"].as_object().unwrap().clone();

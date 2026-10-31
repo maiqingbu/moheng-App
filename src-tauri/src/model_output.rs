@@ -16,7 +16,11 @@ const REPORTED_VIOLATIONS: usize = 5;
 /// Each spec and the model steps it covers.
 const SPECS: &[(&[&str], &str)] = &[
     (
-        &["RENDER_CHAPTER_CRAFT", "ADJUST_CHAPTER_LENGTH", "RENDER_CHAPTER"],
+        &[
+            "RENDER_CHAPTER_CRAFT",
+            "ADJUST_CHAPTER_LENGTH",
+            "RENDER_CHAPTER",
+        ],
         include_str!("../../contracts/model-output/chapter-body.schema.json"),
     ),
     (
@@ -103,13 +107,34 @@ mod tests {
     /// Model steps without an output spec, and why their replies cannot
     /// fail a run unnoticed.
     const UNSPECIFIED_STEPS: [(&str, &str); 7] = [
-        ("PLAN_STRATEGY", "r1 plans: the plan contract sends a reply back to the planner"),
-        ("PLAN_CHAPTER_CRAFT", "the plan checks and contract send a reply back to the planner"),
-        ("REPAIR_CANDIDATE", "retired from production (owner decision 2026-10-24)"),
-        ("CLASSIFY_ASSISTANT_INTENT", "a failed reply falls back to keyword routing"),
-        ("OPENING_SIGNING_EVALUATION", "checked against the S35 skill's own outputSchema"),
-        ("REVIEW_CHAPTER", "advisory: a failed review is recorded, the chapter goes on"),
-        ("TEST_PROVIDER", "a connection test, never part of production"),
+        (
+            "PLAN_STRATEGY",
+            "r1 plans: the plan contract sends a reply back to the planner",
+        ),
+        (
+            "PLAN_CHAPTER_CRAFT",
+            "the plan checks and contract send a reply back to the planner",
+        ),
+        (
+            "REPAIR_CANDIDATE",
+            "retired from production (owner decision 2026-10-24)",
+        ),
+        (
+            "CLASSIFY_ASSISTANT_INTENT",
+            "a failed reply falls back to keyword routing",
+        ),
+        (
+            "OPENING_SIGNING_EVALUATION",
+            "checked against the S35 skill's own outputSchema",
+        ),
+        (
+            "REVIEW_CHAPTER",
+            "advisory: a failed review is recorded, the chapter goes on",
+        ),
+        (
+            "TEST_PROVIDER",
+            "a connection test, never part of production",
+        ),
     ];
 
     #[test]
@@ -139,8 +164,8 @@ mod tests {
 
     #[test]
     fn the_story_bible_spec_refuses_the_quote_marks_the_setup_refuses() {
-        let pattern = spec("GENERATE_STORY_BIBLE").unwrap().schema["properties"]["bibles"]
-            ["items"]["properties"]["protagonist"]["properties"]["innerVoiceStyle"]["pattern"]
+        let pattern = spec("GENERATE_STORY_BIBLE").unwrap().schema["properties"]["bibles"]["items"]
+            ["properties"]["protagonist"]["properties"]["innerVoiceStyle"]["pattern"]
             .as_str()
             .unwrap()
             .to_owned();
