@@ -423,6 +423,69 @@ fn a_plan_whose_horizon_stays_short_is_written_with_a_plan_reminder() {
 }
 
 #[test]
+fn ld8_a_chapter_shaped_like_the_two_before_it_is_written_with_a_plan_reminder() {
+    // LD-8 (owner decision 2026-11-01, round 12): the planner kept its shape
+    // through two replans, so a repeated shape is no longer sent back; it
+    // is noted in the chapter's plan reminder for the owner.
+    let temp = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(CraftGateway::default());
+    let state = KernelState::with_production_gateway(
+        AppPaths::new(temp.path().to_path_buf()),
+        gateway.clone(),
+    );
+    let project_id = project_with_confirmed_bible(&state, "shape");
+    command(
+        &state,
+        &project_id,
+        "shape:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
+    command(
+        &state,
+        &project_id,
+        "shape:start",
+        "opening_start_creating",
+        json!({}),
+    );
+    for chapter in 1..=3 {
+        let center = query_production_center_impl(
+            &state,
+            json!({"projectId":project_id,"scope":"PROJECT","pageSize":20}),
+        )
+        .unwrap();
+        let result = command(
+            &state,
+            &project_id,
+            &format!("shape:production:{chapter}"),
+            "production_start",
+            json!({
+                "chapterId":center["nextChapter"]["id"],"volumeId":center["nextChapter"]["volumeId"],
+                "executionMode":"OPENING_BOOTSTRAP","entityIds":[],"references":[],"skillsEnabled":false
+            }),
+        );
+        assert_eq!(result["finalStatus"], "committed", "chapter {chapter}: {result}");
+    }
+    let inputs = gateway.plan_inputs.lock().unwrap();
+    assert!(
+        inputs
+            .iter()
+            .all(|input| !input["planFeedback"].to_string().contains("同一个形状")),
+        "a repeated shape is not sent back"
+    );
+    drop(inputs);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND json_extract(payload_json,'$.category')='计划提醒'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("和前两章是同一个形状"), "{payload}");
+}
+
+#[test]
 fn a_plan_that_keeps_four_scenes_is_folded_to_three_and_written_with_a_plan_reminder() {
     // Acceptance 2026-10-26, chapter 10: the planner kept a fourth scene with
     // one person in it through its replans. The last lenient pass folds the

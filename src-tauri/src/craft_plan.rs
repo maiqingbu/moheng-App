@@ -103,11 +103,12 @@ const CHOSEN_BEATS: [&str; 7] = [
     "emotionalBeat",
     "newLosses",
 ];
-/// LD-5: the least room an event needs written out with action and
-/// dialogue (the planner is told 250 and much more for a confrontation);
-/// less and the scene reads as a list (real run 2026-11-01: fifteen events
-/// in 2,000 characters).
-pub(crate) const MIN_CHARS_PER_EVENT: i64 = 250;
+/// LD-5: the least room an event needs written out; less and the scene
+/// reads as a list (real run 2026-11-01: fifteen events in 2,000
+/// characters). LD-8 (owner decision 2026-11-01, round 12): 150, not 250,
+/// since the planner's events are single actions, so that only truly
+/// crowded plans are sent back.
+pub(crate) const MIN_CHARS_PER_EVENT: i64 = 150;
 
 /// QC-1.2: what marks chapter 1's imminent threat in its first scene.
 pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
@@ -355,6 +356,42 @@ fn bible_people(bible: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
+/// LD-7, made a reminder by LD-8 (owner decision 2026-11-01, round 12:
+/// sent back twice, the planner kept its shape anyway): a chapter shaped
+/// exactly like the two before it, the same beats and the same events in
+/// each scene, is noted for the owner instead of planned again.
+pub fn shape_reminder(plan: &Value, ledger: &Value) -> Option<String> {
+    let craft = &plan["craft"];
+    let scene_list = scenes(craft);
+    let beats = chosen_beats(craft);
+    let events = scene_list
+        .iter()
+        .map(|scene| event_count(scene) as u64)
+        .collect::<Vec<_>>();
+    let shapes = ledger["shapes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    (shapes.len() >= 2
+        && shapes[shapes.len() - 2..].iter().all(|earlier| {
+            earlier["beats"] == json!(beats)
+                && earlier["scenes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|scene| scene["events"].as_u64())
+                    .eq(events.iter().copied().map(Some))
+        }))
+    .then(|| {
+        format!(
+            "本章和前两章是同一个形状（{} 个场景，各场 {} 条事件，同样的 {} 个要素）",
+            scene_list.len(),
+            events.iter().map(u64::to_string).collect::<Vec<_>>().join("、"),
+            beats.len()
+        )
+    })
+}
+
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
 /// every problem found, in Chinese, so the planner can fix them in one pass.
 pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) -> Vec<String> {
@@ -424,36 +461,6 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
                 SCENE_EVENTS.end()
             ));
         }
-    }
-    // LD-7 (real run 2026-11-01, round 11): every chapter came out as three
-    // scenes of four events with all seven beats; a chapter shaped exactly
-    // like the two before it is planned again.
-    let beats = chosen_beats(craft);
-    let events = scene_list
-        .iter()
-        .map(|scene| event_count(scene) as u64)
-        .collect::<Vec<_>>();
-    let shapes = ledger["shapes"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if shapes.len() >= 2
-        && shapes[shapes.len() - 2..].iter().all(|earlier| {
-            earlier["beats"] == json!(beats)
-                && earlier["scenes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|scene| scene["events"].as_u64())
-                    .eq(events.iter().copied().map(Some))
-        })
-    {
-        problems.push(format!(
-            "本章和前两章是同一个形状（{} 个场景，各场 {} 条事件，同样的 {} 个要素）：按这一章要做的事重新挑选要素、场景和事件",
-            scene_list.len(),
-            events.iter().map(u64::to_string).collect::<Vec<_>>().join("、"),
-            beats.len()
-        ));
     }
     if text(&craft["situationChange"]["before"]) == text(&craft["situationChange"]["after"]) {
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
@@ -901,6 +908,13 @@ impl ChapterPlanner {
             ));
         }
         craft_result(problems)
+    }
+
+    /// The LD-8 shape reminder for an r2 plan, as a plan problem so it goes
+    /// into the plan reminder; none for r1 planning.
+    pub fn shape_reminder(&self, plan: &Value) -> Option<String> {
+        shape_reminder(plan, &self.craft.as_ref()?.ledger)
+            .map(|reminder| format!("{PLAN_CRAFT_ERROR}:{reminder}"))
     }
 
     /// Runs `r1_check` for r1 planning only.

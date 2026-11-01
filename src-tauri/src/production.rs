@@ -2676,6 +2676,7 @@ fn run_chapter_production_inner(
                     &mut problems,
                     planner.check_craft(&plan, horizon_capacity, length_range),
                 )?;
+                problems.extend(planner.shape_reminder(&plan));
                 if lenient {
                     problems.extend(crate::planning::fit_lenient_plan_shape(
                         &mut plan,

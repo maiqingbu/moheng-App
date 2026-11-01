@@ -4,8 +4,8 @@
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::chapter_length::ChapterLengthRange;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, drop_unchosen_beats, plan_problems, sizing_problems,
-    skill_decisions,
+    check_craft_plan, creation_ledger, drop_unchosen_beats, plan_problems, shape_reminder,
+    sizing_problems, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -350,36 +350,43 @@ fn ld5_a_scene_too_crowded_for_its_room_is_sent_back() {
 #[test]
 fn ld7_a_chapter_with_more_events_than_its_length_holds_is_told_how_many_to_drop() {
     // Real run 2026-11-01 (round 11): told a scene was too crowded, the
-    // planner raised its estimates and kept all twelve events.
+    // planner raised its estimates and kept all its events.
     for craft in [
-        sized(&[(820, 4), (780, 4), (700, 4)]),
-        sized(&[(900, 4), (900, 4), (900, 4)]),
+        sized(&[(820, 5), (780, 5), (700, 5)]),
+        sized(&[(900, 5), (900, 5), (900, 5)]),
     ] {
         let problems = sizing_problems(&craft, FANQIE);
         assert!(
-            has(&problems, "本章 12 条事件，2200 字最多写得开 8 条"),
+            has(&problems, "本章 15 条事件，2200 字最多写得开 14 条"),
             "{problems:?}"
         );
-        assert!(has(&problems, "删去或合并 4 条"), "{problems:?}");
+        assert!(has(&problems, "删去或合并 1 条"), "{problems:?}");
         assert!(has(&problems, "提高预估字数"), "{problems:?}");
     }
-    assert!(sizing_problems(&sized(&[(1000, 4), (1000, 4)]), FANQIE).is_empty());
 }
 
 #[test]
-fn ld7_a_chapter_shaped_like_the_two_before_it_is_sent_back() {
+fn ld8_twelve_short_events_in_a_chapter_are_not_crowded() {
+    // Real run 2026-11-01 (round 12): the planner's events are single
+    // actions (a door pushed open, dust scraped off); twelve of them read
+    // naturally in 2,000 characters. Owner: only stop truly crowded plans.
+    assert!(sizing_problems(&sized(&[(720, 4), (760, 4), (720, 4)]), FANQIE).is_empty());
+}
+
+#[test]
+fn ld8_a_chapter_shaped_like_the_two_before_it_is_a_reminder_not_a_replan() {
     let earlier = plan()["craft"].clone();
     let ledger = creation_ledger(&[(2, earlier.clone()), (3, earlier)], &bible());
     let problems = plan_problems(&plan(), 4, &bible(), &ledger);
-    assert!(has(&problems, "和前两章是同一个形状"), "{problems:?}");
+    assert!(!has(&problems, "同一个形状"), "{problems:?}");
+    let reminder = shape_reminder(&plan(), &ledger).unwrap_or_default();
+    assert!(reminder.contains("和前两章是同一个形状"), "{reminder}");
 
     let mut other = plan();
     other["craft"].as_object_mut().unwrap().remove("warmth");
-    let problems = plan_problems(&other, 4, &bible(), &ledger);
-    assert!(!has(&problems, "同一个形状"), "{problems:?}");
+    assert_eq!(shape_reminder(&other, &ledger), None);
     let ledger = creation_ledger(&[(3, plan()["craft"].clone())], &bible());
-    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
-    assert!(!has(&problems, "同一个形状"), "{problems:?}");
+    assert_eq!(shape_reminder(&plan(), &ledger), None);
 }
 
 #[test]
