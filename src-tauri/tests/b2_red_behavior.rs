@@ -918,6 +918,31 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
             "林舟找回失踪账本的缺页"
         ]
     );
+    // VD-1c: chapter 4 is planned at the start of the first stage.
+    let prepared = command(
+        &state,
+        &project_id,
+        "vd1c:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap();
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let direction = ai_novel_production_system_core::book_direction::for_chapter(
+        &connection,
+        &project_id,
+        chapter_id,
+        4,
+    )
+    .unwrap()
+    .expect("a direction for chapter 4");
+    assert_eq!(direction["currentStage"]["goal"], "林舟查清缺页落在谁手里");
+    assert_eq!(direction["currentStage"]["chaptersSoFar"], 0);
+    assert!(direction["currentStage"]["taskId"]
+        .as_str()
+        .unwrap()
+        .starts_with("task:required:goal:"));
+    assert_eq!(direction["climax"], "林舟在城门口当众对账");
 }
 
 #[test]

@@ -10,6 +10,7 @@ use crate::repositories::runtime::{DurableModelRunner, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 
 pub const PLAN_BOOK_DIRECTION: &str = "PLAN_BOOK_DIRECTION";
 
@@ -391,6 +392,122 @@ fn template_reminder(command_id: &str, project_id: &str, reason: &str) -> Result
     }))
 }
 
+/// VD-1c: where chapter `chapter_no` stands in volume `volume_id`'s stages,
+/// for the planner: the first stage whose task is not completed, how many
+/// chapters it has had since the stage before it ended (the first stage
+/// counts from `before_stages`), and the stages after it. `completed` maps
+/// each satisfied task to the chapter that completed it. None when the
+/// volume has no stages.
+pub fn chapter_direction(
+    book_plan: &Value,
+    route: &Value,
+    (volume_id, volume_no): (&str, i64),
+    before_stages: i64,
+    completed: &BTreeMap<String, i64>,
+    chapter_no: i64,
+) -> Option<Value> {
+    let seed = crate::planning::volume_seeds(book_plan, volume_no).next()?;
+    let task_for = |stage: &Value| {
+        let task_id = crate::planning::stage_task_id(volume_id, stage["id"].as_str()?);
+        items(route, "tasks")
+            .iter()
+            .any(|task| task["taskId"] == task_id.as_str())
+            .then_some(task_id)
+    };
+    let stages = items(seed, "stages")
+        .iter()
+        .filter_map(|stage| Some((stage, task_for(stage)?)))
+        .collect::<Vec<_>>();
+    if stages.is_empty() {
+        return None;
+    }
+    let current = stages
+        .iter()
+        .position(|(_, task)| !completed.contains_key(task))
+        .unwrap_or(stages.len());
+    let started = current
+        .checked_sub(1)
+        .and_then(|previous| completed.get(&stages[previous].1).copied())
+        .unwrap_or(before_stages);
+    let current_stage = stages.get(current).map(|(stage, task)| {
+        let mut stage = (*stage).clone();
+        stage["taskId"] = json!(task);
+        stage["chaptersSoFar"] = json!((chapter_no - 1 - started).max(0));
+        stage
+    });
+    Some(json!({
+        "volumeFunction":text(&seed["description"]),
+        "currentStage":current_stage,
+        "laterStages":stages.iter().skip(current + 1).map(|(stage, _)| text(&stage["goal"])).collect::<Vec<_>>(),
+        "climax":text(&seed["climax"])
+    }))
+}
+
+/// The direction for planning `chapter_id` (chapter `chapter_no`), from the
+/// approved BookPlan and its volume's route; None before the route exists or
+/// when the volume has no stages.
+pub fn for_chapter(
+    connection: &Connection,
+    project_id: &str,
+    chapter_id: &str,
+    chapter_no: i64,
+) -> Result<Option<Value>, String> {
+    use crate::repositories::narrative::NarrativeRepository;
+    let Some(volume_id) =
+        NarrativeRepository::chapter_volume_id(connection, project_id, chapter_id)
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let Some(volume) =
+        crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+            connection, project_id, &volume_id,
+        )
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let payload = |head: Result<Option<_>, _>| {
+        head.and_then(|reference| {
+            reference
+                .map(|reference| {
+                    NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
+                })
+                .transpose()
+                .map(Option::flatten)
+        })
+        .map_err(|error| error.to_string())
+    };
+    let book_plan = payload(NarrativeRepository::canonical_project_head_ref(
+        connection, project_id, "BookPlan",
+    ))?;
+    let route = payload(NarrativeRepository::canonical_head_ref(
+        connection,
+        project_id,
+        "VolumePlan",
+        &volume_id,
+    ))?;
+    let (Some(book_plan), Some(route)) = (book_plan, route) else {
+        return Ok(None);
+    };
+    let completed =
+        NarrativeRepository::satisfied_task_chapters(connection, project_id, chapter_no)
+            .map_err(|error| error.to_string())?;
+    // The first volume's stages begin after the opening chapters.
+    let before_stages = match volume.volume_no {
+        1 => crate::repositories::project_entry::OPENING_CHAPTER_COUNT,
+        _ => volume.chapter_start - 1,
+    };
+    Ok(chapter_direction(
+        &book_plan,
+        &route,
+        (&volume_id, volume.volume_no),
+        before_stages,
+        &completed,
+        chapter_no,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +552,70 @@ mod tests {
                 {"volumeNo":2,"description":"走出青崖宗"}
             ]
         })
+    }
+
+    /// The approved plan and route VD-1a and VD-1b make from `direction()`.
+    fn plan_and_route() -> (Value, Value) {
+        let mut plan = Map::new();
+        apply(&mut plan, &direction(), &[]);
+        let stage_task = |n: usize| json!({"taskId":format!("task:required:goal:vol:1:stage:1:{n}"),"class":"REQUIRED"});
+        let route = json!({"tasks":[
+            stage_task(1), stage_task(2), stage_task(3),
+            {"taskId":"task:required:goal:book:1","class":"REQUIRED"}
+        ]});
+        (Value::Object(plan), route)
+    }
+
+    #[test]
+    fn chapter_four_starts_the_first_stage() {
+        let (plan, route) = plan_and_route();
+        let direction =
+            chapter_direction(&plan, &route, ("vol:1", 1), 3, &BTreeMap::new(), 4).unwrap();
+        assert_eq!(direction["volumeFunction"], "守住丹房，揪出改约的人");
+        let stage = &direction["currentStage"];
+        assert_eq!(stage["taskId"], "task:required:goal:vol:1:stage:1:1");
+        assert_eq!(stage["goal"], "陆照查清丹房的账");
+        assert_eq!(stage["pressure"], "裴砚舟扣下陆照的月例");
+        assert_eq!(stage["cast"], json!(["陆照", "陈伯"]));
+        assert_eq!(stage["turn"], "段末转折");
+        assert_eq!(stage["estimatedChapters"], 8);
+        assert_eq!(stage["chaptersSoFar"], 0);
+        assert_eq!(
+            direction["laterStages"],
+            json!(["陆照找到改约的证据", "陆照在会审上翻案"])
+        );
+        assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
+    }
+
+    #[test]
+    fn a_completed_stage_moves_the_chapter_on_and_counts_from_its_end() {
+        let (plan, route) = plan_and_route();
+        let completed = BTreeMap::from([("task:required:goal:vol:1:stage:1:1".to_string(), 9)]);
+        let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 12).unwrap();
+        assert_eq!(direction["currentStage"]["goal"], "陆照找到改约的证据");
+        assert_eq!(direction["currentStage"]["chaptersSoFar"], 2);
+        assert_eq!(direction["laterStages"], json!(["陆照在会审上翻案"]));
+    }
+
+    #[test]
+    fn after_the_last_stage_only_the_climax_is_left() {
+        let (plan, route) = plan_and_route();
+        let completed = (1..=3)
+            .map(|n| (format!("task:required:goal:vol:1:stage:1:{n}"), 10 * n))
+            .collect();
+        let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 33).unwrap();
+        assert_eq!(direction["currentStage"], Value::Null);
+        assert_eq!(direction["laterStages"], json!([]));
+        assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
+    }
+
+    #[test]
+    fn a_volume_without_stages_has_no_direction() {
+        let (plan, route) = plan_and_route();
+        assert_eq!(
+            chapter_direction(&plan, &route, ("vol:2", 2), 36, &BTreeMap::new(), 40),
+            None
+        );
     }
 
     #[test]

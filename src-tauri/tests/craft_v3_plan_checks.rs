@@ -4,8 +4,8 @@
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::chapter_length::ChapterLengthRange;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, drop_unchosen_beats, plan_problems, shape_reminder,
-    sizing_problems, skill_decisions,
+    check_craft_plan, creation_ledger, drop_unchosen_beats, last_appearances, plan_problems,
+    shape_reminder, sizing_problems, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -476,4 +476,23 @@ fn ld6_the_win_the_opening_arc_names_is_reported_missing_not_vague() {
     let plan = without_beats(plan(), &[]);
     let problems = plan_problems(&plan, 2, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "主角赢的一局没写"), "{problems:?}");
+}
+
+/// VD-1c: the planner sees when the antagonist and the cast were last on
+/// the page.
+#[test]
+fn vd1c_the_antagonist_and_cast_last_appearances_come_from_earlier_plans() {
+    let both = plan()["craft"].clone();
+    let mut alone = both.clone();
+    for scene in alone["scenes"].as_array_mut().unwrap() {
+        scene["people"] = json!([person("林满")]);
+    }
+    assert_eq!(
+        last_appearances(&[(4, both), (5, alone)], &bible()),
+        json!([
+            {"name":"彭三","role":"反派","lastChapter":null},
+            {"name":"阿秋","role":"配角","lastChapter":null},
+            {"name":"老董","role":"配角","lastChapter":4}
+        ])
+    );
 }

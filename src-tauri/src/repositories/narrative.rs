@@ -1839,6 +1839,24 @@ impl NarrativeRepository {
         Ok((records, truncated))
     }
 
+    /// VD-1c: each task satisfied before chapter `before_chapter_no`, with
+    /// the chapter whose progress record satisfied it (one record per task).
+    pub fn satisfied_task_chapters(
+        connection: &Connection,
+        project_id: &str,
+        before_chapter_no: i64,
+    ) -> Result<BTreeMap<String, i64>, NarrativeRepositoryError> {
+        let mut statement = connection.prepare(
+            "SELECT d.state_id, c.chapter_no FROM state_deltas d JOIN chapters c ON c.project_id=d.project_id AND c.chapter_id=d.chapter_id \
+             WHERE d.project_id=?1 AND d.state_type='volume.task.progress' AND json_extract(d.value_json,'$.status')='SATISFIED' AND c.chapter_no<?2",
+        )?;
+        let rows = statement.query_map(
+            libsql_rusqlite::params![project_id, before_chapter_no],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
+    }
+
     pub fn task_states_bounded(
         connection: &Connection,
         project_id: &str,

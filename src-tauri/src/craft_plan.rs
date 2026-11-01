@@ -5,7 +5,7 @@
 use crate::chapter_length::ChapterLengthRange;
 use crate::craft_setup::QUOTE_MARKS;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The planner capability of CRAFT v3 chapters (`chapter-plan.r2`).
 pub const PLAN_CHAPTER_CRAFT: &str = "PLAN_CHAPTER_CRAFT";
@@ -338,6 +338,29 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
         "lastChapterPlaces":last_places,
         "shapes":shapes
     })
+}
+
+/// VD-1c: the last chapter in `prior` each story-bible antagonist and cast
+/// member appeared in, or null when they have not appeared yet.
+pub fn last_appearances(prior: &[(i64, Value)], bible: &Value) -> Value {
+    let last_seen = prior
+        .iter()
+        .flat_map(|(chapter, craft)| {
+            scene_people(craft).map(move |person| (text(&person["name"]), *chapter))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let antagonist = std::iter::once((&bible["antagonist"]["name"], "反派"));
+    let cast = bible["cast"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|member| (&member["name"], "配角"));
+    Value::Array(
+        antagonist
+            .chain(cast)
+            .map(|(name, role)| json!({"name":name,"role":role,"lastChapter":last_seen.get(text(name))}))
+            .collect(),
+    )
 }
 
 /// Everyone the story bible names: protagonist, antagonist and cast.
@@ -687,6 +710,8 @@ struct CraftPlanning {
     bible: Value,
     ledger: Value,
     established_facts: Vec<Value>,
+    /// VD-1c: where this chapter stands in its volume's stages.
+    direction: Option<Value>,
 }
 
 /// WM-1: the established facts for a chapter, recalled from the work's
@@ -853,8 +878,19 @@ impl ChapterPlanner {
             crate::repositories::craft::prior_plan_crafts(connection, project_id, chapter_id)
                 .map_err(|error| error.to_string())?;
         let ledger = creation_ledger(&prior, &bible);
+        let direction = crate::book_direction::for_chapter(
+            connection,
+            project_id,
+            chapter_id,
+            i64::from(chapter),
+        )?
+        .map(|mut direction| {
+            direction["lastAppearances"] = last_appearances(&prior, &bible);
+            direction
+        });
         Ok(Self {
             craft: Some(CraftPlanning {
+                direction,
                 bible,
                 ledger,
                 // The planner decides who appears, so everyone's traits may
@@ -887,6 +923,9 @@ impl ChapterPlanner {
             input["creationLedger"] = prompt_ledger(&craft.ledger);
             input["establishedFacts"] = json!(craft.established_facts);
             input["chapterNumber"] = json!(self.chapter);
+            if let Some(direction) = &craft.direction {
+                input["volumeDirection"] = direction.clone();
+            }
         }
     }
 

@@ -686,7 +686,7 @@ fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
 }
 
 /// The book plan's seeds for volume `volume_no`.
-fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<Item = &Value> {
+pub(crate) fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<Item = &Value> {
     book_plan["volumeIntentSeeds"]
         .as_array()
         .into_iter()
@@ -701,6 +701,16 @@ fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<Item = &Valu
 /// VD-1b: the volume goal a seed stage becomes.
 fn stage_goal_id(volume_id: &str, stage_id: &str) -> String {
     format!("goal:{volume_id}:{stage_id}")
+}
+
+/// The REQUIRED route task a volume goal becomes.
+fn required_task_id(goal_id: &str) -> String {
+    format!("task:required:{goal_id}")
+}
+
+/// VD-1c: the route task a seed stage becomes in volume `volume_id`.
+pub(crate) fn stage_task_id(volume_id: &str, stage_id: &str) -> String {
+    required_task_id(&stage_goal_id(volume_id, stage_id))
 }
 
 /// Whether `goal_id` is the goal `stage_id` became in some volume.
@@ -1274,7 +1284,7 @@ pub fn compile_volume_plan_from_authority(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("VOLUME_PLAN_GOAL_ID_REQUIRED")?;
-        let task_id = format!("task:required:{goal_id}");
+        let task_id = required_task_id(goal_id);
         let predicate = json!({
             "kind":"TASK_EVIDENCE_RECORDED",
             "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
