@@ -7883,7 +7883,15 @@ fn execute_planning_command_with_observer(
             &intent_payload,
         )?;
         let candidate_payload = if payload.is_null() {
+            let volume_no =
+                crate::repositories::volume_lifecycle::VolumeLifecycleRepository::volume_metadata(
+                    &handle, project_id, &scope_key,
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?
+                .volume_no;
             crate::planning::compile_volume_plan_from_authority(
+                volume_no,
                 &intent,
                 &intent_payload,
                 &goal_contract,

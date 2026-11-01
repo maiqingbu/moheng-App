@@ -685,6 +685,31 @@ fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
         || seed_id.ends_with(&format!("-{volume_no}"))
 }
 
+/// The book plan's seeds for volume `volume_no`.
+fn volume_seeds(book_plan: &Value, volume_no: i64) -> impl Iterator<Item = &Value> {
+    book_plan["volumeIntentSeeds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |seed| {
+            seed["seedId"]
+                .as_str()
+                .is_some_and(|id| seed_matches_volume(id, volume_no))
+        })
+}
+
+/// VD-1b: the volume goal a seed stage becomes.
+fn stage_goal_id(volume_id: &str, stage_id: &str) -> String {
+    format!("goal:{volume_id}:{stage_id}")
+}
+
+/// Whether `goal_id` is the goal `stage_id` became in some volume.
+fn is_stage_goal(goal_id: &str, stage_id: &str) -> bool {
+    goal_id
+        .strip_suffix(stage_id)
+        .is_some_and(|rest| rest.starts_with("goal:") && rest.ends_with(':'))
+}
+
 fn goal_matches_seed(goal: &Value, seed_description: &str) -> bool {
     let Some(goal_description) = goal.get("description").and_then(Value::as_str) else {
         return false;
@@ -730,56 +755,72 @@ pub fn compile_volume_intent_from_authority(
     if project_revision < 0 {
         return Err("VOLUME_INTENT_COMPILED_REVISION_REQUIRED".into());
     }
-    let scoped_seeds = book_plan
-        .get("volumeIntentSeeds")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|seed| {
-            seed.get("seedId")
-                .and_then(Value::as_str)
-                .is_some_and(|id| seed_matches_volume(id, volume_no))
-        })
-        .collect::<Vec<_>>();
+    let scoped_seeds = volume_seeds(book_plan, volume_no).collect::<Vec<_>>();
     let global_goals = book_plan
         .get("mustAchieve")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let scoped_seed_descriptions = scoped_seeds
+    // VD-1b: a seed with stages (a planned direction) sets this volume's
+    // goals: its stages in order, then the book's goals for this volume.
+    let stage_goals = scoped_seeds
         .iter()
-        .filter_map(|seed| seed.get("description").and_then(Value::as_str))
+        .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
+        .filter_map(|stage| {
+            Some(json!({
+                "id":stage_goal_id(volume_id, stage["id"].as_str()?),
+                "volumeNo":volume_no,
+                "description":stage["goal"].as_str()?
+            }))
+        })
         .collect::<Vec<_>>();
-    let mut must_achieve = if scoped_seeds.is_empty() && volume_no == 1 {
-        global_goals
-    } else if !scoped_seed_descriptions.is_empty() {
-        global_goals
+    let staged = !stage_goals.is_empty();
+    let mut must_achieve = if staged {
+        stage_goals
             .into_iter()
-            .filter(|goal| {
-                scoped_seed_descriptions
-                    .iter()
-                    .any(|seed| goal_matches_seed(goal, seed))
-            })
+            .chain(
+                global_goals
+                    .into_iter()
+                    .filter(|goal| goal["volumeNo"] == volume_no),
+            )
             .collect()
     } else {
-        Vec::new()
-    };
-    for seed in &scoped_seeds {
-        if let (Some(seed_id), Some(description)) = (
-            seed.get("seedId").and_then(Value::as_str),
-            seed.get("description").and_then(Value::as_str),
-        ) {
-            let mut goal = json!({
-                "id":format!("goal:{volume_id}:seed:{seed_id}"),
-                "description":description
-            });
-            if seed.get("kind").and_then(Value::as_str) == Some("CANON_REFS") {
-                goal["kind"] = json!("CANON_REFS");
-                goal["refs"] = seed.get("refs").cloned().unwrap_or_else(|| json!([]));
+        let scoped_seed_descriptions = scoped_seeds
+            .iter()
+            .filter_map(|seed| seed.get("description").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let mut must_achieve = if scoped_seeds.is_empty() && volume_no == 1 {
+            global_goals
+        } else if !scoped_seed_descriptions.is_empty() {
+            global_goals
+                .into_iter()
+                .filter(|goal| {
+                    scoped_seed_descriptions
+                        .iter()
+                        .any(|seed| goal_matches_seed(goal, seed))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for seed in &scoped_seeds {
+            if let (Some(seed_id), Some(description)) = (
+                seed.get("seedId").and_then(Value::as_str),
+                seed.get("description").and_then(Value::as_str),
+            ) {
+                let mut goal = json!({
+                    "id":format!("goal:{volume_id}:seed:{seed_id}"),
+                    "description":description
+                });
+                if seed.get("kind").and_then(Value::as_str) == Some("CANON_REFS") {
+                    goal["kind"] = json!("CANON_REFS");
+                    goal["refs"] = seed.get("refs").cloned().unwrap_or_else(|| json!([]));
+                }
+                push_unique_goal(&mut must_achieve, goal);
             }
-            push_unique_goal(&mut must_achieve, goal);
         }
-    }
+        must_achieve
+    };
     for responsibility in sources
         .get("responsibilities")
         .and_then(Value::as_array)
@@ -799,35 +840,38 @@ pub fn compile_volume_intent_from_authority(
             );
         }
     }
-    for event in sources
-        .get("events")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .take(8)
-    {
-        if let (Some(id), Some(event_type)) = (
-            event.get("eventId").and_then(Value::as_str),
-            event.get("eventType").and_then(Value::as_str),
-        ) {
-            let object = event
-                .get("objectJson")
-                .and_then(|value| value.get("text"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| {
-                    event
-                        .get("objectJson")
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "未知对象".into())
-                });
-            push_unique_goal(
-                &mut must_achieve,
-                json!({
-                    "id":format!("goal:{volume_id}:event:{id}"),
-                    "description":format!("承接已发生事件 {event_type}：{object} 并给出可核对后果")
-                }),
-            );
+    // Opening events are covered by the stages when there are any.
+    if !staged {
+        for event in sources
+            .get("events")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(8)
+        {
+            if let (Some(id), Some(event_type)) = (
+                event.get("eventId").and_then(Value::as_str),
+                event.get("eventType").and_then(Value::as_str),
+            ) {
+                let object = event
+                    .get("objectJson")
+                    .and_then(|value| value.get("text"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        event
+                            .get("objectJson")
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "未知对象".into())
+                    });
+                push_unique_goal(
+                    &mut must_achieve,
+                    json!({
+                        "id":format!("goal:{volume_id}:event:{id}"),
+                        "description":format!("承接已发生事件 {event_type}：{object} 并给出可核对后果")
+                    }),
+                );
+            }
         }
     }
     if must_achieve.is_empty() {
@@ -1009,16 +1053,8 @@ pub fn compile_volume_intent_from_authority(
         "revision":project_revision,
     }))
     .map_err(|error| error.to_string())?;
-    let seed_description = book_plan
-        .get("volumeIntentSeeds")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item.get("seedId")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| seed_matches_volume(id, volume_no))
-            })
-        })
+    let seed_description = scoped_seeds
+        .first()
         .and_then(|item| item.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("承接全书战略并推进当前卷目标");
@@ -1197,6 +1233,7 @@ pub fn validate_volume_plan_semantics(plan: &Value) -> Result<(), String> {
 }
 
 pub fn compile_volume_plan_from_authority(
+    volume_no: i64,
     volume_intent_ref: &ArtifactRef,
     volume_intent: &Value,
     goal_contract: &Value,
@@ -1217,6 +1254,14 @@ pub fn compile_volume_plan_from_authority(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let book_plan = goal_contract
+        .get("bookPlan")
+        .ok_or("GOAL_CONTRACT_BOOK_PLAN_REQUIRED")?;
+    // VD-1b: this volume's seed, when the book plan has one with stages.
+    let seed = volume_seeds(book_plan, volume_no).next();
+    let stages = volume_seeds(book_plan, volume_no)
+        .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
     let mut tasks = Vec::new();
     let mut previous_required: Option<String> = None;
     for goal in volume_intent
@@ -1239,6 +1284,15 @@ pub fn compile_volume_plan_from_authority(
             .cloned()
             .map(Value::String)
             .collect::<Vec<_>>();
+        let estimate = stages
+            .iter()
+            .find(|stage| {
+                stage["id"]
+                    .as_str()
+                    .is_some_and(|id| is_stage_goal(goal_id, id))
+            })
+            .and_then(|stage| stage["estimatedChapters"].as_i64())
+            .unwrap_or(1);
         tasks.push(json!({
             "taskId":task_id,
             "class":"REQUIRED",
@@ -1247,18 +1301,17 @@ pub fn compile_volume_plan_from_authority(
             "continuityThreadRefs":continuity_refs,
             "reservationRefs":[],
             "completionPredicate":predicate,
-            "estimatedChapterCost":{"preferred":1}
+            "estimatedChapterCost":{"preferred":estimate}
         }));
         previous_required = Some(task_id);
     }
-    let book_plan = goal_contract
-        .get("bookPlan")
-        .ok_or("GOAL_CONTRACT_BOOK_PLAN_REQUIRED")?;
+    // Directions for another volume wait for it; unnumbered ones apply now.
+    let for_this_volume = |item: &&Value| item.get("volumeNo").is_none_or(|n| n == volume_no);
     if let Some(items) = book_plan
         .get("relationshipMacroDirections")
         .and_then(Value::as_array)
     {
-        for item in items.iter().take(8) {
+        for item in items.iter().filter(for_this_volume).take(8) {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("relation");
             tasks.push(json!({
                 "taskId":format!("task:optional:{id}"),
@@ -1274,13 +1327,21 @@ pub fn compile_volume_plan_from_authority(
     }
     let mut climax_task: Option<String> = None;
     if let Some(items) = book_plan.get("majorMysteryGoals").and_then(Value::as_array) {
-        for item in items.iter().take(1) {
+        for item in items.iter().filter(for_this_volume).take(1) {
             let id = item.get("id").and_then(Value::as_str).unwrap_or("mystery");
             let task_id = format!("task:climax:{id}");
+            let mystery = item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("完成本卷关键回报");
+            let objective = match seed.and_then(|seed| seed["climax"].as_str()) {
+                Some(climax) => format!("{climax}；{mystery}"),
+                None => mystery.to_owned(),
+            };
             tasks.push(json!({
                 "taskId":task_id,
                 "class":"CLIMAX",
-                "objective":item.get("description").cloned().unwrap_or_else(|| json!("完成本卷关键回报")),
+                "objective":objective,
                 "dependsOnTaskIds":previous_required.iter().cloned().map(Value::String).collect::<Vec<_>>(),
                 "continuityThreadRefs":continuity_refs,
                 "reservationRefs":[],

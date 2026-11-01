@@ -884,8 +884,7 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
         .unwrap();
     assert_eq!(runs, 1);
     drop(connection);
-    // The volume intent and route still compile from the new plan (VD-1b
-    // makes them follow its stages).
+    // VD-1b: the volume route follows the stages.
     let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
         .expect("volume list after approval");
     let volume_id = volumes["items"][0]["id"].as_str().expect("volume id");
@@ -901,6 +900,24 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
             json!({"volumeId":volume_id}),
         );
     }
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume route");
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .map(|task| task["objective"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        required[..4],
+        [
+            "林舟查清缺页落在谁手里",
+            "林舟拿到改账的证据",
+            "林舟当众对账",
+            "林舟找回失踪账本的缺页"
+        ]
+    );
 }
 
 #[test]
