@@ -270,3 +270,60 @@ fn qc1_detail_slots_go_round_the_phrases_and_skip_catchphrases() {
         "{problems:?}"
     );
 }
+
+#[test]
+fn qc1_a_long_sentence_written_twice_in_one_chapter_is_a_rewrite_finding() {
+    let body = "蓝光一闪，修复仪边缘浮出细密裂纹。林薇没回头。沈砚按下开关。蓝光一闪，修复仪边缘浮出细密裂纹。";
+    let findings = copied_sentence_findings(&[], body);
+    assert_eq!(findings.len(), 1, "only the second writing: {findings:?}");
+    assert_eq!(findings[0]["code"], "copied_sentence");
+    assert!(
+        findings[0]["quote"]
+            .as_str()
+            .unwrap()
+            .ends_with("沈砚按下开关。蓝光一闪，修复仪边缘浮出细密裂纹。"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn qc1_a_grammar_fragment_is_never_a_catchphrase_candidate() {
+    let history = [
+        "他走的时候没回头。雨停的时候天亮了。她想起的时候已经晚了。",
+        "下车的时候他看了一眼。开门的时候灯灭了。",
+        "她说话的时候低着头。吃饭的时候没人开口。",
+    ]
+    .iter()
+    .map(|text| text.to_string())
+    .collect::<Vec<_>>();
+    let body = "出门的时候下雨了。回来的时候雨停了。";
+    let candidates = catchphrase_candidates(&history, body, &[], "");
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate["phrase"].as_str().unwrap().starts_with('的')),
+        "{candidates:?}"
+    );
+}
+
+#[test]
+fn qc1_a_plan_with_too_many_scenes_is_folded_without_losing_most_events() {
+    let scene = |place: &str| {
+        json!({"place":place,"people":[{"name":"林薇"},{"name":"沈砚"}],"conflict":place,
+               "events":[format!("{place}一"),format!("{place}二"),format!("{place}三")],
+               "readerQuestion":"？"})
+    };
+    let mut plan =
+        json!({"craft":{"scenes":[scene("甲"),scene("乙"),scene("丙"),scene("丁"),scene("戊")]}});
+    ai_novel_production_system_core::planning::fit_lenient_plan_shape(&mut plan, 0);
+    let scenes = plan["craft"]["scenes"].as_array().unwrap();
+    assert_eq!(scenes.len(), 3, "{plan}");
+    let kept = scenes
+        .iter()
+        .map(|scene| scene["events"].as_array().unwrap().len())
+        .sum::<usize>();
+    assert!(
+        kept >= 13,
+        "15 events into 3 scenes of 5 keeps nearly all: {plan}"
+    );
+}

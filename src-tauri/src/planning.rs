@@ -2496,8 +2496,9 @@ pub fn horizon_slot_range(remaining_chapter_capacity: i64) -> (usize, usize) {
 
 /// LD-1 step 2: the last lenient pass fits a plan its planner could not fix
 /// to its contract, and returns what it changed for the plan reminder. A
-/// short preview gets tentative slots up to the minimum; a scene beyond the
-/// third, or with fewer than two people, is folded into its neighbour; a
+/// short preview gets tentative slots up to the minimum; a scene with fewer
+/// than two people is folded into its neighbour, and beyond the third the
+/// neighbours with the fewest events together are folded into one; a
 /// scene keeps at most five events, its first four and its last (the shape
 /// in `craft_plan`). The
 /// changes come back as one plan-craft problem.
@@ -2530,11 +2531,22 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
         return as_problem(notes);
     };
     let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
+    let events = |scene: &Value| scene["events"].as_array().map_or(0, Vec::len);
     while scenes.len() > 1 {
+        // Too many scenes: the neighbours with the fewest events together
+        // join, so the events spread over the scenes left (sixth
+        // acceptance: three scenes folded into one lost ten events).
         let Some(from) = scenes
             .iter()
             .position(|scene| people(scene) < MIN_SCENE_PEOPLE)
-            .or((scenes.len() > *SCENE_COUNT.end()).then(|| scenes.len() - 1))
+            .or_else(|| {
+                if scenes.len() > *SCENE_COUNT.end() {
+                    (1..scenes.len())
+                        .min_by_key(|&at| events(&scenes[at - 1]) + events(&scenes[at]))
+                } else {
+                    None
+                }
+            })
         else {
             break;
         };
@@ -2574,7 +2586,7 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
     }
     let most = *SCENE_EVENTS.end();
     for scene in scenes.iter_mut() {
-        let count = scene["events"].as_array().map_or(0, Vec::len);
+        let count = events(scene);
         if count > most {
             notes.push(format!(
                 "系统把场景「{}」的事件从 {count} 条删到 {most} 条",

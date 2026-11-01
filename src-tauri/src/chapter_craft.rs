@@ -1105,9 +1105,10 @@ const COPIED_SENTENCE_CHARACTERS: usize = 15;
 const COPIED_SENTENCE_WINDOW: usize = 3;
 
 /// QC-1 (third acceptance: 14 sentences repeated word for word across
-/// chapters): each sentence of `body` of at least
-/// `COPIED_SENTENCE_CHARACTERS` characters that occurs word for word in one
-/// of the recent chapters, for the rewrite to word anew.
+/// chapters; sixth: one written twice within chapter 1): each sentence of
+/// `body` of at least `COPIED_SENTENCE_CHARACTERS` characters that occurs
+/// word for word earlier in the chapter or in one of the recent chapters,
+/// for the rewrite to word anew.
 pub fn copied_sentence_findings(history: &[String], body: &str) -> Vec<Value> {
     let spans = sentence_spans(body);
     spans
@@ -1115,19 +1116,25 @@ pub fn copied_sentence_findings(history: &[String], body: &str) -> Vec<Value> {
         .enumerate()
         .filter_map(|(index, &(start, end))| {
             let sentence = &body[start..end];
-            if sentence.chars().count() < COPIED_SENTENCE_CHARACTERS
-                || !history
-                    .iter()
-                    .take(COPIED_SENTENCE_WINDOW)
-                    .any(|text| text.contains(sentence))
-            {
+            if sentence.chars().count() < COPIED_SENTENCE_CHARACTERS {
                 return None;
             }
+            let problem = if body[..start].contains(sentence) {
+                "这句和本章前面的一句一字不差"
+            } else if history
+                .iter()
+                .take(COPIED_SENTENCE_WINDOW)
+                .any(|text| text.contains(sentence))
+            {
+                "这句和最近几章里的一句一字不差"
+            } else {
+                return None;
+            };
             Some(rule_finding(
                 "copied_sentence",
                 "MEDIUM",
                 unique_quote_ending_at(body, &spans, index)?,
-                "这句和最近几章里的一句一字不差".into(),
+                problem.into(),
                 "换一种写法，或删去重复的交代，意思和信息不变",
             ))
         })
@@ -1176,6 +1183,13 @@ pub fn opening_threat_on_page(plan: &Value, body: &str) -> bool {
 
 /// QC-1.4: how many chapters back catchphrases are looked for.
 const CATCHPHRASE_WINDOW: usize = 3;
+/// QC-1.4 (sixth acceptance: 的时候 taken for a catchphrase): whether a
+/// grammar fragment may begin or end with `c` (的时候, 了一下): the
+/// characters of `NOT_A_DETAIL` and a few more. Only the edges are looked
+/// at, so tics such as 愣了一下 stay candidates.
+fn is_grammar_edge(c: char) -> bool {
+    NOT_A_DETAIL.contains(c) || "和与就也都又".contains(c)
+}
 
 /// QC-1.4 (owner decision 2026-10-26): short phrases (3 to 6 Chinese
 /// characters) the chapter uses at least twice that also ran through the
@@ -1193,7 +1207,10 @@ pub fn catchphrase_candidates(
 ) -> Vec<Value> {
     let mut found = BTreeMap::<String, (usize, usize)>::new();
     for (phrase, here, earlier) in repeated_han_phrases(history, body, |phrase| {
-        names.iter().any(|name| phrase.contains(name)) || story_text.contains(phrase)
+        phrase.starts_with(is_grammar_edge)
+            || phrase.ends_with(is_grammar_edge)
+            || names.iter().any(|name| phrase.contains(name))
+            || story_text.contains(phrase)
     }) {
         let total = here + earlier.iter().sum::<usize>();
         let chapters = 1 + earlier.iter().filter(|count| **count > 0).count();
