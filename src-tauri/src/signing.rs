@@ -708,11 +708,15 @@ fn outline_findings(body: &str) -> Vec<String> {
                 .chars()
                 .take_while(|character| character.is_ascii_digit())
                 .count();
+            let mut after = trimmed.chars().skip(numbered);
+            // A digit after the mark makes a date or a decimal, not a list.
             if numbered > 0
-                && trimmed
-                    .chars()
-                    .nth(numbered)
+                && after
+                    .next()
                     .is_some_and(|character| matches!(character, '.' | '、' | ')' | '）'))
+                && !after
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit())
             {
                 return Some(trimmed.to_string());
             }
@@ -2231,6 +2235,13 @@ mod tests {
     fn f1_2_number_separators_are_not_mixed_punctuation() {
         assert!(punctuation_or_layout_findings("峰值0.87，时间00:07，日期2013.08.17。").is_empty());
         assert!(!punctuation_or_layout_findings("他走了.她留下。").is_empty());
+    }
+
+    #[test]
+    fn f1_3_a_line_opening_on_a_date_is_not_a_numbered_list() {
+        // Real run 2026-11-02 (round 10): the scene opened on a time stamp.
+        assert!(outline_findings("2041.08.17 06:14:22，城东第三养老院B栋203室。").is_empty());
+        assert!(!outline_findings("1.调查档案馆\n2、找到证人").is_empty());
     }
 
     use super::*;
