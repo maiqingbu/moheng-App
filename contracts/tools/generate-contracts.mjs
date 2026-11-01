@@ -179,6 +179,17 @@ function dereference(schema, owner, context, stack = new Set()) {
   return schema
 }
 
+// Ajv registers every $id it sees, so inlined copies of shared schemas would collide.
+function stripNestedIds(schema, isRoot = true) {
+  if (Array.isArray(schema)) return schema.map(value => stripNestedIds(value, false))
+  if (schema && typeof schema === 'object') {
+    return Object.fromEntries(Object.entries(schema)
+      .filter(([key]) => isRoot || (key !== '$id' && key !== '$schema'))
+      .map(([key, value]) => [key, stripNestedIds(value, false)]))
+  }
+  return schema
+}
+
 function validatorName(title) {
   return `validate${identifier(title)}`
 }
@@ -237,7 +248,7 @@ export function generateContracts(baseRoot = root) {
   fs.mkdirSync(generatedRoot, { recursive: true })
   fs.mkdirSync(rustGeneratedRoot, { recursive: true })
   writeIfChanged(path.join(generatedRoot, 'types.ts'), generated.typescript)
-  const schemaEntries = generated.validators.map(({ title, schema }) => `  ${JSON.stringify(title)}: ${JSON.stringify(schema)}`).join(',\n')
+  const schemaEntries = generated.validators.map(({ title, schema }) => `  ${JSON.stringify(title)}: ${JSON.stringify(stripNestedIds(schema))}`).join(',\n')
   const validatorExports = generated.validators.map(({ title }) =>
     `export const ${validatorName(title)} = (value: unknown): void => validate(${JSON.stringify(title)}, value)`
   ).join('\n')
