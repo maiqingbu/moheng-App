@@ -339,9 +339,47 @@ fn confirm_craft_setup(state: &KernelState, prefix: &str, project_id: &str) {
     );
 }
 
+/// The harness premise: the urban mystery by default, or a cultivation
+/// story with `MOHENG_REAL_PREMISE=xianxia` (owner, 2026-11-01).
+fn premise() -> (serde_json::Value, serde_json::Value) {
+    if std::env::var("MOHENG_REAL_PREMISE").as_deref() == Ok("xianxia") {
+        return (
+            json!({
+                "idea":"灵脉枯竭的边陲小宗里，一名看守丹房的外门杂役发现自己能以寿元为薪，点燃废丹里残存的药力，每点燃一次就少活一年；而宗门正被三大宗用一纸灵脉租约逐步吞并。前三章必须完成第一次点丹、发现代价、主动追查租约背后的人。",
+                "tags":["东方玄幻","修仙","宗门","逆袭"],
+                "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不用随身老爷爷，不提前揭露幕后黑手"
+            }),
+            json!({
+                "protagonist":"青崖宗外门丹房杂役陆照",
+                "desire":"保住收养自己的没落小宗，查清师父为何签下灵脉租约",
+                "mechanism":"以寿元点燃废丹残余药力，每点一次减寿一年，寿元耗尽即死",
+                "conflict":"三大宗借灵脉租约步步吞并青崖宗，陆照必须在寿元耗尽前找到废约的证据和实力",
+                "readerPromise":"每一次以命换力的选择都撬动宗门局势，寿元代价与宗门危机同步升级",
+                "forbiddenReveals":["前三章不得揭晓租约幕后真正的操盘者","不得让师父死而复生"]
+            }),
+        );
+    }
+    (
+        json!({
+            "idea":"一名负责修复城市记忆档案的年轻调查员，发现每修复一段被篡改的记忆，现实中就会失去一个与自己有关的真实痕迹。前三章必须完成首次委托、发现代价、主动追查幕后来源。",
+            "tags":["都市悬疑","成长","记忆谜案"],
+            "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不提前揭露幕后真凶"
+        }),
+        json!({
+            "protagonist":"城市记忆档案调查员沈砚",
+            "desire":"找回被人从公共档案中抹去的姐姐",
+            "mechanism":"修复被篡改的记忆会同步抹去修复者的一段现实痕迹",
+            "conflict":"维护城市稳定的档案局要求掩盖真相，沈砚必须在自我消失前留下证据",
+            "readerPromise":"每章解决一个可验证的小谜题，同时让失去痕迹的代价持续升级",
+            "forbiddenReveals":["前三章不得揭晓最终幕后者","不得证明姐姐已经死亡"]
+        }),
+    )
+}
+
 /// A new project from the harness idea, taken through directions, setup
 /// and opening readiness; returns it with its three opening chapters.
 fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (String, Vec<String>) {
+    let (idea, story_core) = premise();
     let created = execute(
         state,
         json!({
@@ -351,11 +389,11 @@ fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (Strin
             "requestedAt":NOW,
             "payload":{
                 "title":title,
-                "idea":"一名负责修复城市记忆档案的年轻调查员，发现每修复一段被篡改的记忆，现实中就会失去一个与自己有关的真实痕迹。前三章必须完成首次委托、发现代价、主动追查幕后来源。",
+                "idea":idea["idea"],
                 "platform":"番茄小说",
                 "mode":"DIRECTOR",
-                "tags":["都市悬疑","成长","记忆谜案"],
-                "forbidden":"不使用梦境醒来推翻前文，不用系统面板，不提前揭露幕后真凶"
+                "tags":idea["tags"],
+                "forbidden":idea["forbidden"]
             }
         }),
     );
@@ -403,14 +441,7 @@ fn create_real_project(state: &KernelState, prefix: &str, title: &str) -> (Strin
             "projectId":project_id,
             "expectedRevision":current_revision(state, &project_id),
             "requestedAt":NOW,
-            "payload":{"storyCore":{
-                "protagonist":"城市记忆档案调查员沈砚",
-                "desire":"找回被人从公共档案中抹去的姐姐",
-                "mechanism":"修复被篡改的记忆会同步抹去修复者的一段现实痕迹",
-                "conflict":"维护城市稳定的档案局要求掩盖真相，沈砚必须在自我消失前留下证据",
-                "readerPromise":"每章解决一个可验证的小谜题，同时让失去痕迹的代价持续升级",
-                "forbiddenReveals":["前三章不得揭晓最终幕后者","不得证明姐姐已经死亡"]
-            }}
+            "payload":{"storyCore":story_core}
         }),
     );
     execute(
