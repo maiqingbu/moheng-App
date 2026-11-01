@@ -326,6 +326,20 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     assert!((2000..=2500).contains(&committed), "{committed}");
 }
 
+#[test]
+fn ld7_an_expansion_that_leaves_the_chapter_too_short_is_followed_by_one_more() {
+    // Real run 2026-11-01 (round 11): one expansion added 100-300
+    // characters to chapters 300-600 short.
+    let gateway = Arc::new(CraftGateway::new(vec![good_plan()], &[1200, 1700, 2500]));
+    let project_id = "p-ld7-expand-twice";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
+    assert_eq!(adjust.len(), 2);
+    assert_eq!(adjust[1]["currentChars"], 1700);
+    assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
+}
+
 fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> i64 {
     state
         .manager

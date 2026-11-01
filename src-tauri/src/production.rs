@@ -2841,7 +2841,20 @@ fn run_chapter_production_inner(
     // craft skills and the rule checks guide the writing instead.
 
     update_stage(manager, connection, &project_id, &job_id, "RENDER", &now)?;
-    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":plan_payload,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
+    // LD-7 (real run 2026-11-01, round 11): a writer given each scene's
+    // estimate wrote about two thirds of it; the estimates only size the
+    // plan, and the writers aim for the chapter's range.
+    let mut writer_plan = plan_payload.clone();
+    for scene in writer_plan
+        .pointer_mut("/craft/scenes")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object_mut)
+    {
+        scene.remove("estimatedCharacters");
+    }
+    let mut render_input = json!({"chapterId":chapter_id,"chapterPlanRef":plan_ref,"chapterPlan":writer_plan,"contextManifestRef":context_ref,"contextManifest":context_payload,"authorityContext":authority_context.clone(),"chapterLengthRange":length_range.to_json()});
     let avoid_phrases = crate::chapter_craft::repeated_phrases(&chapter_history.bodies);
     if !avoid_phrases.is_empty() {
         render_input["avoidPhrases"] = json!(avoid_phrases);
@@ -3005,33 +3018,50 @@ fn run_chapter_production_inner(
     // with the rewrite skills. Only edits whose passage occurs once apply,
     // and a rewrite that leaves the length range is dropped whole.
     let mut prose_run_ids = Vec::new();
-    // A chapter outside the length range is expanded or cut once;
-    // it is never committed outside the range.
+    // A chapter outside the length range is expanded or cut, in at most two
+    // rounds; it is never committed outside the range.
     if gateway.enforces_chapter_length() {
         let in_range = |text: &str| length_range.accepts(character_count(text));
         body = crate::chapter_craft::normalize_typography(body.trim());
         let length = character_count(&body);
         if length < length_range.min {
-            let (run_id, outcome) = craft_call(
-                "adjust-length",
-                "ADJUST_CHAPTER_LENGTH",
-                &render_profile,
-                2,
-                json!({
-                    "chapterId":chapter_id,"chapterPlan":plan_payload,"body":body,
-                    "currentChars":length,
-                    "targetChars":length_range.target(),
-                    "chapterLengthRange":length_range.to_json()
-                }),
-            )?;
-            prose_run_ids.push(run_id);
-            body = outcome
-                .parsed
-                .as_ref()
-                .and_then(|payload| payload.get("body"))
-                .and_then(Value::as_str)
-                .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
-                .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
+            // LD-7 (real run 2026-11-01, round 11): one expansion added
+            // 100-300 characters to chapters 300-600 short, so one still
+            // too short gets a second round.
+            for round in 0..2 {
+                let length = character_count(&body);
+                if length >= length_range.min {
+                    break;
+                }
+                // The first round keeps its original id so earlier runs replay.
+                let suffix = match round {
+                    0 => "adjust-length".to_string(),
+                    round => format!("adjust-length-{round}"),
+                };
+                let (run_id, outcome) = craft_call(
+                    &suffix,
+                    "ADJUST_CHAPTER_LENGTH",
+                    &render_profile,
+                    2 + round,
+                    json!({
+                        "chapterId":chapter_id,"chapterPlan":writer_plan,"body":body,
+                        "currentChars":length,
+                        "targetChars":length_range.target(),
+                        "chapterLengthRange":length_range.to_json()
+                    }),
+                )?;
+                prose_run_ids.push(run_id);
+                body = outcome
+                    .parsed
+                    .as_ref()
+                    .and_then(|payload| payload.get("body"))
+                    .and_then(Value::as_str)
+                    .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
+                    .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
+                if character_count(&body) <= length {
+                    break;
+                }
+            }
         } else {
             // LD-4 (real run 2026-11-01): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
@@ -3054,7 +3084,7 @@ fn run_chapter_production_inner(
                     &render_profile,
                     2 + round,
                     json!({
-                        "chapterId":chapter_id,"chapterPlan":plan_payload,"sentences":sentences,
+                        "chapterId":chapter_id,"chapterPlan":writer_plan,"sentences":sentences,
                         "currentChars":length,
                         "targetChars":length_range.target(),
                         "cutChars":length - length_range.target()

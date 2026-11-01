@@ -338,15 +338,48 @@ fn ld5_scenes_estimated_outside_the_chapter_s_range_are_sent_back() {
 #[test]
 fn ld5_a_scene_too_crowded_for_its_room_is_sent_back() {
     // Real run 2026-11-01: fifteen events in 2,000 characters tire readers.
-    let problems = sizing_problems(&sized(&[(700, 5), (700, 5), (600, 5)]), FANQIE);
+    // A chapter within its room can still crowd one scene.
+    let problems = sizing_problems(&sized(&[(400, 3), (1600, 3)]), FANQIE);
     assert!(
-        has(&problems, "第 1 场预估 700 字写 5 条事件"),
+        has(&problems, "第 1 场预估 400 字写 3 条事件"),
         "{problems:?}"
     );
-    assert!(
-        has(&problems, "第 3 场预估 600 字写 5 条事件"),
-        "{problems:?}"
-    );
+    assert!(!has(&problems, "第 2 场"), "{problems:?}");
+}
+
+#[test]
+fn ld7_a_chapter_with_more_events_than_its_length_holds_is_told_how_many_to_drop() {
+    // Real run 2026-11-01 (round 11): told a scene was too crowded, the
+    // planner raised its estimates and kept all twelve events.
+    for craft in [
+        sized(&[(820, 4), (780, 4), (700, 4)]),
+        sized(&[(900, 4), (900, 4), (900, 4)]),
+    ] {
+        let problems = sizing_problems(&craft, FANQIE);
+        assert!(
+            has(&problems, "本章 12 条事件，2200 字最多写得开 8 条"),
+            "{problems:?}"
+        );
+        assert!(has(&problems, "删去或合并 4 条"), "{problems:?}");
+        assert!(has(&problems, "提高预估字数"), "{problems:?}");
+    }
+    assert!(sizing_problems(&sized(&[(1000, 4), (1000, 4)]), FANQIE).is_empty());
+}
+
+#[test]
+fn ld7_a_chapter_shaped_like_the_two_before_it_is_sent_back() {
+    let earlier = plan()["craft"].clone();
+    let ledger = creation_ledger(&[(2, earlier.clone()), (3, earlier)], &bible());
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(has(&problems, "和前两章是同一个形状"), "{problems:?}");
+
+    let mut other = plan();
+    other["craft"].as_object_mut().unwrap().remove("warmth");
+    let problems = plan_problems(&other, 4, &bible(), &ledger);
+    assert!(!has(&problems, "同一个形状"), "{problems:?}");
+    let ledger = creation_ledger(&[(3, plan()["craft"].clone())], &bible());
+    let problems = plan_problems(&plan(), 4, &bible(), &ledger);
+    assert!(!has(&problems, "同一个形状"), "{problems:?}");
 }
 
 #[test]

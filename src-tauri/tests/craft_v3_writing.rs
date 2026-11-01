@@ -243,6 +243,13 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
     assert_eq!(render["chapterNumber"], 1);
     assert_eq!(render["chapterPlan"]["payloadSchema"], "chapter-plan.r2");
     assert!(render.get("beatTargets").is_none() && render.get("partLengthRange").is_none());
+    // LD-7 (real run 2026-11-01, round 11): writers given a scene's
+    // estimate wrote two thirds of it; the estimates size the plan only.
+    assert!(render["chapterPlan"]["craft"]["scenes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|scene| scene.get("estimatedCharacters").is_none()));
     let adjust = call("ADJUST_CHAPTER_LENGTH").expect("length adjustment");
     // The writer gets the count it has and the count to reach.
     assert!(adjust["currentChars"].as_i64() < adjust["targetChars"].as_i64());

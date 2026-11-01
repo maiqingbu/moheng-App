@@ -157,6 +157,7 @@ fn fx18_chapter_still_outside_the_range_after_its_adjustment_is_not_committed() 
         "{error}"
     );
     assert_eq!(gateway.inputs("RENDER_CHAPTER").len(), 1);
+    // LD-7: an expansion that adds nothing is not asked for again.
     assert_eq!(gateway.inputs("ADJUST_CHAPTER_LENGTH").len(), 1);
     assert_eq!(gateway.inputs("AUDIT_EXTRACT").len(), 0);
     assert_eq!(
@@ -349,7 +350,10 @@ fn fx18_long_form_production_uses_the_range_saved_when_its_plan_was_compiled() {
 
 #[test]
 fn fx18_opening_retry_keeps_the_range_chosen_for_the_chapter() {
-    let gateway = Arc::new(LengthGateway::new(&[1200, 1300, 1000], &[600, 600, 3500]));
+    let gateway = Arc::new(LengthGateway::new(
+        &[1200, 1300, 1000],
+        &[600, 600, 3500],
+    ));
     let project_id = "p-fx18-retry-range";
     let (_temp, state, chapter_id, result) = start(
         gateway.clone(),

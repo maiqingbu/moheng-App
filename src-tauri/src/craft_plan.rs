@@ -284,6 +284,14 @@ fn scene_people(craft: &Value) -> impl Iterator<Item = &Value> {
         .flat_map(|scene| scene["people"].as_array().into_iter().flatten())
 }
 
+/// The beats `craft` chose, in `CHOSEN_BEATS` order.
+fn chosen_beats(craft: &Value) -> Vec<&'static str> {
+    CHOSEN_BEATS
+        .into_iter()
+        .filter(|beat| craft.get(*beat).is_some())
+        .collect()
+}
+
 /// The creation ledger (CRAFT_V3_DESIGN §4.3): what the committed chapters
 /// already used, rebuilt from their r2 plans in chapter order.
 /// `prior` holds `(chapter_no, craft)` pairs; r1 chapters have no craft and
@@ -298,14 +306,12 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
     let mut last_places = Vec::new();
     let mut shapes = Vec::new();
     for (chapter, craft) in prior {
-        shapes.push(
-            json!({"chapter":chapter,
-            "beats":CHOSEN_BEATS.iter().filter(|beat| craft.get(**beat).is_some()).collect::<Vec<_>>(),
+        shapes.push(json!({"chapter":chapter,
+            "beats":chosen_beats(craft),
             "scenes":scenes(craft).iter().map(|scene| json!({
             "events":event_count(scene),
             "estimatedCharacters":scene["estimatedCharacters"]
-        })).collect::<Vec<_>>()}),
-        );
+        })).collect::<Vec<_>>()}));
         if craft.get("device").is_some() {
             devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         }
@@ -419,6 +425,36 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             ));
         }
     }
+    // LD-7 (real run 2026-11-01, round 11): every chapter came out as three
+    // scenes of four events with all seven beats; a chapter shaped exactly
+    // like the two before it is planned again.
+    let beats = chosen_beats(craft);
+    let events = scene_list
+        .iter()
+        .map(|scene| event_count(scene) as u64)
+        .collect::<Vec<_>>();
+    let shapes = ledger["shapes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if shapes.len() >= 2
+        && shapes[shapes.len() - 2..].iter().all(|earlier| {
+            earlier["beats"] == json!(beats)
+                && earlier["scenes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|scene| scene["events"].as_u64())
+                    .eq(events.iter().copied().map(Some))
+        })
+    {
+        problems.push(format!(
+            "本章和前两章是同一个形状（{} 个场景，各场 {} 条事件，同样的 {} 个要素）：按这一章要做的事重新挑选要素、场景和事件",
+            scene_list.len(),
+            events.iter().map(u64::to_string).collect::<Vec<_>>().join("、"),
+            beats.len()
+        ));
+    }
     if text(&craft["situationChange"]["before"]) == text(&craft["situationChange"]["after"]) {
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
     }
@@ -506,9 +542,23 @@ pub fn check_craft_plan(
 
 /// LD-5: what is wrong with the room `craft`'s scenes are estimated to
 /// take: each scene states its estimate, the estimates add up to the
-/// chapter's range, and no scene has more events than its room holds.
+/// chapter's range, and neither the chapter nor a scene has more events
+/// than its room holds.
 pub fn sizing_problems(craft: &Value, range: ChapterLengthRange) -> Vec<String> {
     let mut problems = Vec::new();
+    // LD-7 (real run 2026-11-01, round 11): told a scene was too crowded,
+    // the planner raised its estimates and kept every event, so a chapter
+    // with more events than its length holds is told how many to drop.
+    let events = scenes(craft).iter().map(event_count).sum::<usize>() as i64;
+    let room = range.max / MIN_CHARS_PER_EVENT;
+    let over_room = events > room;
+    if over_room {
+        problems.push(format!(
+            "本章 {events} 条事件，{} 字最多写得开 {room} 条（每条 {MIN_CHARS_PER_EVENT} 字以上）：删去或合并 {} 条，留给后面的章节；提高预估字数解决不了",
+            range.max,
+            events - room
+        ));
+    }
     let mut total = 0;
     for (index, scene) in scenes(craft).iter().enumerate() {
         let Some(estimate) = scene["estimatedCharacters"]
@@ -523,7 +573,7 @@ pub fn sizing_problems(craft: &Value, range: ChapterLengthRange) -> Vec<String> 
         };
         total += estimate;
         let events = event_count(scene) as i64;
-        if events > 0 && estimate / events < MIN_CHARS_PER_EVENT {
+        if !over_room && events > 0 && estimate / events < MIN_CHARS_PER_EVENT {
             problems.push(format!(
                 "第 {} 场预估 {estimate} 字写 {events} 条事件，太挤：每条事件写开要 {MIN_CHARS_PER_EVENT} 字以上，删掉一些或留给后面的章节",
                 index + 1
