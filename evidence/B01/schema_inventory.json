@@ -1,6 +1,6 @@
 {
   "foreign_key_violations": 0,
-  "index_count": 224,
+  "index_count": 227,
   "indexes": [
     "idx_arcs_volume",
     "idx_artifact_schemas_project",
@@ -72,6 +72,7 @@
     "idx_support_checkpoints_session",
     "idx_vacuum_reports_project_time",
     "idx_wal_reports_project_time",
+    "idx_work_memory_chapter_no",
     "sqlite_autoindex_arc_plan_index_1",
     "sqlite_autoindex_arcs_1",
     "sqlite_autoindex_arcs_2",
@@ -225,10 +226,12 @@
     "sqlite_autoindex_volume_route_replans_2",
     "sqlite_autoindex_volumes_1",
     "sqlite_autoindex_volumes_2",
-    "sqlite_autoindex_wal_governance_reports_1"
+    "sqlite_autoindex_wal_governance_reports_1",
+    "sqlite_autoindex_work_memory_1",
+    "sqlite_autoindex_work_memory_sources_1"
   ],
   "quick_check": "ok",
-  "table_count": 105,
+  "table_count": 107,
   "tables": [
     "arc_plan_index",
     "arcs",
@@ -334,6 +337,8 @@
     "volume_planning_state_projection",
     "volume_route_replans",
     "volumes",
-    "wal_governance_reports"
+    "wal_governance_reports",
+    "work_memory",
+    "work_memory_sources"
   ]
 }
