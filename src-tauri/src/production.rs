@@ -3032,39 +3032,50 @@ fn run_chapter_production_inner(
                 .and_then(Value::as_str)
                 .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
                 .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
-        } else if !length_range.accepts(length) {
+        } else {
             // LD-4 (real run 2026-11-02): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
-            // sentences, and they are cut here to the target.
-            let sentences = body_sentences(&body)
-                .into_iter()
-                .enumerate()
-                .map(|(number, (from, to, text))| json!({"n":number,"chars":to - from,"text":text}))
-                .collect::<Vec<_>>();
-            let (run_id, outcome) = craft_call(
-                "cut-length",
-                "CUT_CHAPTER",
-                &render_profile,
-                2,
-                json!({
-                    "chapterId":chapter_id,"chapterPlan":plan_payload,"sentences":sentences,
-                    "currentChars":length,
-                    "targetChars":length_range.target(),
-                    "cutChars":length - length_range.target()
-                }),
-            )?;
-            prose_run_ids.push(run_id);
-            let cut = outcome
-                .parsed
-                .as_ref()
-                .and_then(|payload| payload.get("cut"))
-                .and_then(Value::as_array)
-                .ok_or_else(|| "B08_CUT_CHAPTER_OUTPUT_INVALID".to_string())?
-                .iter()
-                .filter_map(Value::as_u64)
-                .map(|number| number as usize)
-                .collect::<Vec<_>>();
-            body = crate::chapter_length::cut_sentences(&body, &cut, length_range);
+            // sentences, and they are cut here to the target. It chose too
+            // few once in a while, so a cut that still leaves the chapter
+            // too long gets a second round.
+            for round in 0..2 {
+                let length = character_count(&body);
+                if length_range.accepts(length) {
+                    break;
+                }
+                let sentences = body_sentences(&body)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(number, (from, to, text))| json!({"n":number,"chars":to - from,"text":text}))
+                    .collect::<Vec<_>>();
+                let (run_id, outcome) = craft_call(
+                    &format!("cut-length-{round}"),
+                    "CUT_CHAPTER",
+                    &render_profile,
+                    2 + round,
+                    json!({
+                        "chapterId":chapter_id,"chapterPlan":plan_payload,"sentences":sentences,
+                        "currentChars":length,
+                        "targetChars":length_range.target(),
+                        "cutChars":length - length_range.target()
+                    }),
+                )?;
+                prose_run_ids.push(run_id);
+                let cut = outcome
+                    .parsed
+                    .as_ref()
+                    .and_then(|payload| payload.get("cut"))
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "B08_CUT_CHAPTER_OUTPUT_INVALID".to_string())?
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|number| number as usize)
+                    .collect::<Vec<_>>();
+                body = crate::chapter_length::cut_sentences(&body, &cut, length_range);
+                if character_count(&body) == length {
+                    break;
+                }
+            }
         }
         if !in_range(&body) {
             return Err(length_error(&body));

@@ -19,6 +19,8 @@ struct CraftGateway {
     rewrite_ending: Option<String>,
     /// Text writer call N adds to its body (missing calls add none).
     inject: Vec<String>,
+    /// The first cut chooses only the first this many sentences.
+    first_cut: Option<usize>,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -32,6 +34,7 @@ impl CraftGateway {
             fail_first_audit: false,
             rewrite_ending: None,
             inject: Vec::new(),
+            first_cut: None,
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -109,6 +112,11 @@ impl ProductionModelGateway for CraftGateway {
                 let ending = body[body.len() - 12..].iter().collect::<String>();
                 response.output = json!({"findings":[{"code":"prose_wordy","severity":"HIGH",
                     "quote":ending,"problem":"收尾拖沓","suggestion":"收紧"}]});
+            }
+            ("CUT_CHAPTER", _)
+                if self.inputs("CUT_CHAPTER").len() == 1 && self.first_cut.is_some() =>
+            {
+                response.output = json!({"cut":(1..=self.first_cut.unwrap()).collect::<Vec<_>>()});
             }
             ("REWRITE_PASSAGES", Some(replacement)) => {
                 response.output = json!({"edits":[{"quote":input["findings"][0]["quote"],"replacement":replacement}]});
@@ -268,8 +276,9 @@ fn craft_v2_a_chapter_in_range_needs_no_adjustment_and_one_still_outside_is_not_
     assert!(result
         .unwrap_err()
         .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"));
-    // One sentence past the range cannot be cut without losing the ending.
-    assert_eq!(too_long.inputs("CUT_CHAPTER").len(), 1);
+    // Past the opening, all that is left is the ending, which is never cut;
+    // the second round cuts nothing and the chapter is not committed.
+    assert_eq!(too_long.inputs("CUT_CHAPTER").len(), 2);
     assert!(too_long.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
 }
 
@@ -293,6 +302,26 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     assert_eq!(cut[0]["sentences"][0]["n"], 0);
     assert!(cut[0]["sentences"][0]["chars"].as_i64().unwrap() > 0);
     assert!(gateway.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
+    let committed = committed_word_count(&state, project_id, &chapter_id);
+    assert!((2000..=2500).contains(&committed), "{committed}");
+}
+
+#[test]
+fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
+    // Real run 2026-11-02 (round 10): the writer chose sentences for 70% of
+    // what had to go.
+    let mut gateway = CraftGateway::new(vec![good_plan()], &[3600]);
+    gateway.inject = vec![(0..60)
+        .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
+        .collect()];
+    gateway.first_cut = Some(10);
+    let gateway = Arc::new(gateway);
+    let project_id = "p-ld4-cut-twice";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let cut = gateway.inputs("CUT_CHAPTER");
+    assert_eq!(cut.len(), 2);
+    assert_eq!(cut[1]["currentChars"], 3420);
     let committed = committed_word_count(&state, project_id, &chapter_id);
     assert!((2000..=2500).contains(&committed), "{committed}");
 }
