@@ -157,6 +157,65 @@ pub fn character_count(text: &str) -> i64 {
     text.chars().count() as i64
 }
 
+/// LD-4: `body` shortened by deleting its sentences (numbered as in
+/// `chapter_craft::sentence_spans`) in the order `cut` names them, until
+/// it is at most the range's target. A cut is skipped when it would take
+/// the chapter below the minimum, when it is the last sentence (the
+/// planned ending) or when it is half of a line of dialogue.
+pub fn cut_sentences(body: &str, cut: &[usize], range: ChapterLengthRange) -> String {
+    let spans = crate::chapter_craft::sentence_spans(body);
+    let mut removed = vec![false; spans.len()];
+    let mut shortened = body.to_string();
+    for &number in cut {
+        if character_count(&shortened) <= range.target() {
+            break;
+        }
+        let Some(&(start, end)) = spans.get(number) else {
+            continue;
+        };
+        let sentence = &body[start..end];
+        if removed[number]
+            || number + 1 == spans.len()
+            || sentence.matches('“').count() != sentence.matches('”').count()
+        {
+            continue;
+        }
+        removed[number] = true;
+        let candidate = without_sentences(body, &spans, &removed);
+        if character_count(&candidate) < range.min {
+            removed[number] = false;
+        } else {
+            shortened = candidate;
+        }
+    }
+    shortened
+}
+
+/// `body` without the `removed` sentences; a line they emptied goes, with
+/// the blank line after it.
+fn without_sentences(body: &str, spans: &[(usize, usize)], removed: &[bool]) -> String {
+    let mut kept = String::with_capacity(body.len());
+    let mut at = 0;
+    for (&(start, end), _) in spans.iter().zip(removed).filter(|(_, removed)| **removed) {
+        kept.push_str(&body[at..start]);
+        at = end;
+    }
+    kept.push_str(&body[at..]);
+    // Sentences never span a line, so the lines still pair up.
+    let mut lines = Vec::new();
+    let mut emptied = false;
+    for (before, after) in body.split('\n').zip(kept.split('\n')) {
+        let was_blank = before.trim().is_empty();
+        if after.trim().is_empty() && (!was_blank || emptied) {
+            emptied = !was_blank;
+            continue;
+        }
+        emptied = false;
+        lines.push(after);
+    }
+    lines.join("\n")
+}
+
 /// Sum of the plan's per-scene `estimatedCharacters`; None when any scene
 /// lacks a positive estimate or there are no scenes.
 pub fn plan_estimate(plan: &Value) -> Option<i64> {
@@ -185,6 +244,49 @@ pub fn validate_plan_length(plan: &Value, range: ChapterLengthRange) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `count` sentences of ten characters, one a line.
+    fn lines_of_ten(count: usize) -> String {
+        (0..count)
+            .map(|n| format!("第{n:02}句话写在这里。"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn ld4_a_long_chapter_loses_the_chosen_sentences_in_order_until_it_reaches_the_target() {
+        let range = ChapterLengthRange { min: 50, max: 70 };
+        let cut = cut_sentences(&lines_of_ten(10), &[2, 5, 7, 0, 1, 3], range);
+        assert_eq!(
+            cut,
+            "第03句话写在这里。\n第04句话写在这里。\n第06句话写在这里。\n第08句话写在这里。\n第09句话写在这里。"
+        );
+    }
+
+    #[test]
+    fn ld4_a_cut_below_the_minimum_of_the_ending_or_of_half_a_line_of_dialogue_is_skipped() {
+        let body = "第00句话写在这里。\n“你先走。我留下。”\n第02句话写在这里。";
+        let range = ChapterLengthRange { min: 5, max: 10 };
+        assert_eq!(
+            cut_sentences(body, &[3, 1, 2, 0], range),
+            "“你先走。我留下。”\n第02句话写在这里。"
+        );
+        let range = ChapterLengthRange { min: 100, max: 105 };
+        assert_eq!(
+            cut_sentences(&lines_of_ten(10), &[0, 1], range),
+            lines_of_ten(10)
+        );
+    }
+
+    #[test]
+    fn ld4_a_paragraph_cut_whole_takes_its_blank_line_with_it() {
+        let body = "第00句话写在这里。\n\n第01句话写在这里。\n\n第02句话写在这里。";
+        let range = ChapterLengthRange { min: 5, max: 10 };
+        assert_eq!(
+            cut_sentences(body, &[1], range),
+            "第00句话写在这里。\n\n第02句话写在这里。"
+        );
+    }
 
     #[test]
     fn fx18_range_resolution_prefers_chosen_then_saved_chapter_then_work_then_default() {

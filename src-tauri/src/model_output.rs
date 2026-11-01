@@ -24,6 +24,10 @@ const SPECS: &[(&[&str], &str)] = &[
         include_str!("../../contracts/model-output/chapter-body.schema.json"),
     ),
     (
+        &["CUT_CHAPTER"],
+        include_str!("../../contracts/model-output/cut-chapter.schema.json"),
+    ),
+    (
         &["REWRITE_PASSAGES"],
         include_str!("../../contracts/model-output/rewrite-passages.schema.json"),
     ),

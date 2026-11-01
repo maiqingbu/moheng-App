@@ -1,6 +1,6 @@
 //! CRAFT v3 step 3b: an r2 chapter is written in one piece with the story
 //! bible and the style card, brought into the length range by one
-//! expand/compress call, and its rule findings (tropes included) are edited
+//! expand or cut call, and its rule findings (tropes included) are edited
 //! in place without a model review.
 
 mod craft_v3_support;
@@ -244,9 +244,7 @@ fn an_r2_chapter_is_written_whole_with_bible_and_style_card_then_sized_and_edite
     assert_eq!(render["chapterPlan"]["payloadSchema"], "chapter-plan.r2");
     assert!(render.get("beatTargets").is_none() && render.get("partLengthRange").is_none());
     let adjust = call("ADJUST_CHAPTER_LENGTH").expect("length adjustment");
-    assert_eq!(adjust["direction"], "EXPAND");
-    // Real run 2026-10-24: told only how far over, the model cut about a
-    // tenth; it now gets the count it has and the count to reach.
+    // The writer gets the count it has and the count to reach.
     assert!(adjust["currentChars"].as_i64() < adjust["targetChars"].as_i64());
     assert!(adjust.get("shortBy").is_none() && adjust.get("overBy").is_none());
     let rewrite = call("REWRITE_PASSAGES").expect("rule edits");

@@ -3005,13 +3005,13 @@ fn run_chapter_production_inner(
     // with the rewrite skills. Only edits whose passage occurs once apply,
     // and a rewrite that leaves the length range is dropped whole.
     let mut prose_run_ids = Vec::new();
-    // A chapter outside the length range gets one expand or compress call;
+    // A chapter outside the length range is expanded or cut once;
     // it is never committed outside the range.
     if gateway.enforces_chapter_length() {
         let in_range = |text: &str| length_range.accepts(character_count(text));
         body = crate::chapter_craft::normalize_typography(body.trim());
-        if !in_range(&body) {
-            let length = character_count(&body);
+        let length = character_count(&body);
+        if length < length_range.min {
             let (run_id, outcome) = craft_call(
                 "adjust-length",
                 "ADJUST_CHAPTER_LENGTH",
@@ -3019,7 +3019,6 @@ fn run_chapter_production_inner(
                 2,
                 json!({
                     "chapterId":chapter_id,"chapterPlan":plan_payload,"body":body,
-                    "direction":if length < length_range.min { "EXPAND" } else { "COMPRESS" },
                     "currentChars":length,
                     "targetChars":length_range.target(),
                     "chapterLengthRange":length_range.to_json()
@@ -3033,6 +3032,39 @@ fn run_chapter_production_inner(
                 .and_then(Value::as_str)
                 .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
                 .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
+        } else if !length_range.accepts(length) {
+            // LD-4 (real run 2026-11-02): asked to compress, the writer cut
+            // 0-10% of chapters a third too long; it now only chooses the
+            // sentences, and they are cut here to the target.
+            let sentences = body_sentences(&body)
+                .into_iter()
+                .enumerate()
+                .map(|(number, (from, to, text))| json!({"n":number,"chars":to - from,"text":text}))
+                .collect::<Vec<_>>();
+            let (run_id, outcome) = craft_call(
+                "cut-length",
+                "CUT_CHAPTER",
+                &render_profile,
+                2,
+                json!({
+                    "chapterId":chapter_id,"chapterPlan":plan_payload,"sentences":sentences,
+                    "currentChars":length,
+                    "targetChars":length_range.target(),
+                    "cutChars":length - length_range.target()
+                }),
+            )?;
+            prose_run_ids.push(run_id);
+            let cut = outcome
+                .parsed
+                .as_ref()
+                .and_then(|payload| payload.get("cut"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| "B08_CUT_CHAPTER_OUTPUT_INVALID".to_string())?
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|number| number as usize)
+                .collect::<Vec<_>>();
+            body = crate::chapter_length::cut_sentences(&body, &cut, length_range);
         }
         if !in_range(&body) {
             return Err(length_error(&body));

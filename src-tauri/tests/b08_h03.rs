@@ -151,6 +151,10 @@ impl ProductionModelGateway for RecordingGateway {
             }),
             "REVIEW_CHAPTER" => json!({"findings":[]}),
             "REWRITE_PASSAGES" => json!({"edits":[]}),
+            // Every sentence, as a writer asked to cut anything it can.
+            "CUT_CHAPTER" => {
+                json!({"cut":(0..input["sentences"].as_array().map_or(0, Vec::len)).collect::<Vec<_>>()})
+            }
             "AUDIT_EXTRACT" => json!({
                 "qualityFindings":[],
                 "canonCandidates":[{

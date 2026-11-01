@@ -18,7 +18,7 @@ struct CraftGateway {
     /// the rewrite replaces them with this text.
     rewrite_ending: Option<String>,
     /// Text writer call N adds to its body (missing calls add none).
-    inject: Vec<&'static str>,
+    inject: Vec<String>,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -146,7 +146,7 @@ impl ProductionModelGateway for CraftGateway {
             let motif = format!(
                 "{}{}",
                 MOTIF.repeat(self.motifs.get(renders).copied().unwrap_or(0)),
-                self.inject.get(renders).copied().unwrap_or("")
+                self.inject.get(renders).map_or("", String::as_str)
             );
             let body = format!("{}{motif}", response.output["body"].as_str().unwrap());
             let filler = length.saturating_sub(body.chars().count() + 1);
@@ -251,7 +251,6 @@ fn craft_v2_a_chapter_is_written_once_and_sized_by_one_adjustment() {
     assert!(renders[0].get("part").is_none() && renders[0].get("beatTargets").is_none());
     let adjust = gateway.inputs("ADJUST_CHAPTER_LENGTH");
     assert_eq!(adjust.len(), 1);
-    assert_eq!(adjust[0]["direction"], "EXPAND");
     assert_eq!(adjust[0]["currentChars"], 1200);
     assert_eq!(adjust[0]["targetChars"], 2500);
     assert_eq!(committed_word_count(&state, project_id, &chapter_id), 2500);
@@ -269,10 +268,33 @@ fn craft_v2_a_chapter_in_range_needs_no_adjustment_and_one_still_outside_is_not_
     assert!(result
         .unwrap_err()
         .starts_with("B08_RENDER_LENGTH_OUT_OF_RANGE"));
-    assert_eq!(
-        too_long.inputs("ADJUST_CHAPTER_LENGTH")[0]["direction"],
-        "COMPRESS"
-    );
+    // One sentence past the range cannot be cut without losing the ending.
+    assert_eq!(too_long.inputs("CUT_CHAPTER").len(), 1);
+    assert!(too_long.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
+}
+
+#[test]
+fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
+    // Real run 2026-11-02: asked to compress, the writer cut 0-10% of
+    // chapters a third too long; it now only chooses the sentences.
+    let mut gateway = CraftGateway::new(vec![good_plan()], &[3400]);
+    let walking = (0..60)
+        .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
+        .collect::<String>();
+    gateway.inject = vec![walking];
+    let gateway = Arc::new(gateway);
+    let project_id = "p-ld4-cut";
+    let (_temp, state, chapter_id, result) = produce(gateway.clone(), project_id);
+    result.unwrap();
+    let cut = gateway.inputs("CUT_CHAPTER");
+    assert_eq!(cut.len(), 1);
+    assert_eq!(cut[0]["currentChars"], 3400);
+    assert_eq!(cut[0]["cutChars"], 900);
+    assert_eq!(cut[0]["sentences"][0]["n"], 0);
+    assert!(cut[0]["sentences"][0]["chars"].as_i64().unwrap() > 0);
+    assert!(gateway.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
+    let committed = committed_word_count(&state, project_id, &chapter_id);
+    assert!((2000..=2500).contains(&committed), "{committed}");
 }
 
 fn committed_word_count(state: &KernelState, project_id: &str, chapter_id: &str) -> i64 {
@@ -745,7 +767,7 @@ fn craft_v2_a_repeat_that_would_fail_signing_is_the_first_rewrite_finding() {
     // repeat came after eight other findings. It leads the review's too.
     let gateway = Arc::new(CraftGateway {
         motifs: vec![3],
-        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],
+        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。".into()],
         // A review finding, with a rewrite the length check discards.
         rewrite_ending: Some("长".repeat(2000)),
         ..CraftGateway::new(vec![good_plan()], &[2500])
@@ -765,7 +787,7 @@ fn craft_v2_a_repeat_that_would_fail_signing_is_the_first_rewrite_finding() {
 #[test]
 fn craft_v2_rule_findings_go_to_the_rewrite_with_the_review() {
     let gateway = Arc::new(CraftGateway {
-        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。"],
+        inject: vec!["他喉结滚动。她没说话。他的喉结又动了一下。门外喉结般的石钮微响。".into()],
         ..CraftGateway::new(vec![good_plan()], &[2500])
     });
     let project_id = "p-craft-rule-findings";

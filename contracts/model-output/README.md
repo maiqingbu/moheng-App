@@ -12,6 +12,7 @@
 | 文件 | 模型步骤 |
 |---|---|
 | `chapter-body.schema.json` | RENDER_CHAPTER_CRAFT、ADJUST_CHAPTER_LENGTH、RENDER_CHAPTER |
+| `cut-chapter.schema.json` | CUT_CHAPTER |
 | `rewrite-passages.schema.json` | REWRITE_PASSAGES |
 | `audit-extract.schema.json` | AUDIT_EXTRACT |
 | `check-continuity.schema.json` | CHECK_CONTINUITY |

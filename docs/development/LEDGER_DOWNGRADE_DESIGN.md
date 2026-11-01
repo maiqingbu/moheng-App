@@ -50,7 +50,7 @@
 
 重试会叠加（每次都单独记账、单独预留费用，不重复计费）：审计最坏 4 次（原始、规范重发、auditFeedback 重跑、再规范重发）；计划最坏 6 次（3 轮重计划 × 每轮可能一次规范重发）。每章 16 次模型调用的上限仍然兜底。
 
-已覆盖（第 1a 步）：RENDER_CHAPTER_CRAFT、ADJUST_CHAPTER_LENGTH（`chapter-body`）、REWRITE_PASSAGES、AUDIT_EXTRACT。
+已覆盖（第 1a 步）：RENDER_CHAPTER_CRAFT、ADJUST_CHAPTER_LENGTH（`chapter-body`）、REWRITE_PASSAGES、AUDIT_EXTRACT。LD-4（2026-11-02）新增 CUT_CHAPTER（`cut-chapter`）：章节过长时模型只挑要删的句子编号，由代码删到目标字数。
 
 ### 2.3 编号由系统分配（LD-1.2）
 
