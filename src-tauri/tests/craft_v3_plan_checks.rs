@@ -4,7 +4,8 @@
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
 use ai_novel_production_system_core::chapter_length::ChapterLengthRange;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, plan_problems, sizing_problems, skill_decisions,
+    check_craft_plan, creation_ledger, drop_unchosen_beats, plan_problems, sizing_problems,
+    skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -267,10 +268,10 @@ fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_repl
     // person failed the contract with no chance to replan.
     let mut crowded = plan();
     crowded["craft"]["scenes"][0]["events"] = json!(["一", "二", "三", "四", "五", "六", "七"]);
-    crowded["craft"]["scenes"][1]["people"] = json!([person("林满")]);
+    crowded["craft"]["scenes"][1]["people"] = json!([]);
     let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "第 1 场有 7 条事件"), "{problems:?}");
-    assert!(has(&problems, "第 2 场只有 1 个人物"), "{problems:?}");
+    assert!(has(&problems, "第 2 场没有人物"), "{problems:?}");
     let mut four = plan();
     four["craft"]["scenes"] = json!([
         scene("江边码头"),
@@ -355,6 +356,84 @@ fn ld5_the_planner_sees_the_recent_chapters_shapes() {
     let ledger = creation_ledger(&[(1, earlier)], &bible());
     assert_eq!(
         ledger["shapes"],
-        json!([{"chapter":1,"scenes":[{"events":3,"estimatedCharacters":1200},{"events":3,"estimatedCharacters":null}]}])
+        json!([{"chapter":1,
+            "beats":["bigTurn","smallDiscovery","protagonistWin","device","warmth","emotionalBeat","newLosses"],
+            "scenes":[{"events":3,"estimatedCharacters":1200},{"events":3,"estimatedCharacters":null}]}])
     );
+}
+
+/// LD-6 (owner decision 2026-11-01): the beats are chosen for the chapter;
+/// a chapter always changes the situation, has its scenes and its hook.
+const BEATS: [&str; 7] = [
+    "bigTurn",
+    "smallDiscovery",
+    "protagonistWin",
+    "device",
+    "warmth",
+    "emotionalBeat",
+    "newLosses",
+];
+
+fn without_beats(chapter_plan: Value, keep: &[&str]) -> Value {
+    let mut plan = chapter_plan;
+    let craft = plan["craft"].as_object_mut().unwrap();
+    for beat in BEATS.iter().filter(|beat| !keep.contains(beat)) {
+        craft.remove(*beat);
+    }
+    plan
+}
+
+#[test]
+fn ld6_a_chapter_with_none_of_the_beats_but_a_changed_situation_passes() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_a_beat_the_plan_keeps_must_still_be_concrete() {
+    let mut plan = without_beats(plan(), &["bigTurn"]);
+    plan["craft"]["bigTurn"] = json!("转折");
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "大转折写得太空"), "{problems:?}");
+}
+
+#[test]
+fn ld6_the_first_three_chapters_keep_the_win_their_opening_arc_names() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 2, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "主角赢的一局"), "{problems:?}");
+}
+
+#[test]
+fn ld6_one_person_alone_is_a_scene() {
+    let mut plan = plan();
+    plan["craft"]["scenes"][1]["people"] = json!([person("林满")]);
+    plan["craft"]["scenes"][1]["conflict"] = json!("天亮前要在面馆的旧账里找出那张借据");
+    let problems = plan_problems(&plan, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_a_beat_sent_empty_was_not_chosen() {
+    // Told the beats are optional, a model fills the shape with empty ones.
+    let mut plan = plan();
+    plan["craft"]["bigTurn"] = json!("");
+    plan["craft"]["warmth"] = Value::Null;
+    plan["craft"]["newLosses"] = json!([]);
+    plan["craft"]["device"] = json!({"name":"","status":"","howUsed":" "});
+    drop_unchosen_beats(&mut plan);
+    for beat in ["bigTurn", "warmth", "newLosses", "device"] {
+        assert!(plan["craft"].get(beat).is_none(), "{beat}: {plan}");
+    }
+    assert!(plan["craft"].get("smallDiscovery").is_some());
+    let problems = plan_problems(&plan, 4, &bible(), &creation_ledger(&[], &bible()));
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn ld6_the_win_the_opening_arc_names_is_reported_missing_not_vague() {
+    let plan = without_beats(plan(), &[]);
+    let problems = plan_problems(&plan, 2, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "主角赢的一局没写"), "{problems:?}");
 }

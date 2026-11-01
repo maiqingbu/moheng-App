@@ -43,6 +43,7 @@ pub fn normalize_chapter_plan_model_output(
     authoritative_bindings: &Value,
 ) -> Value {
     crate::craft_plan::fold_opening_threat(&mut plan);
+    crate::craft_plan::drop_unchosen_beats(&mut plan);
     if let Some(object) = plan.as_object_mut() {
         object.retain(|key, _| {
             matches!(

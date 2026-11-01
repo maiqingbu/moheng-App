@@ -39,8 +39,70 @@ const SKILL_FIELDS: &[(&str, &[&str])] = &[
 /// LD-5 (owner decision 2026-11-01): bounds only; how many scenes and
 /// events a chapter has follows from what it has to do.
 pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 1..=3;
-pub(crate) const MIN_SCENE_PEOPLE: usize = 2;
+/// LD-6: one person alone is a scene too (a search, a flight, reasoning).
+pub(crate) const MIN_SCENE_PEOPLE: usize = 1;
 pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 1..=5;
+/// What is wrong with the device a plan uses, against the earlier uses.
+fn device_problems(planned: &Value, ledger: &Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let device = text(&planned["name"]);
+    let earlier_uses = ledger["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| text(&item["name"]) == device)
+        .collect::<Vec<_>>();
+    let used_before = !earlier_uses.is_empty();
+    match text(&planned["status"]) {
+        "NEW" if used_before => problems.push(format!(
+            "异常手法「{device}」之前已经用过，标为新手法不对；要么换新手法，要么写清楚怎么升级"
+        )),
+        "ESCALATED" if !used_before => {
+            problems.push(format!("异常手法「{device}」之前没用过，不能标为升级"))
+        }
+        "NEW" | "ESCALATED" => {}
+        _ => problems.push("异常手法的 status 只能是 NEW 或 ESCALATED".into()),
+    }
+    if earlier_uses
+        .iter()
+        .any(|item| text(&item["howUsed"]) == text(&planned["howUsed"]))
+    {
+        problems.push(format!(
+            "异常手法「{device}」的用法和之前一模一样，需要新的变化"
+        ));
+    }
+    problems
+}
+
+/// LD-6: a beat the model sent empty (blank text, null, an empty list or
+/// an object of blanks) was not chosen, so it leaves the plan.
+pub fn drop_unchosen_beats(plan: &mut Value) {
+    fn blank(value: &Value) -> bool {
+        match value {
+            Value::Null => true,
+            Value::String(text) => text.trim().is_empty(),
+            Value::Array(items) => items.iter().all(blank),
+            Value::Object(fields) => fields.values().all(blank),
+            _ => false,
+        }
+    }
+    if let Some(craft) = plan.get_mut("craft").and_then(Value::as_object_mut) {
+        craft.retain(|beat, value| !(CHOSEN_BEATS.contains(&beat.as_str()) && blank(value)));
+    }
+}
+
+/// LD-6 (owner decision 2026-11-01): the beats a plan chooses for its
+/// chapter as it needs them; situationChange, scenes and endHook every
+/// chapter has.
+const CHOSEN_BEATS: [&str; 7] = [
+    "bigTurn",
+    "smallDiscovery",
+    "protagonistWin",
+    "device",
+    "warmth",
+    "emotionalBeat",
+    "newLosses",
+];
 /// LD-5: the least room an event needs written out with action and
 /// dialogue (the planner is told 250 and much more for a confrontation);
 /// less and the scene reads as a list (real run 2026-11-01: fifteen events
@@ -61,16 +123,16 @@ pub(crate) const OPENING_THREAT_WITHIN: usize = 600;
 /// contract requires besides those `plan_problems` judges for substance,
 /// each as `(pointer, what it is)`, scene and person fields included.
 fn required_plan_texts(plan: &Value) -> Vec<(String, String)> {
-    let mut fields = vec![
-        (
-            "/chapterGoal".to_string(),
-            "本章目标（chapterGoal）".to_string(),
-        ),
-        (
+    let mut fields = vec![(
+        "/chapterGoal".to_string(),
+        "本章目标（chapterGoal）".to_string(),
+    )];
+    if plan["craft"].get("device").is_some() {
+        fields.push((
             "/craft/device/name".into(),
             "异常手法的名字（device.name）".into(),
-        ),
-    ];
+        ));
+    }
     for (index, scene) in scenes(&plan["craft"]).iter().enumerate() {
         let at = |field: &str| format!("/craft/scenes/{index}/{field}");
         let number = index + 1;
@@ -110,15 +172,11 @@ fn blank(plan: &Value, pointer: &str) -> bool {
 
 /// The required plan fields the planner left out or empty, as problems.
 fn missing_plan_fields(plan: &Value) -> Vec<String> {
-    let mut missing = required_plan_texts(plan)
+    required_plan_texts(plan)
         .into_iter()
         .filter(|(pointer, _)| blank(plan, pointer))
         .map(|(_, label)| format!("{label}没写"))
-        .collect::<Vec<_>>();
-    if !plan["craft"]["newLosses"].is_array() {
-        missing.push("失去的东西（newLosses）没写，没有就写空列表".into());
-    }
-    missing
+        .collect()
 }
 
 /// QC-1: the last lenient pass fills what the planner left out, so the
@@ -136,7 +194,10 @@ pub(crate) fn complete_plan_fields(plan: &mut Value) -> Vec<String> {
         }
         let (parent, field) = pointer.rsplit_once('/').expect("a pointer has a parent");
         let fallback = match field {
-            "chapterGoal" => text(&plan["craft"]["bigTurn"]),
+            "chapterGoal" => match text(&plan["craft"]["bigTurn"]) {
+                "" => text(&plan["craft"]["situationChange"]["after"]),
+                turn => turn,
+            },
             "readerQuestion" => text(&plan["craft"]["endHook"]),
             _ => "",
         };
@@ -147,12 +208,6 @@ pub(crate) fn complete_plan_fields(plan: &mut Value) -> Vec<String> {
         if let Some(object) = plan.pointer_mut(parent).and_then(Value::as_object_mut) {
             object.insert(field.to_string(), json!(value));
             filled.push(label);
-        }
-    }
-    if let Some(craft) = plan["craft"].as_object_mut() {
-        if !craft.get("newLosses").is_some_and(Value::is_array) {
-            craft.insert("newLosses".into(), json!([]));
-            filled.push("失去的东西（newLosses）".into());
         }
     }
     filled
@@ -244,12 +299,16 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
     let mut shapes = Vec::new();
     for (chapter, craft) in prior {
         shapes.push(
-            json!({"chapter":chapter,"scenes":scenes(craft).iter().map(|scene| json!({
+            json!({"chapter":chapter,
+            "beats":CHOSEN_BEATS.iter().filter(|beat| craft.get(**beat).is_some()).collect::<Vec<_>>(),
+            "scenes":scenes(craft).iter().map(|scene| json!({
             "events":event_count(scene),
             "estimatedCharacters":scene["estimatedCharacters"]
         })).collect::<Vec<_>>()}),
         );
-        devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
+        if craft.get("device").is_some() {
+            devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
+        }
         endings.push(json!({"chapter":chapter,"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"])}));
         people.extend(scene_people(craft).map(|person| text(&person["name"]).to_string()));
         losses.extend(
@@ -295,17 +354,28 @@ fn bible_people(bible: &Value) -> BTreeSet<&str> {
 pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) -> Vec<String> {
     let craft = &plan["craft"];
     let mut problems = Vec::new();
-    for (path, label) in [
-        ("/bigTurn", "大转折"),
-        ("/smallDiscovery", "小发现"),
-        ("/protagonistWin", "主角赢的一局"),
-        ("/warmth", "温度或幽默"),
-        ("/emotionalBeat", "情感时刻"),
-        ("/endHook", "章末钩子"),
-        ("/situationChange/before", "处境变化（前）"),
-        ("/situationChange/after", "处境变化（后）"),
-        ("/device/howUsed", "异常手法的用法"),
+    // LD-6 (owner decision 2026-11-01): a chapter always changes the
+    // situation and ends on a hook; a chosen beat (`Some`) is checked only
+    // when the plan has it, except the win chapters 1-3 take from their
+    // opening arc.
+    for (beat, path, label) in [
+        (Some("bigTurn"), "/bigTurn", "大转折"),
+        (Some("smallDiscovery"), "/smallDiscovery", "小发现"),
+        (Some("protagonistWin"), "/protagonistWin", "主角赢的一局"),
+        (Some("warmth"), "/warmth", "温度或幽默"),
+        (Some("emotionalBeat"), "/emotionalBeat", "情感时刻"),
+        (None, "/endHook", "章末钩子"),
+        (None, "/situationChange/before", "处境变化（前）"),
+        (None, "/situationChange/after", "处境变化（后）"),
+        (Some("device"), "/device/howUsed", "异常手法的用法"),
     ] {
+        let opening_win = beat == Some("protagonistWin") && chapter <= 3;
+        if beat.is_some_and(|beat| craft.get(beat).is_none()) {
+            if opening_win {
+                problems.push(format!("{label}没写：前三章要写开局走向里这一章赢的那一局"));
+            }
+            continue;
+        }
         if craft.pointer(path).map(text).unwrap_or("").chars().count() < MIN_DECISION_CHARS {
             problems.push(format!(
                 "{label}写得太空，需要具体到人和事（至少 {MIN_DECISION_CHARS} 个字）"
@@ -337,10 +407,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     for (index, scene) in scene_list.iter().enumerate() {
         let people = scene["people"].as_array().map_or(0, Vec::len);
         if people < MIN_SCENE_PEOPLE {
-            problems.push(format!(
-                "第 {} 场只有 {people} 个人物，每场至少两人在场且有冲突",
-                index + 1
-            ));
+            problems.push(format!("第 {} 场没有人物", index + 1));
         }
         let events = event_count(scene);
         if !SCENE_EVENTS.contains(&events) {
@@ -352,36 +419,11 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             ));
         }
     }
-    if !matches!(text(&craft["device"]["status"]), "NEW" | "ESCALATED") {
-        problems.push("异常手法的 status 只能是 NEW 或 ESCALATED".into());
-    }
     if text(&craft["situationChange"]["before"]) == text(&craft["situationChange"]["after"]) {
         problems.push("处境变化前后相同，本章结束时主角的处境必须变了".into());
     }
-    let device = text(&craft["device"]["name"]);
-    let earlier_uses = ledger["devices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| text(&item["name"]) == device)
-        .collect::<Vec<_>>();
-    let used_before = !earlier_uses.is_empty();
-    match text(&craft["device"]["status"]) {
-        "NEW" if used_before => problems.push(format!(
-            "异常手法「{device}」之前已经用过，标为新手法不对；要么换新手法，要么写清楚怎么升级"
-        )),
-        "ESCALATED" if !used_before => {
-            problems.push(format!("异常手法「{device}」之前没用过，不能标为升级"))
-        }
-        _ => {}
-    }
-    if earlier_uses
-        .iter()
-        .any(|item| text(&item["howUsed"]) == text(&craft["device"]["howUsed"]))
-    {
-        problems.push(format!(
-            "异常手法「{device}」的用法和之前一模一样，需要新的变化"
-        ));
+    if let Some(planned) = craft.get("device") {
+        problems.extend(device_problems(planned, ledger));
     }
     let last_places = ledger["lastChapterPlaces"]
         .as_array()
@@ -531,12 +573,15 @@ pub fn skill_decisions(plan: &Value, skill_ids: &[String]) -> Value {
                 .iter()
                 .find(|(id, _)| id == skill_id)
                 .map(|(_, fields)| {
-                    let decisions = fields
+                    // LD-6: a beat the chapter did not choose was decided by no one.
+                    fields
                         .iter()
                         .map(|field| (field.to_string(), decision(craft, field)))
-                        .collect::<serde_json::Map<_, _>>();
-                    json!({"skillId":skill_id,"decisions":decisions})
+                        .filter(|(_, decided)| !decided.is_null())
+                        .collect::<serde_json::Map<_, _>>()
                 })
+                .filter(|decisions| !decisions.is_empty())
+                .map(|decisions| json!({"skillId":skill_id,"decisions":decisions}))
         })
         .collect::<Vec<_>>())
 }

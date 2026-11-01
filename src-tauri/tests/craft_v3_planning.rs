@@ -83,6 +83,7 @@ impl ProductionModelGateway for CraftGateway {
                         .unwrap()
                         .remove("hides");
                     craft["device"].as_object_mut().unwrap().remove("name");
+                    // LD-6: chosen per chapter, so leaving it out is no problem.
                     craft.as_object_mut().unwrap().remove("newLosses");
                     plan.as_object_mut().unwrap().remove("chapterGoal");
                 }
@@ -639,15 +640,11 @@ fn qc1_a_plan_missing_required_fields_is_sent_back_then_completed_with_a_plan_re
     assert_eq!(result["finalStatus"], "committed", "{result}");
     let inputs = gateway.plan_inputs.lock().unwrap();
     let problems = inputs[1]["planFeedback"]["problems"].to_string();
-    for missing in [
-        "留给读者的问题",
-        "隐瞒",
-        "异常手法的名字",
-        "失去的东西",
-        "本章目标",
-    ] {
+    for missing in ["留给读者的问题", "隐瞒", "异常手法的名字", "本章目标"] {
         assert!(problems.contains(missing), "{missing}: {problems}");
     }
+    // LD-6: what the protagonist loses is a beat chosen for the chapter.
+    assert!(!problems.contains("失去的东西"), "{problems}");
     drop(inputs);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
     let payload: String = connection

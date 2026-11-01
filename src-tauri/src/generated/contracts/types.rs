@@ -951,15 +951,22 @@ pub struct ChapterPlanR2ContinuityActionsItem {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChapterPlanR2Craft {
-    pub big_turn: String,
-    pub small_discovery: String,
-    pub protagonist_win: String,
-    pub device: ChapterPlanR2CraftDevice,
-    pub warmth: String,
-    pub emotional_beat: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub big_turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_discovery: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protagonist_win: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<ChapterPlanR2CraftDevice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotional_beat: Option<String>,
     pub situation_change: ChapterPlanR2CraftSituationChange,
     pub scenes: Vec<ChapterPlanR2CraftScenesItem>,
-    pub new_losses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_losses: Option<Vec<String>>,
     pub end_hook: String,
 }
 

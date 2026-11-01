@@ -228,7 +228,7 @@
        },
        "people": {
         "type": "array",
-        "minItems": 2,
+        "minItems": 1,
         "items": {
          "type": "object",
          "properties": {
@@ -303,15 +303,8 @@
     }
    },
    "required": [
-    "bigTurn",
-    "smallDiscovery",
-    "protagonistWin",
-    "device",
-    "warmth",
-    "emotionalBeat",
     "situationChange",
     "scenes",
-    "newLosses",
     "endHook"
    ],
    "additionalProperties": false
