@@ -17,6 +17,11 @@ const NOW: &str = "2026-09-13T12:00:00Z";
 struct BehaviorGateway {
     audit_calls: AtomicUsize,
     planning_contexts: Mutex<Vec<Value>>,
+    /// VD-1a: plans the book's direction after signing, with a chapter
+    /// table in every reply when `table_directions` is set.
+    plans_directions: bool,
+    table_directions: bool,
+    direction_inputs: Mutex<Vec<Value>>,
 }
 
 impl BehaviorGateway {
@@ -100,6 +105,10 @@ impl ProductionModelGateway for BehaviorGateway {
             endpoint: "fixture://b2-red-behavior".into(),
             timeout_ms: 1_000,
         })
+    }
+
+    fn plans_book_direction(&self) -> bool {
+        self.plans_directions
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
@@ -236,17 +245,55 @@ impl ProductionModelGateway for BehaviorGateway {
                 })
             }
             "OPENING_SIGNING_EVALUATION" => Self::signing_evaluation(input),
+            "PLAN_BOOK_DIRECTION" => {
+                self.direction_inputs.lock().unwrap().push(input.clone());
+                let mut direction = direction_reply(input);
+                if self.table_directions {
+                    direction["chapters"] = json!([{"no":4,"goal":"林舟去渡口"}]);
+                }
+                direction
+            }
             other => return Err(format!("unexpected behavior-test capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
     }
 }
 
+/// A direction whose three stages fill the first volume after the opening.
+fn direction_reply(input: &Value) -> Value {
+    let room = input["firstVolume"]["chaptersAfterOpening"]
+        .as_i64()
+        .unwrap();
+    let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"缺页的主人现身","estimatedChapters":chapters});
+    json!({
+        "protagonistMacroDirection":"林舟从躲债的学徒走到替全城重算旧账的人",
+        "mustAchieve":[{"volumeNo":1,"description":"林舟找回失踪账本的缺页"}],
+        "relationshipMacroDirections":[],
+        "majorMysteryGoals":[{"layer":1,"answerInVolume":1,"description":"缺页记的是谁的债"}],
+        "futureReservations":[{"description":"账本的来源","notBeforeVolumeNo":2}],
+        "volumeIntentSeeds":[{"volumeNo":1,"description":"追回缺页，逼出改账的人","stages":[
+            stage("林舟查清缺页落在谁手里", room / 3),
+            stage("林舟拿到改账的证据", room / 3),
+            stage("林舟当众对账", room - 2 * (room / 3))
+        ],"climax":"林舟在城门口当众对账"}]
+    })
+}
+
 fn state() -> (KernelState, tempfile::TempDir, Arc<BehaviorGateway>) {
+    state_with(false, false)
+}
+
+fn state_with(
+    plans_directions: bool,
+    table_directions: bool,
+) -> (KernelState, tempfile::TempDir, Arc<BehaviorGateway>) {
     let temp = tempfile::tempdir().expect("project directory");
     let gateway = Arc::new(BehaviorGateway {
         audit_calls: AtomicUsize::new(0),
         planning_contexts: Mutex::new(Vec::new()),
+        plans_directions,
+        table_directions,
+        direction_inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     (state, temp, gateway)
@@ -793,4 +840,94 @@ fn rv30_long_form_plan_input_keeps_canon_once_and_omits_evidence_quotes() {
             "HARD Plan input contains raw evidence quote from opening chapter {chapter_no}"
         );
     }
+}
+
+#[test]
+fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    assert_eq!(inputs.len(), 1);
+    assert!(
+        inputs[0]["firstVolume"]["chaptersAfterOpening"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert!(!inputs[0]["signing"]["verdict"].as_str().unwrap().is_empty());
+    assert_eq!(
+        approved["protagonistMacroDirection"],
+        "林舟从躲债的学徒走到替全城重算旧账的人"
+    );
+    assert_eq!(
+        approved["mustAchieve"],
+        json!([{"id":"goal:book:1","volumeNo":1,"description":"林舟找回失踪账本的缺页"}])
+    );
+    let seed = &approved["volumeIntentSeeds"][0];
+    assert_eq!(seed["seedId"], "volume-1");
+    assert_eq!(seed["stages"].as_array().unwrap().len(), 3);
+    assert_eq!(seed["stages"][2]["goal"], "林舟当众对账");
+    assert_eq!(approved["futureReservations"][0]["mayReveal"], false);
+    // The opening's facts still bind the plan as a rule, not as a goal.
+    assert!(approved["mustNotBreak"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule["description"] == "开篇已提交事实不得违背；以 Canon 为准。"));
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let runs: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM model_runs WHERE capability='PLAN_BOOK_DIRECTION'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(runs, 1);
+    drop(connection);
+    // The volume intent and route still compile from the new plan (VD-1b
+    // makes them follow its stages).
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id");
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(
+            &state,
+            &project_id,
+            &format!("vd1a:{step}"),
+            command_type,
+            json!({"volumeId":volume_id}),
+        );
+    }
+}
+
+#[test]
+fn vd1a_a_direction_that_keeps_listing_chapters_leaves_the_template_and_a_reminder() {
+    let (state, _temp, gateway) = state_with(true, true);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    assert_eq!(inputs.len(), 3, "one direction and two feedback rounds");
+    assert!(inputs[2]["planFeedback"]["problems"][0]
+        .as_str()
+        .unwrap()
+        .contains("不要写章表"));
+    assert!(approved["mustAchieve"][0]["id"]
+        .as_str()
+        .unwrap()
+        .starts_with("goal:opening-reality:"));
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (reason, payload): (String, String) = connection
+        .query_row(
+            "SELECT reason, payload_json FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND outcome='OPEN'",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        reason.starts_with("全书方向没有生成，沿用了模板："),
+        "{reason}"
+    );
+    assert!(payload.contains("规划提醒"), "{payload}");
 }

@@ -7356,6 +7356,10 @@ fn execute_planning_command_with_observer(
         .unwrap_or(Value::Null);
     let mut book_plan_dependencies: Vec<crate::generated::types::ArtifactRef> = Vec::new();
     let mut b02_plan_job: Option<String> = None;
+    // VD-1a: the run that wrote the book's direction, or the reminder that
+    // it kept the template.
+    let mut direction_run_id: Option<String> = None;
+    let mut direction_reminder: Option<Value> = None;
     let mut b03_volume_job: Option<(String, String)> = None;
     let b02_plan_worker = "b02-book-plan-worker";
     let (artifact_type, scope, scope_key) = match command_type {
@@ -7779,12 +7783,23 @@ fn execute_planning_command_with_observer(
                 observer,
             )?;
         }
+        let planned = crate::book_direction::plan(
+            &handle,
+            state.production_gateway.as_ref(),
+            project_id,
+            command_id,
+            idempotency_key,
+            requested_at,
+        )?;
+        direction_run_id = planned.model_run_id;
+        direction_reminder = planned.reminder;
         payload = crate::planning::approve_book_plan(
             &payload,
             true,
             &canon_refs,
             &evidence_refs,
             &opening_actual_state,
+            planned.direction.as_ref(),
         )?;
         if let Some(job_id) = b02_plan_job.as_deref() {
             notify_b02_planning_phase(
@@ -8169,9 +8184,10 @@ fn execute_planning_command_with_observer(
     let model_run_id = request
         .pointer("/payload/modelRunId")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        .or(direction_run_id);
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
-    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}],"decisionUpdates":direction_reminder.map(|reminder| vec![reminder])})).map_err(|e| e.to_string())?;
     if let Some(job_id) = b02_plan_job.as_deref() {
         notify_b02_planning_phase(
             &handle,

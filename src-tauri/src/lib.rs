@@ -1,4 +1,5 @@
 pub mod assistant_intent;
+pub mod book_direction;
 pub mod canon_semantics;
 pub mod catalog;
 pub mod change_retcon;

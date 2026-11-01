@@ -124,6 +124,12 @@ pub trait ProductionModelGateway: Send + Sync {
         self.enforces_chapter_length()
     }
 
+    /// VD-1a: configured providers plan the book's direction after signing;
+    /// deterministic gateways keep the template goals.
+    fn plans_book_direction(&self) -> bool {
+        self.enforces_chapter_length()
+    }
+
     /// FX-21: configured providers classify project assistant questions;
     /// deterministic gateways keep the keyword routing.
     fn classifies_assistant_intent(&self) -> bool {
@@ -470,7 +476,8 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
             "AUDIT_EXTRACT"
             | "REVIEW_CHAPTER"
             | "CHECK_CONTINUITY"
-            | crate::craft_plan::PLAN_CHAPTER_CRAFT => "auditModelId",
+            | crate::craft_plan::PLAN_CHAPTER_CRAFT
+            | crate::book_direction::PLAN_BOOK_DIRECTION => "auditModelId",
             _ => return Ok(profile),
         };
         if let Some(paths) = &self.settings_paths {

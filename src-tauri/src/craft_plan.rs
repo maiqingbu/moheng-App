@@ -386,7 +386,11 @@ pub fn shape_reminder(plan: &Value, ledger: &Value) -> Option<String> {
         format!(
             "本章和前两章是同一个形状（{} 个场景，各场 {} 条事件，同样的 {} 个要素）",
             scene_list.len(),
-            events.iter().map(u64::to_string).collect::<Vec<_>>().join("、"),
+            events
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("、"),
             beats.len()
         )
     })
@@ -746,6 +750,14 @@ fn confirmed_content(
     )
 }
 
+/// The confirmed story bible's content, when there is one.
+pub(crate) fn confirmed_bible(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+) -> Result<Option<Value>, String> {
+    confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)
+}
+
 /// The style-card fields the writer follows; the rest is metadata.
 const STYLE_CARD_CONTENT: &[&str] = &[
     "narration",
@@ -790,7 +802,7 @@ impl WritingContext {
         chapter_id: &str,
         chapter_number: Option<u32>,
     ) -> Result<Self, String> {
-        let bible = confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)?
+        let bible = confirmed_bible(connection, project_id)?
             .ok_or_else(|| "B08_STORY_BIBLE_REQUIRED".to_string())?;
         let style_card =
             confirmed_content(connection, project_id, "StyleCard", STYLE_CARD_CONTENT)?;
@@ -831,8 +843,7 @@ impl ChapterPlanner {
         chapter_number: Option<u32>,
     ) -> Result<Self, String> {
         let chapter = chapter_number.unwrap_or(1);
-        let Some(bible) = confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)?
-        else {
+        let Some(bible) = confirmed_bible(connection, project_id)? else {
             return Ok(Self {
                 craft: None,
                 chapter,

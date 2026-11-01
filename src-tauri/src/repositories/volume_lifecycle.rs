@@ -109,6 +109,22 @@ impl VolumeLifecycleRepository {
             .map_err(Into::into)
     }
 
+    /// The first and last chapter numbers of volume `volume_no`.
+    pub fn volume_chapter_range(
+        connection: &Connection,
+        project_id: &str,
+        volume_no: i64,
+    ) -> Result<Option<(i64, i64)>, VolumeLifecycleRepositoryError> {
+        connection
+            .query_row(
+                "SELECT chapter_start, chapter_end FROM volumes WHERE project_id=?1 AND volume_no=?2",
+                libsql_rusqlite::params![project_id, volume_no],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn committed_chapters(
         connection: &Connection,
         project_id: &str,

@@ -238,6 +238,7 @@ pub fn approve_book_plan(
     opening_canon_refs: &[String],
     signing_evidence_refs: &[String],
     actual_state: &OpeningActualState,
+    direction: Option<&Value>,
 ) -> Result<Value, String> {
     let (seed, _) = normalize_legacy_book_plan_payload(seed);
     if !signing_pass || opening_canon_refs.len() < 3 || signing_evidence_refs.is_empty() {
@@ -254,6 +255,7 @@ pub fn approve_book_plan(
         opening_canon_refs,
         signing_evidence_refs,
         actual_state,
+        direction,
     )?;
     for key in [
         "mustAchieve",
@@ -292,6 +294,7 @@ fn enrich_book_plan_from_opening(
     opening_canon_refs: &[String],
     signing_evidence_refs: &[String],
     actual_state: &OpeningActualState,
+    direction: Option<&Value>,
 ) -> Result<(), String> {
     if opening_canon_refs.is_empty() || actual_state.evidence.is_empty() {
         return Err("BOOK_PLAN_OPENING_CANON_REQUIRED".into());
@@ -332,6 +335,16 @@ fn enrich_book_plan_from_opening(
             "description":"开篇已提交事实不得违背；以 Canon 为准。"
         }),
     );
+    let prerequisites = opening_canon_refs
+        .iter()
+        .chain(signing_evidence_refs)
+        .cloned()
+        .collect::<Vec<_>>();
+    // VD-1a: a direction from the model replaces the template goals below.
+    if let Some(direction) = direction {
+        crate::book_direction::apply(object, direction, &prerequisites);
+        return Ok(());
+    }
     if actual_state.relations.is_empty() {
         append_book_plan_item(
             object,
@@ -377,7 +390,7 @@ fn enrich_book_plan_from_opening(
             "description":"保留开篇 Canon 已确立的后续责任；以 Canon 为准。",
             "reservedForVolumeNo":2,
             "notBeforeVolumeNo":2,
-            "prerequisites":opening_canon_refs.iter().cloned().chain(signing_evidence_refs.iter().cloned()).collect::<Vec<_>>(),
+            "prerequisites":prerequisites,
             "mayForeshadow":true,
             "mayReveal":true,
             "authorityLevel":"B"
@@ -3518,7 +3531,7 @@ mod tests {
     fn book_approval_and_volume_route_fail_closed_on_static_truth() {
         let seed = json!({"payloadSchema":"book-plan.r1","planningMaturity":"SEED","storyPromise":"promise","protagonistMacroDirection":"direction","endingBoundary":"end","mustNotBreak":[],"openingHypotheses":[],"globalLengthBudget":{"preferredWords":1000}});
         assert_eq!(
-            approve_book_plan(&seed, false, &[], &[], &OpeningActualState::default()),
+            approve_book_plan(&seed, false, &[], &[], &OpeningActualState::default(), None),
             Err("BOOK_PLAN_SIGNING_REQUIRED".into())
         );
         let route = json!({"payloadSchema":"volume-plan.r1","volumeIntentRef":{"artifactId":"intent:1","version":1,"payloadHash":"a".repeat(64)},"routeVersion":1,"tasks":[],"routeInvariants":[],"requiredExitConditions":[],"capacityBudget":{"minChapters":1,"preferredChapters":2,"maxChapters":3},"chapters":[]});

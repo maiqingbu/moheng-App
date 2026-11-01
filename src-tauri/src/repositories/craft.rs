@@ -33,16 +33,35 @@ pub fn prior_plan_crafts(
     project_id: &str,
     chapter_id: &str,
 ) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
+    let Some(chapter_no) = connection
+        .query_row(
+            "SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2",
+            [project_id, chapter_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    plan_crafts_before(connection, project_id, chapter_no)
+}
+
+/// The same craft decisions for the committed chapters before `chapter_no`.
+pub fn plan_crafts_before(
+    connection: &Connection,
+    project_id: &str,
+    chapter_no: i64,
+) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
     let mut statement = connection.prepare(
         "SELECT c.chapter_no, json_extract(p.payload_json,'$.craft') FROM chapters c \
          JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.status='COMMITTED' AND json_extract(p.payload_json,'$.craft') IS NOT NULL \
-         AND c.chapter_no < (SELECT chapter_no FROM chapters WHERE project_id=?1 AND chapter_id=?2) \
+         AND c.chapter_no < ?2 \
          ORDER BY c.chapter_no",
     )?;
     let rows = statement
-        .query_map(libsql_rusqlite::params![project_id, chapter_id], |row| {
+        .query_map(libsql_rusqlite::params![project_id, chapter_no], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;

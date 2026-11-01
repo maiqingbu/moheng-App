@@ -5,6 +5,7 @@ export interface GoalConstraint {
   "description": string
   "kind"?: "CANON_REFS"
   "refs"?: Array<string>
+  "volumeNo"?: number
 }
 
 export interface MacroDirection {
@@ -12,6 +13,7 @@ export interface MacroDirection {
   "description": string
   "kind"?: "CANON_REFS"
   "refs"?: Array<string>
+  "volumeNo"?: number
 }
 
 export interface FutureReservation {
@@ -33,6 +35,18 @@ export interface VolumeIntentSeed {
   "description": string
   "kind"?: "CANON_REFS"
   "refs"?: Array<string>
+  "stages"?: Array<VolumeStage>
+  "climax"?: string
+}
+
+export interface VolumeStage {
+  "id": string
+  "goal": string
+  "pressure": string
+  "cast": Array<string>
+  "newCast"?: Array<string>
+  "turn": string
+  "estimatedChapters": number
 }
 
 export interface Condition {

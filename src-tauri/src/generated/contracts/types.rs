@@ -11,6 +11,8 @@ pub struct GoalConstraint {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_no: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +24,8 @@ pub struct MacroDirection {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_no: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +58,23 @@ pub struct VolumeIntentSeed {
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<VolumeStage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub climax: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeStage {
+    pub id: String,
+    pub goal: String,
+    pub pressure: String,
+    pub cast: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_cast: Option<Vec<String>>,
+    pub turn: String,
+    pub estimated_chapters: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
