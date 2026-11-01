@@ -2,6 +2,7 @@
 //! deterministic plan checks, the creation ledger rebuilt from earlier
 //! chapters' plans, and which skill bound which plan decision.
 
+use crate::chapter_length::ChapterLengthRange;
 use crate::craft_setup::QUOTE_MARKS;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -35,9 +36,16 @@ const SKILL_FIELDS: &[(&str, &[&str])] = &[
 
 /// The plan's scene shape, as chapter-plan-r2 states it: the checks report
 /// a plan off it and the last lenient pass fits a plan to it.
-pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 2..=3;
+/// LD-5 (owner decision 2026-11-01): bounds only; how many scenes and
+/// events a chapter has follows from what it has to do.
+pub(crate) const SCENE_COUNT: std::ops::RangeInclusive<usize> = 1..=3;
 pub(crate) const MIN_SCENE_PEOPLE: usize = 2;
-pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 3..=5;
+pub(crate) const SCENE_EVENTS: std::ops::RangeInclusive<usize> = 1..=5;
+/// LD-5: the least room an event needs written out with action and
+/// dialogue (the planner is told 250 and much more for a confrontation);
+/// less and the scene reads as a list (real run 2026-11-01: fifteen events
+/// in 2,000 characters).
+pub(crate) const MIN_CHARS_PER_EVENT: i64 = 250;
 
 /// QC-1.2: what marks chapter 1's imminent threat in its first scene.
 pub(crate) const OPENING_THREAT_MARK: &str = "迫近的威胁：";
@@ -206,6 +214,11 @@ pub(crate) fn text(value: &Value) -> &str {
     value.as_str().unwrap_or("").trim()
 }
 
+/// How many events a planned scene has.
+pub(crate) fn event_count(scene: &Value) -> usize {
+    scene["events"].as_array().map_or(0, Vec::len)
+}
+
 fn scenes(craft: &Value) -> &[Value] {
     craft["scenes"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
@@ -228,7 +241,14 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
     let mut people = BTreeSet::new();
     let mut losses = Vec::new();
     let mut last_places = Vec::new();
+    let mut shapes = Vec::new();
     for (chapter, craft) in prior {
+        shapes.push(
+            json!({"chapter":chapter,"scenes":scenes(craft).iter().map(|scene| json!({
+            "events":event_count(scene),
+            "estimatedCharacters":scene["estimatedCharacters"]
+        })).collect::<Vec<_>>()}),
+        );
         devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         endings.push(json!({"chapter":chapter,"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"])}));
         people.extend(scene_people(craft).map(|person| text(&person["name"]).to_string()));
@@ -249,7 +269,8 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
         "endings":endings,
         "introducedPeople":people.into_iter().filter(|name| bible_people.contains(name.as_str())).collect::<Vec<_>>(),
         "losses":losses,
-        "lastChapterPlaces":last_places
+        "lastChapterPlaces":last_places,
+        "shapes":shapes
     })
 }
 
@@ -321,7 +342,7 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
                 index + 1
             ));
         }
-        let events = scene["events"].as_array().map_or(0, Vec::len);
+        let events = event_count(scene);
         if !SCENE_EVENTS.contains(&events) {
             problems.push(format!(
                 "第 {} 场有 {events} 条事件，每场写 {} 到 {} 条",
@@ -441,6 +462,41 @@ pub fn check_craft_plan(
     craft_result(plan_problems(plan, chapter, bible, ledger))
 }
 
+/// LD-5: what is wrong with the room `craft`'s scenes are estimated to
+/// take: each scene states its estimate, the estimates add up to the
+/// chapter's range, and no scene has more events than its room holds.
+pub fn sizing_problems(craft: &Value, range: ChapterLengthRange) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut total = 0;
+    for (index, scene) in scenes(craft).iter().enumerate() {
+        let Some(estimate) = scene["estimatedCharacters"]
+            .as_i64()
+            .filter(|chars| *chars > 0)
+        else {
+            problems.push(format!(
+                "第 {} 场没有预估字数（estimatedCharacters：这场写开要多少字）",
+                index + 1
+            ));
+            continue;
+        };
+        total += estimate;
+        let events = event_count(scene) as i64;
+        if events > 0 && estimate / events < MIN_CHARS_PER_EVENT {
+            problems.push(format!(
+                "第 {} 场预估 {estimate} 字写 {events} 条事件，太挤：每条事件写开要 {MIN_CHARS_PER_EVENT} 字以上，删掉一些或留给后面的章节",
+                index + 1
+            ));
+        }
+    }
+    if problems.is_empty() && !(range.min..=range.max).contains(&total) {
+        problems.push(format!(
+            "各场预估合计 {total} 字，本章写 {} 到 {} 字：按这章要做的事重新估",
+            range.min, range.max
+        ));
+    }
+    problems
+}
+
 fn craft_result(problems: Vec<String>) -> Result<(), String> {
     if problems.is_empty() {
         Ok(())
@@ -503,7 +559,8 @@ pub fn prompt_ledger(ledger: &Value) -> Value {
         "endings":recent("endings"),
         "introducedPeople":ledger["introducedPeople"],
         "losses":recent("losses"),
-        "lastChapterPlaces":ledger["lastChapterPlaces"]
+        "lastChapterPlaces":ledger["lastChapterPlaces"],
+        "shapes":recent("shapes")
     })
 }
 
@@ -724,7 +781,12 @@ impl ChapterPlanner {
     /// the problems so one replan fixes all of them (a plan without craft
     /// decisions is sent back too); nothing for r1 planning. Run before the
     /// contract so shape problems reach the planner for a replan.
-    pub fn check_craft(&self, plan: &Value, horizon_capacity: i64) -> Result<(), String> {
+    pub fn check_craft(
+        &self,
+        plan: &Value,
+        horizon_capacity: i64,
+        length_range: ChapterLengthRange,
+    ) -> Result<(), String> {
         let Some(craft) = &self.craft else {
             return Ok(());
         };
@@ -735,6 +797,7 @@ impl ChapterPlanner {
         }
         let mut problems =
             plan_problems(plan, i64::from(self.chapter), &craft.bible, &craft.ledger);
+        problems.extend(sizing_problems(&plan["craft"], length_range));
         if crate::planning::validate_chapter_plan_horizon(plan, horizon_capacity).is_err() {
             let (minimum, capacity) = crate::planning::horizon_slot_range(horizon_capacity);
             problems.push(format!(

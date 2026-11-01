@@ -2,8 +2,9 @@
 //! the skill → plan-field decisions (CRAFT_V3_DESIGN §4.2–4.3).
 
 use ai_novel_production_system_core::chapter_craft::plan_feedback;
+use ai_novel_production_system_core::chapter_length::ChapterLengthRange;
 use ai_novel_production_system_core::craft_plan::{
-    check_craft_plan, creation_ledger, plan_problems, skill_decisions,
+    check_craft_plan, creation_ledger, plan_problems, sizing_problems, skill_decisions,
 };
 use serde_json::{json, Value};
 
@@ -270,13 +271,90 @@ fn scene_counts_people_and_events_outside_the_plan_shape_are_reported_for_a_repl
     let problems = plan_problems(&crowded, 1, &bible(), &creation_ledger(&[], &bible()));
     assert!(has(&problems, "第 1 场有 7 条事件"), "{problems:?}");
     assert!(has(&problems, "第 2 场只有 1 个人物"), "{problems:?}");
-    let mut single = plan();
-    single["craft"]["scenes"] = json!([scene("江边码头")]);
-    single["craft"]["device"]["status"] = json!("OLD");
-    let problems = plan_problems(&single, 1, &bible(), &creation_ledger(&[], &bible()));
-    assert!(has(&problems, "需要 2 到 3 个场景"), "{problems:?}");
+    let mut four = plan();
+    four["craft"]["scenes"] = json!([
+        scene("江边码头"),
+        scene("姑妈的面馆"),
+        scene("当铺"),
+        scene("码头仓库")
+    ]);
+    four["craft"]["device"]["status"] = json!("OLD");
+    let problems = plan_problems(&four, 1, &bible(), &creation_ledger(&[], &bible()));
+    assert!(has(&problems, "需要 1 到 3 个场景"), "{problems:?}");
     assert!(
         has(&problems, "status 只能是 NEW 或 ESCALATED"),
         "{problems:?}"
+    );
+}
+
+/// LD-5 (owner decision 2026-11-01): "创作作品，不是按照一套固定模板拼接文字。"
+/// The plan estimates the room each scene needs; how many scenes and
+/// events a chapter has follows from what it has to do.
+fn sized(estimates_and_events: &[(i64, usize)]) -> Value {
+    let scenes = estimates_and_events
+        .iter()
+        .map(|&(estimate, events)| {
+            let mut scene = scene("江边码头");
+            scene["events"] = json!((0..events).map(|n| format!("事件{n}")).collect::<Vec<_>>());
+            scene["estimatedCharacters"] = json!(estimate);
+            scene
+        })
+        .collect::<Vec<_>>();
+    json!({ "scenes": scenes })
+}
+
+const FANQIE: ChapterLengthRange = ChapterLengthRange {
+    min: 1800,
+    max: 2200,
+};
+
+#[test]
+fn ld5_one_scene_with_two_full_events_is_a_chapter_too() {
+    assert!(sizing_problems(&sized(&[(2000, 2)]), FANQIE).is_empty());
+    assert!(sizing_problems(&sized(&[(700, 2), (1300, 4)]), FANQIE).is_empty());
+}
+
+#[test]
+fn ld5_a_scene_without_its_estimate_is_sent_back() {
+    let mut craft = sized(&[(1000, 2), (1000, 2)]);
+    craft["scenes"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("estimatedCharacters");
+    let problems = sizing_problems(&craft, FANQIE);
+    assert!(has(&problems, "第 2 场没有预估字数"), "{problems:?}");
+}
+
+#[test]
+fn ld5_scenes_estimated_outside_the_chapter_s_range_are_sent_back() {
+    let problems = sizing_problems(&sized(&[(1500, 3), (1500, 3)]), FANQIE);
+    assert!(
+        has(&problems, "各场预估合计 3000 字，本章写 1800 到 2200 字"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn ld5_a_scene_too_crowded_for_its_room_is_sent_back() {
+    // Real run 2026-11-01: fifteen events in 2,000 characters tire readers.
+    let problems = sizing_problems(&sized(&[(700, 5), (700, 5), (600, 5)]), FANQIE);
+    assert!(
+        has(&problems, "第 1 场预估 700 字写 5 条事件"),
+        "{problems:?}"
+    );
+    assert!(
+        has(&problems, "第 3 场预估 600 字写 5 条事件"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn ld5_the_planner_sees_the_recent_chapters_shapes() {
+    let mut earlier = plan()["craft"].clone();
+    earlier["scenes"][0]["estimatedCharacters"] = json!(1200);
+    let ledger = creation_ledger(&[(1, earlier)], &bible());
+    assert_eq!(
+        ledger["shapes"],
+        json!([{"chapter":1,"scenes":[{"events":3,"estimatedCharacters":1200},{"events":3,"estimatedCharacters":null}]}])
     );
 }

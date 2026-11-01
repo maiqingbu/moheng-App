@@ -213,7 +213,7 @@ export interface ChapterPlanR2 {
   "knowledgeBoundaries": Array<string>
   "reservationRefs": Array<string>
   "horizonPreview": Array<HorizonSlot>
-  "craft": { "bigTurn": string; "smallDiscovery": string; "protagonistWin": string; "device": { "name": string; "status": "NEW" | "ESCALATED"; "howUsed": string }; "warmth": string; "emotionalBeat": string; "situationChange": { "before": string; "after": string }; "scenes": Array<{ "place": string; "people": Array<{ "name": string; "wants": string; "hides": string; "whyHere": string }>; "conflict": string; "events": Array<string>; "readerQuestion": string }>; "newLosses": Array<string>; "endHook": string }
+  "craft": { "bigTurn": string; "smallDiscovery": string; "protagonistWin": string; "device": { "name": string; "status": "NEW" | "ESCALATED"; "howUsed": string }; "warmth": string; "emotionalBeat": string; "situationChange": { "before": string; "after": string }; "scenes": Array<{ "place": string; "people": Array<{ "name": string; "wants": string; "hides": string; "whyHere": string }>; "conflict": string; "events": Array<string>; "readerQuestion": string; "estimatedCharacters"?: number }>; "newLosses": Array<string>; "endHook": string }
 }
 
 export interface StoryBibleR1 {

@@ -217,7 +217,7 @@
     },
     "scenes": {
      "type": "array",
-     "minItems": 2,
+     "minItems": 1,
      "maxItems": 3,
      "items": {
       "type": "object",
@@ -264,7 +264,7 @@
        },
        "events": {
         "type": "array",
-        "minItems": 3,
+        "minItems": 1,
         "maxItems": 5,
         "items": {
          "type": "string",
@@ -274,6 +274,10 @@
        "readerQuestion": {
         "type": "string",
         "minLength": 1
+       },
+       "estimatedCharacters": {
+        "type": "integer",
+        "minimum": 1
        }
       },
       "required": [

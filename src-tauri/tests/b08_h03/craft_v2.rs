@@ -284,7 +284,7 @@ fn craft_v2_a_chapter_in_range_needs_no_adjustment_and_one_still_outside_is_not_
 
 #[test]
 fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
-    // Real run 2026-11-02: asked to compress, the writer cut 0-10% of
+    // Real run 2026-11-01: asked to compress, the writer cut 0-10% of
     // chapters a third too long; it now only chooses the sentences.
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3400]);
     let walking = (0..60)
@@ -308,7 +308,7 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
 
 #[test]
 fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
-    // Real run 2026-11-02 (round 10): the writer chose sentences for 70% of
+    // Real run 2026-11-01 (round 10): the writer chose sentences for 70% of
     // what had to go.
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3600]);
     gateway.inject = vec![(0..60)

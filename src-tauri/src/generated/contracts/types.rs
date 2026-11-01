@@ -986,6 +986,8 @@ pub struct ChapterPlanR2CraftScenesItem {
     pub conflict: String,
     pub events: Vec<String>,
     pub reader_question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_characters: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

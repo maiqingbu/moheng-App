@@ -2239,7 +2239,7 @@ mod tests {
 
     #[test]
     fn f1_3_a_line_opening_on_a_date_is_not_a_numbered_list() {
-        // Real run 2026-11-02 (round 10): the scene opened on a time stamp.
+        // Real run 2026-11-01 (round 10): the scene opened on a time stamp.
         assert!(outline_findings("2041.08.17 06:14:22，城东第三养老院B栋203室。").is_empty());
         assert!(!outline_findings("1.调查档案馆\n2、找到证人").is_empty());
     }

@@ -2510,7 +2510,7 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
             horizon.push(json!({"slotNo":slot,"objective":"待后续规划确定","tentative":true}));
         }
     }
-    use crate::craft_plan::{text, MIN_SCENE_PEOPLE, SCENE_COUNT, SCENE_EVENTS};
+    use crate::craft_plan::{event_count, text, MIN_SCENE_PEOPLE, SCENE_COUNT, SCENE_EVENTS};
     let mut notes = crate::craft_plan::complete_plan_fields(plan)
         .into_iter()
         .map(|field| format!("系统补上了{field}"))
@@ -2531,7 +2531,6 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
         return as_problem(notes);
     };
     let people = |scene: &Value| scene["people"].as_array().map_or(0, Vec::len);
-    let events = |scene: &Value| scene["events"].as_array().map_or(0, Vec::len);
     while scenes.len() > 1 {
         // Too many scenes: the neighbours with the fewest events together
         // join, so the events spread over the scenes left (sixth
@@ -2542,7 +2541,7 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
             .or_else(|| {
                 if scenes.len() > *SCENE_COUNT.end() {
                     (1..scenes.len())
-                        .min_by_key(|&at| events(&scenes[at - 1]) + events(&scenes[at]))
+                        .min_by_key(|&at| event_count(&scenes[at - 1]) + event_count(&scenes[at]))
                 } else {
                     None
                 }
@@ -2583,10 +2582,17 @@ pub fn fit_lenient_plan_shape(plan: &mut Value, remaining_chapter_capacity: i64)
         {
             list.extend(events);
         }
+        // LD-5: the folded scene takes the room estimated for both.
+        if let (Some(folded), Some(kept)) = (
+            scene["estimatedCharacters"].as_i64(),
+            into["estimatedCharacters"].as_i64(),
+        ) {
+            into["estimatedCharacters"] = json!(folded + kept);
+        }
     }
     let most = *SCENE_EVENTS.end();
     for scene in scenes.iter_mut() {
-        let count = events(scene);
+        let count = event_count(scene);
         if count > most {
             notes.push(format!(
                 "系统把场景「{}」的事件从 {count} 条删到 {most} 条",

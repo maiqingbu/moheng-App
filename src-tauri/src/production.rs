@@ -2674,7 +2674,7 @@ fn run_chapter_production_inner(
                 note_if_lenient(
                     lenient,
                     &mut problems,
-                    planner.check_craft(&plan, horizon_capacity),
+                    planner.check_craft(&plan, horizon_capacity, length_range),
                 )?;
                 if lenient {
                     problems.extend(crate::planning::fit_lenient_plan_shape(
@@ -3033,7 +3033,7 @@ fn run_chapter_production_inner(
                 .map(|text| crate::chapter_craft::normalize_typography(text.trim()))
                 .ok_or_else(|| "B08_ADJUST_CHAPTER_LENGTH_OUTPUT_INVALID".to_string())?;
         } else {
-            // LD-4 (real run 2026-11-02): asked to compress, the writer cut
+            // LD-4 (real run 2026-11-01): asked to compress, the writer cut
             // 0-10% of chapters a third too long; it now only chooses the
             // sentences, and they are cut here to the target. It chose too
             // few once in a while, so a cut that still leaves the chapter

@@ -311,7 +311,7 @@ fn qc1_a_plan_with_too_many_scenes_is_folded_without_losing_most_events() {
     let scene = |place: &str| {
         json!({"place":place,"people":[{"name":"林薇"},{"name":"沈砚"}],"conflict":place,
                "events":[format!("{place}一"),format!("{place}二"),format!("{place}三")],
-               "readerQuestion":"？"})
+               "readerQuestion":"？","estimatedCharacters":400})
     };
     let mut plan =
         json!({"craft":{"scenes":[scene("甲"),scene("乙"),scene("丙"),scene("丁"),scene("戊")]}});
@@ -326,4 +326,10 @@ fn qc1_a_plan_with_too_many_scenes_is_folded_without_losing_most_events() {
         kept >= 13,
         "15 events into 3 scenes of 5 keeps nearly all: {plan}"
     );
+    // LD-5: a folded scene takes the room estimated for both.
+    let estimated = scenes
+        .iter()
+        .map(|scene| scene["estimatedCharacters"].as_i64().unwrap())
+        .sum::<i64>();
+    assert_eq!(estimated, 2000, "{plan}");
 }

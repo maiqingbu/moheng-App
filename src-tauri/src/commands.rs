@@ -7181,7 +7181,7 @@ fn compile_current_chapter_plan(
         // Checked here, not only at commit, so the planner gets the reason
         // and one more try.
         let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
-        let craft = planner.check_craft(&plan, horizon_capacity);
+        let craft = planner.check_craft(&plan, horizon_capacity, length_range);
         crate::production::note_if_lenient(lenient, &mut problems, craft)?;
         if lenient {
             problems.extend(crate::planning::fit_lenient_plan_shape(
