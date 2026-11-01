@@ -526,23 +526,36 @@ struct CraftPlanning {
     established_facts: Vec<Value>,
 }
 
-/// The continuity details of the committed chapters before `chapter_id`.
-fn prior_facts(
-    connection: &libsql_rusqlite::Connection,
-    project_id: &str,
-    chapter_id: &str,
-) -> Result<Vec<(i64, Value)>, String> {
-    crate::repositories::craft::prior_continuity_details(connection, project_id, chapter_id)
-}
-
-/// The names of the people and places a plan puts on stage.
-fn plan_focus(plan: &Value) -> Vec<String> {
-    let craft = &plan["craft"];
-    scenes(craft)
+/// WM-1: the established facts for a chapter, recalled from the work's
+/// memory by `craft` (a chapter's craft decisions): its people and places
+/// first, then what it brings back, then the newest of the rest, at most
+/// `MAX_ESTABLISHED_FACTS`. An absent person's own traits are left out only
+/// when `people` names who counts as a person.
+fn recall_for(
+    memories: &[crate::work_memory::Memory],
+    craft: &Value,
+    people: &[String],
+) -> Vec<Value> {
+    let on_stage = scenes(craft)
         .iter()
         .map(|scene| text(&scene["place"]).to_string())
         .chain(scene_people(craft).map(|person| text(&person["name"]).to_string()))
-        .collect()
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    let plan_text = if craft.is_null() {
+        String::new()
+    } else {
+        craft.to_string()
+    };
+    crate::work_memory::recall(
+        memories,
+        &crate::work_memory::RecallQuery {
+            on_stage: &on_stage,
+            people,
+            text: &plan_text,
+        },
+        MAX_ESTABLISHED_FACTS,
+    )
 }
 
 /// How one chapter is planned: as r2 once the project has a confirmed story
@@ -589,7 +602,7 @@ const STYLE_CARD_CONTENT: &[&str] = &[
 pub struct WritingContext {
     pub bible: Value,
     pub style_card: Option<Value>,
-    facts: Vec<(i64, Value)>,
+    memories: Vec<crate::work_memory::Memory>,
     chapter: u32,
 }
 
@@ -625,7 +638,9 @@ impl WritingContext {
         Ok(Self {
             bible,
             style_card,
-            facts: prior_facts(connection, project_id, chapter_id)?,
+            memories: crate::repositories::work_memory::earlier_memories(
+                connection, project_id, chapter_id,
+            )?,
             chapter: chapter_number.unwrap_or(1),
         })
     }
@@ -638,9 +653,13 @@ impl WritingContext {
         }
         input["chapterNumber"] = json!(self.chapter);
         input["recentChapters"] = json!(recent_chapters);
-        input["establishedFacts"] = json!(established_facts(
-            &self.facts,
-            &plan_focus(&input["chapterPlan"])
+        // Who the story names as a person: their own traits come in only
+        // when they are in the chapter.
+        let (_, people) = self.chapter_people(&input["chapterPlan"]);
+        input["establishedFacts"] = json!(recall_for(
+            &self.memories,
+            &input["chapterPlan"]["craft"],
+            &people
         ));
     }
 }
@@ -668,8 +687,13 @@ impl ChapterPlanner {
             craft: Some(CraftPlanning {
                 bible,
                 ledger,
-                established_facts: established_facts(
-                    &prior_facts(connection, project_id, chapter_id)?,
+                // The planner decides who appears, so everyone's traits may
+                // come in, the last chapter's people first.
+                established_facts: recall_for(
+                    &crate::repositories::work_memory::earlier_memories(
+                        connection, project_id, chapter_id,
+                    )?,
+                    prior.last().map_or(&Value::Null, |(_, craft)| craft),
                     &[],
                 ),
             }),
@@ -767,35 +791,4 @@ pub fn continuity_details(audit: &Value, body: &str) -> Vec<Value> {
         .take(MAX_DETAILS_PER_CHAPTER)
         .map(|item| json!({"subject":text(&item["subject"]),"kind":text(&item["kind"]),"detail":text(&item["detail"])}))
         .collect()
-}
-
-/// The established facts for the next chapter: the earlier chapters' details,
-/// newest first and without duplicates, those about `focus` (the people and
-/// places of this chapter) ahead of the rest, at most `MAX_ESTABLISHED_FACTS`.
-pub fn established_facts(prior: &[(i64, Value)], focus: &[String]) -> Vec<Value> {
-    let mut seen = BTreeSet::new();
-    let mut facts = prior
-        .iter()
-        .rev()
-        .flat_map(|(chapter, details)| {
-            details
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(move |detail| (chapter, detail))
-        })
-        .filter(|(_, detail)| {
-            seen.insert((
-                text(&detail["subject"]).to_string(),
-                text(&detail["kind"]).to_string(),
-                text(&detail["detail"]).to_string(),
-            ))
-        })
-        .map(|(chapter, detail)| {
-            json!({"chapter":chapter,"subject":detail["subject"],"kind":detail["kind"],"detail":detail["detail"]})
-        })
-        .collect::<Vec<_>>();
-    facts.sort_by_key(|fact| !focus.iter().any(|name| name == text(&fact["subject"])));
-    facts.truncate(MAX_ESTABLISHED_FACTS);
-    facts
 }

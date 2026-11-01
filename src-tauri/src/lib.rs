@@ -33,6 +33,7 @@ pub mod skills_v2;
 pub mod stable_id;
 pub mod style_card;
 pub mod volume_lifecycle;
+pub mod work_memory;
 
 pub use repositories::runtime;
 

@@ -13,3 +13,4 @@ pub mod runtime;
 pub mod support;
 pub mod ui_projection;
 pub mod volume_lifecycle;
+pub mod work_memory;

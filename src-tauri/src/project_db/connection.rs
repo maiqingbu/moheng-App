@@ -39,6 +39,7 @@ const FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION: &str =
     include_str!("../../migrations/0016_fx11_canon_fact_scoped_lookup.sql");
 const CRAFT_STYLE_SAMPLE_MIGRATION: &str =
     include_str!("../../migrations/0017_craft_style_sample.sql");
+const WM1_WORK_MEMORY_MIGRATION: &str = include_str!("../../migrations/0018_wm1_work_memory.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     let existed = path.is_file();
@@ -221,6 +222,13 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
             |row| row.get(0),
         )
         .optional()?;
+    let applied_v18: Option<i64> = connection
+        .query_row(
+            "SELECT version FROM migration_history WHERE version = 18",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(applied.is_none()
         || applied_v3.is_none()
         || applied_v4.is_none()
@@ -235,7 +243,8 @@ pub fn project_needs_migration(connection: &Connection) -> Result<bool, Database
         || applied_v14.is_none()
         || applied_v15.is_none()
         || applied_v16.is_none()
-        || applied_v17.is_none())
+        || applied_v17.is_none()
+        || applied_v18.is_none())
 }
 
 fn migration_recorded(connection: &Connection, version: i64) -> Result<bool, DatabaseError> {
@@ -352,6 +361,7 @@ pub fn migrate_project(
         )?;
         apply_numbered_migration(connection, 16, FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION, now)?;
         apply_numbered_migration(connection, 17, CRAFT_STYLE_SAMPLE_MIGRATION, now)?;
+        apply_numbered_migration(connection, 18, WM1_WORK_MEMORY_MIGRATION, now)?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;
         Ok::<_, DatabaseError>(())
     })();

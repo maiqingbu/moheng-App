@@ -401,3 +401,68 @@ fn qc1_a_failed_rewrite_never_stops_the_chapter() {
     assert!(review["rewriteError"].is_string(), "{review}");
     assert_eq!(review["editsApplied"], 0);
 }
+
+#[test]
+fn wm1_a_chapter_s_details_are_kept_in_the_work_s_memory() {
+    let (_temp, state, _gateway, project_id) = project_ready_to_write("wm1");
+    write_next_chapter(&state, &project_id, "wm1:production:1");
+    write_next_chapter(&state, &project_id, "wm1:production:2");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let kept = connection
+        .query_row(
+            "SELECT chapter_no, subject, kind, content FROM work_memory WHERE project_id=?1 ORDER BY chapter_no LIMIT 1",
+            [&project_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        kept,
+        (1, "林满".into(), "PREFERENCE".into(), "喝豆浆不加糖".into())
+    );
+}
+
+#[test]
+fn wm1_the_memory_lets_go_of_a_chapter_no_longer_committed() {
+    let (_temp, state, _gateway, project_id) = project_ready_to_write("wm1gone");
+    write_next_chapter(&state, &project_id, "wm1gone:production:1");
+    write_next_chapter(&state, &project_id, "wm1gone:production:2");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let count = |connection: &libsql_rusqlite::Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM work_memory WHERE project_id=?1 AND chapter_no=1",
+                [&project_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(count(&connection) > 0);
+    let (first, later): (String, String) = connection
+        .query_row(
+            "SELECT (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=1), (SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3)",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE chapters SET status='PLANNED' WHERE project_id=?1 AND chapter_id=?2",
+            [&project_id, &first],
+        )
+        .unwrap();
+    let recalled = ai_novel_production_system_core::repositories::work_memory::earlier_memories(
+        &connection,
+        &project_id,
+        &later,
+    )
+    .unwrap();
+    assert!(recalled.iter().all(|memory| memory.chapter != 1));
+    assert_eq!(count(&connection), 0);
+}
