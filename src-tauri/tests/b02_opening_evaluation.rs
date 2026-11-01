@@ -3624,3 +3624,61 @@ fn b3b_broken_signing_json_is_resent_once() {
         2
     );
 }
+
+/// The first evaluation quotes E3-8 with sentences joined from different
+/// places, a passage the chapter does not have.
+struct StitchedQuoteOnceGateway {
+    inner: B02Gateway,
+    signing_inputs: Mutex<Vec<Value>>,
+}
+
+impl ProductionModelGateway for StitchedQuoteOnceGateway {
+    fn resolve_profile(&self) -> Result<ResolvedProviderProfile, String> {
+        self.inner.resolve_profile()
+    }
+
+    fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        if capability == "OPENING_SIGNING_EVALUATION" {
+            let mut inputs = self.signing_inputs.lock().unwrap();
+            inputs.push(input.clone());
+            let mut output = full_signing_items(input);
+            if inputs.len() == 1 {
+                for item in output["payload"]["signingEvaluationItems"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    if item["itemId"] == "E3-8" {
+                        item["evidence"][0]["exactQuote"] = json!("林舟说完就走，顾清没有拦他。");
+                    }
+                }
+            }
+            return Ok(ProductionModelResponse::deterministic(output));
+        }
+        self.inner.invoke(capability, input)
+    }
+}
+
+#[test]
+fn qc1_a_quote_the_chapters_do_not_have_is_asked_for_once_more() {
+    // Acceptance 2026-11-01 (seventh run): E3-8 quoted two places of
+    // chapter 1 joined together, and Fanqie came back unverified.
+    let gateway = Arc::new(StitchedQuoteOnceGateway {
+        inner: B02Gateway::new(true, "A"),
+        signing_inputs: Mutex::new(Vec::new()),
+    });
+    let (state, _temp) = state_with_custom_gateway(gateway.clone());
+    let project_id = create_opening_project(&state);
+    commit_three_opening_chapters(&state, &project_id);
+    let evaluation = command(
+        &state,
+        &project_id,
+        "qc1:signing:stitched",
+        "opening_evaluate",
+        json!({}),
+    );
+    assert_eq!(evaluation["result"]["status"], "PASS", "{evaluation}");
+    let inputs = gateway.signing_inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let feedback = inputs[1]["outputFeedback"].to_string();
+    assert!(feedback.contains("E3-8"), "{feedback}");
+}

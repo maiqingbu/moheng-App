@@ -326,7 +326,7 @@ fn model_item_result(
             .or_else(|| find(crate::production::locate_unique_quote))
             .or_else(|| find(crate::production::locate_quote_span));
         let Some((chapter, (range_start, range_end))) = located else {
-            return empty_model_item(item_id, "引用原文或起止位置与已提交正文不完全一致。");
+            return empty_model_item(item_id, UNLOCATED_QUOTE);
         };
         let supplied_quote = exact_quote;
         let exact_quote = chapter
@@ -352,6 +352,11 @@ fn model_item_result(
     }
     json!({"itemId":item_id,"result":result,"reason":reason,"evidence":checked_evidence})
 }
+
+/// Why an item whose quote is in none of the chapters is unverified.
+const UNLOCATED_QUOTE: &str = "引用原文或起止位置与已提交正文不完全一致。";
+/// What marks a resend for quotes the chapters do not have.
+const UNLOCATED_QUOTES_ERROR: &str = "S35 quotes not in the chapters for";
 
 /// What S35 puts in its payload for signing.
 const S35_PAYLOAD_FIELDS: [&str; 7] = [
@@ -1609,7 +1614,9 @@ pub fn execute_opening_evaluation_with_observer(
         // QC-1 (sixth acceptance run): a reply whose envelope is off the
         // S35 schema, after misplaced payload fields are moved in, is asked
         // for once more with what was wrong; a second one is evaluated as
-        // it is (its model items NOT_VERIFIED).
+        // it is (its model items NOT_VERIFIED). Seventh run: so is a reply
+        // with items quoting what none of the chapters has (two places
+        // joined together).
         let outcome = crate::production::resend_once_on_invalid_json(&spec, |spec, off_spec| {
             if spec.attempt_no > 1 {
                 DurableJobService::reopen_b02_phase_job_for_resend(
@@ -1623,13 +1630,16 @@ pub fn execute_opening_evaluation_with_observer(
             }
             let mut input = input.clone();
             if let Some(error) = off_spec {
-                input["outputFeedback"] = json!({
-                    "rejectedFor":error,
-                    "instruction":format!(
+                let instruction = match error.split_once(UNLOCATED_QUOTES_ERROR) {
+                    Some((_, items)) => format!(
+                        "上一次回复里这些评估项的 exactQuote 在所引章节正文里找不到：{items}。exactQuote 必须是那一章正文里连续的一段，逐字复制，不能把不同位置的句子拼在一起；返回完整回复。"
+                    ),
+                    None => format!(
                         "上一次回复不符合 S35 输出信封：skillId、skillVersion、bundleDigest、taskId、status、confidence 放在最外层，{} 放进 payload，返回完整回复。",
                         S35_PAYLOAD_FIELDS.join("、")
-                    )
-                });
+                    ),
+                };
+                input["outputFeedback"] = json!({"rejectedFor":error,"instruction":instruction});
             }
             let mut outcome = execute_production_model(
                 &handle,
@@ -1641,12 +1651,30 @@ pub fn execute_opening_evaluation_with_observer(
             )?;
             if let Some(parsed) = outcome.parsed.as_mut() {
                 lift_misplaced_payload_fields(parsed);
-                if spec.attempt_no == 1 && !valid_s35_signing_envelope(parsed, &expected_s35) {
-                    let error = format!(
+                let error = if spec.attempt_no > 1 {
+                    None
+                } else if !valid_s35_signing_envelope(parsed, &expected_s35) {
+                    Some(format!(
                         "{}:S35 envelope off its schema; payload lacks {:?}",
                         crate::model_output::OFF_SPEC,
                         missing_payload_fields(parsed)
-                    );
+                    ))
+                } else {
+                    let unlocated =
+                        model_results(Some(parsed), &chapters, None, Some(&expected_s35))
+                            .into_iter()
+                            .filter(|item| item["reason"] == UNLOCATED_QUOTE)
+                            .filter_map(|item| item["itemId"].as_str().map(str::to_string))
+                            .collect::<Vec<_>>();
+                    (!unlocated.is_empty()).then(|| {
+                        format!(
+                            "{}:{UNLOCATED_QUOTES_ERROR} {}",
+                            crate::model_output::OFF_SPEC,
+                            unlocated.join("、")
+                        )
+                    })
+                };
+                if let Some(error) = error {
                     DurableModelRunner::mark_model_payload_parse_failure(
                         &handle, spec, &error, &now,
                     )
