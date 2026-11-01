@@ -439,7 +439,8 @@ pub fn chapter_direction(
         "volumeFunction":text(&seed["description"]),
         "currentStage":current_stage,
         "laterStages":stages.iter().skip(current + 1).map(|(stage, _)| text(&stage["goal"])).collect::<Vec<_>>(),
-        "climax":text(&seed["climax"])
+        "climax":text(&seed["climax"]),
+        "storyPromise":text(&book_plan["storyPromise"])
     }))
 }
 
@@ -557,6 +558,7 @@ mod tests {
     /// The approved plan and route VD-1a and VD-1b make from `direction()`.
     fn plan_and_route() -> (Value, Value) {
         let mut plan = Map::new();
+        plan.insert("storyPromise".into(), json!("以命换力"));
         apply(&mut plan, &direction(), &[]);
         let stage_task = |n: usize| json!({"taskId":format!("task:required:goal:vol:1:stage:1:{n}"),"class":"REQUIRED"});
         let route = json!({"tasks":[
@@ -585,6 +587,7 @@ mod tests {
             json!(["陆照找到改约的证据", "陆照在会审上翻案"])
         );
         assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
+        assert_eq!(direction["storyPromise"], "以命换力");
     }
 
     #[test]

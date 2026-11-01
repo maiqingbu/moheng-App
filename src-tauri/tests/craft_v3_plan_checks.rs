@@ -496,3 +496,33 @@ fn vd1c_the_antagonist_and_cast_last_appearances_come_from_earlier_plans() {
         ])
     );
 }
+
+/// VD-1e (real run round 14): chapters 4-8 planned nearly the same goal
+/// while their stage stayed open.
+#[test]
+fn vd1e_a_goal_close_to_a_recent_chapters_goal_is_sent_back() {
+    let earlier = |goal: &str| {
+        let mut craft = plan()["craft"].clone();
+        craft["chapterGoal"] = json!(goal);
+        craft["situationChange"]["after"] = json!(format!("{goal}之后"));
+        craft["endHook"] = json!(format!("{goal}的钩子"));
+        craft
+    };
+    let ledger = creation_ledger(
+        &[
+            (4, earlier("陆照确认师父续骨汤药方无误，排除丹房内部失误可能，并首次将灰线展露给陈师伯")),
+            (5, earlier("陆照把出入录拓片交给阿沅保管")),
+        ],
+        &bible(),
+    );
+    assert_eq!(ledger["endings"][0]["goal"], "陆照确认师父续骨汤药方无误，排除丹房内部失误可能，并首次将灰线展露给陈师伯");
+    let mut repeated = plan();
+    repeated["chapterGoal"] =
+        json!("陆照第三次点燃废丹残余，确认师父续骨汤药方无误，排除丹房内部失误可能，并首次让灰线在陈师伯眼前浮现");
+    let problems = plan_problems(&repeated, 6, &bible(), &ledger);
+    assert!(has(&problems, "本章目标和第 4 章的目标几乎一样"), "{problems:?}");
+    let mut fresh = plan();
+    fresh["chapterGoal"] = json!("陆照在申时查验前把出入录拓片换进周砚舟的账册");
+    let problems = plan_problems(&fresh, 6, &bible(), &ledger);
+    assert!(!has(&problems, "目标几乎一样"), "{problems:?}");
+}

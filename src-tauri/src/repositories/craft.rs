@@ -26,8 +26,9 @@ pub fn save_style_sample(
 }
 
 /// The craft decisions of the committed chapters before `chapter_id`, in
-/// chapter order: `(chapter_no, craft)` from each final chapter's r2 plan.
-/// Chapters planned as r1 carry no craft and are skipped.
+/// chapter order: `(chapter_no, craft)` from each final chapter's r2 plan,
+/// each craft also holding its plan's `chapterGoal` (VD-1e). Chapters
+/// planned as r1 carry no craft and are skipped.
 pub fn prior_plan_crafts(
     connection: &Connection,
     project_id: &str,
@@ -53,7 +54,7 @@ pub fn plan_crafts_before(
     chapter_no: i64,
 ) -> Result<Vec<(i64, serde_json::Value)>, libsql_rusqlite::Error> {
     let mut statement = connection.prepare(
-        "SELECT c.chapter_no, json_extract(p.payload_json,'$.craft') FROM chapters c \
+        "SELECT c.chapter_no, json_set(json_extract(p.payload_json,'$.craft'),'$.chapterGoal',json_extract(p.payload_json,'$.chapterGoal')) FROM chapters c \
          JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version \
          JOIN artifact_payloads p ON p.artifact_id=json_extract(f.payload_json,'$.chapterPlanRef.artifactId') AND p.version=json_extract(f.payload_json,'$.chapterPlanRef.version') \
          WHERE c.project_id=?1 AND c.status='COMMITTED' AND json_extract(p.payload_json,'$.craft') IS NOT NULL \

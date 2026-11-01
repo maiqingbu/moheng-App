@@ -35,6 +35,13 @@ pub fn person(name: &str) -> Value {
 }
 
 /// A plan for `chapter` that passes the r2 checks; `vague` makes it fail.
+/// VD-1e: each chapter moves past the goals before it.
+const GOALS: [&str; 3] = [
+    "林满揪出调包的货单",
+    "林满在当铺找到借据的漏洞",
+    "林满逼彭三的人当众认账",
+];
+
 pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
     let places = [
         ["江边码头", "姑妈的面馆"],
@@ -56,7 +63,7 @@ pub fn craft_plan(input: &Value, chapter: i64, vague: bool) -> Value {
         "compiledFromProjectRevision":input["compiledFromProjectRevision"],
         "compiledFromStateDigest":input["compiledFromStateDigest"],
         "contextManifestRef":input["contextManifestRef"],
-        "chapterGoal":format!("第{chapter}章让林满揪出一笔假账"),
+        "chapterGoal":GOALS[(chapter as usize - 1) % GOALS.len()],
         "activeTaskRefs":[],"continuityActions":[],"requiredStateOutcomes":[],"forbiddenTransitions":[],
         "knowledgeBoundaries":[],"reservationRefs":[],
         "horizonPreview":[

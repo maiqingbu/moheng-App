@@ -316,7 +316,7 @@ pub fn creation_ledger(prior: &[(i64, Value)], bible: &Value) -> Value {
         if craft.get("device").is_some() {
             devices.push(json!({"chapter":chapter,"name":text(&craft["device"]["name"]),"howUsed":text(&craft["device"]["howUsed"])}));
         }
-        endings.push(json!({"chapter":chapter,"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"])}));
+        endings.push(json!({"chapter":chapter,"goal":text(&craft["chapterGoal"]),"after":text(&craft["situationChange"]["after"]),"endHook":text(&craft["endHook"])}));
         people.extend(scene_people(craft).map(|person| text(&person["name"]).to_string()));
         losses.extend(
             craft["newLosses"]
@@ -419,6 +419,17 @@ pub fn shape_reminder(plan: &Value, ledger: &Value) -> Option<String> {
     })
 }
 
+/// How many of the latest chapters' goals a new goal is compared with.
+const RECENT_GOALS: usize = 3;
+
+/// Whether a chapter goal says nearly what `earlier` said: most telling
+/// character pairs of the shorter one also appear in the other.
+fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> bool {
+    let earlier = crate::chapter_craft::telling_pairs(earlier);
+    let shorter = earlier.len().min(goal.len());
+    shorter > 0 && earlier.intersection(goal).count() * 10 >= shorter * 6
+}
+
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
 /// every problem found, in Chinese, so the planner can fix them in one pass.
 pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) -> Vec<String> {
@@ -513,7 +524,20 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
             places.into_iter().collect::<Vec<_>>().join("、")
         ));
     }
-    for ending in ledger["endings"].as_array().into_iter().flatten() {
+    // VD-1e (real run round 14): chapters 4-8 planned nearly the same goal
+    // while their stage stayed open.
+    let endings = ledger["endings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let goal = crate::chapter_craft::telling_pairs(text(&plan["chapterGoal"]));
+    for ending in &endings[endings.len().saturating_sub(RECENT_GOALS)..] {
+        if goals_overlap(text(&ending["goal"]), &goal) {
+            problems.push(format!(
+                "本章目标和第 {} 章的目标几乎一样（{}）：从最近一章的结尾往前推，写这一阶段还没做到的事，前几章已经做到阶段目标时写它的段末转折",
+                ending["chapter"],
+                text(&ending["goal"])
+            ));
+        }
+    }
+    for ending in endings {
         if text(&ending["after"]) == text(&craft["situationChange"]["after"]) {
             problems.push("本章结束的局面和之前某章完全相同，需要新的局面".into());
         }
