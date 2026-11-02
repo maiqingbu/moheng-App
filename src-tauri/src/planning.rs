@@ -275,6 +275,28 @@ pub fn approve_book_plan(
     Ok(approved)
 }
 
+/// P1: each mystery layer the direction planned, as a MYSTERY obligation
+/// that stays open until a chapter records its MYSTERY_RESOLVED event.  The
+/// opening's own CANON_REFS rule is not a mystery.
+pub fn book_mystery_obligations(book_plan: &Value, artifact_id: &str, version: i64) -> Vec<Value> {
+    book_plan
+        .get("majorMysteryGoals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|goal| Some((goal.get("id")?.as_str()?, goal.get("volumeNo")?.as_i64()?, goal)))
+        .map(|(id, volume_no, goal)| {
+            json!({
+                "obligationId":id,"scope":"BOOK","obligationType":"MYSTERY","authorityLevel":"B",
+                "lifecycle":"APPROVED","description":goal["description"],"prerequisites":[],
+                "payloadJson":{"sourceArtifactId":artifact_id,"sourceVersion":version,"answerInVolume":volume_no,
+                    // Open from the start; the volume answering it is answerInVolume.
+                    "resumeCondition":{"kind":"AFTER_CHAPTER","value":0}}
+            })
+        })
+        .collect()
+}
+
 /// Seeds the post-signing goal fields from actual opening references when the
 /// pre-signing seed did not provide them.  These are deliberately structural
 /// continuations of observed Canon, not a new commercial scoring product or a

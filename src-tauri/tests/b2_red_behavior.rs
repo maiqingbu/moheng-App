@@ -26,6 +26,12 @@ struct BehaviorGateway {
     /// again with feedback.
     blank_audit_once: AtomicBool,
     audit_feedback: Mutex<Vec<Value>>,
+    /// P1: chapter 1 opens a thread, chapter 2 advances it and chapter 3
+    /// resolves it, by the ref the audit is shown.
+    threads: AtomicBool,
+    /// The chapter-1 thread is a planted hint (a foreshadow).
+    thread_foreshadows: AtomicBool,
+    open_threads_seen: Mutex<Vec<Value>>,
 }
 
 impl BehaviorGateway {
@@ -248,11 +254,25 @@ impl ProductionModelGateway for BehaviorGateway {
                 } else {
                     Vec::new()
                 };
+                let continuity_candidates = if !self.threads.load(Ordering::SeqCst) {
+                    Vec::new()
+                } else if chapter_no == 1 {
+                    vec![json!({"disposition":"ADVANCE","description":"账本缺的那一页去了哪里","evidence":evidence,"fulfillmentObject":"缺页","promotionSignals":{"foreshadowRecoveryResponsibility":self.thread_foreshadows.load(Ordering::SeqCst)}})]
+                } else {
+                    self.open_threads_seen.lock().unwrap().push(input["openThreads"].clone());
+                    input["openThreads"][0]["threadRef"]
+                        .as_str()
+                        .map(|thread| {
+                            let disposition = if chapter_no == 2 { "ADVANCE" } else { "RESOLVE" };
+                            vec![json!({"threadRef":thread,"disposition":disposition,"evidence":evidence})]
+                        })
+                        .unwrap_or_default()
+                };
                 json!({
                     "qualityFindings":[],
                     "canonCandidates":canon_candidates,
                     "knowledgeCandidates":knowledge_candidates,
-                    "continuityCandidates":[],
+                    "continuityCandidates":continuity_candidates,
                     "taskProgressCandidates":[],
                     "revealedReservationRefs":[],
                     "evidenceRanges":[evidence],
@@ -330,6 +350,9 @@ fn state_with(
         direction_inputs: Mutex::new(Vec::new()),
         blank_audit_once: AtomicBool::new(false),
         audit_feedback: Mutex::new(Vec::new()),
+        threads: AtomicBool::new(false),
+        thread_foreshadows: AtomicBool::new(false),
+        open_threads_seen: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     (state, temp, gateway)
@@ -1123,4 +1146,98 @@ fn an_opening_audit_that_records_nothing_is_asked_again_so_signing_can_read_the_
         feedback[0]["rejectedFor"],
         "B08_AUDIT_OPENING_CANON_REQUIRED"
     );
+}
+
+#[test]
+fn p1_an_opening_records_its_events_and_relations() {
+    // P1 (real run round 20): ten chapters left canon_events and
+    // canon_relations empty.
+    let (state, _temp, _gateway) = state();
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let count = |table: &str| -> i64 {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project_id=?1"), [&project_id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert!(count("canon_events") > 0, "an event-typed fact is an event");
+    let (subject, predicate, object): (String, String, String) = connection
+        .query_row(
+            "SELECT subject_id, predicate, object_id FROM canon_relations WHERE project_id=?1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("a fact about another person is a relation");
+    assert_eq!(
+        (subject.as_str(), predicate.as_str(), object.as_str()),
+        ("entity:b02:linzhou", "distrusts", "entity:b02:guqing")
+    );
+}
+
+#[test]
+fn p1_a_proposed_thread_later_chapters_take_up_is_advanced_then_resolved() {
+    // P1 (real run round 20): 24 threads stayed PROPOSED, never shown to a
+    // later chapter nor allowed to move outside its plan.
+    let (state, _temp, gateway) = state();
+    gateway.threads.store(true, Ordering::SeqCst);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let seen = gateway.open_threads_seen.lock().unwrap().clone();
+    assert_eq!(seen[0][0]["description"], "账本缺的那一页去了哪里", "{seen:?}");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle FROM narrative_obligations WHERE project_id=?1 AND description='账本缺的那一页去了哪里'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "RESOLVED");
+}
+
+#[test]
+fn p1_a_hint_a_chapter_plants_is_a_foreshadow_until_a_later_chapter_recovers_it() {
+    // P1 (real run round 20): the foreshadow table stayed empty.
+    let (state, _temp, gateway) = state();
+    gateway.threads.store(true, Ordering::SeqCst);
+    gateway.thread_foreshadows.store(true, Ordering::SeqCst);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let (status, intent, payoff): (String, String, Option<String>) = connection
+        .query_row(
+            "SELECT status,intent,secret_payload_ref FROM foreshadows WHERE project_id=?1",
+            [&project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), intent.as_str(), payoff.as_deref()), ("RECOVERED", "账本缺的那一页去了哪里", Some("缺页")));
+}
+
+#[test]
+fn p1_the_approved_book_plan_records_each_mystery_layer() {
+    // P1 (real run round 20): no mystery was ever recorded, so the climax
+    // task's MYSTERY_RESOLVED condition had nothing to resolve.
+    let (state, _temp, _gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let mut statement = connection
+        .prepare("SELECT obligation_id,lifecycle,description FROM narrative_obligations WHERE project_id=?1 AND obligation_type='MYSTERY'")
+        .unwrap();
+    let mysteries = statement
+        .query_map([&project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        mysteries,
+        [("mystery:book:1".to_owned(), "APPROVED".to_owned(), "第 1 层：缺页记的是谁的债".to_owned())]
+    );
+    // A chapter may answer it without its plan naming it.
+    use ai_novel_production_system_core::repositories::narrative::NarrativeRepository;
+    let open = NarrativeRepository::open_candidate_threads(&connection, &project_id, 8).unwrap();
+    assert!(open.iter().any(|thread| thread["threadRef"] == "thread:mystery:book:1"), "{open:?}");
+    assert!(NarrativeRepository::is_open_candidate_thread(&connection, &project_id, "mystery:book:1").unwrap());
 }

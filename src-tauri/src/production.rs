@@ -1476,6 +1476,8 @@ struct AuditPolicyContractSize {
     serialized_bytes: usize,
 }
 
+/// P1: open C-level threads the audit is shown.
+const OPEN_THREADS_SHOWN: usize = 8;
 const AUDIT_POLICY_HARD_TOKEN_LIMIT: i64 = 1024;
 const AUDIT_POLICY_HARD_SERIALIZED_BYTE_LIMIT: usize = 8192;
 
@@ -3595,6 +3597,15 @@ fn run_chapter_production_inner(
     if craft_writing.is_some() {
         audit_input["continuityDetailsWanted"] = json!(true);
     }
+    // P1: threads earlier chapters raised, which this chapter may advance or
+    // resolve by their ref.
+    let open_threads = crate::repositories::narrative::NarrativeRepository::open_candidate_threads(
+        connection,
+        &project_id,
+        OPEN_THREADS_SHOWN,
+    )
+    .map_err(|error| error.to_string())?;
+    audit_input["openThreads"] = json!(open_threads);
     let reusable_audit = if !render_reused {
         None
     } else {
@@ -3660,6 +3671,11 @@ fn run_chapter_production_inner(
         .flatten()
         .filter_map(|thread| thread.get("threadId").and_then(Value::as_str))
         .chain(planned_continuity_refs(&plan_payload))
+        .chain(
+            open_threads
+                .iter()
+                .filter_map(|thread| thread["threadRef"].as_str()),
+        )
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
     // QC-1: the chapter's own people, whose facts the fact cap keeps first.
@@ -4144,6 +4160,22 @@ fn run_chapter_production_inner(
                     .map(|evidence| evidence.quote.as_str())
             })
             .unwrap_or(&item.thread_ref);
+        // P1: a hint planted for a later payoff is a foreshadow, which later
+        // chapters reinforce and recover.
+        if item.promotion_signals.foreshadow_recovery_responsibility {
+            foreshadow_delta.push(json!({
+                "foreshadowId":authority_id,"intent":description,"status":"PLANTED",
+                "plantChapterId":chapter_id,
+                // The ref is an id (OpaqueId): no whitespace, 1 to 200 characters.
+                "secretPayloadRef":item.fulfillment_object.as_deref()
+                    .map(|payoff| payoff.split_whitespace().collect::<Vec<_>>().join("_").chars().take(200).collect::<String>())
+                    .filter(|payoff| !payoff.is_empty()),
+                "payloadJson":{"sourceAuthority":"B08_ACTUAL_NARRATIVE","sourceArtifactId":final_id,"sourceVersion":1,"deltaMode":"NEW_CONTINUITY",
+                    "fulfillmentObject":item.fulfillment_object,
+                    "evidence":item.evidence.as_ref().map(|evidence| json!({"start":evidence.start,"end":evidence.end,"quote":evidence.quote}))}
+            }));
+            continue;
+        }
         let resume_condition = item.resume_condition.clone().unwrap_or(Value::Null);
         let lifecycle = if authority_level == "B" {
             "PROGRESSING"
@@ -4485,13 +4517,14 @@ fn run_chapter_production_inner(
         "objectJson":item.object_json,
         "authorityLevel":item.authority_level,
         "eventType":item.event_type,
+        "relationId":candidate_relation_id(item),
         "validFromChapterId":chapter_id,
         "payloadJson":{
             "chapterId":chapter_id,
             "eventId":item.event_type.as_ref().map(|_| format!("event:{}", item.fact_id)),
             "storyTime":item.story_time,
             "canonicalName":item.canonical_name,
-            "entityType":item.entity_type,
+            "entityType":item.entity_type.as_deref().map(entity_kind),
             "sourceArtifactId":final_ref.artifact_id,
             "sourceVersion":final_ref.version,
             "evidenceRange":{"start":item.evidence.start,"end":item.evidence.end,"quote":item.evidence.quote},
@@ -4746,6 +4779,9 @@ struct CanonCandidate {
     authority_level: String,
     #[serde(default)]
     event_type: Option<String>,
+    /// P1: the relation this fact states, when it is about another entity.
+    #[serde(default)]
+    relation_id: Option<String>,
     #[serde(default)]
     story_time: Option<String>,
     #[serde(default)]
@@ -5378,6 +5414,43 @@ fn apply_unique_edits(body: &str, rewrite: &Value, additions: &[String]) -> (Str
         }
     }
     (revised, applied)
+}
+
+/// P1 (real run round 20: PERSON, CHARACTER, ITEM, ARTIFACT, DANLU…): the
+/// one kind an audited entity type stands for.
+pub(crate) fn entity_kind(entity_type: &str) -> &'static str {
+    match entity_type.trim().to_uppercase().as_str() {
+        "PERSON" | "CHARACTER" | "PEOPLE" | "HUMAN" | "NPC" => "PERSON",
+        "PLACE" | "LOCATION" | "SITE" | "AREA" | "BUILDING" => "PLACE",
+        "ORGANIZATION" | "ORGANISATION" | "ORG" | "SECT" | "FACTION" | "GROUP" | "CLAN" => {
+            "ORGANIZATION"
+        }
+        "CREATURE" | "ANIMAL" | "BEAST" | "MONSTER" | "SPIRIT" => "CREATURE",
+        _ => "OBJECT",
+    }
+}
+
+/// P1 (real run round 20: no relation was ever recorded): the relation a
+/// canon candidate states, when its object names another entity
+/// (`objectJson.objectId`): its own relation id, or one derived from who
+/// and whom, so a later change of how they stand updates the same relation.
+fn candidate_relation_id(candidate: &CanonCandidate) -> Option<String> {
+    let object = candidate.object_json.get("objectId").and_then(Value::as_str)?;
+    candidate
+        .relation_id
+        .clone()
+        .or_else(|| {
+            candidate
+                .object_json
+                .get("relationId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            sha256_canonical(&json!([candidate.subject_id, object]))
+                .ok()
+                .map(|digest| format!("relation:{}", &digest[..24]))
+        })
 }
 
 /// The id the system gives the `n`th (from 1) new audit item of a kind
@@ -6517,6 +6590,12 @@ fn validate_actual_extraction(
                 authority_id,
             )
             .map_err(|error| error.to_string())?
+                && !crate::repositories::narrative::NarrativeRepository::is_open_candidate_thread(
+                    connection,
+                    project_id,
+                    authority_id,
+                )
+                .map_err(|error| error.to_string())?
             {
                 return Err("B08_THREAD_TRANSITION_OUTSIDE_PLAN".into());
             }
@@ -6885,6 +6964,22 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audited_entity_types_come_down_to_five_kinds() {
+        for (raw, kind) in [
+            ("CHARACTER", "PERSON"),
+            ("person", "PERSON"),
+            ("ITEM", "OBJECT"),
+            ("ARTIFACT", "OBJECT"),
+            ("DANLU", "OBJECT"),
+            ("ANIMAL", "CREATURE"),
+            ("LOCATION", "PLACE"),
+            ("SECT", "ORGANIZATION"),
+        ] {
+            assert_eq!(super::entity_kind(raw), kind, "{raw}");
+        }
+    }
+
     #[test]
     fn only_tasks_another_chapter_satisfied_keep_their_chapter() {
         use crate::repositories::narrative::TaskStateRecord;

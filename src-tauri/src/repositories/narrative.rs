@@ -3,6 +3,10 @@ use crate::narrative::{build_continuity_threads, ContinuityThreadView, ResumeCon
 use libsql_rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+/// P1: the open threads a chapter may take up on its own (thread_id,
+/// description, updated_at), for project ?1.
+const OPEN_CANDIDATE_THREADS: &str = "SELECT obligation_id AS thread_id,description,updated_at FROM narrative_obligations WHERE project_id=?1 AND ((authority_level='C' AND lifecycle IN ('PROPOSED','PROGRESSING')) OR (obligation_type='MYSTERY' AND lifecycle IN ('APPROVED','PROGRESSING'))) UNION ALL SELECT foreshadow_id,intent,updated_at FROM foreshadows WHERE project_id=?1 AND status IN ('PLANTED','REINFORCED','STALE')";
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const TASK_STATE_CHUNK_SIZE: usize = 100;
@@ -978,8 +982,9 @@ impl NarrativeRepository {
         };
         let responsibilities = {
             let volume_scope = Self::volume_scope_key(volume_id)?;
+            // P1: mysteries enter the route as climax tasks, not as carried responsibilities.
             let mut statement = connection.prepare(
-                "SELECT o.obligation_id,o.obligation_type,o.scope,o.authority_level,o.lifecycle,o.description,o.must_resolve_before_chapter,o.prerequisites_json,o.source_event_id,o.resume_condition_json,o.source_artifact_id,o.source_version FROM narrative_obligations o WHERE o.project_id=?1 AND o.scope IN ('BOOK','VOLUME') AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND (o.scope='BOOK' OR EXISTS (SELECT 1 FROM artifacts a WHERE a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version AND a.scope_level='VOLUME' AND a.scope_key IN (?3,?4))) ORDER BY o.authority_level,o.obligation_id LIMIT ?2",
+                "SELECT o.obligation_id,o.obligation_type,o.scope,o.authority_level,o.lifecycle,o.description,o.must_resolve_before_chapter,o.prerequisites_json,o.source_event_id,o.resume_condition_json,o.source_artifact_id,o.source_version FROM narrative_obligations o WHERE o.project_id=?1 AND o.scope IN ('BOOK','VOLUME') AND o.lifecycle IN ('APPROVED','PLANTED','PROGRESSING') AND o.obligation_type<>'MYSTERY' AND (o.scope='BOOK' OR EXISTS (SELECT 1 FROM artifacts a WHERE a.project_id=o.project_id AND a.artifact_id=o.source_artifact_id AND a.version=o.source_version AND a.scope_level='VOLUME' AND a.scope_key IN (?3,?4))) ORDER BY o.authority_level,o.obligation_id LIMIT ?2",
             )?;
             let rows = statement
                 .query_map(
@@ -3102,6 +3107,38 @@ impl NarrativeRepository {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             }))
+    }
+
+    /// P1: threads and foreshadows chapters raised on their own (C level) and
+    /// the book's mysteries, still open, newest first, so a later audit can
+    /// take them up.
+    pub fn open_candidate_threads(
+        connection: &Connection,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>, NarrativeRepositoryError> {
+        let mut statement = connection
+            .prepare(&format!("{OPEN_CANDIDATE_THREADS} ORDER BY 3 DESC, 1 DESC LIMIT ?2"))?;
+        let rows = statement.query_map(libsql_rusqlite::params![project_id, limit as i64], |row| {
+            Ok(json!({"threadRef":format!("thread:{}", row.get::<_, String>(0)?),"description":row.get::<_, String>(1)?}))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// P1: whether a thread is one of those still open, which a chapter may
+    /// move without its plan naming it.
+    pub fn is_open_candidate_thread(
+        connection: &Connection,
+        project_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, NarrativeRepositoryError> {
+        connection
+            .query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM ({OPEN_CANDIDATE_THREADS}) WHERE thread_id=?2)"),
+                libsql_rusqlite::params![project_id, thread_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn continuity_thread_exists(

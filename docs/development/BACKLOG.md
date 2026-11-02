@@ -58,11 +58,16 @@
 ## 2. 进行中
 
 - **第 21 轮（VD-1h）没跑完（2026-11-03）**：签约后生成方向，三次都没通过检查（7 个阶段、有一个是空的、章数超出），全书规划退回了模板；第 6 章又遇到服务商 `transport: unavailable`。已做 **VD-1i** 修复（VOLUME_DIRECTION_DESIGN §3.11）：先整理再检查，删空阶段，把章数缩放进范围；阶段上限放宽到 8；提示里写明章数范围。
-- **下一步**：VD-1i 过关卡、提交后，重跑修仙验收，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
+- **第 22 轮（VD-1i）跑完（2026-11-03）**：10 章全部 PASS，字数 1900–2393，签约结果：番茄 PASS，起点、晋江 FAIL（按规则）。样章在 `验收样章/第22轮-修仙-VD1i`。发现两个问题：
+  1. **方向又没生成**：三次都卡在“第 4 个阶段的 cast 里有故事圣经之外的人：执法堂长老”，全书规划又退回模板，第 4–10 章没有阶段方向，按小步推进这一项这轮没法检查。修法 **VD-1j**：先整理再检查时，把 cast 里故事圣经之外的人自动挪进 newCast。
+  2. **第 1 章整章没有分段**：写手模型最后一次返回的正文里没有一个换行（前几次有 100 个左右），后面的步骤没有改动换行。修法 **LD-2**：正文输出规范要求超过 400 字的正文必须有换行；不合规范时，按已有机制带着原因重发一次。
+  - 这轮用的是 P1 之前的代码，所以事件、关系、伏笔表都是 0，21 条线索都停在 C 级“提议中”。另外，没写 description 的线索会拿引文当描述，出现了“他说。”这样的线索，P1 的 `openThreads` 会把这些线索给审计看，要留意。
+- **下一步**：VD-1j、LD-2 过关卡、提交后，重跑修仙验收，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
   1. 方向是否一次通过，阶段里有没有小步；
   2. 第 4–10 章是否按小步推进，有没有出现一章写完一个阶段；
   3. 第 8–10 章有没有原地打转；
-  4. 签约、意象、口头禅。
+  4. 签约、意象、口头禅；
+  5. P1：`canon_events`、`canon_relations`、`foreshadows` 的条数，MYSTERY 线索有没有登记，线索有没有从“提议中”往前走。
 - **如果节奏还是太快**：把 `chaptersSoFar` 和预计章数改成按“步”统计（VD-1h 审查时的建议）。
 
 ---
@@ -77,6 +82,16 @@
 - 关系类可选任务（条件 `RELATION_STATE_MATCH`）永远完不成；
 - 伏笔回收、伏笔到期提醒、长篇健康检查都没有数据；
 - WM-2d 的事件时间线也没有数据来源。
+
+**进度（2026-11-03，代码已写、测试通过，待关卡和提交）：**
+- [x] 事件：审计给改变局面的事实标 `eventType`，写进 `canon_events`（测试 `p1_an_opening_records_its_events_and_relations`）。
+- [x] 关系：宾语是另一实体的事实带 `relationId`（同一对人物共用一个关系，关系变了就更新这一条），写进 `canon_relations`。
+- [x] 人物类型统一：`entityType` 归到 PERSON/PLACE/OBJECT/ORGANIZATION/CREATURE 五类（`production.rs::entity_kind`）。
+- [x] 线索生命周期（负责人 11-02 批准改 B08 规则）：审计输入多了 `openThreads`（最近 8 条还开着的 C 级线索、伏笔、谜题）；章节可以在规划之外推进或兑现这些线索，不再报 `B08_THREAD_TRANSITION_OUTSIDE_PLAN`。线索会从 PROPOSED 变成 PROGRESSING，再变成 RESOLVED（测试 `p1_a_proposed_thread_…`）。
+- [x] 伏笔：审计新开的线索如果是“埋下的暗示”（`foreshadowRecoveryResponsibility`），就登记成伏笔（PLANTED），之后推进时变成 REINFORCED，兑现时变成 RECOVERED（测试 `p1_a_hint_…`）。
+- [x] 谜题：提交契约里没有谜题增量（加一个要改冻结的契约），所以改用结局检查已经认可的 `obligation_type='MYSTERY'`。全书规划批准时，方向里的每层谜题登记成 MYSTERY 线索（APPROVED），章节揭开时按上一条的规则 RESOLVE。它们不进卷路线的“跨卷责任”，因为高潮任务已经覆盖了它们（测试 `p1_the_approved_book_plan_records_each_mystery_layer`）。`mystery_states` 表仍然为 0，验收看 MYSTERY 线索的数量。
+- [ ] 真实验收：修仙十章后各表的条数。
+- 欠账：只有首次批准全书规划时会登记谜题；卷方向改写全书规划、变更流程改全书规划时，不会同步谜题。evidence 转 JSON 的写法在 `production.rs` 里有十来处重复，没有抽出来。
 
 执行办法（每一步先写测试，再用一轮真实验收检查表里的条数）：
 1. **事件**

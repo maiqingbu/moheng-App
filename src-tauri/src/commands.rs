@@ -8373,7 +8373,23 @@ fn execute_planning_command_with_observer(
         .map(ToOwned::to_owned)
         .or(direction_run_id);
     let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":artifact_type,"scope":scope,"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":payload,"payloadHash":hash,"dependencyRefs":book_plan_dependencies,"provenance":{"createdBy":"B07::PlanningOwner","commandId":command_id,"modelRunId":model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
-    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}],"decisionUpdates":direction_reminder.map(|reminder| vec![reminder])})).map_err(|e| e.to_string())?;
+    // P1: an approved book plan opens its mysteries; one already recorded
+    // keeps its state when the plan is revised.
+    let mut mysteries = Vec::new();
+    if artifact_type == "BookPlan" && payload["planningMaturity"] == "APPROVED" {
+        for mystery in crate::planning::book_mystery_obligations(&payload, &artifact_id, version) {
+            let recorded = crate::repositories::narrative::NarrativeRepository::continuity_thread_exists(
+                &handle,
+                project_id,
+                mystery["obligationId"].as_str().unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+            if !recorded {
+                mysteries.push(mystery);
+            }
+        }
+    }
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{}",command_id),"projectId":project_id,"commandId":command_id,"idempotencyKey":idempotency_key,"expectedProjectRevision":expected_revision,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":artifact_type,"scope":scope,"artifactId":artifact_id,"version":version,"payloadHash":hash}],"decisionUpdates":direction_reminder.map(|reminder| vec![reminder]),"obligationDelta":(!mysteries.is_empty()).then_some(mysteries)})).map_err(|e| e.to_string())?;
     if let Some(job_id) = b02_plan_job.as_deref() {
         notify_b02_planning_phase(
             &handle,
