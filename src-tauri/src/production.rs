@@ -3411,12 +3411,49 @@ fn run_chapter_production_inner(
             let revised = crate::chapter_craft::normalize_typography(revised.trim());
             let length = character_count(&revised);
             in_range = (length_range.min..=length_range.ceiling()).contains(&length);
-            repeats_grew =
-                crate::chapter_craft::overused_phrases(&chapter_history.bodies, &revised).len()
-                    > repeated.len();
+            // How much text the repeats cover: removing one sentence of a
+            // run can split it into two, so the count of phrases can grow.
+            let repeated_chars =
+                |phrases: &[String]| phrases.iter().map(|p| p.chars().count()).sum::<usize>();
+            repeats_grew = repeated_chars(&crate::chapter_craft::overused_phrases(
+                &chapter_history.bodies,
+                &revised,
+            )) > repeated_chars(&repeated);
             applied = count;
             if applied > 0 && in_range && !repeats_grew {
                 body = revised;
+            }
+            // RP-1: repeats signing F1-5 counts that the rewrite left (its
+            // edit refused, say) are rewritten once more, alone.
+            let left = crate::chapter_craft::overused_phrases(&chapter_history.bodies, &body);
+            if !left.is_empty() {
+                let retry = craft_step(
+                    "rewrite-repeats",
+                    "REWRITE_PASSAGES",
+                    &rewrite_profile,
+                    json!({"chapterId":chapter_id,"body":body,"findings":crate::chapter_craft::repetition_findings(&left, &body),"repeatedPhrases":left,"chapterLengthRange":length_range.to_json(),"craftGuidance":rewrite_guidance}),
+                )
+                .unwrap_or_else(|error| {
+                    rewrite_error.get_or_insert(error);
+                    json!({"edits":[]})
+                });
+                let (revised, count) = apply_unique_edits(&body, &retry, &additions);
+                let revised = crate::chapter_craft::normalize_typography(revised.trim());
+                if count > 0
+                    && (length_range.min..=length_range.ceiling())
+                        .contains(&character_count(&revised))
+                    && repeated_chars(&crate::chapter_craft::overused_phrases(
+                        &chapter_history.bodies,
+                        &revised,
+                    )) < repeated_chars(&left)
+                {
+                    body = revised;
+                    applied += count;
+                    // The chapter now holds a rewrite in range with fewer
+                    // repeats, whatever became of the first one.
+                    in_range = true;
+                    repeats_grew = false;
+                }
             }
         }
         let discarded = if applied == 0 {

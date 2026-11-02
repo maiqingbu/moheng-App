@@ -791,11 +791,20 @@ fn craft_v2_a_phrase_used_a_third_time_goes_to_the_rewrite() {
     let (_temp, state, _chapter_id, result) = produce(gateway.clone(), project_id);
     result.unwrap();
     let rewrites = gateway.inputs("REWRITE_PASSAGES");
-    assert_eq!(rewrites.len(), 1);
-    assert!(rewrites[0]["repeatedPhrases"][0]
-        .as_str()
+    // RP-1: the fixture rewrite leaves the repeat, so the repeat alone is
+    // rewritten once more.
+    assert_eq!(rewrites.len(), 2);
+    for rewrite in &rewrites {
+        assert!(rewrite["repeatedPhrases"][0]
+            .as_str()
+            .unwrap()
+            .contains("蓝莓籽"));
+    }
+    assert!(rewrites[1]["findings"]
+        .as_array()
         .unwrap()
-        .contains("蓝莓籽"));
+        .iter()
+        .all(|finding| finding["code"] == "word_repetition"));
     assert!(
         receipt_craft(&state, project_id)["proseReview"]["repeatedPhrases"]
             .as_u64()

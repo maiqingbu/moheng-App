@@ -29,6 +29,9 @@ struct CraftGateway {
     check_fails: bool,
     /// Every passage rewrite call fails.
     rewrite_fails: bool,
+    /// Every chapter has `COUGH_LINE`, and its first rewrite adds a simile.
+    cough_line: bool,
+    cough_rewrites: AtomicUsize,
 }
 
 /// The inputs of every call to `capability`, in call order.
@@ -41,6 +44,8 @@ fn inputs(calls: &[(String, Value)], capability: &str) -> Vec<Value> {
 }
 
 const TROPE_SENTENCE: &str = "林满倒吸一口凉气，转身进了面馆。";
+/// Round 16: one line in each opening chapter, a third use in chapter 3.
+const COUGH_LINE: &str = "陈婆的咳声从甬道那头传下来，一下，两下，第三下咽回去了。";
 /// Clashes with chapter 1's detail that 林满 takes his soy milk unsweetened.
 const SUGAR_SENTENCE: &str = "林满往豆浆里加了两勺糖。";
 
@@ -103,7 +108,29 @@ impl ProductionModelGateway for CraftGateway {
             "RENDER_CHAPTER_CRAFT" => json!({"body":"林满推开面馆的门，把账本放在了灶台边。"}),
             "ADJUST_CHAPTER_LENGTH" => {
                 let chapter = self.chapters_written.fetch_add(1, Ordering::SeqCst) + 1;
-                json!({"body":long_body(chapter)})
+                let mut body = long_body(chapter);
+                if self.cough_line {
+                    body = body.replacen('\n', &format!("\n{COUGH_LINE}\n"), 1);
+                }
+                json!({"body":body})
+            }
+            "REWRITE_PASSAGES"
+                if self.cough_line && input["findings"].to_string().contains("第三下咽回去了") =>
+            {
+                // The rewrite with all its findings adds a simile; the one
+                // with the repeats alone does not.
+                let repeats_only = input["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|finding| finding["code"] == "word_repetition");
+                self.cough_rewrites.fetch_add(1, Ordering::SeqCst);
+                let replacement = if repeats_only {
+                    "甬道那头，陈婆的咳声断断续续，后来没了动静。"
+                } else {
+                    "陈婆的咳声从甬道那头传下来，像破风箱一样拉了三下。"
+                };
+                json!({"edits":[{"quote":COUGH_LINE,"replacement":replacement}]})
             }
             "REWRITE_PASSAGES" if self.rewrite_fails => {
                 return Err("P01_PROVIDER_HTTP_STATUS:503".into());
@@ -323,7 +350,13 @@ fn qc1_a_contradiction_the_rewrite_leaves_waits_in_the_chapter_reminder() {
     assert_eq!(checks.len(), 2, "a check and a recheck");
     assert!(checks[0]["bodySentences"].as_array().unwrap().len() > 40);
     assert_eq!(checks[0]["earlierFacts"][0]["fact"], "喝豆浆不加糖");
-    let rewrite = inputs(&calls, "REWRITE_PASSAGES").pop().unwrap();
+    // The last rewrite with all the findings (RP-1 may follow it with one
+    // for the signing repeats alone).
+    let rewrite = inputs(&calls, "REWRITE_PASSAGES")
+        .into_iter()
+        .rev()
+        .find(|input| input["findings"][0]["code"] != "word_repetition")
+        .unwrap();
     assert_eq!(rewrite["findings"][0]["code"], "continuity_contradiction");
     drop(calls);
     let connection = state.manager.open(&project_id, "", NOW).unwrap();
@@ -481,4 +514,31 @@ fn rp1_the_second_chapter_is_written_knowing_how_the_first_closed() {
     let renders = inputs(&calls, "RENDER_CHAPTER_CRAFT");
     let ending = renders[1]["recentChapters"][0]["ending"].as_str().unwrap();
     assert_eq!(ending.chars().count(), 200);
+}
+
+#[test]
+fn rp1_a_repeat_the_rewrite_could_not_fix_is_rewritten_once_more() {
+    // Real run round 16: the opening failed signing F1-5 because the only
+    // edit of its third repeat added a simile and was refused.
+    let (_temp, state, gateway, project_id) = project_ready_to_write_with(
+        "cough",
+        CraftGateway {
+            cough_line: true,
+            ..CraftGateway::default()
+        },
+    );
+    for chapter in 1..=3 {
+        write_next_chapter(&state, &project_id, &format!("cough:production:{chapter}"));
+    }
+    assert!(gateway.cough_rewrites.load(Ordering::SeqCst) >= 2);
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let body: String = connection
+        .query_row(
+            "SELECT json_extract(f.payload_json,'$.body') FROM chapters c JOIN artifact_payloads f ON f.artifact_id=c.final_artifact_id AND f.version=c.final_version WHERE c.project_id=?1 AND c.chapter_no=3",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!body.contains("第三下咽回去了"), "{body}");
+    assert!(body.contains("后来没了动静"));
 }

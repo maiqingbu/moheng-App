@@ -1229,7 +1229,9 @@ pub fn catchphrase_candidates(
         .iter()
         .filter(|(phrase, (_, recent, _))| {
             !found.iter().any(|(longer, (_, longer_recent, _))| {
-                longer.len() > phrase.len() && longer.contains(phrase.as_str()) && longer_recent >= recent
+                longer.len() > phrase.len()
+                    && longer.contains(phrase.as_str())
+                    && longer_recent >= recent
             })
         })
         .collect::<Vec<_>>();

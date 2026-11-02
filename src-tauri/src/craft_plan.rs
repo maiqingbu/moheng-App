@@ -524,7 +524,10 @@ pub fn plan_problems(plan: &Value, chapter: i64, bible: &Value, ledger: &Value) 
     }
     // VD-1e (real run round 14): chapters 4-8 planned nearly the same goal
     // while their stage stayed open.
-    let endings = ledger["endings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let endings = ledger["endings"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let goal = crate::chapter_craft::telling_pairs(text(&plan["chapterGoal"]));
     for ending in &endings[endings.len().saturating_sub(RECENT_GOALS)..] {
         if goals_overlap(text(&ending["goal"]), &goal) {
