@@ -197,3 +197,10 @@
 4. QC-1.4 + QC-1.5 连贯检查（口头禅与矛盾）。
 
 全部完成后重跑十章验收，对比这几项：重新绑定的条数、口头禅次数、第 1 章威胁、伏笔条数、矛盾提醒数，并与 2026-10-26 那轮比较。
+
+
+## 开篇审计不能“无变化”（真实验收第 19 轮，2026-11-02）
+
+第 19 轮第 2 章的审计返回了 `COMPLETE_NO_CHANGE`，一条事实都没有。签约评估要读取开篇三章已记下的事实（`BOOK_PLAN_SIGNING_EVIDENCE_UNREACHABLE`），因此 22 个评估项全部无法核实，签约没有通过。
+
+现在开篇章节（`OPENING_BOOTSTRAP`）的审计如果没有任何 `canonCandidates`，就按 `B08_AUDIT_OPENING_CANON_REQUIRED` 带着说明重审一次，要求把正文里写到的事件，以及人物的处境、所在、持有物和关系变化都提取出来。重审仍然为空时，按原来的暂缓规则提交。测试：`tests/b2_red_behavior.rs` 的 `an_opening_audit_that_records_nothing_is_asked_again_so_signing_can_read_the_chapter`。

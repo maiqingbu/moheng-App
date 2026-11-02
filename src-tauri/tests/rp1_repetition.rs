@@ -2,7 +2,7 @@
 //! repeated across chapters, one use in each.
 
 use ai_novel_production_system_core::chapter_craft::{
-    catchphrase_candidates, ending_repetition_findings,
+    catchphrase_candidates, ending_repetition_findings, motif_candidates, motif_findings,
 };
 
 fn texts(items: &[&str]) -> Vec<String> {
@@ -59,4 +59,37 @@ fn rp1_an_ending_like_a_recent_ones_is_a_rewrite_finding_on_the_last_sentence() 
 
     let fresh = "陆照没再说话。院门外传来马蹄声，周砚舟的人举着火把进了山门。";
     assert!(ending_repetition_findings(&texts(&[earlier]), fresh).is_empty());
+}
+
+/// RP-1 §5 (owner decision 2026-11-02, option A): two-character words a
+/// chapter writes often that also ran through the recent chapters are
+/// candidates; the continuity check says which are overused images.
+#[test]
+fn rp1_a_two_character_image_written_often_across_chapters_is_a_motif_candidate() {
+    let history = texts(&[
+        "掌心的金星闪了一下。金星又亮了。",
+        "灶台很冷。陆照低头看手。",
+        "金星浮在血沫里。金星不散。",
+    ]);
+    let body = "金星亮起来。金星浮在半空。他盯着金星。金星往下沉。金星灭了。陆照起来了。";
+    let candidates = motif_candidates(&history, body, &["陆照"]);
+    let found = candidates
+        .iter()
+        .find(|candidate| candidate["word"] == "金星")
+        .unwrap_or_else(|| panic!("{candidates:?}"));
+    assert_eq!(found["thisChapter"], 5);
+    assert_eq!(found["chapters"], 3);
+    assert!(!candidates.iter().any(|candidate| candidate["word"] == "陆照"));
+}
+
+#[test]
+fn rp1_an_overused_image_past_its_allowance_is_a_rewrite_finding() {
+    let body = "金星亮起来。金星浮在半空。他盯着金星。金星往下沉。金星灭了。";
+    let findings = motif_findings(&["金星".to_string()], body);
+    let quotes = findings
+        .iter()
+        .map(|finding| finding["quote"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(quotes, ["金星往下沉。", "金星灭了。"]);
+    assert!(findings.iter().all(|finding| finding["code"] == "detail_repetition"));
 }

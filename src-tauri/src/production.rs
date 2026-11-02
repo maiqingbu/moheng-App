@@ -3192,6 +3192,8 @@ fn run_chapter_production_inner(
         // the sentences contradicting earlier chapters and which repeated
         // short phrases are catchphrases; both lead the findings too.
         let mut candidates = Vec::new();
+        // RP-1 §5: two-character images, for the check to judge as well.
+        let mut motif_candidates = Vec::new();
         let mut earlier_facts = Vec::new();
         let mut continuity_input = None;
         if let Some(writing) = &craft_writing {
@@ -3215,10 +3217,14 @@ fn run_chapter_production_inner(
                 &names,
                 &story_text,
             );
-            if !candidates.is_empty() || !earlier_facts.is_empty() {
+            motif_candidates =
+                crate::chapter_craft::motif_candidates(&chapter_history.bodies, &body, &names);
+            if !candidates.is_empty() || !earlier_facts.is_empty() || !motif_candidates.is_empty()
+            {
                 continuity_input = Some(json!({
                     "chapterNumber":chapter_number,
-                    "earlierFacts":earlier_facts
+                    "earlierFacts":earlier_facts,
+                    "motifCandidates":motif_candidates
                 }));
             }
         }
@@ -3244,12 +3250,12 @@ fn run_chapter_production_inner(
                      sentences: &[String],
                      candidates: &[Value],
                      errors: &mut Vec<String>|
-         -> (Vec<Value>, Vec<String>) {
+         -> (Vec<Value>, Vec<String>, Vec<String>) {
             let checked = match checked {
                 Ok(checked) => checked,
                 Err(error) => {
                     errors.push(error);
-                    return (Vec::new(), Vec::new());
+                    return (Vec::new(), Vec::new(), Vec::new());
                 }
             };
             let contradictions = crate::chapter_craft::credible_contradictions(
@@ -3276,16 +3282,28 @@ fn run_chapter_production_inner(
                 })
                 .map(ToOwned::to_owned)
                 .collect();
-            (contradictions, catchphrases)
+            let motifs = checked["motifs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|word| {
+                    motif_candidates
+                        .iter()
+                        .any(|candidate| candidate["word"] == *word)
+                })
+                .map(ToOwned::to_owned)
+                .collect();
+            (contradictions, catchphrases, motifs)
         };
-        let (contradictions, catchphrases) = match continuity_request(&body, &candidates) {
+        let (contradictions, catchphrases, motifs) = match continuity_request(&body, &candidates) {
             Some((input, sentences)) => judge(
                 craft_step("continuity", "CHECK_CONTINUITY", &continuity_profile, input),
                 &sentences,
                 &candidates,
                 &mut continuity_errors,
             ),
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
         // A sentence the check flagged is fixed for that reason first; a
         // repeat already flagged by a rule keeps the rule's finding.
@@ -3321,7 +3339,7 @@ fn run_chapter_production_inner(
         ));
         // QC-1 (owner decision 2026-10-30): an object or detail written past
         // its allowance is worded differently from there on.
-        let (detail_findings, running_details) = match &craft_writing {
+        let (mut detail_findings, mut running_details) = match &craft_writing {
             Some(writing) => {
                 let (_, names) = writing.chapter_people(&plan_payload);
                 let names = names.iter().map(String::as_str).collect::<Vec<_>>();
@@ -3334,6 +3352,12 @@ fn run_chapter_production_inner(
             }
             None => (Vec::new(), Vec::new()),
         };
+        // RP-1 §5: the images the check found overused are rewritten past
+        // their allowance and left out by the next writers.
+        detail_findings.extend(crate::chapter_craft::motif_findings(&motifs, &body));
+        // Together they keep to the detail findings' share of the rewrite.
+        detail_findings.truncate(crate::chapter_craft::MAX_DETAIL_FINDINGS);
+        running_details.extend(motifs.iter().cloned());
         // A sentence already flagged keeps its first finding.
         let detail_findings = detail_findings
             .into_iter()
@@ -3722,6 +3746,11 @@ fn run_chapter_production_inner(
     let check_audit = |raw: Value| -> Result<(Value, AuditExtraction), String> {
         let audit_payload = prepare_audit(raw)?;
         let extraction = validate_audit(&audit_payload)?;
+        // Real run round 19: an opening chapter's audit reported no change,
+        // and signing found no committed facts to read for that chapter.
+        if execution_mode == "OPENING_BOOTSTRAP" && extraction.canon_candidates.is_empty() {
+            return Err("B08_AUDIT_OPENING_CANON_REQUIRED".into());
+        }
         Ok((audit_payload, extraction))
     };
     // Craft rule (2026-10-18): an audit whose evidence cannot be located in
@@ -3738,6 +3767,7 @@ fn run_chapter_production_inner(
                     "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND"
                         | "B08_AUDIT_INCOMPLETE_NORMALIZATION_DROPPED_CONTENT"
                         | "B08_AUDIT_INCOMPLETE_KNOWLEDGE_TIME"
+                        | "B08_AUDIT_OPENING_CANON_REQUIRED"
                 ) || error
                     .starts_with("B08_CANON_SEMANTICS_UNRESOLVED_PREDICATE_SEMANTICS")) =>
         {
@@ -3762,6 +3792,9 @@ fn run_chapter_production_inner(
                     .predicates()
                 );
                 input["auditFeedback"]["instruction"] = json!("上次提取的 canonCandidates 用了未登记的 predicate（见 rejectedFor）。请重新完整提取：每条事实的 predicate 只能取 registeredPredicates 中的一个，表达不了的变化不要写成事实。");
+            }
+            if error == "B08_AUDIT_OPENING_CANON_REQUIRED" {
+                input["auditFeedback"]["instruction"] = json!("这是开篇三章之一，签约评估要读取本章已记下的事实，上次却一条也没有。请重新完整提取：把正文里写到的事件、人物的处境、所在、持有物和关系的变化写成 canonCandidates，每条的 evidence.sentence 指向 bodySentences 里写到它的那一句，不要返回 COMPLETE_NO_CHANGE。");
             }
             let rerun_spec = ModelRunSpec {
                 model_run_id: rerun_id.clone(),

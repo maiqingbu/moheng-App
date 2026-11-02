@@ -64,3 +64,15 @@ QC-1 的细节次数上限（`detail_repetition_findings`）只管 3–6 个汉�
 - 只认 `telling_pairs` 认可的两字，并排除人名；
 - 超出部分交给改写换说法；
 - 写手的 `avoidDetails` 同样收进这些两字意象。
+
+### 5.1 实现（方案 A）
+
+- `chapter_craft::motif_candidates` 挑候选，条件如下：
+  - 两个字都是汉字，且都不在常用字和虚词表里；
+  - 本章至少用 5 次；
+  - 连同本章，最近 4 章里至少 3 章用到；
+  - 不是人名的一部分。
+
+  按本章用的次数排序，最多取 12 个。候选作为 `motifCandidates`，随连贯检查的请求一起发出。
+- 连贯检查（CHECK_CONTINUITY）在 `motifs` 里返回被写滥的意象，只认候选里有的词，排除普通词、数字和名字碎片。输出规范 `check-continuity.schema.json` 新增可选的 `motifs`。
+- 判出的意象由 `chapter_craft::motif_findings` 处理：本章超过 3 次（`DETAIL_PER_CHAPTER`）的句子交给改写，代码和细节重复一样，都是 `detail_repetition`。这些意象同时记进回执的 `overusedDetails`，之后各章的写手会在 `avoidDetails` 里看到它们。

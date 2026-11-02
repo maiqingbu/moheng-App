@@ -1006,7 +1006,7 @@ const DETAIL_WINDOW_TOTAL: usize = 10;
 const NOT_A_DETAIL: &str = "把被给让了着过他她它我你们的地得在是";
 /// The most detail findings a chapter sends to the rewrite, so they leave
 /// room for the others.
-const MAX_DETAIL_FINDINGS: usize = 6;
+pub(crate) const MAX_DETAIL_FINDINGS: usize = 6;
 
 /// QC-1 (owner decision 2026-10-30; fifth acceptance run: 存钱罐 eleven
 /// times in a chapter, 左手小指第一节 in every chapter): each sentence of
@@ -1097,6 +1097,78 @@ pub fn detail_repetition_findings(
         .map(|(phrase, _, _)| phrase)
         .collect();
     (findings, running)
+}
+
+/// RP-1 §5 (owner decision 2026-11-02, option A): how often a two-character
+/// word must appear in the chapter, in how many of this and the recent
+/// chapters, and how many candidates the continuity check judges.
+const MOTIF_MIN_HERE: usize = 5;
+const MOTIF_SPREAD: usize = 3;
+const MAX_MOTIF_CANDIDATES: usize = 12;
+
+/// RP-1 §5: two-character words (鳞斑, 金星) the chapter writes at least
+/// `MOTIF_MIN_HERE` times that also ran through the recent chapters (in at
+/// least `MOTIF_SPREAD` of the four), never part of a name nor a grammar
+/// pair, most used first. Many are ordinary words (起来, 声音), so the
+/// continuity check says which are images written to excess.
+/// `{word, thisChapter, chapters}` each.
+pub fn motif_candidates(history: &[String], body: &str, names: &[&str]) -> Vec<Value> {
+    let chars = body.chars().collect::<Vec<_>>();
+    let mut counts = BTreeMap::<String, usize>::new();
+    for pair in chars.windows(2) {
+        if pair
+            .iter()
+            .all(|c| is_han(*c) && !COMMON_CHARACTERS.contains(*c) && !NOT_A_DETAIL.contains(*c))
+        {
+            *counts.entry(pair.iter().collect()).or_default() += 1;
+        }
+    }
+    let mut candidates = counts
+        .into_iter()
+        .filter(|(word, here)| {
+            *here >= MOTIF_MIN_HERE && !names.iter().any(|name| name.contains(word.as_str()))
+        })
+        .map(|(word, here)| {
+            let chapters = 1 + history
+                .iter()
+                .take(CATCHPHRASE_WINDOW)
+                .filter(|text| text.contains(word.as_str()))
+                .count();
+            (word, here, chapters)
+        })
+        .filter(|(_, _, chapters)| *chapters >= MOTIF_SPREAD)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, here, _)| std::cmp::Reverse(*here));
+    candidates
+        .into_iter()
+        .take(MAX_MOTIF_CANDIDATES)
+        .map(|(word, here, chapters)| json!({"word":word,"thisChapter":here,"chapters":chapters}))
+        .collect()
+}
+
+/// RP-1 §5: each sentence writing one of `motifs` (the images the
+/// continuity check found overused) past `DETAIL_PER_CHAPTER`, for the
+/// rewrite to word differently, as an overused detail is.
+pub fn motif_findings(motifs: &[String], body: &str) -> Vec<Value> {
+    let allowances = motifs
+        .iter()
+        .map(|motif| {
+            (
+                motif.clone(),
+                DETAIL_PER_CHAPTER,
+                format!("「{motif}」这几章反复在写，本章已经写了 {DETAIL_PER_CHAPTER} 次"),
+            )
+        })
+        .collect::<Vec<_>>();
+    excess_use_findings(
+        &allowances,
+        body,
+        "detail_repetition",
+        "换个说法提到它（代称、动作或干脆省去），物件本身和信息不变",
+    )
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// QC-1: how long a sentence copied from a recent chapter must be to count,

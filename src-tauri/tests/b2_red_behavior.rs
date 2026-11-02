@@ -9,7 +9,7 @@ use ai_novel_production_system_core::production::{
 };
 use ai_novel_production_system_core::project_db::paths::AppPaths;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const NOW: &str = "2026-09-13T12:00:00Z";
@@ -22,6 +22,10 @@ struct BehaviorGateway {
     plans_directions: bool,
     table_directions: bool,
     direction_inputs: Mutex<Vec<Value>>,
+    /// Round 19: the first audit reports no change; set when it was asked
+    /// again with feedback.
+    blank_audit_once: AtomicBool,
+    audit_feedback: Mutex<Vec<Value>>,
 }
 
 impl BehaviorGateway {
@@ -162,7 +166,16 @@ impl ProductionModelGateway for BehaviorGateway {
                 let chapter_no = self.audit_calls.load(Ordering::SeqCst) + 1;
                 json!({"body":Self::quote(chapter_no)})
             }
+            "AUDIT_EXTRACT" if self.blank_audit_once.swap(false, Ordering::SeqCst) => json!({
+                "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                "continuityCandidates":[],"taskProgressCandidates":[],
+                "revealedReservationRefs":[],"evidenceRanges":[],
+                "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+            }),
             "AUDIT_EXTRACT" => {
+                if input.get("auditFeedback").is_some() {
+                    self.audit_feedback.lock().unwrap().push(input["auditFeedback"].clone());
+                }
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
                 let quote = Self::quote(chapter_no);
                 let evidence = json!({
@@ -312,6 +325,8 @@ fn state_with(
         plans_directions,
         table_directions,
         direction_inputs: Mutex::new(Vec::new()),
+        blank_audit_once: AtomicBool::new(false),
+        audit_feedback: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     (state, temp, gateway)
@@ -1094,4 +1109,17 @@ fn vd2_a_volume_direction_that_keeps_listing_chapters_leaves_a_reminder() {
 
 fn approved_story_promise(state: &KernelState, project_id: &str) -> Value {
     current_book_plan_payload(state, project_id).2["storyPromise"].clone()
+}
+
+#[test]
+fn an_opening_audit_that_records_nothing_is_asked_again_so_signing_can_read_the_chapter() {
+    // Real run round 19: chapter 2's audit reported no change and signing
+    // found no committed facts for it.
+    let (state, _temp, gateway) = state_with(false, false);
+    gateway.blank_audit_once.store(true, Ordering::SeqCst);
+    let (_project_id, approved) = create_approved_book_plan(&state);
+    assert_eq!(approved["planningMaturity"], "APPROVED");
+    let feedback = gateway.audit_feedback.lock().unwrap().clone();
+    assert_eq!(feedback.len(), 1, "{feedback:?}");
+    assert_eq!(feedback[0]["rejectedFor"], "B08_AUDIT_OPENING_CANON_REQUIRED");
 }

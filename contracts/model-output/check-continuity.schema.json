@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "chapter continuity check",
-  "description": "QC-1.4/1.5: sentences contradicting an earlier fact, cited by number, and which phrase candidates are catchphrases.",
+  "description": "QC-1.4/1.5: sentences contradicting an earlier fact, cited by number, and which phrase candidates are catchphrases; RP-1: which motif candidates are overused images.",
   "type": "object",
   "required": [
     "contradictions",
@@ -38,6 +38,13 @@
       }
     },
     "catchphrases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "motifs": {
       "type": "array",
       "items": {
         "type": "string",

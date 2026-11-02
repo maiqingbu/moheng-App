@@ -3864,7 +3864,9 @@ fn b1a_complete_no_change_audit_commits_final_and_receipt_without_reality_delta(
             .unwrap(),
         1
     );
-    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM model_runs WHERE project_id='p-b1a-no-change' AND status='COMPLETED'", [], |row| row.get(0)).unwrap(), 3);
+    // An opening chapter's audit that records nothing is asked once more
+    // (real run round 19), then the chapter commits as before.
+    assert_eq!(connection.query_row::<i64,_,_>("SELECT COUNT(*) FROM model_runs WHERE project_id='p-b1a-no-change' AND status='COMPLETED'", [], |row| row.get(0)).unwrap(), 4);
 }
 
 #[test]
