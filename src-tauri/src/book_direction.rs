@@ -666,10 +666,21 @@ pub fn chapter_direction(
         .iter()
         .position(|(_, task)| !completed.contains_key(task))
         .unwrap_or(stages.len());
-    let started = current
-        .checked_sub(1)
-        .and_then(|previous| completed.get(&stages[previous].1).copied())
-        .unwrap_or(before_stages);
+    // The chapter the stage before stage `index` ended with.
+    let ended_before = |index: usize| {
+        index
+            .checked_sub(1)
+            .and_then(|previous| completed.get(&stages[previous].1).copied())
+            .unwrap_or(before_stages)
+    };
+    let started = ended_before(current);
+    // VD-1f: the stage that ended with the chapter before this one, and how
+    // many chapters it took.
+    let previous_stage = (current > 0 && started == chapter_no - 1).then(|| {
+        let stage = stages[current - 1].0;
+        json!({"goal":text(&stage["goal"]),"estimatedChapters":stage["estimatedChapters"],
+            "chaptersTaken":started - ended_before(current - 1)})
+    });
     let current_stage = stages.get(current).map(|(stage, task)| {
         let mut stage = (*stage).clone();
         stage["taskId"] = json!(task);
@@ -681,7 +692,8 @@ pub fn chapter_direction(
         "currentStage":current_stage,
         "laterStages":stages.iter().skip(current + 1).map(|(stage, _)| text(&stage["goal"])).collect::<Vec<_>>(),
         "climax":text(&seed["climax"]),
-        "storyPromise":text(&book_plan["storyPromise"])
+        "storyPromise":text(&book_plan["storyPromise"]),
+        "previousStage":previous_stage
     }))
 }
 
@@ -773,6 +785,18 @@ pub fn reminders(direction: &Value, on_stage: &BTreeSet<&str>, chapter_no: i64) 
             reminders.push(format!(
                 "反派{name}已经连续 {} 章没出场（最后一次在第 {last} 章）",
                 chapter_no - last
+            ));
+        }
+    }
+    let previous = &direction["previousStage"];
+    if let (Some(taken), Some(estimate)) = (
+        previous["chaptersTaken"].as_i64(),
+        previous["estimatedChapters"].as_i64(),
+    ) {
+        if taken * 2 < estimate {
+            reminders.push(format!(
+                "上一阶段（{}）预计 {estimate} 章，只用 {taken} 章就完成了，节奏过快：这一阶段放慢，每章只推进一步",
+                text(&previous["goal"])
             ));
         }
     }
@@ -960,6 +984,27 @@ mod tests {
             reminded(&direction, &["陆照"], 20),
             vec!["这一阶段已经写了 16 章，预计 8 章，到了两倍还没完成：往段末转折收".to_string()]
         );
+    }
+
+    #[test]
+    fn a_stage_done_in_under_half_its_estimate_is_a_reminder_in_the_next_chapter() {
+        // VD-1f (real run round 17): four stages of 6 to 9 chapters were done
+        // one a chapter.
+        let (plan, route) = plan_and_route();
+        let completed =
+            BTreeMap::from([("task:required:goal:vol:1:stage:1:1".to_string(), 4)]);
+        let direction =
+            chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 5).unwrap();
+        assert_eq!(
+            direction["previousStage"],
+            json!({"goal":"陆照查清丹房的账","estimatedChapters":8,"chaptersTaken":1})
+        );
+        assert_eq!(
+            reminders(&direction, &["裴砚舟"].into_iter().collect(), 5),
+            vec!["上一阶段（陆照查清丹房的账）预计 8 章，只用 1 章就完成了，节奏过快：这一阶段放慢，每章只推进一步".to_string()]
+        );
+        let later = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 6).unwrap();
+        assert_eq!(later["previousStage"], Value::Null);
     }
 
     #[test]
