@@ -3008,21 +3008,37 @@ fn run_chapter_production_inner(
             .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
         (model_run_id, body)
     } else {
+        let rendered_body = |result: &ModelRunOutcome| {
+            result
+                .parsed
+                .as_ref()
+                .and_then(|payload| payload.get("body"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())
+        };
         let (model_run_id, result) = craft_call(
             "render",
             render_capability,
             &render_profile,
             1,
-            render_input,
+            render_input.clone(),
         )?;
-        let body = result
-            .parsed
-            .as_ref()
-            .and_then(|payload| payload.get("body"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "B08_RENDER_OUTPUT_INVALID".to_string())?;
-        (model_run_id, body)
+        let body = rendered_body(&result)?;
+        // LD-2 (real run round 22): a chapter written as one paragraph is
+        // written again once, told to break it into paragraphs.
+        if gateway.enforces_chapter_length() && crate::chapter_craft::is_unbroken(&body) {
+            let mut input = render_input;
+            input["outputFeedback"] = json!({
+                "rejectedFor":"正文没有分段：整章没有一个换行",
+                "instruction":"上一次的正文整章连成一段。重写这一章，按场景、动作和对话分段，段与段之间用换行（\\n）隔开。"
+            });
+            let (model_run_id, result) =
+                craft_call("render-paragraphs", render_capability, &render_profile, 2, input)?;
+            (model_run_id, rendered_body(&result)?)
+        } else {
+            (model_run_id, body)
+        }
     };
     // Craft v2 (owner decision 2026-10-19): the written chapter is read once
     // with the review skills, and passages it flags are rewritten in place

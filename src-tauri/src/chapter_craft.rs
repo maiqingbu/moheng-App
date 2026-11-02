@@ -247,6 +247,12 @@ pub fn check_plan(
     validate_plan_craft(plan, recent_chapters)
 }
 
+/// LD-2 (real run round 22): prose over 400 characters with no line break,
+/// a chapter written as one paragraph.
+pub fn is_unbroken(body: &str) -> bool {
+    !body.contains('\n') && body.chars().count() > 400
+}
+
 /// Chinese typography for committed prose (owner rule: signing checks forbid
 /// mixed full/half-width punctuation and repeated punctuation): half-width
 /// punctuation becomes full-width, and a period touching ASCII letters or
@@ -1574,6 +1580,15 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_long_chapter_without_a_line_break_is_unbroken() {
+        // LD-2 (real run round 22): chapter 1 came back as one paragraph.
+        assert!(is_unbroken(&"正".repeat(401)));
+        assert!(!is_unbroken(&format!("{}\n正", "正".repeat(401))));
+        assert!(!is_unbroken(&"正".repeat(400)));
+    }
+
     #[test]
     fn a_rejected_direction_is_told_it_is_a_direction() {
         let feedback = plan_feedback(&format!(

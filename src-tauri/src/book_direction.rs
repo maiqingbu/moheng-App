@@ -97,11 +97,21 @@ pub fn tidy(direction: &mut Value, input: &Value) {
             .flatten()
             .find(|seed| seed["volumeNo"] == 1)
         {
-            tidy_seed(first, room);
+            tidy_seed(first, room, &input["storyBible"]);
         }
     } else if let Some(room) = input["volume"]["chapters"].as_i64() {
-        tidy_seed(direction, room);
+        tidy_seed(direction, room, &input["storyBible"]);
     }
+}
+
+/// The people `bible` names: protagonist, antagonist and cast.
+fn known_names(bible: &Value) -> Vec<&str> {
+    [&bible["protagonist"]["name"], &bible["antagonist"]["name"]]
+        .into_iter()
+        .map(text)
+        .chain(items(bible, "cast").iter().map(|member| text(&member["name"])))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// The fewest chapters the stages of a volume with `room` chapters take.
@@ -109,11 +119,34 @@ fn least_chapters(room: i64) -> i64 {
     (room + 1) / 2
 }
 
-fn tidy_seed(seed: &mut Value, room: i64) {
+fn tidy_seed(seed: &mut Value, room: i64, bible: &Value) {
     let Some(stages) = seed["stages"].as_array_mut() else {
         return;
     };
     stages.retain(|stage| !text(&stage["goal"]).is_empty());
+    // VD-1j (real run round 22): a person outside the bible is new cast.
+    let known = known_names(bible);
+    if !known.is_empty() {
+        for stage in stages.iter_mut() {
+            let (cast, strangers): (Vec<Value>, Vec<Value>) = stage["cast"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .partition(|name| known.contains(&text(name)));
+            if strangers.is_empty() {
+                continue;
+            }
+            let mut new_cast = stage["newCast"].as_array().cloned().unwrap_or_default();
+            for name in strangers {
+                if !new_cast.contains(&name) {
+                    new_cast.push(name);
+                }
+            }
+            stage["cast"] = json!(cast);
+            stage["newCast"] = json!(new_cast);
+        }
+    }
     let estimates = stages
         .iter()
         .map(|stage| stage["estimatedChapters"].as_i64().unwrap_or(1).max(1))
@@ -168,16 +201,7 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
             stages.len()
         ));
     }
-    let known = [&bible["protagonist"]["name"], &bible["antagonist"]["name"]]
-        .into_iter()
-        .map(text)
-        .chain(
-            items(bible, "cast")
-                .iter()
-                .map(|member| text(&member["name"])),
-        )
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>();
+    let known = known_names(bible);
     for (index, stage) in stages.iter().enumerate() {
         let number = index + 1;
         for field in ["goal", "pressure", "turn"] {
@@ -1501,6 +1525,18 @@ mod tests {
             &"各阶段 estimatedChapters 加起来是 40 章，第一卷开篇之后还有 33 章，应在 17 到 33 之间"
                 .to_string()
         ));
+    }
+
+    #[test]
+    fn tidying_moves_a_stage_cast_member_outside_the_bible_into_new_cast() {
+        // Real run round 22: three directions in a row failed on this alone.
+        let mut direction = direction();
+        direction["volumeIntentSeeds"][0]["stages"][1]["cast"] = json!(["柳漪", "沈掌柜"]);
+        tidy(&mut direction, &direction_input());
+        let stage = &direction["volumeIntentSeeds"][0]["stages"][1];
+        assert_eq!(stage["cast"], json!(["柳漪"]));
+        assert_eq!(stage["newCast"], json!(["沈掌柜"]));
+        assert_eq!(problems(&direction, &direction_input()), Vec::<String>::new());
     }
 
     #[test]
