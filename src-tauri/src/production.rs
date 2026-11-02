@@ -4525,7 +4525,35 @@ fn run_chapter_production_inner(
     heads.extend(change_request_heads);
     let mut bundle_artifacts = Vec::new();
     let final_ref = reference(&final_artifact);
-    let canon_delta = extraction.canon_candidates.iter().map(|item| json!({
+    // P1 (real run round 23): a relation's object must be an entity, one
+    // this chapter records or one already recorded; a fact about someone
+    // named only by a title stays a fact.
+    let audit_entities = extraction
+        .canon_candidates
+        .iter()
+        .filter_map(|item| item.entity_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    let mut relation_ids = BTreeMap::new();
+    for item in &extraction.canon_candidates {
+        let Some(relation_id) = candidate_relation_id(item) else {
+            continue;
+        };
+        let object = item.object_json["objectId"].as_str().unwrap_or_default();
+        if audit_entities.contains(object)
+            || crate::repositories::narrative::NarrativeRepository::canon_entity_exists(
+                connection,
+                &project_id,
+                object,
+            )
+            .map_err(|error| error.to_string())?
+        {
+            relation_ids.insert(item.fact_id.clone(), relation_id);
+        }
+    }
+    // Relations last, after the facts that record their entities.
+    let mut canon_candidates = extraction.canon_candidates.iter().collect::<Vec<_>>();
+    canon_candidates.sort_by_key(|item| relation_ids.contains_key(&item.fact_id));
+    let canon_delta = canon_candidates.into_iter().map(|item| json!({
         "entityId":item.entity_id,
         "factId":item.fact_id,
         "subjectId":item.subject_id,
@@ -4533,7 +4561,7 @@ fn run_chapter_production_inner(
         "objectJson":item.object_json,
         "authorityLevel":item.authority_level,
         "eventType":item.event_type,
-        "relationId":candidate_relation_id(item),
+        "relationId":relation_ids.get(&item.fact_id),
         "validFromChapterId":chapter_id,
         "payloadJson":{
             "chapterId":chapter_id,

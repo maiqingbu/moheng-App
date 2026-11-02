@@ -218,7 +218,9 @@ pub fn commit_story_bible_candidates(
         "input":{
             "storyCore":constitution.payload["storyCore"],
             "adjustment":request.pointer("/payload/adjustment").and_then(Value::as_str).unwrap_or(""),
-            "generation":generation
+            "generation":generation,
+            // P2: the methods selected for this step.
+            "craftGuidance":crate::chapter_craft::setup_guidance("story_setup")?
         }
     });
     let (run, candidates) = run_entry_model_job(

@@ -53,6 +53,7 @@ impl AssistantEntry {
             ],
             Self::Change => &[
                 ("RETCON", "change an already established fact of the story (e.g. someone did not die, a past event was different)"),
+                ("REMEMBER", "a lasting rule for how the story is written from now on, such as a character never doing or always saying something; subjects names the person or thing it is about"),
                 ("CHANGE", "any other change to plans, direction, settings or future content"),
             ],
             Self::Repair => &[
@@ -70,7 +71,13 @@ impl AssistantEntry {
         match self {
             Self::Diagnose => crate::harness::diagnose_keyword_intent(question),
             Self::Change => {
-                if ["事实", "改成", "原来", "没有死", "其实"]
+                // P3: a lasting rule is an owner correction, confirmed by the owner.
+                if ["以后", "记住", "别再", "不要再", "从不", "永远不"]
+                    .iter()
+                    .any(|term| question.contains(term))
+                {
+                    "REMEMBER"
+                } else if ["事实", "改成", "原来", "没有死", "其实"]
                     .iter()
                     .any(|term| question.contains(term))
                 {
@@ -256,6 +263,19 @@ mod tests {
             AssistantEntry::Repair.keyword_intent("搜索找不到原文"),
             "REBUILD_FTS"
         );
+    }
+
+    #[test]
+    fn p3_a_lasting_rule_for_the_writing_is_remembered_not_changed() {
+        // P3: "以后……不要……" is an owner correction the owner confirms.
+        assert!(AssistantEntry::Change
+            .intents()
+            .iter()
+            .any(|(intent, _)| *intent == "REMEMBER"));
+        for question in ["以后顾清不要再叫林舟师兄", "记住：林舟说话从不带脏字", "别再让柳漪哭了"] {
+            assert_eq!(AssistantEntry::Change.keyword_intent(question), "REMEMBER", "{question}");
+        }
+        assert_eq!(AssistantEntry::Change.keyword_intent("林舟其实没有死"), "RETCON");
     }
 
     #[test]

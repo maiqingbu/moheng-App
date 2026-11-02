@@ -484,7 +484,7 @@ export class BrowserDemoPort implements FrontendPort {
     await wait(10)
     // The demo has no model: keyword routing only.
     const intent = request.entry === 'CHANGE'
-      ? (/事实|改成|原来|没有死|其实/.test(request.question) ? 'RETCON' : 'CHANGE')
+      ? (/以后|记住|别再|不要再|从不|永远不/.test(request.question) ? 'REMEMBER' : /事实|改成|原来|没有死|其实/.test(request.question) ? 'RETCON' : 'CHANGE')
       : request.entry === 'REPAIR' ? (/搜索|索引/.test(request.question) ? 'REBUILD_FTS' : 'NO_ACTION')
       : (/知道/.test(request.question) ? 'KNOWLEDGE' : 'PROJECT_OVERVIEW')
     return { intent, source: 'KEYWORD', subjects: [], attribute: null, modelRunId: null, fallbackReason: 'DEMO_NO_MODEL' }

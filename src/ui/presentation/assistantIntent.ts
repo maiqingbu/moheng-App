@@ -7,6 +7,7 @@ const intentLabels: Record<string, string> = {
   CONTINUITY: '承诺与伏笔',
   PROJECT_OVERVIEW: '作品整体状态',
   RETCON: '修订已有事实',
+  REMEMBER: '记住一条写作规则',
   CHANGE: '一般修改',
   PROPOSAL_ONLY: '需要走修改提案',
   RECOMPILE_CHAPTER_PLAN: '重新生成本章计划',
@@ -22,6 +23,8 @@ export function assistantIntentLabel(resolution: Pick<AssistantIntentResolution,
   return `理解为：${label}（${resolution.source === 'MODEL' ? '模型理解' : '关键词匹配'}）`
 }
 
-export function changeTypeForIntent(resolution: Pick<AssistantIntentResolution, 'intent' | 'source'>): 'RETCON' | 'CHANGE' {
-  return resolution.intent === 'RETCON' ? 'RETCON' : 'CHANGE'
+export function changeTypeForIntent(resolution: Pick<AssistantIntentResolution, 'intent' | 'source'>): 'RETCON' | 'REMEMBER' | 'CHANGE' {
+  // P3: a lasting rule becomes an owner correction draft, never a change.
+  if (resolution.intent === 'RETCON' || resolution.intent === 'REMEMBER') return resolution.intent
+  return 'CHANGE'
 }

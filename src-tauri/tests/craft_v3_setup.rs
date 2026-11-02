@@ -235,6 +235,13 @@ fn generating_story_bible_commits_three_candidates_without_a_head() {
         "码头账房林满"
     );
     assert_eq!(inputs[0]["input"]["adjustment"], "多些人情味");
+    // P2: the story bible is planned with the story setup skills.
+    assert_eq!(inputs[0]["input"]["craftGuidance"]["stage"], "story_setup");
+    assert!(inputs[0]["input"]["craftGuidance"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|skill| skill["skillId"] == "S01"));
 }
 
 #[test]

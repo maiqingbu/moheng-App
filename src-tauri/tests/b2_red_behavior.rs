@@ -32,6 +32,8 @@ struct BehaviorGateway {
     /// The chapter-1 thread is a planted hint (a foreshadow).
     thread_foreshadows: AtomicBool,
     open_threads_seen: Mutex<Vec<Value>>,
+    /// Every model input, by capability.
+    inputs: Mutex<Vec<(String, Value)>>,
 }
 
 impl BehaviorGateway {
@@ -122,6 +124,10 @@ impl ProductionModelGateway for BehaviorGateway {
     }
 
     fn invoke(&self, capability: &str, input: &Value) -> Result<ProductionModelResponse, String> {
+        self.inputs
+            .lock()
+            .unwrap()
+            .push((capability.to_owned(), input.clone()));
         if capability == "PLAN_STRATEGY" {
             self.planning_contexts
                 .lock()
@@ -224,6 +230,17 @@ impl ProductionModelGateway for BehaviorGateway {
                         "objectId":"entity:b02:guqing",
                         "predicate":"distrusts",
                         "objectJson":{"objectId":"entity:b02:guqing","state":"互不信任"},
+                        "authorityLevel":"C",
+                        "evidence":evidence
+                    }));
+                    // Real run round 23: a relation to someone named only
+                    // by a title, who is no entity.
+                    canon_candidates.push(json!({
+                        "factId":"fact:b2:red:relation-unknown",
+                        "subjectId":"entity:b02:linzhou",
+                        "entityId":"entity:b02:linzhou",
+                        "predicate":"relationship",
+                        "objectJson":{"objectId":"师父","state":"敬畏"},
                         "authorityLevel":"C",
                         "evidence":evidence
                     }));
@@ -353,6 +370,7 @@ fn state_with(
         threads: AtomicBool::new(false),
         thread_foreshadows: AtomicBool::new(false),
         open_threads_seen: Mutex::new(Vec::new()),
+        inputs: Mutex::new(Vec::new()),
     });
     let state = KernelState::with_production_gateway(AppPaths::new(temp.path()), gateway.clone());
     (state, temp, gateway)
@@ -1174,6 +1192,8 @@ fn p1_an_opening_records_its_events_and_relations() {
         (subject.as_str(), predicate.as_str(), object.as_str()),
         ("entity:b02:linzhou", "distrusts", "entity:b02:guqing")
     );
+    // A relation to someone who is no entity stays a fact only.
+    assert_eq!(count("canon_relations"), 1);
 }
 
 #[test]
@@ -1240,4 +1260,37 @@ fn p1_the_approved_book_plan_records_each_mystery_layer() {
     let open = NarrativeRepository::open_candidate_threads(&connection, &project_id, 8).unwrap();
     assert!(open.iter().any(|thread| thread["threadRef"] == "thread:mystery:book:1"), "{open:?}");
     assert!(NarrativeRepository::is_open_candidate_thread(&connection, &project_id, "mystery:book:1").unwrap());
+}
+
+#[test]
+fn p2_the_setup_and_direction_steps_are_given_their_skills() {
+    // P2: story directions and the book and volume directions never called
+    // a skill (the story bible: craft_v3_setup).
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    open_volume_two(&state, &project_id);
+    let inputs = gateway.inputs.lock().unwrap().clone();
+    for (capability, stage, resident) in [
+        ("GENERATE_STORY_DIRECTIONS", "story_directions", "S09"),
+        ("PLAN_BOOK_DIRECTION", "book_plan", "S02"),
+        ("PLAN_VOLUME_DIRECTION", "volume_plan", "S17"),
+    ] {
+        let (_, input) = inputs
+            .iter()
+            .find(|(called, _)| called == capability)
+            .unwrap_or_else(|| panic!("{capability} was not called"));
+        let guidance = if input["craftGuidance"].is_null() {
+            &input["input"]["craftGuidance"]
+        } else {
+            &input["craftGuidance"]
+        };
+        assert_eq!(guidance["stage"], stage, "{capability}");
+        let skills = guidance["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|skill| skill["skillId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(skills.contains(&resident), "{capability}: {skills:?}");
+    }
 }

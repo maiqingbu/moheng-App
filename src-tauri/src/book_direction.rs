@@ -588,6 +588,14 @@ fn run_direction(
     input: Value,
     check: fn(&Value, &Value) -> Vec<String>,
 ) -> Result<Result<(Value, String), String>, String> {
+    // P2: the methods selected for the book or the volume plan.
+    let mut input = input;
+    let stage = if capability == PLAN_VOLUME_DIRECTION {
+        "volume_plan"
+    } else {
+        "book_plan"
+    };
+    input["craftGuidance"] = crate::chapter_craft::setup_guidance(stage)?;
     let profile = gateway.resolve_step_profile(capability)?;
     let spec = ModelRunSpec {
         model_run_id: StableIdentityFactory::from_command(

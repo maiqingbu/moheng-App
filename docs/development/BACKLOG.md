@@ -62,7 +62,8 @@
   1. **方向又没生成**：三次都卡在“第 4 个阶段的 cast 里有故事圣经之外的人：执法堂长老”，全书规划又退回模板，第 4–10 章没有阶段方向，按小步推进这一项这轮没法检查。修法 **VD-1j**：先整理再检查时，把 cast 里故事圣经之外的人自动挪进 newCast。
   2. **第 1 章整章没有分段**：写手模型最后一次返回的正文里没有一个换行（前几次有 100 个左右），后面的步骤没有改动换行。修法 **LD-2**：配置了真实服务商时（和字数规则同一个开关），写出的正文超过 400 字却没有一个换行，就带着“没有分段”的原因重写一次（`chapter_craft::is_unbroken`）。原本想写进输出规范，但测试用的假网关正文都不分段，会让一批测试失败，所以没有那样做。
   - 这轮用的是 P1 之前的代码，所以事件、关系、伏笔表都是 0，21 条线索都停在 C 级“提议中”。另外，没写 description 的线索会拿引文当描述，出现了“他说。”这样的线索，P1 的 `openThreads` 会把这些线索给审计看，要留意。
-- **下一步**：VD-1j、LD-2 过关卡、提交后，重跑修仙验收，检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
+- **第 23 轮（P1 + VD-1j + LD-2）第 1 章就失败（2026-11-03）**：`FOREIGN KEY constraint failed`。原因是审计把关系对象写成了称呼（“师父”“阿荠”），不是已有的人物编号，而关系表要求对象是已登记的人物。已修：关系对象必须是本章审计登记的人物或项目里已有的人物，否则只记事实、不记关系；关系类事实排在登记人物的事实之后（测试 `p1_an_opening_records_its_events_and_relations` 加了这个情况）。
+- **下一步**：关卡通过、提交后，重跑修仙验收（第 24 轮），检查以下几项（分析办法参照会话记录里第 20 轮的做法：查 BookPlan 的 stages/steps、`state_deltas` 里 SATISFIED 的章号、各章的 `chapterGoal`、提醒内容）：
   1. 方向是否一次通过，阶段里有没有小步；
   2. 第 4–10 章是否按小步推进，有没有出现一章写完一个阶段；
   3. 第 8–10 章有没有原地打转；
@@ -115,6 +116,13 @@
 
 现在只有章规划、写正文、改写三个环节调用了 v2 skill（第 20 轮实际用到的：章规划 S09–S14、S21、S24–S26、S36、S39；写正文 S10、S11、S24、S27、S32；改写 S27、S32、S40、S46）。立项方向（story_directions）、开篇设定（story_setup）、全书规划（book_plan）、卷规划（volume_plan）四个环节一次都没有调用，S01–S08、S15–S20、S22、S23、S41–S43 等从来没被用上。新流程的审稿（review）环节也没有接 skill。
 
+**进度（2026-11-03，代码已写、测试通过，待关卡和提交）：**
+- [x] 四个环节都接上了 skill：`chapter_craft::setup_guidance(stage)` 给故事方向、故事底稿、全书方向、卷方向的模型输入加上 `craftGuidance`，四个提示词都写了“craftGuidance holds the selected story methods for this step; follow them.”（测试 `p2_the_setup_and_direction_steps_are_given_their_skills`，以及 `craft_v3_setup` 里的故事底稿测试）。
+- [x] 覆盖检查：47 个 skill 里，原来有 3 个任何环节都选不中：S04 配角与反派、S07 核心机制与力量体系、S43 长篇健康诊断。原因是这几个环节不传信号。现在故事底稿带上“新主要人物、新能力”信号，卷方向带上“卷边界”信号，三个都能被选中（测试 `every_skill_can_be_selected_by_some_step`）。
+- 选中的环节和 skill：故事方向 S09；故事底稿 S01、S03、S06，加上 S04、S07 等；全书方向 S02、S08、S15、S16、S19；卷方向 S08、S17、S18、S23，加上 S43 等。
+- [ ] 回执里单独记录选了哪些 skill：还没做。模型输入里已经带着 `craftGuidance`，先不另记。
+- [ ] 新流程审稿要不要接 skill：还没评估。
+
 执行办法：
 1. `book_direction::plan`（PLAN_BOOK_DIRECTION）的输入加上 `craftGuidance = chapter_craft::guidance("book_plan", signals)`；`plan_volume`（PLAN_VOLUME_DIRECTION）加上 `guidance("volume_plan", …)`。两个提示词都写明“craftGuidance holds the selected methods; follow them”。
 2. GENERATE_STORY_BIBLE（`craft_setup.rs`）加上 `guidance("story_setup", …)`；GENERATE_STORY_DIRECTIONS（`project_entry.rs::generate_story_directions`）加上 `guidance("story_directions", …)`。
@@ -127,6 +135,10 @@
 ### P3　项目助手按用户想法改东西
 
 现状：修改申请走 B12 流程（CHANGE/RETCON → 负责人批准 → 由数据所属的模块执行，有影响范围和回执），但只支持全书规划、卷意图、卷任务路线、章规划这几类（`change_retcon.rs::target_class`）。故事底稿、人物、风格卡、事实、伏笔、负责人纠正都判为 UNSUPPORTED。
+
+**进度（2026-11-03）：**
+- [x] 第 1 步：“发起修改”多了一种理解结果 `REMEMBER`（以后都要遵守的写作规则），关键词兜底用“以后、记住、别再、不要再、从不、永远不”。助手不会直接执行，只在页面上给出一份纠正草稿：内容，以及关于谁或什么。用户核对、点“确认记住”后，才调用 `memory_correction_add`（测试：`assistant_intent` 的 `p3_a_lasting_rule_…`，以及 `tests/store/fx21-assistant-intent.test.ts`）。
+- [ ] 第 2–4 步：还没做。
 
 执行办法（要坚持的原则：助手只能提出申请，必须由负责人批准，由数据所属的模块执行，不能绕过系统直接写数据）：
 1. **先接负责人纠正**：用户说“以后某人不要……”时，意图识别为 `REMEMBER`，生成 `memory_correction_add` 草稿，界面展示后由用户确认才执行。这一步不需要走 B12，因为纠正本来就由负责人亲手确认。

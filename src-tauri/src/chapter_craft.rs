@@ -34,6 +34,22 @@ pub fn guidance(stage: &str, signals: &StepSignals) -> Result<Value, String> {
     }))
 }
 
+/// P2: guidance for a step before any chapter is written: story directions,
+/// story setup, book plan or volume plan. Story setup designs the cast and
+/// the mechanism; a volume plan stands at a volume boundary.
+pub fn setup_guidance(stage: &str) -> Result<Value, String> {
+    let events: &[&str] = match stage {
+        "story_setup" => &["new_major_character", "new_ability"],
+        "volume_plan" => &["volume_boundary"],
+        _ => &[],
+    };
+    let signals = StepSignals {
+        events: events.iter().map(|event| event.to_string()).collect(),
+        ..Default::default()
+    };
+    guidance(stage, &signals)
+}
+
 /// The ids of the skills in a `guidance` value, in order.
 pub fn guidance_skill_ids(guidance: &Value) -> Vec<String> {
     guidance["skills"]
@@ -1580,6 +1596,26 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_skill_can_be_selected_by_some_step() {
+        // P2: S04, S07 and S43 were never selected, for want of signals.
+        let chapter_stages = ["chapter_plan", "render", "review", "rewrite"];
+        let never = crate::skills_v2::catalog()
+            .unwrap()
+            .iter()
+            .filter(|skill| {
+                !skill.inject.keys().any(|stage| {
+                    // A chapter step's signals can match any trigger.
+                    (chapter_stages.contains(&stage.as_str()) && !skill.triggers.is_empty())
+                        || guidance_skill_ids(&setup_guidance(stage).unwrap()).contains(&skill.id)
+                })
+            })
+            .map(|skill| skill.id.clone())
+            .collect::<Vec<_>>();
+        assert!(never.is_empty(), "never selected: {never:?}");
+    }
+
 
     #[test]
     fn a_long_chapter_without_a_line_break_is_unbroken() {

@@ -438,7 +438,9 @@ fn generate_story_directions(
         "length":payload.get("length").cloned().unwrap_or_else(|| json!("")),
         "forbidden":payload.get("forbidden").cloned().unwrap_or_else(|| json!("")),
         "adjustment":payload.get("adjustment").cloned().unwrap_or_else(|| json!("")),
-        "generation":generation
+        "generation":generation,
+        // P2: the methods selected for this step.
+        "craftGuidance":crate::chapter_craft::setup_guidance("story_directions")?
     });
     let input = json!({
         // The data follows the instruction once, as the `input` field.

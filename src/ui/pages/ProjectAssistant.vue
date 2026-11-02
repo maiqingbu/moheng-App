@@ -44,6 +44,9 @@ const displayScopes = (values: unknown) => Array.isArray(values)
 
 // FX-21: shows how the assistant understood the last question.
 const intentLabel = ref('')
+// P3: a lasting rule the owner reviews before it is remembered.
+const rememberDraft = ref<{ content: string; subject: string } | null>(null)
+const rememberState = computed(() => store.commandState('assistant-remember'))
 
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
@@ -151,6 +154,11 @@ async function proposeChange() {
     const understood = await store.classifyAssistantIntent(question.value, 'CHANGE')
     const changeType = changeTypeForIntent(understood)
     intentLabel.value = assistantIntentLabel(understood)
+    if (changeType === 'REMEMBER') {
+      rememberDraft.value = { content: question.value.trim(), subject: understood.subjects?.[0] ?? '' }
+      changeMessage.value = '这是一条以后都要遵守的写作规则。请核对下面的内容，确认后才会记住。'
+      return
+    }
     if (changeType === 'RETCON') {
       const grounded = await createGroundedAssistantRetcon({
         execute: (key, request) => store.runCommand(key, request),
@@ -206,6 +214,22 @@ async function proposeChange() {
   }
 }
 
+async function confirmRemember() {
+  if (!rememberDraft.value?.content.trim()) return
+  try {
+    await store.runCommand('assistant-remember', {
+      type: 'memory_correction_add',
+      payload: { content: rememberDraft.value.content, subject: rememberDraft.value.subject },
+    })
+  } catch {
+    // CommandFeedback shows what went wrong.
+  }
+  if (rememberState.value.status === 'committed') {
+    rememberDraft.value = null
+    changeMessage.value = '已记住。之后每一章的规划和写作都会照这条来。'
+  }
+}
+
 function chooseGrounding(factId: string) {
   selectedGroundingFactId.value = factId
   void proposeChange()
@@ -235,6 +259,12 @@ onMounted(() => {
       <CommandFeedback :state="queryState" />
       <p v-if="intentLabel" class="muted" data-assistant-intent style="font-size:12px;margin-top:6px">{{ intentLabel }}</p>
       <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
+      <div v-if="rememberDraft" class="section" data-remember-draft style="display:grid;gap:8px;margin-top:12px">
+        <label class="muted">要记住的规则<textarea v-model="rememberDraft.content" rows="2" /></label>
+        <label class="muted">关于谁或什么（可不填）<input v-model="rememberDraft.subject" /></label>
+        <div class="actions"><button class="btn primary" @click="confirmRemember">确认记住</button><button class="btn" @click="rememberDraft = null">不记了</button></div>
+        <CommandFeedback :state="rememberState" />
+      </div>
       <div v-if="groundingOptions.length" class="section" style="display:grid;gap:8px;margin-top:12px"><span class="muted">请选择要修订的当前事实：</span><button v-for="fact in groundingOptions" :key="fact.factId" class="btn" @click="chooseGrounding(fact.factId)">{{ fact.label }}</button></div>
     </section>
 

@@ -23,6 +23,19 @@ describe('FX-21 助手语义理解', () => {
     expect(assistantIntentLabel(undefined)).toBe('')
   })
 
+  it('Given 用户说“以后某人不要……” When 发起修改 Then 生成纠正草稿，用户确认后才记住', () => {
+    expect(changeTypeForIntent({ intent: 'REMEMBER', source: 'MODEL' })).toBe('REMEMBER')
+    expect(assistantIntentLabel({ intent: 'REMEMBER', source: 'KEYWORD' })).toBe('理解为：记住一条写作规则（关键词匹配）')
+    const page = source('src/ui/pages/ProjectAssistant.vue')
+    // The proposal step stops at a draft; only the confirm button commits.
+    const propose = page.slice(page.indexOf('async function proposeChange'), page.indexOf('async function confirmRemember'))
+    expect(propose).toContain("if (changeType === 'REMEMBER')")
+    expect(propose).not.toContain('memory_correction_add')
+    const confirm = page.slice(page.indexOf('async function confirmRemember'))
+    expect(confirm).toContain("type: 'memory_correction_add'")
+    expect(page).toContain('@click="confirmRemember"')
+  })
+
   it('Given 三种运行环境 When 检查接线 Then 桌面端调用后端命令、演示端有关键词兜底', () => {
     expect(source('src/infrastructure/tauri/frontendPort.ts')).toContain("'classify_assistant_intent'")
     expect(source('src/infrastructure/browser-demo/demoPort.ts')).toContain('async classifyAssistantIntent(')
