@@ -39,6 +39,11 @@ export interface VolumeIntentSeed {
   "climax"?: string
 }
 
+export interface StageStep {
+  "id": string
+  "goal": string
+}
+
 export interface VolumeStage {
   "id": string
   "goal": string
@@ -47,6 +52,7 @@ export interface VolumeStage {
   "newCast"?: Array<string>
   "turn": string
   "estimatedChapters": number
+  "steps"?: Array<StageStep>
 }
 
 export interface Condition {

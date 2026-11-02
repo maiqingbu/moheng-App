@@ -3219,8 +3219,7 @@ fn run_chapter_production_inner(
             );
             motif_candidates =
                 crate::chapter_craft::motif_candidates(&chapter_history.bodies, &body, &names);
-            if !candidates.is_empty() || !earlier_facts.is_empty() || !motif_candidates.is_empty()
-            {
+            if !candidates.is_empty() || !earlier_facts.is_empty() || !motif_candidates.is_empty() {
                 continuity_input = Some(json!({
                     "chapterNumber":chapter_number,
                     "earlierFacts":earlier_facts,

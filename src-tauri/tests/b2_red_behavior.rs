@@ -174,7 +174,10 @@ impl ProductionModelGateway for BehaviorGateway {
             }),
             "AUDIT_EXTRACT" => {
                 if input.get("auditFeedback").is_some() {
-                    self.audit_feedback.lock().unwrap().push(input["auditFeedback"].clone());
+                    self.audit_feedback
+                        .lock()
+                        .unwrap()
+                        .push(input["auditFeedback"].clone());
                 }
                 let chapter_no = self.audit_calls.fetch_add(1, Ordering::SeqCst) + 1;
                 let quote = Self::quote(chapter_no);
@@ -269,7 +272,7 @@ impl ProductionModelGateway for BehaviorGateway {
             "PLAN_VOLUME_DIRECTION" => {
                 self.direction_inputs.lock().unwrap().push(input.clone());
                 let room = input["volume"]["chapters"].as_i64().unwrap();
-                let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters});
+                let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters,"steps":["先找线人","再查底册","最后对质"]});
                 let mut direction = json!({
                     "description":"林舟离开县城，去府城追查账本的来路",
                     "stages":[
@@ -295,7 +298,7 @@ fn direction_reply(input: &Value) -> Value {
     let room = input["firstVolume"]["chaptersAfterOpening"]
         .as_i64()
         .unwrap();
-    let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"缺页的主人现身","estimatedChapters":chapters});
+    let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"缺页的主人现身","estimatedChapters":chapters,"steps":["先找线人","再查底册","最后对质"]});
     json!({
         "protagonistMacroDirection":"林舟从躲债的学徒走到替全城重算旧账的人",
         "mustAchieve":[{"volumeNo":1,"description":"林舟找回失踪账本的缺页"}],
@@ -942,15 +945,10 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
         .filter(|task| task["class"] == "REQUIRED")
         .map(|task| task["objective"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        required[..4],
-        [
-            "林舟查清缺页落在谁手里",
-            "林舟拿到改账的证据",
-            "林舟当众对账",
-            "林舟找回失踪账本的缺页"
-        ]
-    );
+    // VD-1h: one task per step, three steps a stage, then the book goal.
+    assert_eq!(required.len(), 10, "{required:?}");
+    assert_eq!(required[..3], ["先找线人", "再查底册", "最后对质"]);
+    assert_eq!(required[9], "林舟找回失踪账本的缺页");
     // VD-1c: chapter 4 is planned at the start of the first stage.
     let prepared = command(
         &state,
@@ -969,7 +967,10 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
     )
     .unwrap()
     .expect("a direction for chapter 4");
-    assert_eq!(direction["currentStage"]["goal"], "林舟查清缺页落在谁手里");
+    // VD-1h: the planner sees the first step, not the stage's end.
+    assert_eq!(direction["currentStage"]["goal"], "先找线人");
+    assert_eq!(direction["currentStage"]["step"], 1);
+    assert_eq!(direction["currentStage"]["stepCount"], 3);
     assert_eq!(direction["currentStage"]["chaptersSoFar"], 0);
     assert!(direction["currentStage"]["taskId"]
         .as_str()
@@ -1077,14 +1078,8 @@ fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
         .filter(|task| task["class"] == "REQUIRED")
         .map(|task| task["objective"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(
-        required[..3],
-        [
-            "林舟进府城找到当年的账房",
-            "林舟拿到账本的底册",
-            "林舟当堂对质"
-        ]
-    );
+    assert_eq!(required.len(), 9, "{required:?}");
+    assert_eq!(required[..3], ["先找线人", "再查底册", "最后对质"]);
 }
 
 #[test]
@@ -1121,5 +1116,8 @@ fn an_opening_audit_that_records_nothing_is_asked_again_so_signing_can_read_the_
     assert_eq!(approved["planningMaturity"], "APPROVED");
     let feedback = gateway.audit_feedback.lock().unwrap().clone();
     assert_eq!(feedback.len(), 1, "{feedback:?}");
-    assert_eq!(feedback[0]["rejectedFor"], "B08_AUDIT_OPENING_CANON_REQUIRED");
+    assert_eq!(
+        feedback[0]["rejectedFor"],
+        "B08_AUDIT_OPENING_CANON_REQUIRED"
+    );
 }

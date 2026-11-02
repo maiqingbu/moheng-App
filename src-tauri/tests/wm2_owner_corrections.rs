@@ -142,14 +142,19 @@ fn wm2a_the_planner_and_the_writer_are_given_the_corrections() {
         .unwrap()
         .extend_input(&mut plan_input);
     assert_eq!(plan_input["ownerCorrections"], expected);
-    let writer = WritingContext::for_chapter(&connection, &project_id, &chapter_id, Some(1)).unwrap();
-    let mut render_input = json!({"chapterPlan":{"craft":{"scenes":[{"people":[person("老董")]}]}}});
+    let writer =
+        WritingContext::for_chapter(&connection, &project_id, &chapter_id, Some(1)).unwrap();
+    let mut render_input =
+        json!({"chapterPlan":{"craft":{"scenes":[{"people":[person("老董")]}]}}});
     writer.extend_render_input(&mut render_input, &[]);
     assert_eq!(render_input["ownerCorrections"], expected);
     // The writer gets a correction about someone only when the chapter has them.
     let mut without = json!({"chapterPlan":{"craft":{"scenes":[{"people":[person("林满")]}]}}});
     writer.extend_render_input(&mut without, &[]);
-    assert_eq!(without["ownerCorrections"], json!([{"subject":null,"content":"不写主角吐血"}]));
+    assert_eq!(
+        without["ownerCorrections"],
+        json!([{"subject":null,"content":"不写主角吐血"}])
+    );
 }
 
 #[test]

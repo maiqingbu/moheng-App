@@ -773,14 +773,19 @@ pub fn compile_volume_intent_from_authority(
         .unwrap_or_default();
     // VD-1b: a seed with stages (a planned direction) sets this volume's
     // goals: its stages in order, then the book's goals for this volume.
+    // VD-1h: a stage with steps sets one goal per step.
     let stage_goals = scoped_seeds
         .iter()
         .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
-        .filter_map(|stage| {
+        .flat_map(|stage| match stage["steps"].as_array() {
+            Some(steps) if !steps.is_empty() => steps.iter().collect::<Vec<_>>(),
+            _ => vec![stage],
+        })
+        .filter_map(|unit| {
             Some(json!({
-                "id":stage_goal_id(volume_id, stage["id"].as_str()?),
+                "id":stage_goal_id(volume_id, unit["id"].as_str()?),
                 "volumeNo":volume_no,
-                "description":stage["goal"].as_str()?
+                "description":unit["goal"].as_str()?
             }))
         })
         .collect::<Vec<_>>();
@@ -1242,6 +1247,24 @@ pub fn validate_volume_plan_semantics(plan: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The chapters `goal_id` is estimated to take when it is `stage` or one of
+/// its steps (VD-1h: a stage's estimate shared among its steps, the first
+/// ones taking the remainder).
+fn stage_goal_estimate(stage: &Value, goal_id: &str) -> Option<i64> {
+    let estimate = stage["estimatedChapters"].as_i64()?;
+    if is_stage_goal(goal_id, stage["id"].as_str()?) {
+        return Some(estimate);
+    }
+    let steps = stage["steps"].as_array()?;
+    let index = steps.iter().position(|step| {
+        step["id"]
+            .as_str()
+            .is_some_and(|id| is_stage_goal(goal_id, id))
+    })?;
+    let count = steps.len() as i64;
+    Some((estimate / count + i64::from((index as i64) < estimate % count)).max(1))
+}
+
 pub fn compile_volume_plan_from_authority(
     volume_no: i64,
     volume_intent_ref: &ArtifactRef,
@@ -1296,12 +1319,7 @@ pub fn compile_volume_plan_from_authority(
             .collect::<Vec<_>>();
         let estimate = stages
             .iter()
-            .find(|stage| {
-                stage["id"]
-                    .as_str()
-                    .is_some_and(|id| is_stage_goal(goal_id, id))
-            })
-            .and_then(|stage| stage["estimatedChapters"].as_i64())
+            .find_map(|stage| stage_goal_estimate(stage, goal_id))
             .unwrap_or(1);
         tasks.push(json!({
             "taskId":task_id,

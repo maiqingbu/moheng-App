@@ -940,3 +940,85 @@ fn vd1b_a_directed_route_chains_the_stages_and_peaks_on_this_volumes_mystery() {
         "会审上陆照当众拿出原件；第 2 层：租约里多出的那一条是谁加的"
     );
 }
+
+#[test]
+fn vd1h_a_stage_with_steps_becomes_one_required_task_per_step() {
+    let mut book_plan = directed_book_plan();
+    book_plan["volumeIntentSeeds"][0]["stages"][0]["steps"] = json!([
+        {"id":"step:1:1:1","goal":"陆照摸清账房几时没人"},
+        {"id":"step:1:1:2","goal":"陆照抄下三月的出库单"},
+        {"id":"step:1:1:3","goal":"陆照对出两笔对不上的账"}
+    ]);
+    let book_ref = ArtifactRef {
+        artifact_id: "book-plan:steps".into(),
+        version: 1,
+        payload_hash: "c".repeat(64),
+    };
+    let sources = json!({
+        "facts":[],"relations":[],"knowledge":[],"events":[],
+        "evidence":[{"evidenceId":"evidence:steps"}],"responsibilities":[]
+    });
+    let intent = compile_volume_intent_from_authority(
+        "vol:steps:1",
+        1,
+        1,
+        36,
+        120000,
+        &book_ref,
+        &book_plan,
+        &sources,
+        0,
+    )
+    .unwrap();
+    let goals = intent["mustAchieve"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|goal| goal["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        goals[..5],
+        [
+            "goal:vol:steps:1:step:1:1:1",
+            "goal:vol:steps:1:step:1:1:2",
+            "goal:vol:steps:1:step:1:1:3",
+            "goal:vol:steps:1:stage:1:2",
+            "goal:vol:steps:1:stage:1:3"
+        ]
+    );
+    let intent_ref = ArtifactRef {
+        artifact_id: "volume-intent:steps".into(),
+        version: 1,
+        payload_hash: "d".repeat(64),
+    };
+    let contract_ref = |id: &str| ArtifactRef {
+        artifact_id: id.into(),
+        version: 1,
+        payload_hash: "e".repeat(64),
+    };
+    let goal_contract = compile_goal_contract(
+        &contract_ref("story"),
+        &json!({}),
+        &contract_ref("main"),
+        &json!({}),
+        &contract_ref("book"),
+        &book_plan,
+        &intent_ref,
+        &intent,
+    )
+    .unwrap();
+    let route =
+        compile_volume_plan_from_authority(1, &intent_ref, &intent, &goal_contract, 0).unwrap();
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .collect::<Vec<_>>();
+    // Stage 1 (8 chapters) over three steps: 3, 3 and 2.
+    assert_eq!(required[0]["objective"], "陆照摸清账房几时没人");
+    assert_eq!(required[0]["estimatedChapterCost"]["preferred"], 3);
+    assert_eq!(required[2]["estimatedChapterCost"]["preferred"], 2);
+    assert_eq!(required[3]["objective"], "陆照找到改约的证据");
+    assert_eq!(required[3]["estimatedChapterCost"]["preferred"], 10);
+}

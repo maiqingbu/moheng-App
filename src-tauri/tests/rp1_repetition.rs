@@ -79,7 +79,9 @@ fn rp1_a_two_character_image_written_often_across_chapters_is_a_motif_candidate(
         .unwrap_or_else(|| panic!("{candidates:?}"));
     assert_eq!(found["thisChapter"], 5);
     assert_eq!(found["chapters"], 3);
-    assert!(!candidates.iter().any(|candidate| candidate["word"] == "陆照"));
+    assert!(!candidates
+        .iter()
+        .any(|candidate| candidate["word"] == "陆照"));
 }
 
 #[test]
@@ -91,5 +93,7 @@ fn rp1_an_overused_image_past_its_allowance_is_a_rewrite_finding() {
         .map(|finding| finding["quote"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(quotes, ["金星往下沉。", "金星灭了。"]);
-    assert!(findings.iter().all(|finding| finding["code"] == "detail_repetition"));
+    assert!(findings
+        .iter()
+        .all(|finding| finding["code"] == "detail_repetition"));
 }

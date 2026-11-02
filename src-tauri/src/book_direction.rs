@@ -21,6 +21,8 @@ const NO_CHAPTER_TABLE: &str = "不要写章表，也不要写“第 N 章”：
 
 /// How many stages the first volume is split into.
 const STAGE_COUNT: std::ops::RangeInclusive<usize> = 3..=6;
+/// VD-1h: how many steps a stage is split into, each one or two chapters.
+const STEP_COUNT: std::ops::RangeInclusive<usize> = 3..=5;
 
 /// The direction step's input: the confirmed story, what the opening did,
 /// the signing conclusions and the first volume's size.
@@ -117,6 +119,16 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
             if text(&stage[field]).is_empty() {
                 problems.push(format!("第 {number} 个阶段缺 {field}"));
             }
+        }
+        let steps = names(&stage["steps"])
+            .filter(|step| !step.is_empty())
+            .count();
+        if !STEP_COUNT.contains(&steps) {
+            problems.push(format!(
+                "第 {number} 个阶段要分 {} 到 {} 步（steps），现在是 {steps} 步",
+                STEP_COUNT.start(),
+                STEP_COUNT.end()
+            ));
         }
         let strangers = names(&stage["cast"])
             .filter(|name| !known.is_empty() && !known.contains(name))
@@ -274,6 +286,16 @@ fn seed_from(seed: &Value, volume_no: i64) -> Value {
                 let new_cast = names(&stage["newCast"]).collect::<Vec<_>>();
                 if !new_cast.is_empty() {
                     built["newCast"] = json!(new_cast);
+                }
+                let steps = names(&stage["steps"])
+                    .filter(|step| !step.is_empty())
+                    .enumerate()
+                    .map(|(step, goal)| {
+                        json!({"id":format!("step:{volume_no}:{}:{}", index + 1, step + 1),"goal":goal})
+                    })
+                    .collect::<Vec<_>>();
+                if !steps.is_empty() {
+                    built["steps"] = json!(steps);
                 }
                 built
             })
@@ -665,29 +687,43 @@ pub fn chapter_direction(
     chapter_no: i64,
 ) -> Option<Value> {
     let seed = crate::planning::volume_seeds(book_plan, volume_no).next()?;
-    let task_for = |stage: &Value| {
-        let task_id = crate::planning::stage_task_id(volume_id, stage["id"].as_str()?);
+    let task_for = |unit: &Value| {
+        let task_id = crate::planning::stage_task_id(volume_id, unit["id"].as_str()?);
         items(route, "tasks")
             .iter()
             .any(|task| task["taskId"] == task_id.as_str())
             .then_some(task_id)
     };
+    // VD-1h: each stage's route tasks, one per step when it has steps in the
+    // route, otherwise the stage's own.
     let stages = items(seed, "stages")
         .iter()
-        .filter_map(|stage| Some((stage, task_for(stage)?)))
+        .filter_map(|stage| {
+            let steps = items(stage, "steps")
+                .iter()
+                .filter_map(|step| Some((step, task_for(step)?)))
+                .collect::<Vec<_>>();
+            let units = if steps.is_empty() {
+                vec![(stage, task_for(stage)?)]
+            } else {
+                steps
+            };
+            Some((stage, units))
+        })
         .collect::<Vec<_>>();
     if stages.is_empty() {
         return None;
     }
-    let current = stages
-        .iter()
-        .position(|(_, task)| !completed.contains_key(task))
+    // A stage is done when its last task is.
+    let ended = |index: usize| completed.get(&stages[index].1.last()?.1).copied();
+    let current = (0..stages.len())
+        .position(|index| ended(index).is_none())
         .unwrap_or(stages.len());
     // The chapter the stage before stage `index` ended with.
     let ended_before = |index: usize| {
         index
             .checked_sub(1)
-            .and_then(|previous| completed.get(&stages[previous].1).copied())
+            .and_then(ended)
             .unwrap_or(before_stages)
     };
     let started = ended_before(current);
@@ -698,11 +734,29 @@ pub fn chapter_direction(
         json!({"goal":text(&stage["goal"]),"estimatedChapters":stage["estimatedChapters"],
             "chaptersTaken":started - ended_before(current - 1)})
     });
-    let current_stage = stages.get(current).map(|(stage, task)| {
-        let mut stage = (*stage).clone();
-        stage["taskId"] = json!(task);
-        stage["chaptersSoFar"] = json!((chapter_no - 1 - started).max(0));
-        stage
+    let current_stage = stages.get(current).map(|(stage, units)| {
+        let mut built = (*stage).clone();
+        let step = units
+            .iter()
+            .position(|(_, task)| !completed.contains_key(task))
+            .unwrap_or(units.len() - 1);
+        let (unit, task) = &units[step];
+        if unit["id"] != stage["id"] {
+            // The planner sees the step, never the stage's end: its goal,
+            // and its turn until the last step.
+            built["goal"] = json!(text(&unit["goal"]));
+            if let Some(stage) = built.as_object_mut() {
+                stage.remove("steps");
+                if step + 1 < units.len() {
+                    stage.remove("turn");
+                }
+            }
+            built["step"] = json!(step + 1);
+            built["stepCount"] = json!(units.len());
+        }
+        built["taskId"] = json!(task);
+        built["chaptersSoFar"] = json!((chapter_no - 1 - started).max(0));
+        built
     });
     Some(json!({
         "volumeFunction":text(&seed["description"]),
@@ -784,6 +838,10 @@ pub fn for_chapter(
 /// chapter would finish a stage meant for several.
 pub fn stage_goal_problem(direction: &Value, chapter_goal: &str) -> Option<String> {
     let stage = &direction["currentStage"];
+    // VD-1h: with steps the planner sees only the step, which it may reach.
+    if stage.get("step").is_some() {
+        return None;
+    }
     let goal = text(&stage["goal"]);
     let so_far = stage["chaptersSoFar"].as_i64()?;
     let estimate = stage["estimatedChapters"].as_i64()?;
@@ -894,7 +952,8 @@ mod tests {
     }
 
     fn stage(goal: &str, pressure: &str, cast: &[&str], chapters: i64) -> Value {
-        json!({"goal":goal,"pressure":pressure,"cast":cast,"turn":"段末转折","estimatedChapters":chapters})
+        json!({"goal":goal,"pressure":pressure,"cast":cast,"turn":"段末转折","estimatedChapters":chapters,
+            "steps":[format!("{goal}·第一步"),format!("{goal}·第二步"),format!("{goal}·第三步")]})
     }
 
     fn direction() -> Value {
@@ -1070,6 +1129,98 @@ mod tests {
         assert_eq!(
             reminded(&direction, &["陆照"], 5),
             vec!["反派裴砚舟还没在任何一章的场景里正面出场".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_stage_needs_three_to_five_steps() {
+        // VD-1h (real run round 20): each chapter planned a whole stage.
+        let mut direction = direction();
+        direction["volumeIntentSeeds"][0]["stages"][1]["steps"] = json!(["只有一步"]);
+        direction["volumeIntentSeeds"][0]["stages"][2]["steps"] =
+            json!(["一", "二", "三", "四", "五", "六"]);
+        let found = problems(&direction, &direction_input());
+        assert!(
+            found.contains(&"第 2 个阶段要分 3 到 5 步（steps），现在是 1 步".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&"第 3 个阶段要分 3 到 5 步（steps），现在是 6 步".to_string()),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_stage_s_steps_are_named_by_the_system() {
+        let mut plan = Map::new();
+        apply(&mut plan, &direction(), &[]);
+        assert_eq!(
+            plan["volumeIntentSeeds"][0]["stages"][1]["steps"],
+            json!([
+                {"id":"step:1:2:1","goal":"陆照找到改约的证据·第一步"},
+                {"id":"step:1:2:2","goal":"陆照找到改约的证据·第二步"},
+                {"id":"step:1:2:3","goal":"陆照找到改约的证据·第三步"}
+            ])
+        );
+    }
+
+    /// The route VD-1b makes when stage 1 has steps.
+    fn stepped_route() -> Value {
+        let task = |id: &str| json!({"taskId":format!("task:required:goal:vol:1:{id}"),"class":"REQUIRED"});
+        json!({"tasks":[
+            task("step:1:1:1"), task("step:1:1:2"), task("step:1:1:3"),
+            task("stage:1:2"), task("stage:1:3")
+        ]})
+    }
+
+    #[test]
+    fn a_chapter_is_planned_toward_its_stage_s_current_step() {
+        // VD-1h (real run round 20): planners told the stage goal reached it
+        // in one chapter.
+        let (plan, _) = plan_and_route();
+        let direction = chapter_direction(
+            &plan,
+            &stepped_route(),
+            ("vol:1", 1),
+            3,
+            &BTreeMap::new(),
+            4,
+        )
+        .unwrap();
+        let stage = &direction["currentStage"];
+        assert_eq!(stage["goal"], "陆照查清丹房的账·第一步");
+        assert_eq!(stage["taskId"], "task:required:goal:vol:1:step:1:1:1");
+        assert_eq!(stage["step"], 1);
+        assert_eq!(stage["stepCount"], 3);
+        assert_eq!(stage.get("turn"), None);
+        assert!(
+            !stage.to_string().contains("\"陆照查清丹房的账\""),
+            "{stage}"
+        );
+        let completed = BTreeMap::from([("task:required:goal:vol:1:step:1:1:1".to_string(), 5)]);
+        let direction =
+            chapter_direction(&plan, &stepped_route(), ("vol:1", 1), 3, &completed, 6).unwrap();
+        assert_eq!(direction["currentStage"]["goal"], "陆照查清丹房的账·第二步");
+        assert_eq!(direction["currentStage"]["chaptersSoFar"], 2);
+        assert_eq!(direction["previousStage"], Value::Null);
+        assert_eq!(
+            stage_goal_problem(&direction, "陆照查清丹房的账·第二步"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stage_ends_with_its_last_step() {
+        let (plan, _) = plan_and_route();
+        let completed = (1..=3)
+            .map(|n| (format!("task:required:goal:vol:1:step:1:1:{n}"), 4 + n))
+            .collect();
+        let direction =
+            chapter_direction(&plan, &stepped_route(), ("vol:1", 1), 3, &completed, 8).unwrap();
+        assert_eq!(direction["currentStage"]["goal"], "陆照找到改约的证据");
+        assert_eq!(
+            direction["previousStage"],
+            json!({"goal":"陆照查清丹房的账","estimatedChapters":8,"chaptersTaken":4})
         );
     }
 

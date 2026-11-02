@@ -66,6 +66,13 @@ pub struct VolumeIntentSeed {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StageStep {
+    pub id: String,
+    pub goal: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VolumeStage {
     pub id: String,
     pub goal: String,
@@ -75,6 +82,8 @@ pub struct VolumeStage {
     pub new_cast: Option<Vec<String>>,
     pub turn: String,
     pub estimated_chapters: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<StageStep>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

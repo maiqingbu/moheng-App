@@ -1576,10 +1576,19 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 mod tests {
     #[test]
     fn a_rejected_direction_is_told_it_is_a_direction() {
-        let feedback =
-            plan_feedback(&format!("{}:阶段少了", crate::book_direction::DIRECTION_ERROR)).unwrap();
-        assert_eq!(feedback["rejectedFor"], crate::book_direction::DIRECTION_ERROR);
-        assert!(feedback["instruction"].as_str().unwrap().starts_with("上一版方向"));
+        let feedback = plan_feedback(&format!(
+            "{}:阶段少了",
+            crate::book_direction::DIRECTION_ERROR
+        ))
+        .unwrap();
+        assert_eq!(
+            feedback["rejectedFor"],
+            crate::book_direction::DIRECTION_ERROR
+        );
+        assert!(feedback["instruction"]
+            .as_str()
+            .unwrap()
+            .starts_with("上一版方向"));
         assert_eq!(feedback["problems"], serde_json::json!(["阶段少了"]));
     }
 
