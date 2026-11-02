@@ -7183,7 +7183,7 @@ fn compile_current_chapter_plan(
         let horizon_capacity = bindings["horizonPreviewCapacity"].as_i64().unwrap_or(0);
         let craft = planner.check_craft(&plan, horizon_capacity, length_range);
         crate::production::note_if_lenient(lenient, &mut problems, craft)?;
-        problems.extend(planner.shape_reminder(&plan));
+        problems.extend(planner.reminders(&plan));
         if lenient {
             problems.extend(crate::planning::fit_lenient_plan_shape(
                 &mut plan,

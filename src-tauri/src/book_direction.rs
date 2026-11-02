@@ -10,7 +10,7 @@ use crate::repositories::runtime::{DurableModelRunner, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
 use libsql_rusqlite::Connection;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PLAN_BOOK_DIRECTION: &str = "PLAN_BOOK_DIRECTION";
 
@@ -509,6 +509,60 @@ pub fn for_chapter(
     ))
 }
 
+/// How many chapters in a row the antagonist may be off the page before
+/// the plan is reminded (owner decision 2026-11-02).
+const ANTAGONIST_ABSENCE: i64 = 4;
+
+/// VD-1d (§3.6): what the plan for chapter `chapter_no` should be reminded
+/// of, given its `direction` and the people `on_stage` in it. Reminders,
+/// never a reason to plan again.
+pub fn reminders(direction: &Value, on_stage: &BTreeSet<&str>, chapter_no: i64) -> Vec<String> {
+    let mut reminders = Vec::new();
+    let appearances = items(direction, "lastAppearances");
+    let last_seen = |name: &str| {
+        appearances
+            .iter()
+            .find(|person| text(&person["name"]) == name)
+            .map(|person| person["lastChapter"].as_i64().unwrap_or(0))
+    };
+    for antagonist in appearances.iter().filter(|person| person["role"] == "反派") {
+        let name = text(&antagonist["name"]);
+        let last = antagonist["lastChapter"].as_i64().unwrap_or(0);
+        if !on_stage.contains(name) && chapter_no - last >= ANTAGONIST_ABSENCE {
+            reminders.push(format!(
+                "反派{name}已经连续 {} 章没出场（最后一次在第 {last} 章）",
+                chapter_no - last
+            ));
+        }
+    }
+    let stage = &direction["currentStage"];
+    let (Some(so_far), Some(estimate)) = (
+        stage["chaptersSoFar"].as_i64(),
+        stage["estimatedChapters"].as_i64(),
+    ) else {
+        return reminders;
+    };
+    let stage_start = chapter_no - so_far;
+    if so_far * 2 >= estimate {
+        let missing = names(&stage["cast"])
+            .filter(|name| !on_stage.contains(name))
+            .filter(|name| last_seen(name).is_some_and(|last| last < stage_start))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            reminders.push(format!(
+                "这一阶段该出场的{}到阶段过半还没出场",
+                missing.join("、")
+            ));
+        }
+    }
+    if so_far >= estimate * 2 {
+        reminders.push(format!(
+            "这一阶段已经写了 {so_far} 章，预计 {estimate} 章，到了两倍还没完成：往段末转折收"
+        ));
+    }
+    reminders
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +664,61 @@ mod tests {
         assert_eq!(direction["currentStage"], Value::Null);
         assert_eq!(direction["laterStages"], json!([]));
         assert_eq!(direction["climax"], "会审上陆照当众拿出原件");
+    }
+
+    fn reminded(direction: &Value, on_stage: &[&str], chapter_no: i64) -> Vec<String> {
+        reminders(direction, &on_stage.iter().copied().collect(), chapter_no)
+    }
+
+    fn direction_at(chapter_no: i64, last_seen: &[(&str, Option<i64>)]) -> Value {
+        let (plan, route) = plan_and_route();
+        let mut direction =
+            chapter_direction(&plan, &route, ("vol:1", 1), 3, &BTreeMap::new(), chapter_no)
+                .unwrap();
+        // The antagonist comes first, as in craft_plan::last_appearances.
+        direction["lastAppearances"] = last_seen
+            .iter()
+            .enumerate()
+            .map(|(index, (name, chapter))| {
+                let role = if index == 0 { "反派" } else { "配角" };
+                json!({"name":name,"role":role,"lastChapter":chapter})
+            })
+            .collect();
+        direction
+    }
+
+    #[test]
+    fn an_antagonist_off_the_page_for_four_chapters_is_a_reminder() {
+        let direction = direction_at(8, &[("裴砚舟", Some(4)), ("陈伯", Some(7))]);
+        assert_eq!(
+            reminded(&direction, &["陆照"], 8),
+            vec!["反派裴砚舟已经连续 4 章没出场（最后一次在第 4 章）".to_string()]
+        );
+        assert!(reminded(&direction, &["陆照", "裴砚舟"], 8).is_empty());
+        let direction = direction_at(7, &[("裴砚舟", Some(4)), ("陈伯", Some(6))]);
+        assert!(reminded(&direction, &["陆照"], 7).is_empty());
+    }
+
+    #[test]
+    fn stage_cast_still_missing_past_mid_stage_is_a_reminder() {
+        // The first stage (8 chapters, cast 陆照 and 陈伯) started at chapter 4.
+        let direction = direction_at(8, &[("裴砚舟", Some(7)), ("陈伯", Some(2))]);
+        assert_eq!(
+            reminded(&direction, &["陆照"], 8),
+            vec!["这一阶段该出场的陈伯到阶段过半还没出场".to_string()]
+        );
+        assert!(reminded(&direction, &["陆照", "陈伯"], 8).is_empty());
+        let direction = direction_at(6, &[("裴砚舟", Some(5)), ("陈伯", Some(2))]);
+        assert!(reminded(&direction, &["陆照"], 6).is_empty());
+    }
+
+    #[test]
+    fn a_stage_at_twice_its_estimate_is_a_reminder() {
+        let direction = direction_at(20, &[("裴砚舟", Some(19)), ("陈伯", Some(19))]);
+        assert_eq!(
+            reminded(&direction, &["陆照"], 20),
+            vec!["这一阶段已经写了 16 章，预计 8 章，到了两倍还没完成：往段末转折收".to_string()]
+        );
     }
 
     #[test]

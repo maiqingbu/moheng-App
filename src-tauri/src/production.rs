@@ -2683,7 +2683,7 @@ fn run_chapter_production_inner(
                     &mut problems,
                     planner.check_craft(&plan, horizon_capacity, length_range),
                 )?;
-                problems.extend(planner.shape_reminder(&plan));
+                problems.extend(planner.reminders(&plan));
                 if lenient {
                     problems.extend(crate::planning::fit_lenient_plan_shape(
                         &mut plan,
@@ -6127,6 +6127,22 @@ pub fn exact_quote_span(body: &str, start: usize, end: usize, quote: &str) -> Re
     )
 }
 
+/// VD-1d (real run round 15): the tasks among `states` that a chapter other
+/// than `chapter_id` already satisfied. Progress is one record per task, so
+/// a later chapter reporting the same completion would move it to itself.
+fn satisfied_elsewhere(
+    states: &[crate::repositories::narrative::TaskStateRecord],
+    chapter_id: &str,
+) -> BTreeSet<String> {
+    states
+        .iter()
+        .filter(|state| {
+            state.value["status"] == "SATISFIED" && state.chapter_id.as_deref() != Some(chapter_id)
+        })
+        .map(|state| state.state_id.clone())
+        .collect()
+}
+
 fn validate_actual_extraction(
     connection: &libsql_rusqlite::Connection,
     project_id: &str,
@@ -6339,6 +6355,23 @@ fn validate_actual_extraction(
     let mut downgraded = Vec::new();
     // Completion predicates read the rest of this audit (its canon).
     let canon_view = audit.clone();
+    let reported = audit
+        .task_progress_candidates
+        .iter()
+        .map(|candidate| candidate.task_id.as_str())
+        .collect::<Vec<_>>();
+    let done = satisfied_elsewhere(
+        &crate::repositories::narrative::NarrativeRepository::task_states_by_ids_complete(
+            connection, project_id, &reported,
+        )
+        .map_err(|error| error.to_string())?,
+        chapter_id,
+    );
+    // A satisfied task can still be reported blocked or invalidated later.
+    audit.task_progress_candidates.retain(|candidate| {
+        !done.contains(&candidate.task_id)
+            || matches!(candidate.status.as_str(), "BLOCKED" | "INVALIDATED")
+    });
     for candidate in &mut audit.task_progress_candidates {
         exact_quote(body, &candidate.evidence)?;
         if !active_tasks.contains(candidate.task_id.as_str()) {
@@ -6778,6 +6811,25 @@ fn knowledge_authority_is_bound(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_tasks_another_chapter_satisfied_keep_their_chapter() {
+        use crate::repositories::narrative::TaskStateRecord;
+        let state = |id: &str, status: &str, chapter: &str| TaskStateRecord {
+            state_id: id.into(),
+            value: serde_json::json!({"status":status}),
+            chapter_id: Some(chapter.into()),
+        };
+        let states = [
+            state("task:a", "SATISFIED", "chap:4"),
+            state("task:b", "ACTIVE", "chap:4"),
+            state("task:c", "SATISFIED", "chap:6"),
+        ];
+        assert_eq!(
+            super::satisfied_elsewhere(&states, "chap:6"),
+            ["task:a".to_string()].into_iter().collect()
+        );
+    }
+
     #[test]
     fn fx18_configured_provider_enforces_the_chapter_length_range() {
         let paths = crate::project_db::paths::AppPaths::new(std::env::temp_dir());

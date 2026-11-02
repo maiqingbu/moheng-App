@@ -984,11 +984,23 @@ impl ChapterPlanner {
         craft_result(problems)
     }
 
-    /// The LD-8 shape reminder for an r2 plan, as a plan problem so it goes
-    /// into the plan reminder; none for r1 planning.
-    pub fn shape_reminder(&self, plan: &Value) -> Option<String> {
-        shape_reminder(plan, &self.craft.as_ref()?.ledger)
+    /// The reminders for an r2 plan, as plan problems so they go into the
+    /// plan reminder: the LD-8 shape and the VD-1d direction reminders;
+    /// none for r1 planning.
+    pub fn reminders(&self, plan: &Value) -> Vec<String> {
+        let Some(craft) = &self.craft else {
+            return Vec::new();
+        };
+        let on_stage = scene_people(&plan["craft"])
+            .map(|person| text(&person["name"]))
+            .collect::<BTreeSet<_>>();
+        shape_reminder(plan, &craft.ledger)
+            .into_iter()
+            .chain(craft.direction.iter().flat_map(|direction| {
+                crate::book_direction::reminders(direction, &on_stage, i64::from(self.chapter))
+            }))
             .map(|reminder| format!("{PLAN_CRAFT_ERROR}:{reminder}"))
+            .collect()
     }
 
     /// Runs `r1_check` for r1 planning only.
