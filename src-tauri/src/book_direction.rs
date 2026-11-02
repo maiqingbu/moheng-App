@@ -19,8 +19,8 @@ pub const DIRECTION_ERROR: &str = "B07_DIRECTION";
 
 const NO_CHAPTER_TABLE: &str = "不要写章表，也不要写“第 N 章”：阶段按情节划分，不按章号";
 
-/// How many stages the first volume is split into.
-const STAGE_COUNT: std::ops::RangeInclusive<usize> = 3..=6;
+/// How many stages a volume is split into (VD-1i: up to 8 for a long one).
+const STAGE_COUNT: std::ops::RangeInclusive<usize> = 3..=8;
 /// VD-1h: how many steps a stage is split into, each one or two chapters.
 const STEP_COUNT: std::ops::RangeInclusive<usize> = 3..=5;
 
@@ -48,7 +48,8 @@ pub fn input(
         "signing":signing,
         "firstVolume":{
             "chapters":end - start + 1,
-            "chaptersAfterOpening":end - opening_chapters
+            "chaptersAfterOpening":end - opening_chapters,
+            "stageChapters":{"min":least_chapters(end - opening_chapters),"max":end - opening_chapters}
         }
     })
 }
@@ -82,6 +83,70 @@ fn has_chapter_table(value: &Value) -> bool {
         Value::Array(values) => values.iter().any(has_chapter_table),
         Value::String(text) => names_a_chapter(text),
         _ => false,
+    }
+}
+
+/// VD-1i: tidies a direction's volume seed before it is checked: drops
+/// blank stages and scales the stage estimates into the chapters the
+/// volume has, which the model kept missing.
+pub fn tidy(direction: &mut Value, input: &Value) {
+    if let Some(room) = input["firstVolume"]["chaptersAfterOpening"].as_i64() {
+        let seeds = direction["volumeIntentSeeds"].as_array_mut();
+        if let Some(first) = seeds
+            .into_iter()
+            .flatten()
+            .find(|seed| seed["volumeNo"] == 1)
+        {
+            tidy_seed(first, room);
+        }
+    } else if let Some(room) = input["volume"]["chapters"].as_i64() {
+        tidy_seed(direction, room);
+    }
+}
+
+/// The fewest chapters the stages of a volume with `room` chapters take.
+fn least_chapters(room: i64) -> i64 {
+    (room + 1) / 2
+}
+
+fn tidy_seed(seed: &mut Value, room: i64) {
+    let Some(stages) = seed["stages"].as_array_mut() else {
+        return;
+    };
+    stages.retain(|stage| !text(&stage["goal"]).is_empty());
+    let estimates = stages
+        .iter()
+        .map(|stage| stage["estimatedChapters"].as_i64().unwrap_or(1).max(1))
+        .collect::<Vec<_>>();
+    let total = estimates.iter().sum::<i64>();
+    let least = least_chapters(room);
+    if room <= 0 || total == 0 || (least..=room).contains(&total) {
+        return;
+    }
+    let target = total.clamp(least, room).max(stages.len() as i64);
+    let mut scaled = estimates
+        .iter()
+        .map(|estimate| (estimate * target / total).max(1))
+        .collect::<Vec<_>>();
+    // Rounding: the largest stages take or give the chapters left over.
+    let mut order = (0..scaled.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| std::cmp::Reverse(estimates[*index]));
+    let mut gap = target - scaled.iter().sum::<i64>();
+    for index in order.iter().cycle().take(order.len() * 4) {
+        match gap.signum() {
+            1 => {
+                scaled[*index] += 1;
+                gap -= 1;
+            }
+            -1 if scaled[*index] > 1 => {
+                scaled[*index] -= 1;
+                gap += 1;
+            }
+            _ => {}
+        }
+    }
+    for (stage, chapters) in stages.iter_mut().zip(scaled) {
+        stage["estimatedChapters"] = json!(chapters);
     }
 }
 
@@ -145,7 +210,7 @@ fn stage_problems(seed: &Value, bible: &Value, label: &str, room: (&str, i64)) -
         .map(|stage| stage["estimatedChapters"].as_i64().unwrap_or(0))
         .sum::<i64>();
     let (room_label, room) = room;
-    let least = (room + 1) / 2;
+    let least = least_chapters(room);
     if room > 0 && !(least..=room).contains(&estimated) {
         problems.push(format!(
             "各阶段 estimatedChapters 加起来是 {estimated} 章，{room_label} {room} 章，应在 {least} 到 {room} 之间"
@@ -344,7 +409,8 @@ pub fn volume_input(
             .next()
             .map_or("", |seed| text(&seed["description"])),
         "previousVolume":previous,
-        "volume":{"volumeNo":volume_no,"chapters":end - start + 1}
+        "volume":{"volumeNo":volume_no,"chapters":end - start + 1,
+            "stageChapters":{"min":least_chapters(end - start + 1),"max":end - start + 1}}
     })
 }
 
@@ -518,7 +584,8 @@ fn run_direction(
         attempt_no: 1,
         repair_round: 0,
     };
-    let accept = |direction: Value, lenient: bool| {
+    let accept = |mut direction: Value, lenient: bool| {
+        tidy(&mut direction, &input);
         let found = check(&direction, &input);
         match (found.is_empty(), lenient) {
             (true, _) => Ok((direction, found)),
@@ -1225,6 +1292,43 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_stage_is_dropped_and_estimates_are_scaled_into_the_volume() {
+        // VD-1i (real run round 21): three directions of 7 stages, the last
+        // blank, estimated at 39 or 44 of 33 chapters, kept the template.
+        let mut direction = direction();
+        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array_mut().unwrap();
+        stages.push(json!({"goal":"","pressure":"","cast":[],"turn":"","steps":[]}));
+        for (stage, chapters) in stages.iter_mut().zip([12, 14, 13]) {
+            stage["estimatedChapters"] = json!(chapters);
+        }
+        let input = direction_input();
+        tidy(&mut direction, &input);
+        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 3);
+        let total = stages
+            .iter()
+            .map(|stage| stage["estimatedChapters"].as_i64().unwrap())
+            .sum::<i64>();
+        assert_eq!(total, 33);
+        assert_eq!(problems(&direction, &input), Vec::<String>::new());
+    }
+
+    #[test]
+    fn seven_stages_fit_a_long_volume_and_the_input_names_the_chapter_range() {
+        let mut direction = direction();
+        let stage = direction["volumeIntentSeeds"][0]["stages"][0].clone();
+        let stages = direction["volumeIntentSeeds"][0]["stages"].as_array_mut().unwrap();
+        while stages.len() < 7 {
+            stages.push(stage.clone());
+        }
+        for stage in stages.iter_mut() {
+            stage["estimatedChapters"] = json!(4);
+        }
+        assert_eq!(problems(&direction, &direction_input()), Vec::<String>::new());
+        assert_eq!(direction_input()["firstVolume"]["stageChapters"], json!({"min":17,"max":33}));
+    }
+
+    #[test]
     fn a_volume_without_stages_has_no_direction() {
         let (plan, route) = plan_and_route();
         assert_eq!(
@@ -1274,7 +1378,10 @@ mod tests {
     #[test]
     fn the_volume_input_holds_the_book_plan_for_it_and_what_the_volume_before_did() {
         let input = volume_two_input();
-        assert_eq!(input["volume"], json!({"volumeNo":2,"chapters":36}));
+        assert_eq!(
+            input["volume"],
+            json!({"volumeNo":2,"chapters":36,"stageChapters":{"min":18,"max":36}})
+        );
         assert_eq!(input["seed"], "走出青崖宗");
         assert_eq!(input["book"]["storyPromise"], "以命换力");
         assert_eq!(
@@ -1303,7 +1410,7 @@ mod tests {
             "{found:?}"
         );
         assert!(
-            found.contains(&"第 2 卷要分 3 到 6 个阶段，现在是 0 个".to_string()),
+            found.contains(&"第 2 卷要分 3 到 8 个阶段，现在是 0 个".to_string()),
             "{found:?}"
         );
         let mut long = volume_two();
@@ -1366,14 +1473,14 @@ mod tests {
     }
 
     #[test]
-    fn two_stages_or_seven_are_a_problem() {
-        for count in [2, 7] {
+    fn two_stages_or_nine_are_a_problem() {
+        for count in [2, 9] {
             let mut direction = direction();
             direction["volumeIntentSeeds"][0]["stages"] = json!((0..count)
                 .map(|_| stage("目标", "裴砚舟出手", &[], 3))
                 .collect::<Vec<_>>());
             assert!(problems(&direction, &direction_input())
-                .contains(&format!("第一卷要分 3 到 6 个阶段，现在是 {count} 个")));
+                .contains(&format!("第一卷要分 3 到 8 个阶段，现在是 {count} 个")));
         }
     }
 

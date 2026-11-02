@@ -1054,7 +1054,10 @@ fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
     assert_eq!(planned, "PLANNED");
     let inputs = gateway.direction_inputs.lock().unwrap().clone();
     let input = inputs.last().unwrap();
-    assert_eq!(input["volume"], json!({"volumeNo":2,"chapters":30}));
+    assert_eq!(
+        input["volume"],
+        json!({"volumeNo":2,"chapters":30,"stageChapters":{"min":15,"max":30}})
+    );
     assert_eq!(
         input["book"]["storyPromise"],
         approved_story_promise(&state, &project_id)
