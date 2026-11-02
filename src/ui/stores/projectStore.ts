@@ -141,7 +141,9 @@ export const useProjectStore = defineStore('project-projection', () => {
     )
   }
   const writeLocked = computed(() => isProjectWriteLocked(currentProjectId.value))
-  const writeLockAllowed = new Set(['production_pause', 'production_cancel'])
+  // The owner's corrections are local and take effect from the next chapter,
+  // so they may be written while a chapter is being produced (WM-2a).
+  const writeLockAllowed = new Set(['production_pause', 'production_cancel', 'writing_rule_add', 'memory_correction_add', 'memory_correction_revoke'])
   const globalCommandTypes = new Set(['project_create_from_idea', 'project_create_from_market', 'global_settings_save'])
   const modelBusyCommandTypes = new Set([
     'production_start', 'story_directions_generate', 'pitch_regenerate', 'story_bible_generate',
@@ -517,6 +519,10 @@ export const useProjectStore = defineStore('project-projection', () => {
   }
   async function queryDependencySummaryBootstrap(): Promise<DependencySummaryBootstrapProjection> {
     return frontendPort.queryDependencySummaryBootstrap(queryBase('history:dependency-summary', 1))
+  }
+  /** WM-2a: the owner's corrections in force. */
+  async function loadCorrections() {
+    return (await frontendPort.queryOwnerCorrections(queryBase('corrections', 50))).items
   }
   async function loadSettings(force=false) {
     if (settings.value && !force) return settings.value
@@ -963,7 +969,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadCraftSetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
-    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, search, supportSession, classifyAssistantIntent, loadBackups, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, loadCorrections, search, supportSession, classifyAssistantIntent, loadBackups, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

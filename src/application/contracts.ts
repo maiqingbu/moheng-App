@@ -474,6 +474,7 @@ export type DecisionCategory =
   | '完结冲突'
   | '审计提醒'
   | '计划提醒'
+  | '规划提醒'
 
 export interface DecisionItem {
   id: string
@@ -487,6 +488,17 @@ export interface DecisionItem {
   recommendation?: string
   evidence?: string[]
   allowedActions?: Array<'RETRY_REMOTE' | 'MARK_FAILED' | 'CANCEL_JOB' | 'ACKNOWLEDGE'>
+  /** WM-2a: a plan or continuity reminder the owner may keep as a correction. */
+  rememberable?: boolean
+}
+
+/** WM-2a: one of the owner's corrections; no subject for a writing rule of the whole work. */
+export interface OwnerCorrection {
+  correctionId: string
+  subject: string | null
+  content: string
+  sourceDecisionId: string | null
+  createdAt: string
 }
 
 export interface ChapterListItem {
@@ -1074,6 +1086,9 @@ export type CommandType =
   | 'style_card_generate'
   | 'style_card_confirm'
   | 'style_sample_save'
+  | 'writing_rule_add'
+  | 'memory_correction_add'
+  | 'memory_correction_revoke'
   | 'opening_ready'
   | 'opening_start_creating'
   | 'book_plan_create'
@@ -1144,6 +1159,7 @@ export interface FrontendPort {
   queryStoryDirections(request: ProjectQueryRequest): Promise<StoryDirectionProjection>
   queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection>
   queryCraftSetup(request: ProjectQueryRequest): Promise<CraftSetupProjection>
+  queryOwnerCorrections(request: ProjectQueryRequest): Promise<{ items: OwnerCorrection[] }>
   queryOpeningReady(request: ProjectQueryRequest): Promise<OpeningReadyProjection>
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
   queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>

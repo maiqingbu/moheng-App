@@ -1,6 +1,6 @@
 {
   "foreign_key_violations": 0,
-  "index_count": 227,
+  "index_count": 228,
   "indexes": [
     "idx_arcs_volume",
     "idx_artifact_schemas_project",
@@ -179,6 +179,7 @@
     "sqlite_autoindex_obligation_dependencies_1",
     "sqlite_autoindex_obligation_evidence_1",
     "sqlite_autoindex_obligation_evidence_2",
+    "sqlite_autoindex_owner_corrections_1",
     "sqlite_autoindex_planning_state_ledger_index_1",
     "sqlite_autoindex_production_events_1",
     "sqlite_autoindex_production_events_2",
@@ -231,7 +232,7 @@
     "sqlite_autoindex_work_memory_sources_1"
   ],
   "quick_check": "ok",
-  "table_count": 107,
+  "table_count": 108,
   "tables": [
     "arc_plan_index",
     "arcs",
@@ -298,6 +299,7 @@
     "narrative_taste_profile_index",
     "obligation_dependencies",
     "obligation_evidence",
+    "owner_corrections",
     "planning_state_ledger_index",
     "production_events",
     "production_timeline_projection",

@@ -15,5 +15,6 @@ export const decisionWorkspaces: Record<DecisionCategory, { path: string; label:
   大规模修复: { path: 'production', label: '去创作页授权修复' },
   完结冲突: { path: 'completion', label: '去完结准备处理' },
   审计提醒: { path: 'read', label: '去资料页阅读本章' },
-  计划提醒: { path: 'production', label: '去创作页查看' }
+  计划提醒: { path: 'production', label: '去创作页查看' },
+  规划提醒: { path: 'volumes', label: '去卷管理查看' }
 }

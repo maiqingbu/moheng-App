@@ -6,10 +6,10 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import ChapterLengthPicker from '../components/ChapterLengthPicker.vue'
 import BaseModal from '../components/BaseModal.vue'
 import { backupRestoreRequests, restorableBackups } from '../flows/backupRestore'
-import { productTimeLabel } from '../presentation/productLanguage'
+import { isInFlight, productTimeLabel } from '../presentation/productLanguage'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
-import type { BackupEntry, SettingsProjection } from '../../application/contracts'
+import type { BackupEntry, OwnerCorrection, SettingsProjection } from '../../application/contracts'
 
 const route=useRoute()
 const projectStore=useProjectStore()
@@ -22,7 +22,26 @@ const pricingEntries=ref<PricingEntry[]>([])
 const pricingVersion=ref(0)
 const apiKey=ref('')
 
-onMounted(()=>{ if(isProjectSettings.value) { void projectStore.loadSettings(); void loadBackups() } else void libraryStore.loadGlobalSettings() })
+// WM-2a: the owner's writing rules for this work and the reminders kept as corrections.
+const corrections=ref<OwnerCorrection[]>([])
+const newRule=ref('')
+const ruleState=computed(()=>projectStore.commandState('writing-rule'))
+async function loadCorrections(){ corrections.value=await projectStore.loadCorrections() }
+const revokeState=computed(()=>projectStore.commandState('writing-rule-revoke'))
+async function addRule(){
+  if(!newRule.value.trim()) return
+  try {
+    await projectStore.runCommand('writing-rule',{type:'writing_rule_add',payload:{content:newRule.value}})
+    if(ruleState.value.status==='committed') newRule.value=''
+  } finally { await loadCorrections() }
+}
+async function revoke(correctionId:string){
+  try {
+    await projectStore.runCommand('writing-rule-revoke',{type:'memory_correction_revoke',payload:{correctionId}})
+  } finally { await loadCorrections() }
+}
+
+onMounted(()=>{ if(isProjectSettings.value) { void projectStore.loadSettings(); void loadBackups(); void loadCorrections() } else void libraryStore.loadGlobalSettings() })
 watchEffect(()=>{
   if(!isProjectSettings.value && !libraryStore.globalSettings) void libraryStore.loadGlobalSettings()
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
@@ -96,13 +115,26 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
     <CommandFeedback :state="saveState" />
 
     <div class="settings-layout section">
-      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button v-if="isProjectSettings" :class="{active:section==='length'}" @click="scrollTo('length')">章节字数</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
+      <aside class="settings-nav"><button :class="{active:section==='model'}" @click="scrollTo('model')">模型配置</button><button :class="{active:section==='cost'}" @click="scrollTo('cost')">成本控制</button><button v-if="isProjectSettings" :class="{active:section==='length'}" @click="scrollTo('length')">章节字数</button><button v-if="isProjectSettings" :class="{active:section==='rules'}" @click="scrollTo('rules')">写作规矩</button><button :class="{active:section==='privacy'}" @click="scrollTo('privacy')">隐私</button><button :class="{active:section==='export'}" @click="scrollTo('export')">导出</button><button v-if="isProjectSettings" :class="{active:section==='reliability'}" @click="scrollTo('reliability')">数据可靠性</button><button :class="{active:section==='platform'}" @click="scrollTo('platform')">平台偏好</button><button :class="{active:section==='appearance'}" @click="scrollTo('appearance')">外观</button></aside>
 
       <main>
         <section id="setting-model" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">可在这里测试模型服务连接。应用设置作为默认配置，单个作品可以使用独立的模型设置。</p></div></div>
           <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
           <div class="actions" style="margin-top:14px"><button class="btn" @click="test">测试模型连接</button></div><CommandFeedback :state="testState" />
+        </section>
+
+        <section v-if="isProjectSettings" id="setting-rules" class="setting-section">
+          <div class="card-head"><div><h2 class="card-title">写作规矩</h2><p class="card-subtitle">这部作品的每一章，规划和写作都会照这些规矩来；和其他内容冲突时以它们为准。在“待处理”里记住的提醒也列在这里。</p></div></div>
+          <div v-if="!corrections.length" class="muted">还没有写作规矩。</div>
+          <div v-for="item in corrections" :key="item.correctionId" class="actions" style="justify-content:space-between;align-items:flex-start">
+            <div><span v-if="item.subject" class="badge">{{ item.subject }}</span> {{ item.content }}</div>
+            <button class="btn" :disabled="isInFlight(revokeState.status)" @click="revoke(item.correctionId)">撤销</button>
+          </div>
+          <CommandFeedback :state="revokeState" />
+          <label class="field section"><span class="field-label">新增一条</span><textarea v-model="newRule" class="textarea" placeholder="例如：不写主角吐血，代价用记忆缺失来表现" /></label>
+          <CommandFeedback :state="ruleState" />
+          <div class="actions"><button class="btn primary" :disabled="!newRule.trim() || isInFlight(ruleState.status)" @click="addRule">添加</button></div>
         </section>
 
         <section id="setting-cost" class="setting-section">

@@ -18,6 +18,25 @@ pub struct Memory {
     pub detail: String,
 }
 
+/// WM-2a: one of the owner's corrections. `subject` is the person or thing
+/// it holds for; none for a writing rule of the whole work.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Correction {
+    pub correction_id: String,
+    pub subject: Option<String>,
+    pub content: String,
+    pub source_decision_id: Option<String>,
+    pub created_at: String,
+}
+
+impl Correction {
+    /// What the planner and the writer are told of it.
+    pub fn prompt_view(&self) -> Value {
+        json!({"subject":self.subject,"content":self.content})
+    }
+}
+
 /// What a chapter is about: who is in it, everyone the story names as a
 /// person, and the plan's text.
 pub struct RecallQuery<'a> {

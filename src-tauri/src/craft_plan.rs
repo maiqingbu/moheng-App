@@ -737,6 +737,8 @@ struct CraftPlanning {
     established_facts: Vec<Value>,
     /// VD-1c: where this chapter stands in its volume's stages.
     direction: Option<Value>,
+    /// WM-2a: the owner's corrections.
+    corrections: Vec<Value>,
 }
 
 /// WM-1: the established facts for a chapter, recalled from the work's
@@ -808,6 +810,20 @@ pub(crate) fn confirmed_bible(
     confirmed_content(connection, project_id, "StoryBible", BIBLE_CONTENT)
 }
 
+/// WM-2a: the owner's corrections in force, as the planner and the writer
+/// are told them.
+fn owner_corrections(
+    connection: &libsql_rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<Value>, String> {
+    Ok(
+        crate::repositories::work_memory::corrections(connection, project_id)?
+            .iter()
+            .map(crate::work_memory::Correction::prompt_view)
+            .collect(),
+    )
+}
+
 /// The style-card fields the writer follows; the rest is metadata.
 const STYLE_CARD_CONTENT: &[&str] = &[
     "narration",
@@ -824,6 +840,8 @@ pub struct WritingContext {
     pub bible: Value,
     pub style_card: Option<Value>,
     memories: Vec<crate::work_memory::Memory>,
+    /// WM-2a: the owner's corrections, as the writer is told them.
+    corrections: Vec<Value>,
     chapter: u32,
 }
 
@@ -862,6 +880,7 @@ impl WritingContext {
             memories: crate::repositories::work_memory::earlier_memories(
                 connection, project_id, chapter_id,
             )?,
+            corrections: owner_corrections(connection, project_id)?,
             chapter: chapter_number.unwrap_or(1),
         })
     }
@@ -871,6 +890,9 @@ impl WritingContext {
         input["storyBible"] = self.bible.clone();
         if let Some(card) = &self.style_card {
             input["styleCard"] = card.clone();
+        }
+        if !self.corrections.is_empty() {
+            input["ownerCorrections"] = json!(self.corrections);
         }
         input["chapterNumber"] = json!(self.chapter);
         input["recentChapters"] = json!(recent_chapters);
@@ -915,6 +937,7 @@ impl ChapterPlanner {
         });
         Ok(Self {
             craft: Some(CraftPlanning {
+                corrections: owner_corrections(connection, project_id)?,
                 direction,
                 bible,
                 ledger,
@@ -950,6 +973,9 @@ impl ChapterPlanner {
             input["chapterNumber"] = json!(self.chapter);
             if let Some(direction) = &craft.direction {
                 input["volumeDirection"] = direction.clone();
+            }
+            if !craft.corrections.is_empty() {
+                input["ownerCorrections"] = json!(craft.corrections);
             }
         }
     }

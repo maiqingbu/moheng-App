@@ -35,6 +35,7 @@ import type {
   StoryDirectionProjection,
   StorySetupProjection,
   CraftSetupProjection,
+  OwnerCorrection,
   SupportSessionProjection,
   VersionProjection,
   VolumeDetailProjection,
@@ -436,6 +437,13 @@ export class BrowserDemoPort implements FrontendPort {
     this.record(request.projectId)
     // The browser demo has no model: it shows an empty craft setup.
     return { storyBible: { candidates: [], confirmed: null }, styleCard: { candidates: [], confirmed: null }, sample: null, archetypes: [] }
+  }
+
+  async queryOwnerCorrections(request: ProjectQueryRequest): Promise<{ items: OwnerCorrection[] }> {
+    await wait(35)
+    this.record(request.projectId)
+    // The browser demo keeps no corrections.
+    return { items: [] }
   }
 
   async queryStorySetup(request: ProjectQueryRequest): Promise<StorySetupProjection> {

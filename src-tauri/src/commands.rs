@@ -666,6 +666,84 @@ pub fn query_craft_setup_impl(state: &KernelState, request: Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+/// WM-2a: the owner's corrections in force, oldest first.
+pub fn query_owner_corrections_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    state
+        .manager
+        .with_read_connection(project_id, "1970-01-01T00:00:00Z", |connection| {
+            crate::repositories::work_memory::corrections(connection, project_id)
+                .map(|items| json!({"items":items}))
+                .map_err(ManagerError::ProjectCommand)
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// WM-2a (WORK_MEMORY_DESIGN §6.2): records or revokes one of the owner's
+/// corrections: a writing rule for the whole work, or a remembered
+/// reminder for the person or thing it names. Kept on this machine with the
+/// work like the style sample: not an artifact, no revision.
+fn execute_owner_correction(
+    state: &KernelState,
+    request: &Value,
+    command_type: &str,
+    project_id: &str,
+    command_id: &str,
+    requested_at: &str,
+) -> Result<Value, String> {
+    let payload = request.get("payload").cloned().unwrap_or(Value::Null);
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let (message, correction_id) = if command_type == "memory_correction_revoke" {
+        let correction_id =
+            text("correctionId").ok_or_else(|| "IPC_INVALID:payload.correctionId".to_string())?;
+        if !crate::repositories::work_memory::revoke_correction(
+            &handle,
+            project_id,
+            &correction_id,
+            requested_at,
+        )? {
+            return Err("WM2_CORRECTION_NOT_FOUND".into());
+        }
+        ("已撤销这条纠正，之后的章节不再按它写。", correction_id)
+    } else {
+        let content = text("content").ok_or_else(|| "WM2_CORRECTION_CONTENT_REQUIRED".to_string())?;
+        let correction = crate::work_memory::Correction {
+            // From the command, so a retried command records it once.
+            correction_id: format!(
+                "correction:{}",
+                &sha256_canonical(&json!(command_id)).map_err(|error| error.to_string())?[..24]
+            ),
+            subject: (command_type == "memory_correction_add")
+                .then(|| text("subject"))
+                .flatten(),
+            content,
+            source_decision_id: text("decisionId"),
+            created_at: requested_at.into(),
+        };
+        crate::repositories::work_memory::add_correction(&handle, project_id, &correction)?;
+        (
+            "已记住。之后每一章的规划和写作都会照这条来，和其他内容冲突时以它为准。",
+            correction.correction_id,
+        )
+    };
+    Ok(json!({
+        "commandId":command_id,"projectId":project_id,"resultProjectId":project_id,
+        "finalStatus":"committed","message":message,"correctionId":correction_id
+    }))
+}
+
 pub fn query_opening_ready_impl(state: &KernelState, request: Value) -> Result<Value, String> {
     let request = request.get("request").cloned().unwrap_or(request);
     let project_id = required_string(&request, "projectId")?;
@@ -8949,6 +9027,10 @@ pub fn execute_command_impl(state: &KernelState, request: Value) -> Result<Value
                 &digest,
             )
         }
+        "writing_rule_add" | "memory_correction_add" | "memory_correction_revoke" => {
+            let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
+            execute_owner_correction(state, &request, command_type, id, command_id, requested_at)
+        }
         "market_refresh" => {
             let id = project_id.ok_or_else(|| "IPC_INVALID:projectId".to_string())?;
             if let Some(replayed) = replayed_project_command(state, id, idempotency_key, &digest)? {
@@ -9724,6 +9806,14 @@ pub fn query_craft_setup(state: State<'_, KernelState>, request: Value) -> Resul
 }
 
 #[tauri::command]
+pub fn query_owner_corrections(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    query_owner_corrections_impl(&state, request)
+}
+
+#[tauri::command]
 pub fn query_opening_ready(state: State<'_, KernelState>, request: Value) -> Result<Value, String> {
     query_opening_ready_impl(&state, request)
 }
@@ -10297,6 +10387,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_story_directions,
         query_story_setup,
         query_craft_setup,
+        query_owner_corrections,
         query_opening_ready,
         query_assistant_repair_plan,
         query_production_center,

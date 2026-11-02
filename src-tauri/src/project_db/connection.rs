@@ -40,6 +40,8 @@ const FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION: &str =
 const CRAFT_STYLE_SAMPLE_MIGRATION: &str =
     include_str!("../../migrations/0017_craft_style_sample.sql");
 const WM1_WORK_MEMORY_MIGRATION: &str = include_str!("../../migrations/0018_wm1_work_memory.sql");
+const WM2_OWNER_CORRECTIONS_MIGRATION: &str =
+    include_str!("../../migrations/0019_wm2_owner_corrections.sql");
 
 pub fn open_connection(path: &Path, read_only: bool) -> Result<Connection, DatabaseError> {
     let existed = path.is_file();
@@ -362,6 +364,7 @@ pub fn migrate_project(
         apply_numbered_migration(connection, 16, FX11_CANON_FACT_SCOPED_LOOKUP_MIGRATION, now)?;
         apply_numbered_migration(connection, 17, CRAFT_STYLE_SAMPLE_MIGRATION, now)?;
         apply_numbered_migration(connection, 18, WM1_WORK_MEMORY_MIGRATION, now)?;
+        apply_numbered_migration(connection, 19, WM2_OWNER_CORRECTIONS_MIGRATION, now)?;
         connection.execute("INSERT OR IGNORE INTO project_meta(project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)", [project_id, title, now])?;
         Ok::<_, DatabaseError>(())
     })();

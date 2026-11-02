@@ -185,3 +185,25 @@
 **负责人决定（2026-11-02）**：
 1. 先做 WM-2a。
 2. “记住这条”只放在计划提醒和连贯提醒（矛盾、口头禅）上。
+
+### 8.1 WM-2a 实现
+
+- **数据**：负责人纠正存在独立的 `owner_corrections` 表里（迁移 19），不和 `work_memory` 混放。`work_memory` 是从章节回执推导出来的，会随回执重建；纠正是负责人亲手写的，不能被重建冲掉。
+  - 不填对象（`subject` 为空）的是整部作品的写作规矩，填了对象的只对那个人物或物件生效。
+  - 撤销的纠正不删除，只记下撤销时间。
+  - 复制作品时一起复制（`COPY_REMAP`）。
+- **命令**：
+  - `writing_rule_add`：添加作品设置里的写作规矩；
+  - `memory_correction_add`：提醒里的“记住这条”，可以带 `subject` 和 `decisionId`；
+  - `memory_correction_revoke`：撤销一条。
+
+  这三条命令和文风样本一样，只存在本机，不生成版本、不占项目修订号。内容为空时拒绝，返回 `WM2_CORRECTION_CONTENT_REQUIRED`。查询用 `query_owner_corrections`。
+- **交给模型**：r2 章规划（`ChapterPlanner::extend_input`）和写手（`WritingContext::extend_render_input`）的输入里都有 `ownerCorrections`，格式是 `{subject, content}`，包含当前生效的全部纠正。两个提示词都写明：纠正和其他内容冲突时以纠正为准。
+- **界面**：
+  - 待处理页里，`rememberable` 的提醒会显示“记住这条”，也就是暂缓内容里有 `plan` 或 `continuity` 条目的提醒（计划提醒、规划提醒、连贯问题）。点开后带出提醒原文供修改，“只对谁生效”可以不填。
+  - 作品设置新增“写作规矩”一栏，列出全部生效的纠正，可以新增、撤销。
+- **重试与写锁**：纠正的编号由命令编号算出，同一条命令重试不会记两次。三条命令都允许在生产进行中执行（加入 `writeLockAllowed`），从下一章开始生效。
+- **欠账**：纠正不分对象全部交给模型，条数也不设上限，规矩多了以后提示会越来越长。等条数真的多起来，再按本章人物筛选。
+- **测试**：
+  - `tests/wm2_owner_corrections.rs` 覆盖四件事：增加后撤销、内容为空被拒、规划和写手都拿到纠正、重试只记一条；
+  - `tests/store/wm2-owner-corrections.test.ts` 检查界面入口。

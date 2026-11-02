@@ -39,6 +39,31 @@ const allowedActions = computed(() => selected.value?.allowedActions ?? [])
 const takesNote = computed(() => allowedActions.value.some(action => action !== 'ACKNOWLEDGE'))
 const inFlight = computed(() => isInFlight(state.value.status))
 const workspace = computed(() => selected.value ? decisionWorkspaces[selected.value.category] : undefined)
+// WM-2a: a plan or continuity reminder can be kept as an owner correction,
+// worded by the owner, for the person or thing it names.
+const remembering = ref(false)
+const correction = ref('')
+const subject = ref('')
+const rememberKey = computed(() => `remember-${selected.value?.id ?? 'none'}`)
+const rememberState = computed(() => store.commandState(rememberKey.value))
+function startRemember() {
+  correction.value = selected.value?.summary ?? ''
+  subject.value = ''
+  remembering.value = true
+}
+async function remember() {
+  if (!selected.value || !correction.value.trim()) return
+  try {
+    await store.runCommand(rememberKey.value, {
+      type: 'memory_correction_add',
+      payload: { decisionId: selected.value.id, content: correction.value, subject: subject.value }
+    })
+  } catch {
+    // CommandFeedback shows what went wrong.
+  }
+  if (rememberState.value.status === 'committed') remembering.value = false
+}
+watch(selectedId, () => { remembering.value = false })
 async function submit(choice: keyof typeof actionLabels) {
   if (!selected.value) return
   await store.runCommand(commandKey.value, {
@@ -81,6 +106,19 @@ watch(filter, load)
         </div>
         <label v-if="selected.status === 'pending' && takesNote" class="field section"><span class="field-label">补充意见</span><textarea v-model="note" class="textarea" placeholder="用读者语言描述你的要求" /></label>
         <CommandFeedback :state="state" />
+        <div v-if="selected.rememberable && !remembering" class="actions section">
+          <button class="btn" @click="startRemember">记住这条</button>
+          <span class="muted">记住后，之后每一章的规划和写作都按它来。</span>
+        </div>
+        <div v-if="selected.rememberable && remembering" class="section">
+          <label class="field"><span class="field-label">要记住的规矩</span><textarea v-model="correction" class="textarea" placeholder="用一句话写清以后要怎么写" /></label>
+          <label class="field"><span class="field-label">只对谁生效（可不填）</span><input v-model="subject" class="input" placeholder="人物或物件的名字；不填则只按内容判断" /></label>
+          <CommandFeedback :state="rememberState" />
+          <div class="actions">
+            <button class="btn primary" :disabled="!correction.trim() || isInFlight(rememberState.status)" @click="remember">保存</button>
+            <button class="btn" @click="remembering = false">取消</button>
+          </div>
+        </div>
         <div v-if="selected.status === 'pending' && allowedActions.length" class="actions">
           <button v-for="action in allowedActions" :key="action" class="btn" :class="{ primary: action === 'RETRY_REMOTE' || action === 'ACKNOWLEDGE' }" :disabled="inFlight" :aria-busy="inFlight" @click="submit(action)">{{ actionLabels[action] }}</button>
           <RouterLink v-if="workspace && store.project" class="btn" :to="`/projects/${store.project.id}/${workspace.path}`">{{ workspace.label }}</RouterLink>

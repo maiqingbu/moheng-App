@@ -769,8 +769,8 @@ fn repeated_open_does_not_repeat_migration_or_backup_storm() {
             })
             .unwrap();
         assert_eq!(
-            max_version, 18,
-            "schema version must settle at WM-1 v18 and not grow"
+            max_version, 19,
+            "schema version must settle at WM-2a v19 and not grow"
         );
         drop(conn);
     }

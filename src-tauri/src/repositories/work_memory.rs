@@ -1,7 +1,7 @@
 //! WM-1 phase 1: the work's memory table (WORK_MEMORY_DESIGN §7), derived
 //! from each committed chapter's production receipt.
 
-use crate::work_memory::Memory;
+use crate::work_memory::{Correction, Memory};
 use libsql_rusqlite::Connection;
 use serde_json::Value;
 
@@ -149,4 +149,67 @@ fn sync(connection: &Connection, project_id: &str) -> Result<(), String> {
             Err(error)
         }
     }
+}
+
+/// WM-2a: records one of the owner's corrections; recording the same one
+/// again (a retried command) changes nothing.
+pub fn add_correction(
+    connection: &Connection,
+    project_id: &str,
+    correction: &Correction,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO owner_corrections(project_id, correction_id, subject, content, source_decision_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(project_id, correction_id) DO NOTHING",
+            libsql_rusqlite::params![
+                project_id,
+                correction.correction_id,
+                correction.subject,
+                correction.content,
+                correction.source_decision_id,
+                correction.created_at
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// WM-2a: revokes a correction; whether there was one to revoke.
+pub fn revoke_correction(
+    connection: &Connection,
+    project_id: &str,
+    correction_id: &str,
+    now: &str,
+) -> Result<bool, String> {
+    connection
+        .execute(
+            "UPDATE owner_corrections SET revoked_at=?3 WHERE project_id=?1 AND correction_id=?2 AND revoked_at IS NULL",
+            libsql_rusqlite::params![project_id, correction_id, now],
+        )
+        .map(|changed| changed > 0)
+        .map_err(|error| error.to_string())
+}
+
+/// WM-2a: the owner's corrections in force, oldest first.
+pub fn corrections(connection: &Connection, project_id: &str) -> Result<Vec<Correction>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT correction_id, subject, content, source_decision_id, created_at FROM owner_corrections \
+             WHERE project_id=?1 AND revoked_at IS NULL ORDER BY created_at, rowid",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok(Correction {
+                correction_id: row.get(0)?,
+                subject: row.get(1)?,
+                content: row.get(2)?,
+                source_decision_id: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
 }
