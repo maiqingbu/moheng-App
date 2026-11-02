@@ -3349,8 +3349,24 @@ pub(crate) fn context_input_from_authority(
                 .ok_or_else(|| format!("CONTEXT_SOURCE_UNAVAILABLE|source=TASK|scope={scope}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Real run round 26: a task's readiness is read from the states of the
+    // tasks it depends on, which the default selection leaves out once they
+    // are satisfied; a chosen selection is taken as it is.
+    let default_selection = scope_selection
+        .as_ref()
+        .and_then(|selection| selection.task_refs.as_ref())
+        .is_none();
+    let dependency_refs = plan_task_refs
+        .iter()
+        .filter(|_| default_selection)
+        .filter_map(|task_ref| route_task_contracts.get(task_ref))
+        .flat_map(|task| task["dependsOnTaskIds"].as_array().cloned().unwrap_or_default())
+        .filter_map(|dependency| dependency.as_str().map(ToOwned::to_owned))
+        .filter(|dependency| !plan_task_refs.contains(dependency))
+        .collect::<BTreeSet<_>>();
     let task_ref_slices = plan_task_refs
         .iter()
+        .chain(&dependency_refs)
         .map(String::as_str)
         .collect::<Vec<_>>();
     let task_states = map_context_query(

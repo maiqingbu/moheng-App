@@ -3049,13 +3049,13 @@ fn run_chapter_production_inner(
             render_input.clone(),
         )?;
         let body = rendered_body(&result)?;
-        // LD-2 (real run round 22): a chapter written as one paragraph is
-        // written again once, told to break it into paragraphs.
+        // LD-2 (real runs rounds 22 and 26): a chapter barely broken into
+        // paragraphs is written again once, told to break it up.
         if gateway.enforces_chapter_length() && crate::chapter_craft::is_unbroken(&body) {
             let mut input = render_input;
             input["outputFeedback"] = json!({
-                "rejectedFor":"正文没有分段：整章没有一个换行",
-                "instruction":"上一次的正文整章连成一段。重写这一章，按场景、动作和对话分段，段与段之间用换行（\\n）隔开。"
+                "rejectedFor":"正文分段太少：有超过 300 字的段落",
+                "instruction":"上一次的正文段落太长，几百字连成一段。重写这一章，按场景、动作和对话分段，每段一般不超过 150 字，段与段之间用换行（\\n）隔开。"
             });
             let (model_run_id, result) =
                 craft_call("render-paragraphs", render_capability, &render_profile, 2, input)?;

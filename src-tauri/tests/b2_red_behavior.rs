@@ -1408,3 +1408,76 @@ fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
     assert_eq!(required.len(), 4, "{required:?}");
     assert!(required[0].ends_with(":step:1:1:1"), "{required:?}");
 }
+
+#[test]
+fn after_a_step_is_done_the_next_chapter_works_on_the_next_step() {
+    // Real run round 26: once step 1 was satisfied it left the context, its
+    // state with it, so step 2 never looked ready and chapters 5-10 worked
+    // only on an optional task.
+    let (state, _temp, _gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, &format!("next:{step}"), command_type, json!({"volumeId":volume_id}));
+    }
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume route");
+    let steps = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .filter_map(|task| task["taskId"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let chapter_three: String = connection
+            .query_row("SELECT chapter_id FROM chapters WHERE project_id=?1 AND chapter_no=3", [&project_id], |row| row.get(0))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO state_deltas(state_id,project_id,state_type,value_json,chapter_id,payload_json,created_at,updated_at) VALUES (?1,?2,'volume.task.progress',?3,?4,'{}',?5,?5)",
+                libsql_rusqlite::params![
+                    steps[0],
+                    project_id,
+                    json!({"taskId":steps[0],"status":"SATISFIED"}).to_string(),
+                    chapter_three,
+                    NOW
+                ],
+            )
+            .unwrap();
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "next:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    command(
+        &state,
+        &project_id,
+        "next:chapter-four-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_id,"chapterGoalHint":"追查账本缺页的去向。"}),
+    );
+    let (_, _, plan) = {
+        let connection = state.manager.open(&project_id, "", NOW).unwrap();
+        let raw: String = connection
+            .query_row(
+                "SELECT p.payload_json FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='ChapterPlan' AND h.scope_key LIKE '%'||?2||'%'",
+                libsql_rusqlite::params![project_id, chapter_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        ((), (), serde_json::from_str::<Value>(&raw).unwrap())
+    };
+    let active = plan["activeTaskRefs"].as_array().unwrap();
+    assert!(active.iter().any(|task| task == &json!(steps[1])), "{active:?}");
+}

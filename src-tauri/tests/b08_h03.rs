@@ -30,9 +30,17 @@ const NOW: &str = "2026-08-30T12:00:00Z";
 
 /// `length` characters of filler prose with no repeated phrase, so the
 /// writer's repetition check never fires on test bodies.
+/// Prose of `length` characters, none repeated, in paragraphs of 150
+/// (LD-2 rewrites a chapter with a paragraph over 300).
 fn varied_prose(length: usize) -> String {
     (0..length)
-        .map(|n| char::from_u32(0x4E00 + n as u32).unwrap())
+        .map(|n| {
+            if n % 150 == 149 {
+                '\n'
+            } else {
+                char::from_u32(0x4E00 + n as u32).unwrap()
+            }
+        })
         .collect()
 }
 

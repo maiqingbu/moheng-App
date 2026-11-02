@@ -1370,7 +1370,7 @@ fn r2_model_output(capability: &str, input: &Value, task_id: &str) -> Value {
                 length_target
             };
             let filler = target.saturating_sub(opening.chars().count() + 1);
-            json!({"body":format!("{opening}\n{}", (0..filler).map(|n| char::from_u32(0x4E00 + n as u32).unwrap()).collect::<String>())})
+            json!({"body":format!("{opening}\n{}", (0..filler).map(|n| if n % 150 == 149 { '\n' } else { char::from_u32(0x4E00 + n as u32).unwrap() }).collect::<String>())})
         }
         "REVIEW_CHAPTER" => json!({"findings":[]}),
         "REWRITE_PASSAGES" => json!({"edits":[]}),

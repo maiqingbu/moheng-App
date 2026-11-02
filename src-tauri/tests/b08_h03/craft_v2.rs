@@ -21,6 +21,9 @@ struct CraftGateway {
     inject: Vec<String>,
     /// The first cut chooses only the first this many sentences.
     first_cut: Option<usize>,
+    /// The filler is one run with no line break, so it is one sentence (the
+    /// ending, never cut).
+    unbroken_filler: bool,
     inputs: Mutex<Vec<(String, Value)>>,
 }
 
@@ -35,6 +38,7 @@ impl CraftGateway {
             rewrite_ending: None,
             inject: Vec::new(),
             first_cut: None,
+            unbroken_filler: false,
             inputs: Mutex::new(Vec::new()),
         }
     }
@@ -158,7 +162,12 @@ impl ProductionModelGateway for CraftGateway {
             );
             let body = format!("{}{motif}", response.output["body"].as_str().unwrap());
             let filler = length.saturating_sub(body.chars().count() + 1);
-            response.output["body"] = json!(format!("{body}\n{}", varied_prose(filler)));
+            let filler = if self.unbroken_filler {
+                varied_prose(filler).replace('\n', "丁")
+            } else {
+                varied_prose(filler)
+            };
+            response.output["body"] = json!(format!("{body}\n{filler}"));
         }
         Ok(response)
     }
@@ -271,7 +280,9 @@ fn craft_v2_a_chapter_in_range_needs_no_adjustment_and_one_still_outside_is_not_
     result.unwrap();
     assert!(in_range.inputs("ADJUST_CHAPTER_LENGTH").is_empty());
 
-    let too_long = Arc::new(CraftGateway::new(vec![good_plan()], &[3600, 3400]));
+    let mut too_long = CraftGateway::new(vec![good_plan()], &[3600, 3400]);
+    too_long.unbroken_filler = true;
+    let too_long = Arc::new(too_long);
     let (_temp, _state, _chapter_id, result) = produce(too_long.clone(), "p-craft-too-long");
     assert!(result
         .unwrap_err()
@@ -289,7 +300,8 @@ fn ld4_a_chapter_too_long_is_cut_by_the_sentences_the_writer_chooses() {
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3400]);
     let walking = (0..60)
         .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
-        .collect::<String>();
+        .collect::<Vec<_>>()
+        .join("\n");
     gateway.inject = vec![walking];
     let gateway = Arc::new(gateway);
     let project_id = "p-ld4-cut";
@@ -313,7 +325,8 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     let mut gateway = CraftGateway::new(vec![good_plan()], &[3600]);
     gateway.inject = vec![(0..60)
         .map(|n| format!("第{n:02}次沈砚沿着走廊走到档案室门口。"))
-        .collect()];
+        .collect::<Vec<_>>()
+        .join("\n")];
     gateway.first_cut = Some(10);
     let gateway = Arc::new(gateway);
     let project_id = "p-ld4-cut-twice";
@@ -321,7 +334,8 @@ fn ld4_a_cut_that_leaves_the_chapter_too_long_is_followed_by_one_more() {
     result.unwrap();
     let cut = gateway.inputs("CUT_CHAPTER");
     assert_eq!(cut.len(), 2);
-    assert_eq!(cut[1]["currentChars"], 3420);
+    // Ten sentences of 18 characters and the nine line breaks between them.
+    assert_eq!(cut[1]["currentChars"], 3411);
     let committed = committed_word_count(&state, project_id, &chapter_id);
     assert!((2000..=2500).contains(&committed), "{committed}");
 }

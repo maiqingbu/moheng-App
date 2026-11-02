@@ -263,10 +263,11 @@ pub fn check_plan(
     validate_plan_craft(plan, recent_chapters)
 }
 
-/// LD-2 (real run round 22): prose over 400 characters with no line break,
-/// a chapter written as one paragraph.
+/// LD-2: prose with a paragraph over 300 characters, a chapter barely
+/// broken into paragraphs (real run round 22: one paragraph; round 26: four
+/// of 400 to 600 characters, where a chapter's run 40 to 150).
 pub fn is_unbroken(body: &str) -> bool {
-    !body.contains('\n') && body.chars().count() > 400
+    body.lines().any(|paragraph| paragraph.chars().count() > 300)
 }
 
 /// Chinese typography for committed prose (owner rule: signing checks forbid
@@ -1618,11 +1619,12 @@ mod tests {
 
 
     #[test]
-    fn a_long_chapter_without_a_line_break_is_unbroken() {
-        // LD-2 (real run round 22): chapter 1 came back as one paragraph.
+    fn a_chapter_with_a_paragraph_over_300_characters_is_unbroken() {
+        // LD-2 (real run round 22): chapter 1 came back as one paragraph;
+        // round 26: as four of 400 to 600 characters.
         assert!(is_unbroken(&"正".repeat(401)));
-        assert!(!is_unbroken(&format!("{}\n正", "正".repeat(401))));
-        assert!(!is_unbroken(&"正".repeat(400)));
+        assert!(is_unbroken(&format!("{}\n{}", "正".repeat(100), "正".repeat(301))));
+        assert!(!is_unbroken(&format!("{}\n{}", "正".repeat(300), "正".repeat(300))));
     }
 
     #[test]
