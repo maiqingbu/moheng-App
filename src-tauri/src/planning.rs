@@ -677,7 +677,7 @@ fn source_strings(sources: &Value, key: &str, nested_key: &str) -> Vec<String> {
         .collect()
 }
 
-fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
+pub(crate) fn seed_matches_volume(seed_id: &str, volume_no: i64) -> bool {
     let marker = format!("volume-{volume_no}");
     seed_id == marker
         || seed_id.ends_with(&format!(":{marker}"))

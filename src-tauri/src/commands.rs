@@ -6665,7 +6665,24 @@ fn execute_volume_lifecycle_command(
         )?,
         _ => return Err("B09_UNSUPPORTED_LIFECYCLE_COMMAND".into()),
     };
+    drop(handle);
+    // VD-2: a volume that opens is planned from what the one before did.
+    let volume_direction = match command_type {
+        // The handoff is committed: planning the volume only improves it,
+        // so a failure is reported, never the command's.
+        "volume_handoff" if result.get("replayed") != Some(&json!(true)) => direct_volume(
+            state,
+            project_id,
+            required_string(payload, "nextVolumeId")?,
+            command_id,
+            idempotency_key,
+            requested_at,
+        )
+        .unwrap_or_else(|error| json!({"status":"FAILED","error":error})),
+        _ => Value::Null,
+    };
     Ok(json!({
+        "volumeDirection": volume_direction,
         "commandId": command_id,
         "projectId": project_id,
         "finalStatus": "committed",
@@ -6679,6 +6696,88 @@ fn execute_volume_lifecycle_command(
         "afterRevision": result.get("projectRevision"),
         "result": result,
     }))
+}
+
+/// VD-2 (VOLUME_DIRECTION_DESIGN §7): plans volume `volume_id` once it is
+/// open. A planned direction becomes a new BookPlan version, and the
+/// volume's intent and route are compiled again from it; otherwise the
+/// handoff's plan stays, with a reminder when planning failed. Returns
+/// `PLANNED`, `TEMPLATE` or null (a gateway that plans no directions).
+#[doc(hidden)]
+pub fn direct_volume(
+    state: &KernelState,
+    project_id: &str,
+    volume_id: &str,
+    command_id: &str,
+    idempotency_key: &str,
+    requested_at: &str,
+) -> Result<Value, String> {
+    let handle = state
+        .manager
+        .open(project_id, "", requested_at)
+        .map_err(|error| error.to_string())?;
+    let planned = crate::book_direction::plan_volume(
+        &handle,
+        state.production_gateway.as_ref(),
+        project_id,
+        volume_id,
+        (command_id, idempotency_key, requested_at),
+    )?;
+    let revision = |handle: &crate::project_db::ProjectHandle| {
+        crate::repositories::narrative::NarrativeRepository::project_revision(handle, project_id)
+            .map_err(|error| error.to_string())
+    };
+    let commit_id = format!("{command_id}:volume-direction");
+    let Some(book_plan) = planned.direction else {
+        let Some(reminder) = planned.reminder else {
+            return Ok(Value::Null);
+        };
+        let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision(&handle)?,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[],"decisionUpdates":[reminder]})).map_err(|e| e.to_string())?;
+        CommitService::commit(&handle, &bundle, requested_at).map_err(|e| e.to_string())?;
+        return Ok(json!("TEMPLATE"));
+    };
+    let current = crate::repositories::narrative::NarrativeRepository::canonical_project_head_ref(
+        &handle, project_id, "BookPlan",
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+    crate::generated::validators::validate_book_plan_r1(&book_plan)
+        .map_err(|error| format!("BOOK_PLAN_CONTRACT:{error}"))?;
+    let artifact_id = format!("plan:bookplan:{project_id}");
+    let version = crate::repositories::narrative::NarrativeRepository::next_artifact_version(
+        &handle,
+        project_id,
+        &artifact_id,
+    )
+    .map_err(|e| e.to_string())?;
+    let hash = sha256_canonical(&book_plan).map_err(|e| e.to_string())?;
+    let artifact: ArtifactEnvelope = serde_json::from_value(json!({"artifactId":artifact_id,"projectId":project_id,"artifactType":"BookPlan","scope":{"level":"PROJECT"},"version":version,"schemaVersion":"m0a.artifact.v1","artifactStatus":"CANDIDATE","payload":book_plan,"payloadHash":hash,"dependencyRefs":[current],"provenance":{"createdBy":"B07::PlanningOwner","commandId":commit_id,"modelRunId":planned.model_run_id},"createdAt":requested_at})).map_err(|e| e.to_string())?;
+    let bundle: CommitBundle = serde_json::from_value(json!({"commitId":format!("commit:{commit_id}"),"projectId":project_id,"commandId":commit_id,"idempotencyKey":format!("{idempotency_key}:volume-direction"),"expectedProjectRevision":revision(&handle)?,"contractVersion":"m0a.v1","createdAt":requested_at,"artifacts":[artifact],"headUpdates":[{"artifactType":"BookPlan","scope":{"level":"PROJECT"},"artifactId":artifact_id,"version":version,"payloadHash":hash}]})).map_err(|e| e.to_string())?;
+    let mut expected = CommitService::commit(&handle, &bundle, requested_at)
+        .map_err(|e| e.to_string())?
+        .after_revision;
+    // The planning commands open the project themselves.
+    drop(handle);
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        let committed = execute_planning_command_with_observer(
+            state,
+            &json!({"payload":{"volumeId":volume_id}}),
+            command_type,
+            project_id,
+            &format!("{command_id}:{step}"),
+            &format!("{idempotency_key}:{step}"),
+            requested_at,
+            Some(expected),
+            &mut |_| {},
+        )?;
+        expected = committed["receipt"]["afterRevision"]
+            .as_i64()
+            .ok_or_else(|| "VD2_PLANNING_REVISION_MISSING".to_string())?;
+    }
+    Ok(json!("PLANNED"))
 }
 
 fn production_control_response(

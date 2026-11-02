@@ -477,7 +477,8 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
             | "REVIEW_CHAPTER"
             | "CHECK_CONTINUITY"
             | crate::craft_plan::PLAN_CHAPTER_CRAFT
-            | crate::book_direction::PLAN_BOOK_DIRECTION => "auditModelId",
+            | crate::book_direction::PLAN_BOOK_DIRECTION
+            | crate::book_direction::PLAN_VOLUME_DIRECTION => "auditModelId",
             _ => return Ok(profile),
         };
         if let Some(paths) = &self.settings_paths {

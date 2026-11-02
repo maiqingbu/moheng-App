@@ -272,6 +272,7 @@ fn estimate_output_tokens(capability: &str, input: &Value) -> i64 {
         "PLAN_STRATEGY" => 1_500,
         "PLAN_CHAPTER_CRAFT" => 1_800,
         "PLAN_BOOK_DIRECTION" => 2_500,
+        "PLAN_VOLUME_DIRECTION" => 1_500,
         "RENDER_CHAPTER_CRAFT" | "ADJUST_CHAPTER_LENGTH" => 4_000,
         "CLASSIFY_ASSISTANT_INTENT" => 200,
         "AUDIT_EXTRACT" => 1_200,

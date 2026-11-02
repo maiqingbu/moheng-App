@@ -254,6 +254,30 @@ PLAN_CHAPTER_CRAFT 的输入新增 `volumeDirection`（参考信息，不进硬�
 1. 换卷时生成的下一卷方向**自动采用**，与第一卷一致。
 2. **允许**模型根据上一卷的实际结果改写下一卷的 `description`；全书目标（`mustAchieve`）和预留不动。
 
-### 7.4 验收
+### 7.4 实现（VD-2）
 
-十章验收碰不到换卷。要么写一个集成测试，用确定性网关走一遍“第一卷结束 → 换卷 → 第二卷第 1 章规划”；要么单独做一次“把第一卷章数临时调小”的真实验收。建议先做前者。
+- `book_direction::plan_volume`：读本卷信息、全书规划、故事圣经和上一卷的实际结果，然后调用 PLAN_VOLUME_DIRECTION。
+  - 上一卷的实际结果包括：各阶段的目标和完成章、最后 3 章的目标、处境变化和章末钩子，以及 `lastAppearances`。
+  - 检查用 `volume_problems`：先查不写章表、`description` 不为空，其余与第一卷共用 `stage_problems`。
+  - 与 PLAN_BOOK_DIRECTION 共用 `run_direction`，同样是两轮反馈加宽松放行。
+- `book_direction::with_volume_seed`：只替换这一卷的种子，阶段编号为 `stage:卷号:N`。
+- `commands::direct_volume`：`volume_handoff` 提交之后、并且不是重放时执行。生成成功的话，按顺序做三件事：
+  1. 提交一个新版本的全书规划，依赖上一个版本；
+  2. 用 `planning_create_volume_intent` 重新编译这一卷的意图；
+  3. 用 `planning_create_volume_plan` 重新编译这一卷的任务路线。
+
+  新的意图和路线会替换 B09 换卷时编译的那一版。生成失败时，只提交一条“第 N 卷方向没有生成”的规划提醒。命令结果里的 `volumeDirection` 是 `PLANNED`、`TEMPLATE` 或 null（确定性网关）。
+- **出错时**：`direct_volume` 出错不会让 `volume_handoff` 失败，因为换卷已经提交了。结果里的 `volumeDirection` 会记成 `{"status":"FAILED","error":…}`。重试换卷会走重放，不会再规划这一卷，需要负责人看到这个状态后另行处理（欠账）。
+- **欠账**：
+  - 全书规划的新版本直接经 `CommitService` 提交，没有走通用规划提交路径上的那些检查（比如签约是否过期）。
+  - 每次换卷，意图和路线会先由 B09 编译一版，再由 VD-2 编译一版，多出两次提交。
+  - 等以后把方向挪到换卷编译之前（按 §7.2 的原设计）时，这几项一起解决。
+- **偏离 §7.2 的地方**：没有把换卷那次原子提交拆开，而是在它之后另做提交。中途失败时，会停在“换卷完成、方向未更新”的状态，这和现在的行为一样，可以继续写下去。
+
+### 7.5 验收
+
+十章验收碰不到换卷。`tests/b2_red_behavior.rs` 的两条 `vd2_*` 测试先插入第二卷，再调用 `direct_volume`：
+- 一条检查第二卷的种子、意图和路线都跟着新阶段走；
+- 一条检查写章表时退回并留下提醒。
+
+真实的换卷验收，等以后做“把第一卷章数临时调小”的专项验收时再跑。

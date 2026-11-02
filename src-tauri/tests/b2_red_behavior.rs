@@ -253,6 +253,26 @@ impl ProductionModelGateway for BehaviorGateway {
                 }
                 direction
             }
+            "PLAN_VOLUME_DIRECTION" => {
+                self.direction_inputs.lock().unwrap().push(input.clone());
+                let room = input["volume"]["chapters"].as_i64().unwrap();
+                let stage = |goal: &str, chapters: i64| {
+                    json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters})
+                };
+                let mut direction = json!({
+                    "description":"林舟离开县城，去府城追查账本的来路",
+                    "stages":[
+                        stage("林舟进府城找到当年的账房", room / 3),
+                        stage("林舟拿到账本的底册", room / 3),
+                        stage("林舟当堂对质", room - 2 * (room / 3))
+                    ],
+                    "climax":"林舟在府衙当堂对质"
+                });
+                if self.table_directions {
+                    direction["chapters"] = json!([{"no":40}]);
+                }
+                direction
+            }
             other => return Err(format!("unexpected behavior-test capability: {other}")),
         };
         Ok(ProductionModelResponse::deterministic(output))
@@ -972,4 +992,98 @@ fn vd1a_a_direction_that_keeps_listing_chapters_leaves_the_template_and_a_remind
         "{reason}"
     );
     assert!(payload.contains("规划提醒"), "{payload}");
+}
+
+/// VD-2: opens volume 2 after volume 1 (as the handoff does) and plans it.
+fn open_volume_two(state: &KernelState, project_id: &str) -> (String, Value) {
+    use ai_novel_production_system_core::repositories::volume_lifecycle::VolumeLifecycleRepository;
+    let connection = state.manager.open(project_id, "", NOW).unwrap();
+    let (book_id, end): (String, i64) = connection
+        .query_row(
+            "SELECT book_id, chapter_end FROM volumes WHERE project_id=?1 AND volume_no=1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let volume_id = "vol:2d2d2d2d2d2d2d2d2d2d2d2d".to_string();
+    VolumeLifecycleRepository::insert_next_volume(
+        &connection,
+        project_id,
+        &volume_id,
+        &book_id,
+        2,
+        "第二卷",
+        end + 1,
+        end + 30,
+        90_000,
+        NOW,
+    )
+    .unwrap();
+    drop(connection);
+    let planned = ai_novel_production_system_core::commands::direct_volume(
+        state,
+        project_id,
+        &volume_id,
+        "vd2:direct",
+        "vd2:direct:key",
+        NOW,
+    )
+    .unwrap();
+    (volume_id, planned)
+}
+
+#[test]
+fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let (volume_id, planned) = open_volume_two(&state, &project_id);
+    assert_eq!(planned, "PLANNED");
+    let inputs = gateway.direction_inputs.lock().unwrap().clone();
+    let input = inputs.last().unwrap();
+    assert_eq!(input["volume"], json!({"volumeNo":2,"chapters":30}));
+    assert_eq!(input["book"]["storyPromise"], approved_story_promise(&state, &project_id));
+    let (_, _, book_plan) = current_book_plan_payload(&state, &project_id);
+    let seed = book_plan["volumeIntentSeeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|seed| seed["seedId"] == "volume-2")
+        .unwrap()
+        .clone();
+    assert_eq!(seed["description"], "林舟离开县城，去府城追查账本的来路");
+    assert_eq!(seed["stages"][0]["id"], "stage:2:1");
+    let route = query_plan_route_impl(&state, json!({"projectId":project_id,"volumeId":volume_id}))
+        .expect("volume 2 route");
+    let required = route["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["class"] == "REQUIRED")
+        .map(|task| task["objective"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        required[..3],
+        ["林舟进府城找到当年的账房", "林舟拿到账本的底册", "林舟当堂对质"]
+    );
+}
+
+#[test]
+fn vd2_a_volume_direction_that_keeps_listing_chapters_leaves_a_reminder() {
+    let (state, _temp, _gateway) = state_with(true, true);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let (_, planned) = open_volume_two(&state, &project_id);
+    assert_eq!(planned, "TEMPLATE");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let reason: String = connection
+        .query_row(
+            "SELECT reason FROM decisions WHERE project_id=?1 AND decision_type='AUDIT_REMINDER' AND reason LIKE '第 2 卷方向%'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(reason.starts_with("第 2 卷方向没有生成，沿用了模板："), "{reason}");
+}
+
+fn approved_story_promise(state: &KernelState, project_id: &str) -> Value {
+    current_book_plan_payload(state, project_id).2["storyPromise"].clone()
 }
