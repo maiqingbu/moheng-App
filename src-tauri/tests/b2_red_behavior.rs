@@ -25,6 +25,9 @@ struct BehaviorGateway {
     /// Round 19: the first audit reports no change; set when it was asked
     /// again with feedback.
     blank_audit_once: AtomicBool,
+    /// Chapter 1's first audit has one fact with an unregistered predicate,
+    /// and the follow-up round comes back empty.
+    blank_feedback_once: AtomicBool,
     audit_feedback: Mutex<Vec<Value>>,
     /// P1: chapter 1 opens a thread, chapter 2 advances it and chapter 3
     /// resolves it, by the ref the audit is shown.
@@ -184,6 +187,17 @@ impl ProductionModelGateway for BehaviorGateway {
                 "revealedReservationRefs":[],"evidenceRanges":[],
                 "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
             }),
+            "AUDIT_EXTRACT"
+                if input.get("auditFeedback").is_some()
+                    && self.blank_feedback_once.swap(false, Ordering::SeqCst) =>
+            {
+                json!({
+                    "qualityFindings":[],"canonCandidates":[],"knowledgeCandidates":[],
+                    "continuityCandidates":[],"taskProgressCandidates":[],
+                    "revealedReservationRefs":[],"evidenceRanges":[],
+                    "auditCompleteness":"COMPLETE_NO_CHANGE","unresolvedHard":false
+                })
+            }
             "AUDIT_EXTRACT" => {
                 if input.get("auditFeedback").is_some() {
                     self.audit_feedback
@@ -271,6 +285,17 @@ impl ProductionModelGateway for BehaviorGateway {
                 } else {
                     Vec::new()
                 };
+                if chapter_no == 1 && self.blank_feedback_once.load(Ordering::SeqCst) {
+                    canon_candidates.push(json!({
+                        "factId":"fact:b2:red:unregistered",
+                        "subjectId":"entity:b02:linzhou",
+                        "entityId":"entity:b02:linzhou",
+                        "predicate":"has_unregistered_mood",
+                        "objectJson":{"mood":"烦躁"},
+                        "authorityLevel":"C",
+                        "evidence":evidence
+                    }));
+                }
                 let continuity_candidates = if !self.threads.load(Ordering::SeqCst) {
                     Vec::new()
                 } else if chapter_no == 1 {
@@ -366,6 +391,7 @@ fn state_with(
         table_directions,
         direction_inputs: Mutex::new(Vec::new()),
         blank_audit_once: AtomicBool::new(false),
+        blank_feedback_once: AtomicBool::new(false),
         audit_feedback: Mutex::new(Vec::new()),
         threads: AtomicBool::new(false),
         thread_foreshadows: AtomicBool::new(false),
@@ -1293,4 +1319,31 @@ fn p2_the_setup_and_direction_steps_are_given_their_skills() {
             .collect::<Vec<_>>();
         assert!(skills.contains(&resident), "{capability}: {skills:?}");
     }
+}
+
+#[test]
+fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
+    // Real run round 24: chapters 1 and 2's follow-up audits came back
+    // COMPLETE_NO_CHANGE and were committed, so signing found no facts.
+    let (state, _temp, gateway) = state();
+    gateway.blank_feedback_once.store(true, Ordering::SeqCst);
+    let (project_id, approved) = create_approved_book_plan(&state);
+    assert_eq!(approved["planningMaturity"], "APPROVED");
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let chapter_one_facts: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts f JOIN chapters c ON c.chapter_id=f.valid_from_chapter_id WHERE f.project_id=?1 AND c.chapter_no=1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(chapter_one_facts > 0, "chapter 1 keeps the facts its first audit found");
+    let unregistered: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM canon_facts WHERE project_id=?1 AND predicate='has_unregistered_mood'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unregistered, 0, "the fact the ledger cannot take is held back");
 }

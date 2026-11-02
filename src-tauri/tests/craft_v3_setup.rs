@@ -2,7 +2,8 @@
 //! confirmation and the local-only style sample (CRAFT_V3_DESIGN §4.1).
 
 use ai_novel_production_system_core::commands::{
-    execute_command_impl, query_craft_setup_impl, query_story_directions_impl, KernelState,
+    draft_setup_change_impl, execute_command_impl, query_craft_setup_impl,
+    query_story_directions_impl, KernelState,
 };
 use ai_novel_production_system_core::production::{
     ProductionModelGateway, ProductionModelResponse, ResolvedProviderProfile,
@@ -25,6 +26,7 @@ struct CraftGateway {
     missing_field_once: AtomicBool,
     /// The next directions reply has two pitches instead of three.
     short_directions_once: AtomicBool,
+    draft_inputs: Mutex<Vec<Value>>,
 }
 
 fn bible(index: usize) -> Value {
@@ -108,8 +110,19 @@ impl ProductionModelGateway for CraftGateway {
                     json!({"bibles":bibles}),
                 ))
             }
+            "DRAFT_SETUP_CHANGE" => {
+                self.draft_inputs.lock().unwrap().push(input.clone());
+                Ok(ProductionModelResponse::deterministic(json!({
+                    "applies":true,
+                    "changes":[{"path":"antagonist.method","after":"收买码头的账房"}]
+                })))
+            }
             other => Err(format!("unexpected capability: {other}")),
         }
+    }
+
+    fn classifies_assistant_intent(&self) -> bool {
+        true
     }
 }
 
@@ -561,4 +574,36 @@ fn sample_style_cards_require_a_saved_sample() {
     )
     .unwrap_err();
     assert!(error.contains("STYLE_SAMPLE_MISSING"), "{error}");
+}
+
+#[test]
+fn p3_the_assistant_drafts_a_story_bible_change_from_the_owners_words() {
+    // P3 (owner decision 2026-11-03): the draft names the confirmed bible and
+    // shows each change as before and after; nothing is written.
+    let fixture = project_with_story_setup();
+    command(&fixture, "story_bible_generate", "craft:bible", json!({})).unwrap();
+    let candidate = setup(&fixture)["storyBible"]["candidates"][0].clone();
+    command(
+        &fixture,
+        "story_bible_confirm",
+        "craft:bible-confirm",
+        json!({"candidateId":candidate["id"],"bible":candidate}),
+    )
+    .unwrap();
+    let revision = fixture.manager.project_revision(&fixture.project_id).unwrap();
+    let draft = draft_setup_change_impl(
+        &fixture,
+        json!({"projectId":fixture.project_id,"question":"把彭三的手段改成收买码头的账房","requestedAt":NOW}),
+    )
+    .unwrap();
+    assert_eq!(draft["draft"]["targetAuthority"]["artifactType"], "StoryBible");
+    assert_eq!(
+        draft["draft"]["items"][0],
+        json!({"path":"antagonist.method","before":"借据和打手","after":"收买码头的账房"})
+    );
+    let inputs = fixture.gateway.draft_inputs.lock().unwrap();
+    assert_eq!(inputs[0]["request"], "把彭三的手段改成收买码头的账房");
+    assert_eq!(inputs[0]["storyBible"]["antagonist"]["name"], "彭三");
+    // A draft writes nothing.
+    assert_eq!(fixture.manager.project_revision(&fixture.project_id).unwrap(), revision);
 }

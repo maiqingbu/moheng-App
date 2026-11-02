@@ -72,6 +72,11 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     globalSettings.value = await frontendPort.queryGlobalSettings()
   }
 
+  /** P4: the models the provider lists; empty when it cannot be read. */
+  async function listProviderModels(settings: ProviderSettingsInput) {
+    return frontendPort.listProviderModels(settings)
+  }
+
   async function testProvider(key: string, settings: ProviderSettingsInput) {
     commandStates.value[key] = {
       status: 'submitting',
@@ -175,6 +180,7 @@ export const useProjectLibraryStore = defineStore('project-library-projection', 
     loadGlobalSettings,
     refreshGlobalSettings,
     testProvider,
+    listProviderModels,
     runCommand,
     commandState,
     clearCommandState,

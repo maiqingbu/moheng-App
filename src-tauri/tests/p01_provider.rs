@@ -53,6 +53,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 model_id: "fixture-model".into(),
                 prompt: "bounded".into(),
                 timeout_ms: 1000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -68,6 +69,7 @@ fn p01_provider_adapter_maps_usage_and_typed_errors() {
                 model_id: "fixture-model".into(),
                 prompt: String::new(),
                 timeout_ms: 1000,
+                thinking: None,
             },
             "invalid-fixture-token",
         )
@@ -128,6 +130,7 @@ fn p01_provider_settings_are_non_secret_and_budget_gate_precedes_invocation() {
             model_id: settings.model_id.clone(),
             prompt: String::new(),
             timeout_ms: settings.timeout_ms,
+            thinking: None,
         },
         "fixture-token",
         true,
@@ -166,6 +169,7 @@ fn p01_settings_persist_without_api_key_and_provider_adapter_maps_transport_erro
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 500,
+                thinking: None,
             },
             "fixture-token",
         )
@@ -286,6 +290,7 @@ fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
                     model_id: "fixture-model".into(),
                     prompt: "ping".into(),
                     timeout_ms: 2_000,
+                    thinking: None,
                 },
                 "fixture-token-ephemeral",
             )
@@ -306,6 +311,7 @@ fn p01_provider_502_503_504_and_body_read_failure_are_unknown_without_retry() {
                 model_id: "fixture-model".into(),
                 prompt: "body read failure".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -336,6 +342,7 @@ fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
                 model_id: "fixture-model".into(),
                 prompt: "private-prompt-canary".into(),
                 timeout_ms: 1_500,
+                thinking: None,
             },
             "private-api-key-canary",
         )
@@ -381,6 +388,7 @@ fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
                 model_id: "fixture-model".into(),
                 prompt: "safe request".into(),
                 timeout_ms: 1_000,
+                thinking: None,
             },
             "private-api-key-canary",
         )
@@ -404,6 +412,7 @@ fn p01_transport_diagnostic_captures_redacted_status_timeout_and_request_id() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 1_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -660,6 +669,7 @@ fn p01_b205_provider_canary_stays_out_of_child_argv_and_environment() {
         model_id: "fixture-model".into(),
         prompt: "local secret-boundary fixture".into(),
         timeout_ms: 4_000,
+        thinking: None,
     };
     let secret = canary.clone();
     let invocation = thread::spawn(move || provider.invoke(&request, &secret));
@@ -887,6 +897,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -914,6 +925,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -928,6 +940,7 @@ fn p01_openai_compatible_adapter_maps_real_http_success_auth_and_timeout() {
                 model_id: "fixture-model".into(),
                 prompt: "ping".into(),
                 timeout_ms: 500,
+                thinking: None,
             },
             "fixture-token-ephemeral",
         )
@@ -955,6 +968,7 @@ fn p01_openai_compatible_adapter_maps_post_send_disconnect_to_unknown_remote_out
                 model_id: "fixture-model".into(),
                 prompt: "disconnect after request body is received".into(),
                 timeout_ms: 2_000,
+                thinking: None,
             },
             &canary,
         )
@@ -1520,4 +1534,41 @@ fn craft_step_model_settings_are_saved_and_used_only_for_their_step() {
     assert_eq!(model("RENDER_CHAPTER"), "plan-model");
     assert_eq!(model("AUDIT_EXTRACT"), "plan-model");
     assert_eq!(model("PLAN_CHAPTER_CRAFT"), "plan-model");
+}
+
+#[test]
+fn p4_each_steps_thinking_is_saved_and_goes_with_its_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = AppPaths::new(temp.path());
+    ProviderSettingsRepository::write_global(
+        &paths,
+        &json!({
+            "providerId":"fixture","provider":"OpenAI Compatible","modelId":"plan-model",
+            "endpoint":"http://127.0.0.1:1","enabled":true,
+            "thinking":{
+                "render":{"enabled":true,"effort":"max"},
+                "audit":{"enabled":"yes"},
+                "default":{"enabled":false,"effort":"extreme"},
+                "other":{"enabled":true}
+            }
+        }),
+    )
+    .unwrap();
+    let saved = ProviderSettingsRepository::read_global(&paths).unwrap();
+    // Only the three steps, a boolean switch and a known effort are kept.
+    assert_eq!(
+        saved["thinking"],
+        json!({"render":{"enabled":true,"effort":"max"},"default":{"enabled":false}})
+    );
+    use ai_novel_production_system_core::production::step_thinking;
+    use ai_novel_production_system_core::provider::Thinking;
+    assert_eq!(
+        step_thinking(&saved, "RENDER_CHAPTER"),
+        Some(Thinking { enabled: true, effort: Some("max".into()) })
+    );
+    assert_eq!(step_thinking(&saved, "AUDIT_EXTRACT"), None);
+    assert_eq!(
+        step_thinking(&saved, "PLAN_STRATEGY"),
+        Some(Thinking { enabled: false, effort: None })
+    );
 }

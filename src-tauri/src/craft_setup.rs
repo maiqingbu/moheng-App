@@ -8,6 +8,7 @@
 use crate::commit::CommitService;
 use crate::generated::types::{ArtifactRef, CommitBundle, CommitReceipt};
 use crate::generated::validators::{validate_story_bible_r1, validate_style_card_r1};
+use crate::hash::sha256_canonical;
 use crate::production::ProductionModelGateway;
 use crate::project_db::ProjectHandle;
 use crate::project_entry::{
@@ -411,6 +412,97 @@ fn commit_confirmation(
     CommitService::commit(connection, &commit, now).map_err(|error| error.to_string())
 }
 
+/// P3 (owner decision 2026-11-03): the story bible change the model drafted
+/// from the owner's words (`output`: `applies` and `changes`, each a dotted
+/// `path` into the bible and its new value `after`), or `None` when the words
+/// are not about the bible. Each change is an item with what the bible says
+/// now (`before`); `patch` carries the whole top-level fields it touches, and
+/// the changed bible passes the same checks as a new one.
+pub fn draft_setup_change(
+    artifact_id: &str,
+    bible: &Value,
+    output: &Value,
+) -> Result<Option<Value>, String> {
+    let changes = output["changes"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if output["applies"] != json!(true) || changes.is_empty() {
+        return Ok(None);
+    }
+    let mut changed = bible.clone();
+    let mut items = Vec::new();
+    let mut fields = Vec::new();
+    for change in changes {
+        let path = change["path"].as_str().unwrap_or_default();
+        let invalid = || format!("SETUP_DRAFT_PATH_INVALID:{path}");
+        let field = path.split('.').next().unwrap_or_default();
+        if !STORY_BIBLE.fields.contains(&field) || change["after"].is_null() {
+            return Err(invalid());
+        }
+        let pointer = format!("/{}", path.replace('.', "/"));
+        let slot = changed.pointer_mut(&pointer).ok_or_else(invalid)?;
+        let before = std::mem::replace(slot, change["after"].clone());
+        items.push(json!({"path":path,"before":before,"after":change["after"]}));
+        if !fields.contains(&field) {
+            fields.push(field);
+        }
+    }
+    let changed = (STORY_BIBLE.check)(changed)?;
+    let pick = |source: &Value| {
+        fields
+            .iter()
+            .map(|field| ((*field).to_owned(), source[*field].clone()))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    Ok(Some(json!({
+        "targetAuthority":{"artifactType":STORY_BIBLE.artifact_type,"artifactId":artifact_id},
+        "items":items,
+        "base":pick(bible),
+        "patch":pick(&changed)
+    })))
+}
+
+/// P3: an approved change request's patch to the confirmed story bible,
+/// checked as a new bible is and written as its next version by this owner.
+pub fn apply_typed_change(
+    project_id: &str,
+    target: &crate::repositories::change_retcon::AuthorityHeadRecord,
+    scope: &Value,
+    patch: &Value,
+    decision_id: &str,
+    command_id: &str,
+    now: &str,
+) -> Result<crate::planning::PlanningChangeMutation, String> {
+    let mut candidate = target.payload.clone();
+    crate::planning::merge_change_patch(&mut candidate, patch);
+    let candidate = (STORY_BIBLE.check)(candidate)?;
+    let payload_hash = sha256_canonical(&candidate).map_err(|error| error.to_string())?;
+    let artifact = serde_json::from_value(json!({
+        "artifactId":target.artifact_id,"projectId":project_id,"artifactType":STORY_BIBLE.artifact_type,
+        "scope":scope,"version":target.version + 1,"schemaVersion":"m0a.artifact.v1",
+        "artifactStatus":"CANDIDATE","semanticLifecycle":"APPROVED_PLAN","authorityLevel":"B",
+        "payload":candidate,"payloadHash":payload_hash,"dependencyRefs":[],
+        "provenance":{"createdBy":"B11::CraftSetupOwner","commandId":command_id,"decisionRefs":[decision_id]},
+        "createdAt":now
+    }))
+    .map_err(|error| format!("B11_ARTIFACT:{error}"))?;
+    let head = serde_json::from_value(json!({
+        "artifactType":STORY_BIBLE.artifact_type,"scope":scope,"artifactId":target.artifact_id,
+        "version":target.version + 1,"payloadHash":payload_hash
+    }))
+    .map_err(|error| format!("B11_HEAD:{error}"))?;
+    let owner_receipt = json!({
+        "owner":"B11::CraftSetupOwner","operation":"apply_typed_change",
+        "artifactType":STORY_BIBLE.artifact_type,"artifactId":target.artifact_id,
+        "sourceHead":{"version":target.version,"payloadHash":target.payload_hash},
+        "resultHead":{"version":target.version + 1,"payloadHash":payload_hash},
+        "invocationCount":1,"directB12HeadMutationCount":0,"semanticValidation":"PASS"
+    });
+    Ok(crate::planning::PlanningChangeMutation {
+        artifact,
+        head,
+        owner_receipt,
+    })
+}
+
 /// Commits the user's (possibly edited) story bible as the StoryBible head.
 pub fn commit_story_bible_confirmation(
     connection: &ProjectHandle,
@@ -539,4 +631,74 @@ pub fn query_craft_setup(
         "sample":sample,
         "archetypes":archetypes
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bible() -> Value {
+        serde_json::from_str(include_str!(
+            "../../contracts/fixtures/valid/narrative-story-bible-r1.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_setup_change_draft_shows_each_change_as_before_and_after() {
+        // P3 (owner decision 2026-11-03): only the story bible, each item
+        // shown as what it was and what it becomes.
+        let draft = draft_setup_change(
+            "story-bible:p3",
+            &bible(),
+            &json!({"applies":true,"changes":[
+                {"path":"antagonist.method","after":"收买码头的账房"},
+                {"path":"cast.1.speechStyle","after":"说话慢，句句带刺"}
+            ]}),
+        )
+        .unwrap()
+        .expect("a draft");
+        assert_eq!(
+            draft["targetAuthority"],
+            json!({"artifactType":"StoryBible","artifactId":"story-bible:p3"})
+        );
+        assert_eq!(
+            draft["items"][0],
+            json!({"path":"antagonist.method","before":"借据、打手和码头的规矩","after":"收买码头的账房"})
+        );
+        assert_eq!(draft["items"][1]["before"], "满嘴俗语");
+        // The patch carries whole top-level fields, so arrays stay whole.
+        assert_eq!(draft["patch"]["antagonist"]["name"], "彭三");
+        assert_eq!(draft["patch"]["antagonist"]["method"], "收买码头的账房");
+        assert_eq!(draft["patch"]["cast"][0]["speechStyle"], "话少，开口就呛人");
+        assert_eq!(draft["base"]["cast"][1]["speechStyle"], "满嘴俗语");
+    }
+
+    #[test]
+    fn a_request_that_is_not_about_the_story_bible_has_no_draft() {
+        let none = draft_setup_change("story-bible:p3", &bible(), &json!({"applies":false,"changes":[]}));
+        assert_eq!(none, Ok(None));
+    }
+
+    #[test]
+    fn a_setup_change_draft_is_checked_like_the_story_bible_itself() {
+        // A path outside the bible's fields, or one that does not exist.
+        for path in ["storyCore.premise", "antagonist.secret", "cast.9.name"] {
+            let error = draft_setup_change(
+                "story-bible:p3",
+                &bible(),
+                &json!({"applies":true,"changes":[{"path":path,"after":"x"}]}),
+            )
+            .unwrap_err();
+            assert!(error.starts_with("SETUP_DRAFT_PATH_INVALID"), "{path}: {error}");
+        }
+        // A quoted line in a speech style is refused, as in a new bible.
+        let error = draft_setup_change(
+            "story-bible:p3",
+            &bible(),
+            &json!({"applies":true,"changes":[{"path":"cast.0.speechStyle","after":"总说“你懂个屁”"}]}),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("STORY_BIBLE_READY_SENTENCE"), "{error}");
+    }
 }

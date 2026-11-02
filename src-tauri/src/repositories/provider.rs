@@ -79,6 +79,26 @@ impl ProviderSettingsRepository {
             .unwrap_or_default();
         result["model"] = Value::String(model.to_string());
         result["modelId"] = Value::String(model.to_string());
+        // P4: each step's thinking: a boolean switch and a known effort.
+        let thinking = ["default", "render", "audit"]
+            .into_iter()
+            .filter_map(|step| {
+                let setting = source.get("thinking")?.get(step)?;
+                let enabled = setting.get("enabled")?.as_bool()?;
+                let mut kept = json!({"enabled":enabled});
+                if let Some(effort) = setting
+                    .get("effort")
+                    .and_then(Value::as_str)
+                    .filter(|effort| matches!(*effort, "high" | "max"))
+                {
+                    kept["effort"] = json!(effort);
+                }
+                Some((step.to_owned(), kept))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        if !thinking.is_empty() {
+            result["thinking"] = Value::Object(thinking);
+        }
         result
     }
 

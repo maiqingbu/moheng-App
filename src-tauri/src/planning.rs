@@ -1668,7 +1668,7 @@ pub struct PlanningChangeMutation {
 
 pub struct PlanningOwner;
 
-fn merge_change_patch(target: &mut Value, patch: &Value) {
+pub(crate) fn merge_change_patch(target: &mut Value, patch: &Value) {
     match (target.as_object_mut(), patch.as_object()) {
         (Some(target), Some(patch)) => {
             for (key, value) in patch {

@@ -824,6 +824,19 @@ pub fn classify_assistant_intent_impl(
     Ok(crate::assistant_intent::resolve_intent(state, project_id, entry, question, now).to_json())
 }
 
+/// P3: the story bible change the owner's words ask for, as a draft the
+/// owner reviews before any change request is made.
+pub fn draft_setup_change_impl(state: &KernelState, request: Value) -> Result<Value, String> {
+    let request = request.get("request").cloned().unwrap_or(request);
+    let project_id = required_string(&request, "projectId")?;
+    let question = required_string(&request, "question")?;
+    let now = request
+        .get("requestedAt")
+        .and_then(Value::as_str)
+        .unwrap_or("2026-01-01T00:00:00Z");
+    Ok(crate::assistant_intent::draft_setup_change(state, project_id, question, now))
+}
+
 /// B08 production projection.  This is a bounded read projection assembled
 /// from the authoritative job/artifact/runtime rows; it never reconstructs a
 /// candidate as a committed chapter and never trusts Vue-local state.
@@ -9864,6 +9877,17 @@ pub async fn classify_assistant_intent(
 }
 
 #[tauri::command]
+pub async fn draft_setup_change(
+    state: State<'_, KernelState>,
+    request: Value,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || draft_setup_change_impl(&state, request))
+        .await
+        .map_err(|_| "ASSISTANT_WORKER_FAILED".to_string())?
+}
+
+#[tauri::command]
 pub fn query_production_center(
     state: State<'_, KernelState>,
     request: Value,
@@ -10323,6 +10347,15 @@ pub async fn test_provider(
     run_provider_test_on_blocking_worker(move || test_provider_sync(settings)).await
 }
 
+#[tauri::command]
+pub async fn provider_list_models(
+    _state: State<'_, KernelState>,
+    settings: Value,
+) -> Result<Value, String> {
+    let settings = settings.get("settings").cloned().unwrap_or(settings);
+    run_provider_test_on_blocking_worker(move || Ok(provider_list_models_sync(settings))).await
+}
+
 async fn run_provider_test_on_blocking_worker<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -10345,12 +10378,10 @@ fn validate_test_provider_response(raw_response: &str) -> Result<Value, String> 
     Ok(output)
 }
 
-fn test_provider_sync(settings: Value) -> Result<Value, String> {
-    let config = provider_config(&settings)?;
-    if !config.enabled || config.endpoint.is_empty() {
-        return Err("P01_PROVIDER_NOT_CONFIGURED".into());
-    }
-    let secret = settings
+/// The API key typed in the form, else the one saved in the keychain; never
+/// returned or printed.
+fn provider_secret(settings: &Value, provider_id: &str) -> Result<String, String> {
+    settings
         .get("apiKey")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && !value.starts_with('•'))
@@ -10360,10 +10391,38 @@ fn test_provider_sync(settings: Value) -> Result<Value, String> {
                 "com.moheng.ai-novel-production",
                 "provider-api-key",
             )
-            .get(&config.provider_id)
+            .get(provider_id)
             .ok()
         })
-        .ok_or_else(|| "P01_AUTHENTICATION_ERROR:provider secret unavailable".to_string())?;
+        .ok_or_else(|| "P01_AUTHENTICATION_ERROR:provider secret unavailable".to_string())
+}
+
+/// P4: the models the provider lists; empty with a reason when it cannot be
+/// read, and the settings page falls back to typing the model name.
+fn provider_list_models_sync(settings: Value) -> Value {
+    // No model is needed yet: the list is how one is chosen.
+    let text = |key: &str| settings.get(key).and_then(Value::as_str).unwrap_or_default().trim();
+    let listed = if text("providerId").is_empty() || text("endpoint").is_empty() {
+        Err("P01_PROVIDER_NOT_CONFIGURED".to_string())
+    } else {
+        provider_secret(&settings, text("providerId")).and_then(|secret| {
+            crate::provider::OpenAiCompatibleProvider::new(text("endpoint"))
+                .list_models(&secret)
+                .map_err(|error| format!("P01_{}:{}", error.kind.code(), error.detail))
+        })
+    };
+    match listed {
+        Ok(models) => json!({"models":models}),
+        Err(reason) => json!({"models":[],"reason":reason}),
+    }
+}
+
+fn test_provider_sync(settings: Value) -> Result<Value, String> {
+    let config = provider_config(&settings)?;
+    if !config.enabled || config.endpoint.is_empty() {
+        return Err("P01_PROVIDER_NOT_CONFIGURED".into());
+    }
+    let secret = provider_secret(&settings, &config.provider_id)?;
     let response = crate::provider::OpenAiCompatibleProvider::new(config.endpoint.clone())
         .invoke(
             &crate::provider::ProviderRequest {
@@ -10371,6 +10430,7 @@ fn test_provider_sync(settings: Value) -> Result<Value, String> {
                 model_id: config.model_id,
                 prompt: "Return JSON {\"ok\":true} without explanation.".into(),
                 timeout_ms: config.timeout_ms,
+                thinking: None,
             },
             &secret,
         )
@@ -10438,6 +10498,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_volume_lifecycle,
         support_session,
         classify_assistant_intent,
+        draft_setup_change,
         query_backups,
         support_checkpoint_resume,
         query_endgame_status,
@@ -10449,6 +10510,7 @@ pub fn handler<R: tauri::Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool {
         query_global_settings,
         query_project_settings,
         test_provider,
+        provider_list_models,
         query_market_opportunities,
     ]
 }
@@ -10570,7 +10632,18 @@ mod rv30_opening_canon_tests {
 
 #[cfg(test)]
 mod rv17_provider_test_response_tests {
-    use super::{run_provider_test_on_blocking_worker, validate_test_provider_response};
+    use super::{
+        provider_list_models_sync, run_provider_test_on_blocking_worker,
+        validate_test_provider_response,
+    };
+
+    #[test]
+    fn p4_an_unconfigured_provider_lists_no_models_and_says_why() {
+        // The settings page then lets the owner type the model name.
+        let listed = provider_list_models_sync(serde_json::json!({"providerId":"x","endpoint":" "}));
+        assert_eq!(listed["models"], serde_json::json!([]));
+        assert_eq!(listed["reason"], "P01_PROVIDER_NOT_CONFIGURED");
+    }
 
     #[test]
     fn provider_connection_test_runs_provider_io_on_blocking_worker() {

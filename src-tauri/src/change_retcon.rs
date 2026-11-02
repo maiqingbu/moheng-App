@@ -302,6 +302,8 @@ fn target_scope_value(record: &repository::AuthorityHeadRecord) -> Result<Value,
 fn target_class(artifact_type: Option<&str>) -> &'static str {
     match artifact_type {
         Some("BookPlan" | "VolumeIntent" | "VolumePlan" | "ChapterPlan") => "PLAN_CHANGE",
+        // P3: the story bible (people, world, mechanism) is changed by its owner.
+        Some("StoryBible") => "SETUP_CHANGE",
         Some(_) => "UNSUPPORTED",
         None => "PROJECTION_ONLY",
     }
@@ -311,6 +313,7 @@ fn target_owner(artifact_type: &str) -> Option<&'static str> {
     match artifact_type {
         "BookPlan" | "ChapterPlan" => Some("B07::PlanningOwner"),
         "VolumeIntent" | "VolumePlan" => Some("B09::VolumeLifecycleOwner"),
+        "StoryBible" => Some("B11::CraftSetupOwner"),
         _ => None,
     }
 }
@@ -533,6 +536,18 @@ fn materialize_typed_target(
                 &target.artifact_id,
                 target.version,
                 &target.payload_hash,
+                &scope,
+                patch,
+                decision_id,
+                command_id,
+                now,
+            )?;
+            (mutation.artifact, mutation.head, mutation.owner_receipt)
+        }
+        "StoryBible" => {
+            let mutation = crate::craft_setup::apply_typed_change(
+                project_id,
+                &target,
                 &scope,
                 patch,
                 decision_id,

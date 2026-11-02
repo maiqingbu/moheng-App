@@ -2,6 +2,8 @@ import type {
   ArtifactSummary,
   AssistantRepairPlan,
   AssistantIntentResolution,
+  ProviderModelList,
+  SetupChangeDraftResult,
   BackupEntry,
   BookHealthProjection,
   ChapterListItem,
@@ -480,6 +482,12 @@ export class BrowserDemoPort implements FrontendPort {
     return { projectId: request.projectId, backups: [] }
   }
 
+  async draftSetupChange(_request: ProjectQueryRequest & { question: string; requestedAt?: string }): Promise<SetupChangeDraftResult> {
+    await wait(10)
+    // The demo has no model: the words are proposed as they are.
+    return { draft: null, reason: 'DEMO_NO_MODEL' }
+  }
+
   async classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution> {
     await wait(10)
     // The demo has no model: keyword routing only.
@@ -865,6 +873,12 @@ export class BrowserDemoPort implements FrontendPort {
     this.receipts.set(commandId, clone(receipt))
     emit(finalStatus,message)
     return receipt
+  }
+
+  async listProviderModels(_settings: SettingsProjection): Promise<ProviderModelList> {
+    await wait(10)
+    // The demo has no provider: the model names are typed.
+    return { models: [], reason: 'DEMO_NO_PROVIDER' }
   }
 
   async testProvider(_settings: SettingsProjection, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt> {

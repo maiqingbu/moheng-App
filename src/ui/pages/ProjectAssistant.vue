@@ -6,7 +6,8 @@ import CommandFeedback from '../components/CommandFeedback.vue'
 import BaseModal from '../components/BaseModal.vue'
 import { useProjectStore } from '../stores/projectStore'
 import { presentAssistantSession } from '../presentation/assistantPresentation'
-import { assistantIntentLabel, changeTypeForIntent } from '../presentation/assistantIntent'
+import { assistantIntentLabel, changeTypeForIntent, setupChangeRequest, setupPathLabel } from '../presentation/assistantIntent'
+import type { SetupChangeDraft } from '../../application/contracts'
 import type { AssistantPresentation } from '../presentation/assistantPresentation'
 import {
   createGroundedAssistantRetcon,
@@ -47,6 +48,11 @@ const intentLabel = ref('')
 // P3: a lasting rule the owner reviews before it is remembered.
 const rememberDraft = ref<{ content: string; subject: string } | null>(null)
 const rememberState = computed(() => store.commandState('assistant-remember'))
+// P3 (owner decision 2026-11-03): a story bible change, each item shown as
+// what it is and what it becomes, sent as a change request only on submit.
+const setupDraft = ref<SetupChangeDraft | null>(null)
+const setupDraftState = computed(() => store.commandState('assistant-change-proposal'))
+const displayValue = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value)
 
 async function ask() {
   const session = await store.supportSession(question.value, 'DIAGNOSE')
@@ -183,6 +189,12 @@ async function proposeChange() {
       router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: grounded.changeRequestId } })
       return
     }
+    const drafted = await store.draftSetupChange(question.value)
+    if (drafted?.draft) {
+      setupDraft.value = drafted.draft
+      changeMessage.value = '这是对故事底稿的修改。请逐项核对“原来”和“改成”，可以直接改“改成”的内容，提交后再到版本与变更记录批准。'
+      return
+    }
     await store.runCommand('assistant-change-proposal', {
       type: 'change_request_create',
       projectId,
@@ -230,6 +242,24 @@ async function confirmRemember() {
   }
 }
 
+async function submitSetupDraft() {
+  const projectId = store.currentProjectId
+  if (!projectId || !setupDraft.value) return
+  const changeId = `change:${projectId}:${Date.now()}`
+  try {
+    await store.runCommand('assistant-change-proposal', {
+      type: 'change_request_create',
+      projectId,
+      payload: setupChangeRequest(changeId, setupDraft.value, question.value.trim()),
+    })
+    await store.runCommand('assistant-change-impact', { type: 'impact_preflight', projectId, payload: { changeRequestId: changeId } })
+    setupDraft.value = null
+    router.push({ path: `/projects/${projectId}/history`, query: { changeRequestId: changeId } })
+  } catch (error) {
+    changeMessage.value = productErrorMessage(error, '修改申请未建立，请刷新当前作品后重试。')
+  }
+}
+
 function chooseGrounding(factId: string) {
   selectedGroundingFactId.value = factId
   void proposeChange()
@@ -259,6 +289,15 @@ onMounted(() => {
       <CommandFeedback :state="queryState" />
       <p v-if="intentLabel" class="muted" data-assistant-intent style="font-size:12px;margin-top:6px">{{ intentLabel }}</p>
       <p v-if="changeMessage" class="banner info" style="margin-top:12px">{{ changeMessage }}</p>
+      <div v-if="setupDraft" class="section" data-setup-draft style="display:grid;gap:10px;margin-top:12px">
+        <div v-for="item in setupDraft.items" :key="item.path" style="display:grid;gap:4px">
+          <strong>{{ setupPathLabel(item.path) }}</strong>
+          <span class="muted">原来：{{ displayValue(item.before) }}</span>
+          <label class="muted">改成<textarea v-if="typeof item.after === 'string'" v-model="item.after" rows="2" /><span v-else>{{ displayValue(item.after) }}</span></label>
+        </div>
+        <div class="actions"><button class="btn primary" @click="submitSetupDraft">提交修改申请</button><button class="btn" @click="setupDraft = null">不改了</button></div>
+        <CommandFeedback :state="setupDraftState" />
+      </div>
       <div v-if="rememberDraft" class="section" data-remember-draft style="display:grid;gap:8px;margin-top:12px">
         <label class="muted">要记住的规则<textarea v-model="rememberDraft.content" rows="2" /></label>
         <label class="muted">关于谁或什么（可不填）<input v-model="rememberDraft.subject" /></label>

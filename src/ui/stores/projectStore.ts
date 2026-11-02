@@ -548,6 +548,11 @@ export const useProjectStore = defineStore('project-projection', () => {
     return frontendPort.classifyAssistantIntent(request)
   }
 
+  /** P3: a story bible change drafted from the owner's words (writes nothing). */
+  async function draftSetupChange(question: string) {
+    return frontendPort.draftSetupChange({ ...queryBase('assistant-setup-draft', 1), question, requestedAt: new Date().toISOString() })
+  }
+
   async function queryAssistantRepairPlan(question: string): Promise<AssistantRepairPlan> {
     const request = { ...queryBase('assistant-repair', 1), question, requestedAt: new Date().toISOString() }
     return frontendPort.queryAssistantRepairPlan(request)
@@ -969,7 +974,7 @@ export const useProjectStore = defineStore('project-projection', () => {
     bootstrap, openProject, refresh, clearProject, loadMarket, loadDirections, loadStorySetup, loadCraftSetup, loadOpeningReady, loadProduction, loadVolumes,
     loadVolumeDetail, loadPlanningRoute, loadContinuity, loadWithdrawRequests, decideWithdrawRequest, loadVolumeLifecycle, loadDecisions, loadReaderVolumes, loadChapterList, loadChapter, loadChapterVersions,
     loadExportCapability, createExport, queryExportReceipt, loadLatestExportReceipt,
-    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, loadCorrections, search, supportSession, classifyAssistantIntent, loadBackups, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
+    loadCanon, loadHealth, loadHealthFactorSources, loadHistory, queryChangeRequest, queryRetconContext, queryDependencySummaryBootstrap, loadSettings, loadCorrections, search, supportSession, classifyAssistantIntent, draftSetupChange, loadBackups, queryAssistantRepairPlan, prepareAssistantRepair, authorizeAssistantRepair, reverifyAssistantRepair, requeryAssistantRepair, runCommand, retryCommand, withProjectBusy, testProvider, commandState,
     clearCommandState, confirmCommandResult, isWorkspaceLoading
   }
 })

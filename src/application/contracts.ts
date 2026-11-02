@@ -154,6 +154,17 @@ export interface AssistantIntentResolution {
   modelRunId?: string | null
   fallbackReason?: string | null
 }
+/** P3: one story bible change in a draft: the field, what it is, what it becomes. */
+export interface SetupDraftItem { path: string; before: unknown; after: unknown }
+/** P3: a story bible change drafted from the owner's words; nothing is written yet. */
+export interface SetupChangeDraft {
+  targetAuthority: { artifactType: 'StoryBible'; artifactId: string }
+  items: SetupDraftItem[]
+  /** The touched top-level fields as they are now. */
+  base: Record<string, unknown>
+  patch: Record<string, unknown>
+}
+export interface SetupChangeDraftResult { draft: SetupChangeDraft | null; reason?: string; modelRunId?: string }
 export interface SupportCheckpointProjection { checkpointId: string; projectId: string; projectRevision: number; status: 'SAFE' | 'CHECKPOINT_STALE' }
 
 export interface StorySetupProjection {
@@ -883,11 +894,18 @@ export interface SettingsProjection {
   renderModelId?: string
   /** Optional model used only for the audit extraction; blank uses modelId. */
   auditModelId?: string
+  /** P4: a step left out keeps the provider's own default. */
+  thinking?: Partial<Record<ThinkingStep, StepThinking>>
   enabled?: boolean
   timeoutMs?: number
   secretStatus?: 'AVAILABLE' | 'NOT_CONFIGURED' | 'UNAVAILABLE'
   capabilityStatus?: 'AVAILABLE' | 'UNAVAILABLE' | 'ERROR'
 }
+
+/** P4: the three steps that each have their own model and thinking. */
+export type ThinkingStep = 'default' | 'render' | 'audit'
+export interface StepThinking { enabled: boolean; effort?: 'high' | 'max' }
+export interface ProviderModelList { models: string[]; reason?: string }
 
 export interface ProviderSettingsInput extends SettingsProjection {
   /** Ephemeral IPC input; never part of SettingsProjection or persisted state. */
@@ -1164,6 +1182,7 @@ export interface FrontendPort {
   queryAssistantRepairPlan(request: ProjectQueryRequest & { question: string }): Promise<AssistantRepairPlan>
   queryBackups(request: ProjectQueryRequest): Promise<{ projectId: string; backups: BackupEntry[] }>
   classifyAssistantIntent(request: ProjectQueryRequest & { question: string; entry: 'DIAGNOSE' | 'CHANGE' | 'REPAIR' }): Promise<AssistantIntentResolution>
+  draftSetupChange(request: ProjectQueryRequest & { question: string; requestedAt?: string }): Promise<SetupChangeDraftResult>
   queryProductionCenter(request: ProjectQueryRequest): Promise<ProductionCenterProjection>
   queryVolumeList(request: ProjectQueryRequest): Promise<PageResult<VolumeSummary>>
   queryVolumeDetail(request: ProjectQueryRequest & { volumeId: string }): Promise<VolumeDetailProjection>
@@ -1204,6 +1223,7 @@ export interface FrontendPort {
   supportCheckpointResume(request: { projectId: string; checkpointId: string }): Promise<SupportCheckpointProjection>
   executeCommand(request: CommandRequest, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
   testProvider(settings: ProviderSettingsInput, onStatus?: (status: CommandStatus, message: string) => void): Promise<CommandReceipt>
+  listProviderModels(settings: ProviderSettingsInput): Promise<ProviderModelList>
 }
 
 // R1 Narrative DTOs are generated from the shared contract schemas. They are

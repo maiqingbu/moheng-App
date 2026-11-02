@@ -239,6 +239,27 @@ pub struct ResolvedProviderProfile {
     pub timeout_ms: u64,
 }
 
+/// The settings step whose model a capability uses: `render` (writing),
+/// `audit` (audit, review and plans) or `default`.
+pub fn model_step(capability: &str) -> &'static str {
+    match capability {
+        "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "render",
+        // Owner decision (2026-10-24): r2 plans use the audit model.
+        "AUDIT_EXTRACT"
+        | "REVIEW_CHAPTER"
+        | "CHECK_CONTINUITY"
+        | crate::craft_plan::PLAN_CHAPTER_CRAFT
+        | crate::book_direction::PLAN_BOOK_DIRECTION
+        | crate::book_direction::PLAN_VOLUME_DIRECTION => "audit",
+        _ => "default",
+    }
+}
+
+/// P4: the thinking saved for the step `capability` runs in, if any.
+pub fn step_thinking(settings: &Value, capability: &str) -> Option<crate::provider::Thinking> {
+    serde_json::from_value(settings["thinking"][model_step(capability)].clone()).ok()
+}
+
 pub struct UnavailableProductionGateway;
 
 impl ProductionModelGateway for UnavailableProductionGateway {
@@ -358,11 +379,20 @@ impl ConfiguredProductionGateway {
                 "provider secret unavailable",
             )
         })?;
+        // P4: the step's thinking, as saved in the settings.
+        let thinking = self
+            .settings_paths
+            .as_ref()
+            .and_then(|paths| {
+                crate::repositories::provider::ProviderSettingsRepository::read_global(paths).ok()
+            })
+            .and_then(|settings| step_thinking(&settings, capability));
         let request = ProviderRequest {
             capability: capability.into(),
             model_id: config.model_id.clone(),
             prompt: serialize_provider_input(input),
             timeout_ms: config.timeout_ms,
+            thinking,
         };
         if self.settings_paths.is_some() {
             OpenAiCompatibleProvider::new(config.endpoint.clone()).invoke(&request, &secret)
@@ -470,15 +500,9 @@ impl ProductionModelGateway for ConfiguredProductionGateway {
 
     fn resolve_step_profile(&self, capability: &str) -> Result<ResolvedProviderProfile, String> {
         let mut profile = self.resolve_profile()?;
-        let setting = match capability {
-            "RENDER_CHAPTER" | "REWRITE_PASSAGES" => "renderModelId",
-            // Owner decision (2026-10-24): r2 plans use the audit model.
-            "AUDIT_EXTRACT"
-            | "REVIEW_CHAPTER"
-            | "CHECK_CONTINUITY"
-            | crate::craft_plan::PLAN_CHAPTER_CRAFT
-            | crate::book_direction::PLAN_BOOK_DIRECTION
-            | crate::book_direction::PLAN_VOLUME_DIRECTION => "auditModelId",
+        let setting = match model_step(capability) {
+            "render" => "renderModelId",
+            "audit" => "auditModelId",
             _ => return Ok(profile),
         };
         if let Some(paths) = &self.settings_paths {
@@ -3856,7 +3880,19 @@ fn run_chapter_production_inner(
             let rerun_raw = result
                 .parsed
                 .ok_or_else(|| "B08_AUDIT_OUTPUT_INVALID".to_string())?;
-            last_raw = rerun_raw.clone();
+            // Real run round 24: a follow-up that comes back with no facts
+            // at all would wipe what the first audit found; what is held
+            // back is then taken from the first audit.
+            let has_canon = |value: &Value| {
+                value["canonCandidates"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            };
+            last_raw = if has_canon(&rerun_raw) || !has_canon(&raw_audit) {
+                rerun_raw.clone()
+            } else {
+                raw_audit.clone()
+            };
             match check_audit(rerun_raw.clone()) {
                 Err(error) if error == "B08_AUDIT_INCOMPLETE_EVIDENCE_REBOUND" => {
                     // Ids first, so what is kept still names the facts it named.
@@ -3866,11 +3902,6 @@ fn run_chapter_production_inner(
                     // Real run 2026-10-24: every fact was dropped and the
                     // chapter committed with no canon. A chapter is not
                     // committed without the facts its audit reported.
-                    let has_canon = |value: &Value| {
-                        value["canonCandidates"]
-                            .as_array()
-                            .is_some_and(|items| !items.is_empty())
-                    };
                     if has_canon(&rerun_raw) && !has_canon(&kept) {
                         Err(error)
                     } else {

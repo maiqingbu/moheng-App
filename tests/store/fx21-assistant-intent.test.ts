@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assistantIntentLabel, changeTypeForIntent } from '../../src/ui/presentation/assistantIntent'
+import { assistantIntentLabel, changeTypeForIntent, setupChangeRequest, setupDraftPatch, setupPathLabel } from '../../src/ui/presentation/assistantIntent'
 
 const source = (path: string) => fs.readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../', path), 'utf8')
 
@@ -34,6 +34,29 @@ describe('FX-21 助手语义理解', () => {
     const confirm = page.slice(page.indexOf('async function confirmRemember'))
     expect(confirm).toContain("type: 'memory_correction_add'")
     expect(page).toContain('@click="confirmRemember"')
+  })
+
+  it('Given 修改故事底稿的话 When 助手起草 Then 逐项显示原来和改成，按负责人改过的值提交申请', () => {
+    expect(setupPathLabel('antagonist.method')).toBe('反派 · 手段')
+    expect(setupPathLabel('cast.1.speechStyle')).toBe('配角 2 · 说话方式')
+    const base = { antagonist: { name: '彭三', method: '借据' }, cast: [{ speechStyle: '话少' }, { speechStyle: '俗语' }] }
+    const patch = setupDraftPatch(base, [
+      { path: 'antagonist.method', before: '借据', after: '收买账房' },
+      { path: 'cast.1.speechStyle', before: '俗语', after: '句句带刺' },
+    ])
+    expect(patch).toEqual({ antagonist: { name: '彭三', method: '收买账房' }, cast: [{ speechStyle: '话少' }, { speechStyle: '句句带刺' }] })
+    expect(base.antagonist.method).toBe('借据')
+    const page = source('src/ui/pages/ProjectAssistant.vue')
+    const propose = page.slice(page.indexOf('async function proposeChange'), page.indexOf('async function confirmRemember'))
+    expect(propose).toContain('store.draftSetupChange(question.value)')
+    expect(propose).not.toContain('change_request_apply')
+    const submit = page.slice(page.indexOf('async function submitSetupDraft'))
+    expect(submit).toContain('payload: setupChangeRequest(changeId, setupDraft.value, question.value.trim())')
+    const request = setupChangeRequest('change:1', { targetAuthority: { artifactType: 'StoryBible', artifactId: 'bible:1' }, items: [{ path: 'antagonist.method', before: '借据', after: '收买账房' }], base: { antagonist: { method: '借据' } }, patch: {} }, '改反派手段')
+    expect(request.requestedChange).toEqual({ targetAuthority: { artifactType: 'StoryBible', artifactId: 'bible:1' }, patch: { antagonist: { method: '收买账房' } }, description: '改反派手段', source: 'PROJECT_ASSISTANT' })
+    expect(request.sourceRefs).toEqual(['bible:1'])
+    expect(page).toContain('data-setup-draft')
+    expect(source('src/infrastructure/tauri/frontendPort.ts')).toContain("'draft_setup_change'")
   })
 
   it('Given 三种运行环境 When 检查接线 Then 桌面端调用后端命令、演示端有关键词兜底', () => {

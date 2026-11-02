@@ -9,7 +9,7 @@ import { backupRestoreRequests, restorableBackups } from '../flows/backupRestore
 import { isInFlight, productTimeLabel } from '../presentation/productLanguage'
 import { useProjectStore } from '../stores/projectStore'
 import { useProjectLibraryStore } from '../stores/projectLibraryStore'
-import type { BackupEntry, OwnerCorrection, SettingsProjection } from '../../application/contracts'
+import type { BackupEntry, OwnerCorrection, SettingsProjection, StepThinking, ThinkingStep } from '../../application/contracts'
 
 const route=useRoute()
 const projectStore=useProjectStore()
@@ -21,6 +21,33 @@ type PricingEntry = NonNullable<SettingsProjection['modelPricing']>['entries'][n
 const pricingEntries=ref<PricingEntry[]>([])
 const pricingVersion=ref(0)
 const apiKey=ref('')
+// P4: the provider's model list for the three model fields, typed by hand
+// when the list cannot be read.
+const models=ref<string[]>([])
+const modelsMessage=ref('')
+async function loadModels(){
+  modelsMessage.value='正在获取模型列表…'
+  const listed=await libraryStore.listProviderModels(providerSettings()).catch(()=>({models:[] as string[]}))
+  models.value=listed.models
+  modelsMessage.value=listed.models.length ? `找到 ${listed.models.length} 个模型，可以在下面三个框里选，也可以照常手填。` : '没有读到模型列表，请直接填写模型名。'
+}
+// P4: each step's thinking: the provider's default (nothing sent), off or on.
+const thinkingSteps:{step:ThinkingStep;label:string}[]=[{step:'default',label:'默认创作模型'},{step:'render',label:'写正文模型'},{step:'audit',label:'审核模型'}]
+const thinking=reactive<Record<ThinkingStep,{mode:''|'off'|'on';effort:''|'high'|'max'}>>({default:{mode:'',effort:''},render:{mode:'',effort:''},audit:{mode:'',effort:''}})
+function loadThinking(saved?:SettingsProjection['thinking']){
+  for(const {step} of thinkingSteps){
+    const setting=saved?.[step]
+    thinking[step]={mode:setting ? (setting.enabled ? 'on' : 'off') : '',effort:setting?.effort ?? ''}
+  }
+}
+function thinkingSettings(){
+  const saved:Partial<Record<ThinkingStep,StepThinking>>={}
+  for(const {step} of thinkingSteps){
+    const {mode,effort}=thinking[step]
+    if(mode) saved[step]={enabled:mode==='on',...(mode==='on' && effort ? {effort} : {})}
+  }
+  return saved
+}
 
 // WM-2a: the owner's writing rules for this work and the reminders kept as corrections.
 const corrections=ref<OwnerCorrection[]>([])
@@ -47,6 +74,7 @@ watchEffect(()=>{
   const source=isProjectSettings.value ? projectStore.settings : libraryStore.globalSettings
   if(source) {
     Object.assign(form,source)
+    loadThinking(source.thinking)
     if(!isProjectSettings.value) {
       pricingEntries.value=source.modelPricing?.entries.map(entry=>({...entry})) ?? []
       pricingVersion.value=source.modelPricing?.version ?? 0
@@ -63,12 +91,12 @@ const pricingHistory=computed(()=>libraryStore.globalSettings?.modelPricing?.his
 
 function providerSettings(){
   const model=form.model.trim()
-  return {...form,model,modelId:model,renderModelId:(form.renderModelId ?? '').trim(),auditModelId:(form.auditModelId ?? '').trim(),enabled:Boolean(form.endpoint.trim()),...(apiKey.value ? {apiKey:apiKey.value} : {})}
+  return {...form,model,modelId:model,renderModelId:(form.renderModelId ?? '').trim(),auditModelId:(form.auditModelId ?? '').trim(),thinking:thinkingSettings(),enabled:Boolean(form.endpoint.trim()),...(apiKey.value ? {apiKey:apiKey.value} : {})}
 }
 async function save(){
   const settings=providerSettings()
   if(isProjectSettings.value) await projectStore.runCommand('settings-save',{type:'settings_save',payload:{settings}})
-  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,enabled:settings.enabled} }
+  else { await libraryStore.runCommand('global-settings-save',{type:'global_settings_save',payload:{settings}}); libraryStore.globalSettings={...form,model:settings.model,modelId:settings.modelId,thinking:settings.thinking,enabled:settings.enabled} }
   apiKey.value=''
 }
 function addPricingEntry(){
@@ -120,7 +148,16 @@ function resetForm(){ const source=isProjectSettings.value ? projectStore.settin
       <main>
         <section id="setting-model" class="setting-section">
           <div class="card-head"><div><h2 class="card-title">模型配置</h2><p class="card-subtitle">可在这里测试模型服务连接。应用设置作为默认配置，单个作品可以使用独立的模型设置。</p></div></div>
-          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
+          <div class="setting-grid"><label class="field"><span class="field-label">服务类型</span><select v-model="form.provider" class="select"><option>OpenAI Compatible</option><option>自定义兼容服务</option></select></label><label class="field"><span class="field-label">默认创作模型</span><input v-model="form.model" class="input" list="provider-models" /></label><label class="field" data-render-model><span class="field-label">写正文模型（可选）</span><input v-model="form.renderModelId" class="input" list="provider-models" /><span class="help">只用于写章节正文和修改正文，不用于规划和审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" data-audit-model><span class="field-label">审核模型（可选）</span><input v-model="form.auditModelId" class="input" list="provider-models" /><span class="help">用于新流程的章节计划，以及写完后的事实提取与审核；留空则沿用默认创作模型。使用前请在下方填写它的价格。</span></label><label class="field" style="grid-column:1/-1"><span class="field-label">接口地址（API Endpoint）</span><input v-model="form.endpoint" class="input" /></label><label class="field" style="grid-column:1/-1"><span class="field-label">访问密钥（API Key）</span><input v-model="apiKey" class="input" type="password" autocomplete="new-password" /><span class="help">密钥会安全保存在系统凭据存储中，不会写入作品数据或操作记录。留空表示继续使用已保存的密钥。</span></label></div>
+          <div class="actions" style="margin-top:10px"><button class="btn" @click="loadModels">获取模型列表</button><span v-if="modelsMessage" class="help">{{ modelsMessage }}</span></div>
+          <datalist id="provider-models"><option v-for="model in models" :key="model" :value="model" /></datalist>
+          <div class="setting-grid" data-thinking style="margin-top:10px">
+            <label v-for="item in thinkingSteps" :key="item.step" class="field"><span class="field-label">{{ item.label }} · 思考</span>
+              <select v-model="thinking[item.step].mode" class="select"><option value="">服务商默认</option><option value="off">关闭</option><option value="on">开启</option></select>
+              <select v-model="thinking[item.step].effort" class="select" :disabled="thinking[item.step].mode!=='on'"><option value="">强度：服务商默认</option><option value="high">强度：high</option><option value="max">强度：max</option></select>
+              <span class="help">开启思考会更慢、更费 token；阿里的模型开启后不再使用 JSON 模式。</span>
+            </label>
+          </div>
           <div class="actions" style="margin-top:14px"><button class="btn" @click="test">测试模型连接</button></div><CommandFeedback :state="testState" />
         </section>
 
