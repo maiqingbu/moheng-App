@@ -162,6 +162,17 @@ const REPLANNABLE: [(&str, &str); 4] = [
 /// The feedback for a plan rejection the planner can fix, or `None` when
 /// planning again would not help.
 pub fn plan_feedback(code: &str) -> Option<Value> {
+    // VD-1: a rejected direction is told so in its own words.
+    if let Some(problems) = code
+        .strip_prefix(crate::book_direction::DIRECTION_ERROR)
+        .and_then(|rest| rest.strip_prefix(':'))
+    {
+        return Some(json!({
+            "rejectedFor":crate::book_direction::DIRECTION_ERROR,
+            "instruction":"上一版方向没有通过检查：逐条修正 problems 里的问题，返回完整的新方向。",
+            "problems":problems.split('；').collect::<Vec<_>>()
+        }));
+    }
     // CRAFT v3: the r2 plan checks list every problem for one corrected plan.
     if let Some(problems) = code
         .strip_prefix(crate::craft_plan::PLAN_CRAFT_ERROR)
@@ -1563,6 +1574,15 @@ fn phrases_used(texts: &[String], from: usize, times: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rejected_direction_is_told_it_is_a_direction() {
+        let feedback =
+            plan_feedback(&format!("{}:阶段少了", crate::book_direction::DIRECTION_ERROR)).unwrap();
+        assert_eq!(feedback["rejectedFor"], crate::book_direction::DIRECTION_ERROR);
+        assert!(feedback["instruction"].as_str().unwrap().starts_with("上一版方向"));
+        assert_eq!(feedback["problems"], serde_json::json!(["阶段少了"]));
+    }
+
     use super::*;
 
     const RANGE: ChapterLengthRange = ChapterLengthRange {

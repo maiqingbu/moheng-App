@@ -4,7 +4,7 @@
 //! fields; a direction that still fails its checks after the feedback rounds
 //! leaves the template in place with a reminder.
 
-use crate::craft_plan::{text, PLAN_CRAFT_ERROR};
+use crate::craft_plan::text;
 use crate::production::ProductionModelGateway;
 use crate::repositories::runtime::{DurableModelRunner, ModelRunSpec};
 use crate::stable_id::{StableIdKind, StableIdentityFactory};
@@ -13,6 +13,9 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PLAN_BOOK_DIRECTION: &str = "PLAN_BOOK_DIRECTION";
+
+/// The error prefix of a direction sent back with its problems.
+pub const DIRECTION_ERROR: &str = "B07_DIRECTION";
 
 const NO_CHAPTER_TABLE: &str = "不要写章表，也不要写“第 N 章”：阶段按情节划分，不按章号";
 
@@ -498,7 +501,7 @@ fn run_direction(
         match (found.is_empty(), lenient) {
             (true, _) => Ok((direction, found)),
             (false, true) => Ok((Value::Null, found)),
-            (false, false) => Err(format!("{PLAN_CRAFT_ERROR}:{}", found.join("；"))),
+            (false, false) => Err(format!("{DIRECTION_ERROR}:{}", found.join("；"))),
         }
     };
     Ok(

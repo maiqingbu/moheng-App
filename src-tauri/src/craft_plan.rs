@@ -891,8 +891,20 @@ impl WritingContext {
         if let Some(card) = &self.style_card {
             input["styleCard"] = card.clone();
         }
-        if !self.corrections.is_empty() {
-            input["ownerCorrections"] = json!(self.corrections);
+        // A correction about someone or something only when the chapter
+        // has them; the work's writing rules always.
+        let planned = input["chapterPlan"]["craft"].to_string();
+        let corrections = self
+            .corrections
+            .iter()
+            .filter(|correction| {
+                correction["subject"]
+                    .as_str()
+                    .is_none_or(|subject| planned.contains(subject))
+            })
+            .collect::<Vec<_>>();
+        if !corrections.is_empty() {
+            input["ownerCorrections"] = json!(corrections);
         }
         input["chapterNumber"] = json!(self.chapter);
         input["recentChapters"] = json!(recent_chapters);
