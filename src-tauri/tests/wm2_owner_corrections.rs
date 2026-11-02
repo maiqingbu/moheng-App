@@ -44,7 +44,13 @@ fn project() -> (tempfile::TempDir, KernelState, String) {
         Arc::new(SetupGateway),
     );
     let project_id = project_with_confirmed_bible(&state, "wm2");
-    command(&state, &project_id, "wm2:opening", "opening_ready", json!({"approved":true}));
+    command(
+        &state,
+        &project_id,
+        "wm2:opening",
+        "opening_ready",
+        json!({"approved":true}),
+    );
     (temp, state, project_id)
 }
 
@@ -105,7 +111,13 @@ fn wm2a_an_empty_correction_is_refused() {
 #[test]
 fn wm2a_the_planner_and_the_writer_are_given_the_corrections() {
     let (_temp, state, project_id) = project();
-    command(&state, &project_id, "wm2:rule", "writing_rule_add", json!({"content":"不写主角吐血"}));
+    command(
+        &state,
+        &project_id,
+        "wm2:rule",
+        "writing_rule_add",
+        json!({"content":"不写主角吐血"}),
+    );
     command(
         &state,
         &project_id,
@@ -141,7 +153,13 @@ fn wm2a_the_planner_and_the_writer_are_given_the_corrections() {
 fn wm2a_a_retried_command_records_its_correction_once() {
     let (_temp, state, project_id) = project();
     for _ in 0..2 {
-        command(&state, &project_id, "wm2:retry", "writing_rule_add", json!({"content":"不写主角吐血"}));
+        command(
+            &state,
+            &project_id,
+            "wm2:retry",
+            "writing_rule_add",
+            json!({"content":"不写主角吐血"}),
+        );
     }
     assert_eq!(listed(&state, &project_id).len(), 1);
 }

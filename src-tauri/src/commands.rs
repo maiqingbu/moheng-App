@@ -718,7 +718,8 @@ fn execute_owner_correction(
         }
         ("已撤销这条纠正，之后的章节不再按它写。", correction_id)
     } else {
-        let content = text("content").ok_or_else(|| "WM2_CORRECTION_CONTENT_REQUIRED".to_string())?;
+        let content =
+            text("content").ok_or_else(|| "WM2_CORRECTION_CONTENT_REQUIRED".to_string())?;
         let correction = crate::work_memory::Correction {
             // From the command, so a retried command records it once.
             correction_id: format!(

@@ -256,20 +256,25 @@ pub fn apply(plan: &mut Map<String, Value>, direction: &Value, prerequisites: &[
 /// The BookPlan seed of volume `volume_no` from a planned direction's seed:
 /// its description, its stages named by the system, and its climax.
 fn seed_from(seed: &Value, volume_no: i64) -> Value {
-    let mut built = json!({"seedId":format!("volume-{volume_no}"),"description":text(&seed["description"])});
+    let mut built =
+        json!({"seedId":format!("volume-{volume_no}"),"description":text(&seed["description"])});
     let stages = items(seed, "stages");
     if !stages.is_empty() {
-        built["stages"] = stages.iter().enumerate().map(|(index, stage)| {
-            let mut built = json!({"id":format!("stage:{volume_no}:{}", index + 1),
+        built["stages"] = stages
+            .iter()
+            .enumerate()
+            .map(|(index, stage)| {
+                let mut built = json!({"id":format!("stage:{volume_no}:{}", index + 1),
                 "goal":text(&stage["goal"]),"pressure":text(&stage["pressure"]),
                 "cast":names(&stage["cast"]).collect::<Vec<_>>(),"turn":text(&stage["turn"]),
                 "estimatedChapters":stage["estimatedChapters"].as_i64().unwrap_or(1).max(1)});
-            let new_cast = names(&stage["newCast"]).collect::<Vec<_>>();
-            if !new_cast.is_empty() {
-                built["newCast"] = json!(new_cast);
-            }
-            built
-        }).collect();
+                let new_cast = names(&stage["newCast"]).collect::<Vec<_>>();
+                if !new_cast.is_empty() {
+                    built["newCast"] = json!(new_cast);
+                }
+                built
+            })
+            .collect();
     }
     if !text(&seed["climax"]).is_empty() {
         built["climax"] = json!(text(&seed["climax"]));
@@ -345,7 +350,9 @@ pub fn with_volume_seed(book_plan: &Value, volume_no: i64, direction: &Value) ->
     if !plan["volumeIntentSeeds"].is_array() {
         plan["volumeIntentSeeds"] = json!([]);
     }
-    let seeds = plan["volumeIntentSeeds"].as_array_mut().expect("seeds array");
+    let seeds = plan["volumeIntentSeeds"]
+        .as_array_mut()
+        .expect("seeds array");
     // The seed the compilers read for this volume (planning::volume_seeds).
     match seeds.iter_mut().find(|existing| {
         existing["seedId"]
@@ -442,7 +449,11 @@ pub fn plan(
             reminder: Some(template_reminder(
                 command_id,
                 project_id,
-                ("vd1-direction-reminder", "全书方向", "全书方向没有生成，第一卷没有阶段目标"),
+                (
+                    "vd1-direction-reminder",
+                    "全书方向",
+                    "全书方向没有生成，第一卷没有阶段目标",
+                ),
                 &reason,
             )?),
             ..Planned::default()
@@ -529,27 +540,30 @@ pub fn plan_volume(
     )
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "VOLUME_NOT_FOUND".to_string())?;
-    let book_plan = NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
-        .and_then(|reference| {
-            reference
-                .map(|reference| {
-                    NarrativeRepository::artifact_payload_by_ref(connection, project_id, &reference)
-                })
-                .transpose()
-        })
-        .map_err(|error| error.to_string())?
-        .flatten()
-        .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
+    let book_plan =
+        NarrativeRepository::canonical_project_head_ref(connection, project_id, "BookPlan")
+            .and_then(|reference| {
+                reference
+                    .map(|reference| {
+                        NarrativeRepository::artifact_payload_by_ref(
+                            connection, project_id, &reference,
+                        )
+                    })
+                    .transpose()
+            })
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .ok_or_else(|| "GOAL_CONTRACT_BOOK_PLAN_APPROVED_REQUIRED".to_string())?;
     let bible = crate::craft_plan::confirmed_bible(connection, project_id)?.unwrap_or(Value::Null);
-    let prior =
-        crate::repositories::craft::plan_crafts_before(connection, project_id, volume.chapter_start)
-            .map_err(|error| error.to_string())?;
-    let completed = NarrativeRepository::satisfied_task_chapters(
+    let prior = crate::repositories::craft::plan_crafts_before(
         connection,
         project_id,
         volume.chapter_start,
     )
     .map_err(|error| error.to_string())?;
+    let completed =
+        NarrativeRepository::satisfied_task_chapters(connection, project_id, volume.chapter_start)
+            .map_err(|error| error.to_string())?;
     let previous_stages = crate::planning::volume_seeds(&book_plan, volume.volume_no - 1)
         .flat_map(|seed| items(seed, "stages"))
         .map(|stage| {
@@ -762,6 +776,26 @@ pub fn for_chapter(
     ))
 }
 
+/// VD-1g (real run round 18): the problem with a chapter goal that copies
+/// the current stage's goal while the stage is in its first half, so one
+/// chapter would finish a stage meant for several.
+pub fn stage_goal_problem(direction: &Value, chapter_goal: &str) -> Option<String> {
+    let stage = &direction["currentStage"];
+    let goal = text(&stage["goal"]);
+    let so_far = stage["chaptersSoFar"].as_i64()?;
+    let estimate = stage["estimatedChapters"].as_i64()?;
+    (so_far * 2 < estimate
+        && crate::craft_plan::goals_overlap(
+            goal,
+            &crate::chapter_craft::telling_pairs(chapter_goal),
+        ))
+    .then(|| {
+        format!(
+            "本章目标几乎照抄了阶段目标（{goal}）：这一阶段预计写 {estimate} 章，已写 {so_far} 章，本章只推进其中一步，阶段目标留到后面几章达成"
+        )
+    })
+}
+
 /// How many chapters in a row the antagonist may be off the page before
 /// the plan is reminded (owner decision 2026-11-02).
 const ANTAGONIST_ABSENCE: i64 = 4;
@@ -780,13 +814,17 @@ pub fn reminders(direction: &Value, on_stage: &BTreeSet<&str>, chapter_no: i64) 
     };
     for antagonist in appearances.iter().filter(|person| person["role"] == "反派") {
         let name = text(&antagonist["name"]);
-        let last = antagonist["lastChapter"].as_i64().unwrap_or(0);
-        if !on_stage.contains(name) && chapter_no - last >= ANTAGONIST_ABSENCE {
-            reminders.push(format!(
+        let last = antagonist["lastChapter"].as_i64();
+        if on_stage.contains(name) || chapter_no - last.unwrap_or(0) < ANTAGONIST_ABSENCE {
+            continue;
+        }
+        reminders.push(match last {
+            Some(last) => format!(
                 "反派{name}已经连续 {} 章没出场（最后一次在第 {last} 章）",
                 chapter_no - last
-            ));
-        }
+            ),
+            None => format!("反派{name}还没在任何一章的场景里正面出场"),
+        });
     }
     let previous = &direction["previousStage"];
     if let (Some(taken), Some(estimate)) = (
@@ -991,10 +1029,8 @@ mod tests {
         // VD-1f (real run round 17): four stages of 6 to 9 chapters were done
         // one a chapter.
         let (plan, route) = plan_and_route();
-        let completed =
-            BTreeMap::from([("task:required:goal:vol:1:stage:1:1".to_string(), 4)]);
-        let direction =
-            chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 5).unwrap();
+        let completed = BTreeMap::from([("task:required:goal:vol:1:stage:1:1".to_string(), 4)]);
+        let direction = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 5).unwrap();
         assert_eq!(
             direction["previousStage"],
             json!({"goal":"陆照查清丹房的账","estimatedChapters":8,"chaptersTaken":1})
@@ -1005,6 +1041,33 @@ mod tests {
         );
         let later = chapter_direction(&plan, &route, ("vol:1", 1), 3, &completed, 6).unwrap();
         assert_eq!(later["previousStage"], Value::Null);
+    }
+
+    #[test]
+    fn a_chapter_goal_copying_a_young_stage_s_goal_is_a_problem() {
+        let (plan, route) = plan_and_route();
+        // Stage 1 (8 chapters) at its first chapter.
+        let young = chapter_direction(&plan, &route, ("vol:1", 1), 3, &BTreeMap::new(), 4).unwrap();
+        assert_eq!(
+            stage_goal_problem(&young, "陆照查清丹房的账，揪出改账的人"),
+            Some("本章目标几乎照抄了阶段目标（陆照查清丹房的账）：这一阶段预计写 8 章，已写 0 章，本章只推进其中一步，阶段目标留到后面几章达成".to_string())
+        );
+        assert_eq!(
+            stage_goal_problem(&young, "陆照夜里摸进账房，先抄下三月的出库单"),
+            None
+        );
+        // Past half its estimate the stage may be reached.
+        let late = chapter_direction(&plan, &route, ("vol:1", 1), 3, &BTreeMap::new(), 9).unwrap();
+        assert_eq!(stage_goal_problem(&late, "陆照查清丹房的账"), None);
+    }
+
+    #[test]
+    fn an_antagonist_never_on_stage_is_reminded_as_such() {
+        let direction = direction_at(5, &[("裴砚舟", None), ("陈伯", Some(4))]);
+        assert_eq!(
+            reminded(&direction, &["陆照"], 5),
+            vec!["反派裴砚舟还没在任何一章的场景里正面出场".to_string()]
+        );
     }
 
     #[test]
@@ -1060,24 +1123,40 @@ mod tests {
         assert_eq!(input["volume"], json!({"volumeNo":2,"chapters":36}));
         assert_eq!(input["seed"], "走出青崖宗");
         assert_eq!(input["book"]["storyPromise"], "以命换力");
-        assert_eq!(input["book"]["protagonistMacroDirection"], "陆照从任人差遣的杂役走到替宗门签下新约的人");
-        assert_eq!(input["previousVolume"]["stages"][0]["completedInChapter"], 34);
+        assert_eq!(
+            input["book"]["protagonistMacroDirection"],
+            "陆照从任人差遣的杂役走到替宗门签下新约的人"
+        );
+        assert_eq!(
+            input["previousVolume"]["stages"][0]["completedInChapter"],
+            34
+        );
         assert_eq!(input["storyBible"]["antagonist"]["name"], "裴砚舟");
     }
 
     #[test]
     fn a_volume_direction_with_stages_that_fit_it_has_no_problems() {
-        assert_eq!(volume_problems(&volume_two(), &volume_two_input()), Vec::<String>::new());
+        assert_eq!(
+            volume_problems(&volume_two(), &volume_two_input()),
+            Vec::<String>::new()
+        );
         let mut empty = volume_two();
         empty["description"] = json!("");
         empty["stages"] = json!([]);
         let found = volume_problems(&empty, &volume_two_input());
-        assert!(found.contains(&"description 要写这一卷对全书的作用".to_string()), "{found:?}");
-        assert!(found.contains(&"第 2 卷要分 3 到 6 个阶段，现在是 0 个".to_string()), "{found:?}");
+        assert!(
+            found.contains(&"description 要写这一卷对全书的作用".to_string()),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&"第 2 卷要分 3 到 6 个阶段，现在是 0 个".to_string()),
+            "{found:?}"
+        );
         let mut long = volume_two();
         long["stages"][0]["estimatedChapters"] = json!(30);
         assert!(volume_problems(&long, &volume_two_input()).contains(
-            &"各阶段 estimatedChapters 加起来是 52 章，这一卷有 36 章，应在 18 到 36 之间".to_string()
+            &"各阶段 estimatedChapters 加起来是 52 章，这一卷有 36 章，应在 18 到 36 之间"
+                .to_string()
         ));
     }
 
@@ -1087,7 +1166,10 @@ mod tests {
         let seeds = plan["volumeIntentSeeds"].as_array().unwrap();
         assert_eq!(seeds[0], approved_plan()["volumeIntentSeeds"][0]);
         assert_eq!(seeds[1]["seedId"], "volume-2");
-        assert_eq!(seeds[1]["description"], "陆照离开青崖宗，去紫霄峰追查租约的来历");
+        assert_eq!(
+            seeds[1]["description"],
+            "陆照离开青崖宗，去紫霄峰追查租约的来历"
+        );
         assert_eq!(seeds[1]["stages"][2]["id"], "stage:2:3");
         assert_eq!(seeds[1]["climax"], "山门前陆照当众烧掉伪约");
         assert_eq!(plan["mustAchieve"], approved_plan()["mustAchieve"]);

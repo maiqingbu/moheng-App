@@ -424,7 +424,7 @@ const RECENT_GOALS: usize = 3;
 
 /// Whether a chapter goal says nearly what `earlier` said: most telling
 /// character pairs of the shorter one also appear in the other.
-fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> bool {
+pub(crate) fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> bool {
     crate::chapter_craft::pairs_overlap(&crate::chapter_craft::telling_pairs(earlier), goal, 6)
 }
 
@@ -1000,6 +1000,10 @@ impl ChapterPlanner {
         }
         let mut problems =
             plan_problems(plan, i64::from(self.chapter), &craft.bible, &craft.ledger);
+        // VD-1g: a young stage is not finished in one chapter.
+        problems.extend(craft.direction.as_ref().and_then(|direction| {
+            crate::book_direction::stage_goal_problem(direction, text(&plan["chapterGoal"]))
+        }));
         problems.extend(sizing_problems(&plan["craft"], length_range));
         if crate::planning::validate_chapter_plan_horizon(plan, horizon_capacity).is_err() {
             let (minimum, capacity) = crate::planning::horizon_slot_range(horizon_capacity);

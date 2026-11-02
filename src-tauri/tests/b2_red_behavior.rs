@@ -256,9 +256,7 @@ impl ProductionModelGateway for BehaviorGateway {
             "PLAN_VOLUME_DIRECTION" => {
                 self.direction_inputs.lock().unwrap().push(input.clone());
                 let room = input["volume"]["chapters"].as_i64().unwrap();
-                let stage = |goal: &str, chapters: i64| {
-                    json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters})
-                };
+                let stage = |goal: &str, chapters: i64| json!({"goal":goal,"pressure":"旧秩序的人抢先烧掉账页","cast":[],"turn":"账本的主人现身","estimatedChapters":chapters});
                 let mut direction = json!({
                     "description":"林舟离开县城，去府城追查账本的来路",
                     "stages":[
@@ -1041,7 +1039,10 @@ fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
     let inputs = gateway.direction_inputs.lock().unwrap().clone();
     let input = inputs.last().unwrap();
     assert_eq!(input["volume"], json!({"volumeNo":2,"chapters":30}));
-    assert_eq!(input["book"]["storyPromise"], approved_story_promise(&state, &project_id));
+    assert_eq!(
+        input["book"]["storyPromise"],
+        approved_story_promise(&state, &project_id)
+    );
     let (_, _, book_plan) = current_book_plan_payload(&state, &project_id);
     let seed = book_plan["volumeIntentSeeds"]
         .as_array()
@@ -1063,7 +1064,11 @@ fn vd2_an_opened_volume_is_planned_from_the_one_before_and_its_route_follows() {
         .collect::<Vec<_>>();
     assert_eq!(
         required[..3],
-        ["林舟进府城找到当年的账房", "林舟拿到账本的底册", "林舟当堂对质"]
+        [
+            "林舟进府城找到当年的账房",
+            "林舟拿到账本的底册",
+            "林舟当堂对质"
+        ]
     );
 }
 
@@ -1081,7 +1086,10 @@ fn vd2_a_volume_direction_that_keeps_listing_chapters_leaves_a_reminder() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(reason.starts_with("第 2 卷方向没有生成，沿用了模板："), "{reason}");
+    assert!(
+        reason.starts_with("第 2 卷方向没有生成，沿用了模板："),
+        "{reason}"
+    );
 }
 
 fn approved_story_promise(state: &KernelState, project_id: &str) -> Value {
