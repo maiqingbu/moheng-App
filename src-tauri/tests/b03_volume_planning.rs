@@ -976,12 +976,12 @@ fn vd1h_a_stage_with_steps_becomes_one_required_task_per_step() {
         .iter()
         .map(|goal| goal["id"].as_str().unwrap())
         .collect::<Vec<_>>();
+    // Real run round 25 (owner decision 2026-11-03): the volume's goals are
+    // its stages; the steps are route tasks only.
     assert_eq!(
-        goals[..5],
+        goals[..3],
         [
-            "goal:vol:steps:1:step:1:1:1",
-            "goal:vol:steps:1:step:1:1:2",
-            "goal:vol:steps:1:step:1:1:3",
+            "goal:vol:steps:1:stage:1:1",
             "goal:vol:steps:1:stage:1:2",
             "goal:vol:steps:1:stage:1:3"
         ]
@@ -1015,7 +1015,13 @@ fn vd1h_a_stage_with_steps_becomes_one_required_task_per_step() {
         .iter()
         .filter(|task| task["class"] == "REQUIRED")
         .collect::<Vec<_>>();
-    // Stage 1 (8 chapters) over three steps: 3, 3 and 2.
+    // Stage 1 (8 chapters) over three steps: 3, 3 and 2, each a task named
+    // as its step, toward the stage's goal.
+    assert_eq!(required[0]["taskId"], "task:required:goal:vol:steps:1:step:1:1:1");
+    assert_eq!(
+        required[0]["completionPredicate"]["value"]["goalId"],
+        "goal:vol:steps:1:stage:1:1"
+    );
     assert_eq!(required[0]["objective"], "陆照摸清账房几时没人");
     assert_eq!(required[0]["estimatedChapterCost"]["preferred"], 3);
     assert_eq!(required[2]["estimatedChapterCost"]["preferred"], 2);

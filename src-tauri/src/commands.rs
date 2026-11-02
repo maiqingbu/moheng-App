@@ -27,6 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::State;
 
+/// The required route tasks ahead a chapter's context carries by default.
+const CONTEXT_REQUIRED_TASKS_AHEAD: usize = 4;
+
 #[derive(Clone)]
 pub struct KernelState {
     pub manager: ProjectManager,
@@ -3282,10 +3285,51 @@ pub(crate) fn context_input_from_authority(
             "CONTEXT_HARD_INCOMPLETE|sources=TASK|scope={scope}"
         ));
     }
-    let plan_task_refs = scope_selection
+    let plan_task_refs = match scope_selection
         .as_ref()
         .and_then(|selection| selection.task_refs.clone())
-        .unwrap_or_else(|| route_task_refs.iter().take(100).cloned().collect());
+    {
+        Some(task_refs) => task_refs,
+        None => {
+            // Real run round 25: a volume of steps made every chapter's
+            // context carry the whole route. A chapter sees the tasks still
+            // open, and of the required ones the next few in route order.
+            let route_refs = route_task_refs
+                .iter()
+                .take(100)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let satisfied = map_context_query(
+                crate::repositories::narrative::NarrativeRepository::task_states_by_ids(
+                    connection,
+                    project_id,
+                    &route_refs,
+                    100,
+                ),
+                ContextHardSource::Task,
+                &scope,
+            )?
+            .into_iter()
+            .filter(|task| task.value.get("status").and_then(Value::as_str) == Some("SATISFIED"))
+            .map(|task| task.state_id)
+            .collect::<BTreeSet<_>>();
+            let mut required_ahead = 0;
+            route_refs
+                .into_iter()
+                .filter(|task_ref| !satisfied.contains(*task_ref))
+                .filter(|task_ref| {
+                    let required = route_task_contracts
+                        .get(*task_ref)
+                        .and_then(|task| task.get("class"))
+                        .and_then(Value::as_str)
+                        == Some("REQUIRED");
+                    required_ahead += usize::from(required);
+                    !required || required_ahead <= CONTEXT_REQUIRED_TASKS_AHEAD
+                })
+                .map(ToOwned::to_owned)
+                .collect()
+        }
+    };
     if plan_task_refs.len() > 100
         || plan_task_refs
             .iter()

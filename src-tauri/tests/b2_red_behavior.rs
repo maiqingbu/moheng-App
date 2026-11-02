@@ -1014,6 +1014,19 @@ fn vd1a_a_direction_planned_after_signing_fills_the_approved_book_plan() {
         .collect::<Vec<_>>();
     // VD-1h: one task per step, three steps a stage, then the book goal.
     assert_eq!(required.len(), 10, "{required:?}");
+    // Real run round 25: steps are route tasks only; the volume's goals,
+    // part of every chapter's hard context, are its stages and book goal.
+    let connection = state.manager.open(&project_id, "", NOW).unwrap();
+    let intent_goals: String = connection
+        .query_row(
+            "SELECT json_extract(p.payload_json,'$.mustAchieve') FROM canonical_heads h JOIN artifact_payloads p ON p.artifact_id=h.artifact_id AND p.version=h.version WHERE h.project_id=?1 AND h.artifact_type='VolumeIntent'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(connection);
+    let intent_goals: Value = serde_json::from_str(&intent_goals).unwrap();
+    assert_eq!(intent_goals.as_array().unwrap().len(), 4, "{intent_goals}");
     assert_eq!(required[..3], ["先找线人", "再查底册", "最后对质"]);
     assert_eq!(required[9], "林舟找回失踪账本的缺页");
     // VD-1c: chapter 4 is planned at the start of the first stage.
@@ -1346,4 +1359,52 @@ fn an_empty_follow_up_audit_does_not_wipe_the_facts_the_first_one_found() {
         )
         .unwrap();
     assert_eq!(unregistered, 0, "the fact the ledger cannot take is held back");
+}
+
+#[test]
+fn a_chapter_plan_sees_the_next_steps_not_the_whole_route() {
+    // Real run round 25: 26 step tasks and every other route task went into
+    // chapter 4's context, over the hard budget.
+    let (state, _temp, gateway) = state_with(true, false);
+    let (project_id, _) = create_approved_book_plan(&state);
+    let volumes = query_volume_list_impl(&state, json!({"projectId":project_id,"pageSize":20}))
+        .expect("volume list after approval");
+    let volume_id = volumes["items"][0]["id"].as_str().expect("volume id").to_owned();
+    for (step, command_type) in [
+        ("volume-intent", "planning_create_volume_intent"),
+        ("volume-plan", "planning_create_volume_plan"),
+    ] {
+        command(&state, &project_id, &format!("ctx:{step}"), command_type, json!({"volumeId":volume_id}));
+    }
+    let prepared = command(
+        &state,
+        &project_id,
+        "ctx:chapter-four-prepare",
+        "planning_prepare_next_chapter",
+        json!({"volumeId":volume_id}),
+    );
+    let chapter_id = prepared["chapter"]["chapterId"].as_str().unwrap().to_owned();
+    command(
+        &state,
+        &project_id,
+        "ctx:chapter-four-plan",
+        "planning_compile_chapter_plan",
+        json!({"chapterId":chapter_id,"chapterGoalHint":"追查账本缺页的去向。"}),
+    );
+    let contexts = gateway.planning_contexts.lock().unwrap();
+    let context = contexts
+        .iter()
+        .rev()
+        .find(|context| context["executionMode"] == "LONG_FORM")
+        .expect("LONG_FORM Plan input");
+    let required = context["planTaskContexts"]
+        .as_array()
+        .expect("plan task contexts")
+        .iter()
+        .filter(|task| task["contract"]["class"] == "REQUIRED")
+        .filter_map(|task| task["taskRef"].as_str())
+        .collect::<Vec<_>>();
+    // Nine steps and the book goal are required; the chapter sees the next few.
+    assert_eq!(required.len(), 4, "{required:?}");
+    assert!(required[0].ends_with(":step:1:1:1"), "{required:?}");
 }

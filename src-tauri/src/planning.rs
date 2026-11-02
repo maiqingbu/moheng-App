@@ -795,14 +795,11 @@ pub fn compile_volume_intent_from_authority(
         .unwrap_or_default();
     // VD-1b: a seed with stages (a planned direction) sets this volume's
     // goals: its stages in order, then the book's goals for this volume.
-    // VD-1h: a stage with steps sets one goal per step.
+    // Real run round 25: a stage's steps are route tasks only (VD-1h), as
+    // these goals are part of every chapter's hard context.
     let stage_goals = scoped_seeds
         .iter()
         .flat_map(|seed| seed["stages"].as_array().into_iter().flatten())
-        .flat_map(|stage| match stage["steps"].as_array() {
-            Some(steps) if !steps.is_empty() => steps.iter().collect::<Vec<_>>(),
-            _ => vec![stage],
-        })
         .filter_map(|unit| {
             Some(json!({
                 "id":stage_goal_id(volume_id, unit["id"].as_str()?),
@@ -1329,31 +1326,54 @@ pub fn compile_volume_plan_from_authority(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("VOLUME_PLAN_GOAL_ID_REQUIRED")?;
-        let task_id = required_task_id(goal_id);
-        let predicate = json!({
-            "kind":"TASK_EVIDENCE_RECORDED",
-            "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+        // VD-1h: a stage with steps is reached through one task per step,
+        // named as the step's own goal would be.
+        let stage = stages.iter().find(|stage| {
+            stage["id"]
+                .as_str()
+                .is_some_and(|id| is_stage_goal(goal_id, id))
         });
-        let dependencies = previous_required
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect::<Vec<_>>();
-        let estimate = stages
-            .iter()
-            .find_map(|stage| stage_goal_estimate(stage, goal_id))
-            .unwrap_or(1);
-        tasks.push(json!({
-            "taskId":task_id,
-            "class":"REQUIRED",
-            "objective":goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
-            "dependsOnTaskIds":dependencies,
-            "continuityThreadRefs":continuity_refs,
-            "reservationRefs":[],
-            "completionPredicate":predicate,
-            "estimatedChapterCost":{"preferred":estimate}
-        }));
-        previous_required = Some(task_id);
+        let units = match stage.and_then(|stage| stage["steps"].as_array()) {
+            Some(steps) if !steps.is_empty() => steps
+                .iter()
+                .filter_map(|step| {
+                    let stage_id = stage?["id"].as_str()?;
+                    let step_goal = format!("{}{}", goal_id.strip_suffix(stage_id)?, step["id"].as_str()?);
+                    Some((step_goal, step["goal"].clone()))
+                })
+                .collect::<Vec<_>>(),
+            _ => vec![(
+                goal_id.to_owned(),
+                goal.get("description").cloned().unwrap_or_else(|| json!("完成卷目标")),
+            )],
+        };
+        for (unit_goal, objective) in units {
+            let task_id = required_task_id(&unit_goal);
+            let predicate = json!({
+                "kind":"TASK_EVIDENCE_RECORDED",
+                "value":{"taskId":task_id,"goalId":goal_id,"evidenceType":"FINAL_CHAPTER","requiresNewEvidence":true}
+            });
+            let dependencies = previous_required
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>();
+            let estimate = stages
+                .iter()
+                .find_map(|stage| stage_goal_estimate(stage, &unit_goal))
+                .unwrap_or(1);
+            tasks.push(json!({
+                "taskId":task_id,
+                "class":"REQUIRED",
+                "objective":objective,
+                "dependsOnTaskIds":dependencies,
+                "continuityThreadRefs":continuity_refs,
+                "reservationRefs":[],
+                "completionPredicate":predicate,
+                "estimatedChapterCost":{"preferred":estimate}
+            }));
+            previous_required = Some(task_id);
+        }
     }
     // Directions for another volume wait for it; unnumbered ones apply now.
     let for_this_volume = |item: &&Value| item.get("volumeNo").is_none_or(|n| n == volume_no);
