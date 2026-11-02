@@ -471,3 +471,14 @@ fn wm1_the_memory_lets_go_of_a_chapter_no_longer_committed() {
     assert!(recalled.iter().all(|memory| memory.chapter != 1));
     assert_eq!(count(&connection), 0);
 }
+
+#[test]
+fn rp1_the_second_chapter_is_written_knowing_how_the_first_closed() {
+    let (_temp, state, gateway, project_id) = project_ready_to_write("rp1");
+    write_next_chapter(&state, &project_id, "rp1:production:1");
+    write_next_chapter(&state, &project_id, "rp1:production:2");
+    let calls = gateway.calls.lock().unwrap();
+    let renders = inputs(&calls, "RENDER_CHAPTER_CRAFT");
+    let ending = renders[1]["recentChapters"][0]["ending"].as_str().unwrap();
+    assert_eq!(ending.chars().count(), 200);
+}

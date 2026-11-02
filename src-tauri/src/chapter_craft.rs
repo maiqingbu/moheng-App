@@ -1034,7 +1034,7 @@ pub fn detail_repetition_findings(
             })
     };
     let mut over = Vec::new();
-    for (phrase, here, earlier) in repeated_han_phrases(history, body, skip) {
+    for (phrase, here, earlier) in repeated_han_phrases(history, body, 2, skip) {
         let in_a_run = earlier.len() == CATCHPHRASE_WINDOW
             && earlier.iter().all(|count| *count > 0)
             && earlier.iter().sum::<usize>() + here > DETAIL_WINDOW_TOTAL;
@@ -1183,6 +1183,11 @@ pub fn opening_threat_on_page(plan: &Value, body: &str) -> bool {
 
 /// QC-1.4: how many chapters back catchphrases are looked for.
 const CATCHPHRASE_WINDOW: usize = 3;
+/// RP-1: in how many of this and the recent chapters a catchphrase
+/// candidate appears at least.
+const MIN_CATCHPHRASE_SPREAD: usize = 3;
+/// RP-1: how many candidates the continuity check judges.
+const MAX_CATCHPHRASE_CANDIDATES: usize = 20;
 /// QC-1.4 (sixth acceptance: 的时候 taken for a catchphrase): whether a
 /// grammar fragment may begin or end with `c` (的时候, 了一下): the
 /// characters of `NOT_A_DETAIL` and a few more. Only the edges are looked
@@ -1192,9 +1197,10 @@ fn is_grammar_edge(c: char) -> bool {
 }
 
 /// QC-1.4 (owner decision 2026-10-26): short phrases (3 to 6 Chinese
-/// characters) the chapter uses at least twice that also ran through the
-/// recent chapters (in at least 3 of the 4, at least 6 times in all), the
-/// longest of overlapping ones, never containing a name nor found in
+/// characters) the chapter uses that also ran through the recent chapters
+/// (in at least 3 of the 4; RP-1: once a chapter is enough), the most
+/// widespread first and at most `MAX_CATCHPHRASE_CANDIDATES`, the longest
+/// of overlapping ones, never containing a name nor found in
 /// `story_text` (what the bible, the plan and earlier facts name: objects,
 /// places, devices). Which of them are
 /// catchphrases rather than things the story names is for the continuity
@@ -1205,8 +1211,8 @@ pub fn catchphrase_candidates(
     names: &[&str],
     story_text: &str,
 ) -> Vec<Value> {
-    let mut found = BTreeMap::<String, (usize, usize)>::new();
-    for (phrase, here, earlier) in repeated_han_phrases(history, body, |phrase| {
+    let mut found = BTreeMap::<String, (usize, usize, usize)>::new();
+    for (phrase, here, earlier) in repeated_han_phrases(history, body, 1, |phrase| {
         phrase.starts_with(is_grammar_edge)
             || phrase.ends_with(is_grammar_edge)
             || names.iter().any(|name| phrase.contains(name))
@@ -1214,20 +1220,84 @@ pub fn catchphrase_candidates(
     }) {
         let total = here + earlier.iter().sum::<usize>();
         let chapters = 1 + earlier.iter().filter(|count| **count > 0).count();
-        if chapters >= 3 && total >= 6 {
-            found.insert(phrase, (here, total - here));
+        // RP-1: a phrase used once a chapter counts too.
+        if chapters >= MIN_CATCHPHRASE_SPREAD {
+            found.insert(phrase, (here, total - here, chapters));
         }
     }
-    found
+    let mut candidates = found
         .iter()
-        .filter(|(phrase, (_, total))| {
-            !found.iter().any(|(longer, (_, longer_total))| {
-                longer.len() > phrase.len() && longer.contains(phrase.as_str()) && longer_total >= total
+        .filter(|(phrase, (_, recent, _))| {
+            !found.iter().any(|(longer, (_, longer_recent, _))| {
+                longer.len() > phrase.len() && longer.contains(phrase.as_str()) && longer_recent >= recent
             })
         })
-        .map(|(phrase, (here, recent))| {
-            json!({"phrase":phrase,"thisChapter":here,"recentChapters":recent})
+        .collect::<Vec<_>>();
+    // Longer phrases before common three-character ones (点点头) of the same
+    // spread, so those never crowd out a real catchphrase.
+    candidates.sort_by_key(|(phrase, (here, recent, chapters))| {
+        std::cmp::Reverse((*chapters, phrase.chars().count(), here + recent))
+    });
+    candidates
+        .into_iter()
+        .take(MAX_CATCHPHRASE_CANDIDATES)
+        .map(|(phrase, (here, recent, chapters))| {
+            json!({"phrase":phrase,"thisChapter":here,"recentChapters":recent,"chapters":chapters})
         })
+        .collect()
+}
+
+/// RP-1: how many recent chapters' endings, and how much of each ending,
+/// a chapter's ending is compared with.
+const ENDING_WINDOW: usize = 3;
+const ENDING_COMPARED: usize = 200;
+
+fn ending(body: &str) -> String {
+    let count = body.chars().count();
+    body.chars()
+        .skip(count.saturating_sub(ENDING_COMPARED))
+        .collect()
+}
+
+/// Whether at least `tenths` in 10 of the telling pairs of the shorter of
+/// `a` and `b` are also in the other.
+pub(crate) fn pairs_overlap(
+    a: &BTreeSet<(char, char)>,
+    b: &BTreeSet<(char, char)>,
+    tenths: usize,
+) -> bool {
+    let shorter = a.len().min(b.len());
+    shorter > 0 && a.intersection(b).count() * 10 >= shorter * tenths
+}
+
+/// RP-1 (real runs 13-15): a rewrite finding on the last sentence when the
+/// chapter closes much like one of the latest chapters (`bodies` newest
+/// first): at least 3 in 10 telling pairs of the shorter ending also in the
+/// other.
+pub fn ending_repetition_findings(bodies: &[String], body: &str) -> Vec<Value> {
+    let here = telling_pairs(&ending(body));
+    let Some(back) = bodies
+        .iter()
+        .take(ENDING_WINDOW)
+        .position(|earlier| pairs_overlap(&here, &telling_pairs(&ending(earlier)), 3))
+    else {
+        return Vec::new();
+    };
+    let spans = sentence_spans(body);
+    spans
+        .len()
+        .checked_sub(1)
+        .and_then(|last| unique_quote_ending_at(body, &spans, last))
+        .map(|quote| {
+            rule_finding(
+                "ending_repetition",
+                "MEDIUM",
+                quote,
+                format!("章末收尾和往前数第 {} 章的收尾几乎一样", back + 1),
+                "换一个动作、物件和画面收尾，章末钩子的事实不变",
+            )
+        })
+        .into_iter()
         .collect()
 }
 
@@ -1256,11 +1326,12 @@ pub fn catchphrase_findings(catchphrases: &[String], body: &str) -> Vec<Value> {
 }
 
 /// The distinct runs of 3 to 6 Chinese characters `body` uses at least
-/// twice that `skip` does not refuse, each with its count in `body` and in
+/// `min_here` times that `skip` does not refuse, each with its count in `body` and in
 /// each of the recent chapters of `history` (newest first).
 fn repeated_han_phrases(
     history: &[String],
     body: &str,
+    min_here: usize,
     skip: impl Fn(&str) -> bool,
 ) -> Vec<(String, usize, Vec<usize>)> {
     let chars = body.chars().collect::<Vec<_>>();
@@ -1276,7 +1347,7 @@ fn repeated_han_phrases(
                 continue;
             }
             let here = body.matches(phrase.as_str()).count();
-            if here < 2 {
+            if here < min_here {
                 continue;
             }
             let earlier = history

@@ -3314,6 +3314,10 @@ fn run_chapter_production_inner(
             &chapter_history.bodies,
             &body,
         ));
+        leading_findings.extend(crate::chapter_craft::ending_repetition_findings(
+            &chapter_history.bodies,
+            &body,
+        ));
         // QC-1 (owner decision 2026-10-30): an object or detail written past
         // its allowance is worded differently from there on.
         let (detail_findings, running_details) = match &craft_writing {

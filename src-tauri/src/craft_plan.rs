@@ -425,9 +425,7 @@ const RECENT_GOALS: usize = 3;
 /// Whether a chapter goal says nearly what `earlier` said: most telling
 /// character pairs of the shorter one also appear in the other.
 fn goals_overlap(earlier: &str, goal: &BTreeSet<(char, char)>) -> bool {
-    let earlier = crate::chapter_craft::telling_pairs(earlier);
-    let shorter = earlier.len().min(goal.len());
-    shorter > 0 && earlier.intersection(goal).count() * 10 >= shorter * 6
+    crate::chapter_craft::pairs_overlap(&crate::chapter_craft::telling_pairs(earlier), goal, 6)
 }
 
 /// The deterministic checks of an r2 plan (CRAFT_V3_DESIGN §4.2). Returns
