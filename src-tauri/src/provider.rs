@@ -506,7 +506,8 @@ impl OpenAiCompatibleProvider {
             payload["temperature"] = json!(1.0);
             payload["thinking"] = thinking_type();
             payload["stream"] = json!(false);
-            payload["max_completion_tokens"] = json!(16_384);
+            // Real run round 31: thinking needs room besides the reply.
+            payload["max_completion_tokens"] = json!(if thinks { 32_768 } else { 16_384 });
         } else if Self::is_aliyun_maas_endpoint(endpoint) {
             payload["enable_thinking"] = json!(thinks);
             payload["stream"] = json!(false);
@@ -522,6 +523,10 @@ impl OpenAiCompatibleProvider {
             return payload;
         } else if thinking.is_some() && endpoint.to_ascii_lowercase().contains("deepseek") {
             payload["thinking"] = thinking_type();
+        }
+        if thinks && !Self::is_xiaomi_endpoint(endpoint) {
+            // Real run round 31: 16384 tokens of thinking and no chapter.
+            payload["max_tokens"] = json!(65_536);
         }
         if let Some(effort) = effort {
             payload["reasoning_effort"] = json!(effort);
@@ -957,14 +962,19 @@ mod tests {
         let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(on()));
         assert_eq!(deepseek["thinking"]["type"], "enabled");
         assert_eq!(deepseek["reasoning_effort"], "max");
+        // Real run round 31: thinking took all 16384 output tokens and the
+        // chapter came back empty; thinking needs room besides the reply.
+        assert_eq!(deepseek["max_tokens"], 65_536);
         let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(off()));
         assert_eq!(deepseek["thinking"]["type"], "disabled");
         assert!(deepseek.get("reasoning_effort").is_none());
         // Not set: as before, nothing is sent.
         let deepseek = OpenAiCompatibleProvider::request_payload("https://api.deepseek.com/v1", &request(None));
         assert!(deepseek.get("thinking").is_none());
+        assert!(deepseek.get("max_tokens").is_none());
         let xiaomi = OpenAiCompatibleProvider::request_payload("https://api.xiaomimimo.com/v1", &request(on()));
         assert_eq!(xiaomi["thinking"]["type"], "enabled");
+        assert_eq!(xiaomi["max_completion_tokens"], 32_768);
         assert_eq!(xiaomi["reasoning_effort"], "max");
         let aliyun_url = "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
         let aliyun = OpenAiCompatibleProvider::request_payload(aliyun_url, &request(on()));
